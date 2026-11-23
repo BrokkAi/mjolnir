@@ -41,6 +41,13 @@ import (
 	"time"
 )
 
+// SpawnChild starts command. On Linux, in a worker that reaps adopted
+// children, it registers the child so the reaper leaves its wait to its
+// owner (Rust's spawn_child and spawn_async_child). Until the orphan reaper
+// (subprocess/orphans.rs) is ported nothing reaps adopted children, so
+// starting the command is the whole behaviour.
+func SpawnChild(command *exec.Cmd) error { return command.Start() }
+
 // preparationCancellationKey is the context key of the preparation
 // cancellation token (Rust's task-local CANCELLATION).
 type preparationCancellationKey struct{}

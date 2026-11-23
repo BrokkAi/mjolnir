@@ -192,12 +192,13 @@ func openMuse(t *testing.T, host string) museOpened {
 	}
 	spec := acpDriveSpec("python3", core.HarnessKindMuse, core.ExecutionPolicyConfiguredApprovals, root)
 	spec.SubagentMCPSocket = &SubagentMcpSocket{
-		Path:                  filepath.Join(root, "subagents.sock"),
-		Role:                  core.SubagentMcpRoleMessageOnly,
-		AgentMailboxesEnabled: true,
-		SubtleSubagents:       false,
-		ReviewTools:           false,
-		ProfileRegistration:   false,
+		Path:                 filepath.Join(root, "subagents.sock"),
+		Role:                 core.SubagentMcpRoleMessageOnly,
+		Oracle:               false,
+		OrchestratorsEnabled: false,
+		SubtleSubagents:      false,
+		ReviewTools:          false,
+		ProfileRegistration:  false,
 	}
 	spec.Args = []string{script}
 	spec.Environment = map[string]string{

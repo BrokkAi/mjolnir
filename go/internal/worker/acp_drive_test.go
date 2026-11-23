@@ -27,10 +27,12 @@ import (
 // connection registry here; production holds it through process teardown.
 func drive(ctx context.Context, transport ByteStreams, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, opened *Shared[*OpenedSession], replacingPreviousBridge bool) (SessionRestart, error) {
 	var firstReplacedUnusedNativeSessionID *string
+	var pendingReloadAck chan<- error
 	return driveBridge(ctx, transport, spec, requests, events, opened, BridgeSessionOpen{
 		replacingPreviousBridge:            replacingPreviousBridge,
 		replaceUnusedCodexThread:           shouldReplaceUnusedCodexThread(&spec),
 		firstReplacedUnusedNativeSessionID: &firstReplacedUnusedNativeSessionID,
+		pendingReloadAck:                   &pendingReloadAck,
 	})
 }
 

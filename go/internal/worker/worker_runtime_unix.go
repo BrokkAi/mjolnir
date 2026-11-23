@@ -429,12 +429,12 @@ func buildACPSetup(setup acpPreparationSetup) (*preparedAcpSetup, error) {
 	var subagentSocket *SubagentMcpSocket
 	if setup.subagentRole != nil {
 		subagentSocket = &SubagentMcpSocket{
-			Path:                  filepath.Join(root, SubagentSocket),
-			Role:                  *setup.subagentRole,
-			AgentMailboxesEnabled: config.AgentMailboxesEnabled,
-			SubtleSubagents:       config.SubtleSubagents,
-			ReviewTools:           reviewTools,
-			ProfileRegistration:   setup.profileRegistration,
+			Path:                filepath.Join(root, SubagentSocket),
+			Role:                *setup.subagentRole,
+			Oracle:              config.Oracle,
+			SubtleSubagents:     config.SubtleSubagents,
+			ReviewTools:         reviewTools,
+			ProfileRegistration: setup.profileRegistration,
 		}
 	}
 	terminalOwner := weak.Make(relay)

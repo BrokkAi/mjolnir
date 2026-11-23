@@ -62,12 +62,13 @@ func TestGoldenSessionInstructionsByDurableRole(t *testing.T) {
 			socketRole = core.SubagentMcpRoleParent
 		}
 		spec.SubagentMCPSocket = &SubagentMcpSocket{
-			Path:                  "/worker/subagents.sock",
-			Role:                  socketRole,
-			AgentMailboxesEnabled: true,
-			SubtleSubagents:       true,
-			ReviewTools:           scenario.role == nil,
-			ProfileRegistration:   false,
+			Path:                 "/worker/subagents.sock",
+			Role:                 socketRole,
+			Oracle:               false,
+			OrchestratorsEnabled: scenario.role == nil,
+			SubtleSubagents:      true,
+			ReviewTools:          scenario.role == nil,
+			ProfileRegistration:  false,
 		}
 		events := make(chan core.RuntimeEvent, 256)
 		text, err := compose(context.Background(), &spec, true, events)

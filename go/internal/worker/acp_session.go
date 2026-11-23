@@ -241,29 +241,32 @@ func stopReasonDebug(reason schema.StopReason) string {
 
 // servedSession is the state serveSession's command loop owns.
 type servedSession struct {
-	ctx                  context.Context
-	connection           *acp.Connection
-	spec                 *LaunchSpec
-	requests             <-chan CommandRequest
-	events               chan<- core.RuntimeEvent
-	terminals            *TerminalRegistry
-	pending              *PendingElicitations
-	planSlot             *PlanImplementationSlot
-	opened               *Shared[*OpenedSession]
-	agentOutputCount     *AgentOutputCount
-	lastAgentMessage     *LastAgentMessage
-	grokUsage            *Collector
-	sessionID            schema.SessionId
-	configOptions        []schema.SessionConfigOption
-	modes                *schema.SessionModeState
-	grokModels           *core.GrokModelState
-	enforcement          *core.ExecutionEnforcement
-	steeringSupported    bool
-	opencodeWholeTurns   bool
-	firstPromptNotBefore *time.Time
-	goalQuestion         *Question
-	goalControls         *PendingControls
-	configRecovery       *CommandLoopQuestion
+	ctx                context.Context
+	connection         *acp.Connection
+	spec               *LaunchSpec
+	requests           <-chan CommandRequest
+	events             chan<- core.RuntimeEvent
+	terminals          *TerminalRegistry
+	pending            *PendingElicitations
+	planSlot           *PlanImplementationSlot
+	opened             *Shared[*OpenedSession]
+	agentOutputCount   *AgentOutputCount
+	lastAgentMessage   *LastAgentMessage
+	grokUsage          *Collector
+	sessionID          schema.SessionId
+	configOptions      []schema.SessionConfigOption
+	modes              *schema.SessionModeState
+	grokModels         *core.GrokModelState
+	enforcement        *core.ExecutionEnforcement
+	steeringSupported  bool
+	opencodeWholeTurns bool
+	// antigravityWholeTurns: this Antigravity's prompt responses report the
+	// whole turn once verified.
+	antigravityWholeTurns bool
+	firstPromptNotBefore  *time.Time
+	goalQuestion          *Question
+	goalControls          *PendingControls
+	configRecovery        *CommandLoopQuestion
 }
 
 func (s *servedSession) emit(event core.RuntimeEvent) error {
@@ -345,6 +348,7 @@ func serveSession(ctx context.Context, connection *acp.Connection, spec *LaunchS
 	availabilitySupported := jsonPath(initialized.Meta, "nativeSubagentAvailability", "supported") == true
 
 	opencodeWholeTurns := harness == core.HarnessKindOpenCode && ReportsWholeTurns(agentVersion)
+	antigravityWholeTurns := harness == core.HarnessKindAntigravity && AntigravityUsageReportsWholeTurns(agentVersion)
 
 	// Grok Build publishes its catalogue here rather than as `configOptions`.
 	var grokModels *core.GrokModelState
@@ -775,6 +779,9 @@ func serveSession(ctx context.Context, connection *acp.Connection, spec *LaunchS
 		nativeSessionUsed: nativeSessionUsed,
 	}
 	unlockOpened()
+	if resolved := takePendingReloadAck(sessionOpen.pendingReloadAck); resolved != nil {
+		sendResolution(resolved, nil)
+	}
 	// Drop anything the worker queued for the bridge this one replaced. The
 	// worker dispatches only while it believes the session is configured; it
 	// clears that flag on `HarnessRestarting` and sets it again only after
@@ -837,27 +844,28 @@ func serveSession(ctx context.Context, connection *acp.Connection, spec *LaunchS
 		unlock()
 	}
 	session := &servedSession{
-		ctx:                  ctx,
-		connection:           connection,
-		spec:                 spec,
-		requests:             requests,
-		events:               events,
-		terminals:            terminals,
-		pending:              pendingElicitations,
-		planSlot:             planImplementationSlot,
-		opened:               opened,
-		agentOutputCount:     agentOutputCount,
-		lastAgentMessage:     lastAgentMessage,
-		grokUsage:            grokUsage,
-		sessionID:            sessionID,
-		configOptions:        configOptions,
-		modes:                modes,
-		grokModels:           grokModels,
-		enforcement:          enforcement,
-		steeringSupported:    steeringSupported,
-		opencodeWholeTurns:   opencodeWholeTurns,
-		firstPromptNotBefore: firstPromptNotBefore,
-		goalControls:         &PendingControls{},
+		ctx:                   ctx,
+		connection:            connection,
+		spec:                  spec,
+		requests:              requests,
+		events:                events,
+		terminals:             terminals,
+		pending:               pendingElicitations,
+		planSlot:              planImplementationSlot,
+		opened:                opened,
+		agentOutputCount:      agentOutputCount,
+		lastAgentMessage:      lastAgentMessage,
+		grokUsage:             grokUsage,
+		sessionID:             sessionID,
+		configOptions:         configOptions,
+		modes:                 modes,
+		grokModels:            grokModels,
+		enforcement:           enforcement,
+		steeringSupported:     steeringSupported,
+		opencodeWholeTurns:    opencodeWholeTurns,
+		antigravityWholeTurns: antigravityWholeTurns,
+		firstPromptNotBefore:  firstPromptNotBefore,
+		goalControls:          &PendingControls{},
 	}
 	defer func() {
 		// The open questions this loop owns end with it (Rust drops them).
@@ -1092,6 +1100,23 @@ func (s *servedSession) command(request CommandRequest) (restart SessionRestart,
 	case CommandRequestStopBackgroundTask:
 		resolveBackgroundTaskStop(ctx, connection, s.sessionID, s.terminals, request.Target, request.Resolved)
 		return nil, false, nil
+	case CommandRequestReloadLaunchConfig:
+		var resumeSession *string
+		if request.LaunchConfig.Harness == spec.Harness {
+			nativeSessionID := string(s.sessionID)
+			resumeSession = &nativeSessionID
+		}
+		return SessionRestartReloadLaunchConfig{
+			LaunchConfig:          request.LaunchConfig,
+			Environment:           request.Environment,
+			Command:               request.Command,
+			Args:                  request.Args,
+			AdditionalDirectories: request.AdditionalDirectories,
+			SupervisorSpec:        request.SupervisorSpec,
+			Leases:                request.Leases,
+			ResumeSession:         resumeSession,
+			Resolved:              request.Resolved,
+		}, true, nil
 	case CommandRequestClose:
 		outcome := acpCall(ctx, connection, "session/close", schema.CloseSessionRequest{SessionID: s.sessionID}, nil)
 		if err := emitCloseOutcome(ctx, s.events, request.RequestID, outcome); err != nil {
@@ -1748,6 +1773,9 @@ func (s *servedSession) prompt(requestID string, prompt []schema.ContentBlock) (
 				}
 			case CommandRequestStopBackgroundTask:
 				resolveBackgroundTaskStop(ctx, connection, s.sessionID, s.terminals, command.Target, command.Resolved)
+			case CommandRequestReloadLaunchConfig:
+				sendResolution(command.Resolved, errors.New("cannot reload launch configuration while a turn is active"))
+				releaseReloadLeases(command.Leases)
 			}
 		case turnModeRestored:
 			modeRestoration = nil
@@ -1845,6 +1873,15 @@ func (s *servedSession) promptFinished(requestID string, answer asyncResult[prom
 			if err := OpencodeUsageNormalize(usage, usageMeta); err != nil {
 				if err := s.emit(core.RuntimeEventWarning{
 					Message: "OpenCode usage could not be reconciled; turn accounting is incomplete: " + err.Error(),
+				}); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if s.antigravityWholeTurns && usage != nil {
+			if err := AntigravityUsageNormalize(usage, usageMeta); err != nil {
+				if err := s.emit(core.RuntimeEventWarning{
+					Message: "Antigravity usage could not be reconciled; turn accounting is incomplete: " + err.Error(),
 				}); err != nil {
 					return nil, err
 				}
