@@ -283,12 +283,15 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
             .get(&self.session_id)
             .is_some_and(|active| {
                 self.operation_id.as_ref() == Some(&active.operation_id)
-                    && active.kind == LifecycleKind::Cleanup
+                    && matches!(
+                        active.kind,
+                        LifecycleKind::Cleanup | LifecycleKind::ArchiveStopped
+                    )
             });
         let admitted = if settling_cleanup {
             // An accepted Destroy may already hold admission while it waits
-            // for this cleanup. The short settlement write must be able to
-            // finish while that hold is draining.
+            // for this cleanup or archive-owned cleanup. The short settlement
+            // must be able to finish while that hold is draining.
             mj_controller::upgrade::activity(label)
         } else {
             // Workspace copies can wait for the drain to lapse or close.
