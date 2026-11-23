@@ -22,7 +22,8 @@ use mj_controller::import::{
     BundleResolution, ClaudeSessionSelection, ClaudeTranscript, ImportArchiveProgress,
     ImportControl, ImportedClaudeSession, NativeImportRequest, NativeScanCache, SessionEditTargets,
     import_native_session, import_safety_issues, locate_native_session, native_source_file,
-    read_native_transcript, resolve_bundle, scan_native_sessions, session_edit_targets,
+    native_source_import_issue, read_native_transcript, resolve_bundle, scan_native_sessions,
+    session_edit_targets,
 };
 use mj_tui::{ImportProfileOption, ImportSessionOption};
 
@@ -253,11 +254,52 @@ fn import_source(
     }
 }
 
+/// Resolve the indexed source when its home is available on this machine.
+fn indexed_import_source(
+    config: &Config,
+    harness: HarnessKind,
+    indexed_path: &std::path::Path,
+    default_home: PathBuf,
+    shares_machine: bool,
+) -> ImportSource {
+    let mut source = ImportSource {
+        profile_id: None,
+        home: default_home,
+    };
+    if !shares_machine {
+        return source;
+    }
+
+    let file = native_source_file(harness, indexed_path);
+    for (id, profile) in config
+        .enabled_profiles()
+        .filter(|(_, profile)| profile.kind == harness)
+    {
+        let root = harness
+            .nested_data_dir(&profile.home)
+            .unwrap_or_else(|| profile.home.clone());
+        let contains =
+            file.starts_with(&root) || root.canonicalize().is_ok_and(|root| file.starts_with(root));
+        if contains {
+            return ImportSource {
+                profile_id: Some(id.to_owned()),
+                home: profile.home.clone(),
+            };
+        }
+    }
+
+    if harness == HarnessKind::Dsh
+        && native_source_import_issue(harness, file).is_none()
+        && let Some(data_dir) = file.parent().and_then(std::path::Path::parent)
+        && !data_dir.as_os_str().is_empty()
+    {
+        source.home = data_dir.to_owned();
+    }
+    source
+}
+
 /// Adopt one named native session, answering with the Mjolnir session id the
 /// import produced, or `None` when the person declined the safety prompt.
-///
-/// Continue the row from its configured profile home when the index found it
-/// there. A remote daemon's paths are never read as client-local paths.
 pub(crate) fn import_named_native_session(
     harness: HarnessKind,
     native_session_id: String,
@@ -265,28 +307,13 @@ pub(crate) fn import_named_native_session(
     workspace_id: &str,
 ) -> Result<Option<String>> {
     let config = daemon_config()?;
-    let mut source = ImportSource {
-        profile_id: None,
-        home: harness_config_home(harness)?,
-    };
-    if daemon_shares_this_machine()? {
-        let file = native_source_file(harness, indexed_path);
-        for (id, profile) in config
-            .enabled_profiles()
-            .filter(|(_, profile)| profile.kind == harness)
-        {
-            let root = harness
-                .nested_data_dir(&profile.home)
-                .unwrap_or_else(|| profile.home.clone());
-            let contains = file.starts_with(&root)
-                || root.canonicalize().is_ok_and(|root| file.starts_with(root));
-            if contains {
-                source.profile_id = Some(id.to_owned());
-                source.home = profile.home.clone();
-                break;
-            }
-        }
-    }
+    let source = indexed_import_source(
+        &config,
+        harness,
+        indexed_path,
+        harness_config_home(harness)?,
+        daemon_shares_this_machine()?,
+    );
     import_native(
         harness,
         NativeImportArgs {
@@ -363,7 +390,7 @@ fn import_native(
         native_source_file(harness, &located.source_path).display(),
         match &source.profile_id {
             Some(profile_id) => format!(" (profile {profile_id})"),
-            None => " (no profile runs this harness; read its default home)".to_owned(),
+            None => String::new(),
         }
     );
     let transcript = read_native_transcript(harness, &located.source_path)?;
@@ -1117,6 +1144,37 @@ fn import_session_from_profile(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn indexed_dsh_import_uses_standalone_home_on_the_same_machine() {
+        let directory = tempfile::tempdir().unwrap();
+        let default_home = directory.path().join("this-workspace/.dsh-acp");
+        let other_home = directory.path().join("other-workspace/.dsh-acp");
+        let indexed_record = other_home.join("sessions/id.json");
+        let resolve = |shares_machine| {
+            indexed_import_source(
+                &Config::default(),
+                HarnessKind::Dsh,
+                &indexed_record,
+                default_home.clone(),
+                shares_machine,
+            )
+        };
+        assert_eq!(
+            resolve(true),
+            ImportSource {
+                profile_id: None,
+                home: other_home
+            }
+        );
+        assert_eq!(
+            resolve(false),
+            ImportSource {
+                profile_id: None,
+                home: default_home
+            }
+        );
+    }
 
     #[test]
     fn import_latest_opencode_session_across_homes_uses_session_timestamp() {

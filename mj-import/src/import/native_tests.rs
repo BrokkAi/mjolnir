@@ -401,6 +401,58 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
 }
 
 #[test]
+fn antigravity_import_recovers_workspace_from_log_when_summary_has_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("agy");
+    let cwd = directory.path().join("workspace with spaces");
+    let workspace_uri = url::Url::from_directory_path(&cwd).unwrap().to_string();
+    let root = home.join("antigravity-cli");
+    let conversation = root.join("brain/session-id");
+    fs::create_dir_all(&conversation).unwrap();
+    fs::write(
+        conversation.join("transcript.jsonl"),
+        [
+            json!({"type":"USER_INPUT","step_index":1,"content":"Read the workspace"}).to_string(),
+            json!({"cwd":"  ","metadata":{"workspaceUri": workspace_uri}}).to_string(),
+            "malformed JSONL row".to_owned(),
+            json!({"type":"PLANNER_RESPONSE","step_index":2,"content":"Found it"}).to_string(),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let databases = root.join("conversations");
+    fs::create_dir(&databases).unwrap();
+    rusqlite::Connection::open(databases.join("session-id.db")).unwrap();
+    rusqlite::Connection::open(root.join("conversation_summaries.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE conversation_summaries (
+                conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT
+             );
+             INSERT INTO conversation_summaries VALUES ('session-id', 'Summary title', NULL);",
+        )
+        .unwrap();
+
+    let kind = HarnessKind::Antigravity;
+    let mut sessions = Vec::new();
+    scan_native_sessions(kind, &home, &NativeScanCache::new(), |progress| {
+        sessions.extend(progress.session);
+    })
+    .unwrap();
+    let [listing] = sessions.as_slice() else {
+        panic!("expected one Antigravity session, got {sessions:?}");
+    };
+    assert_eq!(listing.title, "Summary title");
+    assert_eq!(listing.cwd, cwd);
+    assert_eq!(listing.unavailable_reason, None);
+
+    let located = locate_native_session(kind, &home, &ClaudeSessionSelection::Latest).unwrap();
+    assert_eq!(located.native_session_id, "session-id");
+    let transcript = read_native_transcript(kind, &located.source_path).unwrap();
+    assert_eq!(transcript.cwd, cwd);
+}
+
+#[test]
 fn antigravity_dsh_and_opencode_import_verified_native_state() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
