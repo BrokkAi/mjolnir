@@ -7434,8 +7434,9 @@ fn restart_continuation_preserves_confirmed_steering_context() {
         .unwrap();
     assert!(
         relay.snapshot.handled_commands["queued-prompt"]
-            .command
-            .is_none()
+            .terminal_identity
+            .as_ref()
+            .is_some_and(|identity| identity.prompt)
     );
     assert!(!relay.snapshot.dispatches.contains_key("queued-prompt"));
     let before = evidence(&relay);

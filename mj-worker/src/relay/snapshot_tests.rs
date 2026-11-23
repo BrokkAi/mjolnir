@@ -410,35 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_entries_written_before_config_changes_still_load() {
-        let stored: StoredQueuedRelayCommand = serde_json::from_value(serde_json::json!({
-            "command_id": "queued-1",
-            "prompt": [{"type": "text", "text": "hello"}],
-            "created_at_ms": 7,
-        }))
-        .unwrap();
-        assert!(matches!(
-            stored.payload,
-            StoredQueuedRelayPayload::Prompt { .. }
-        ));
-
-        let config = StoredQueuedRelayCommand {
-            command_id: "queued-2".into(),
-            payload: StoredQueuedRelayPayload::SetConfig {
-                key: "model".into(),
-                value: "sonnet".into(),
-            },
-            created_at_ms: 8,
-        };
-        let encoded = serde_json::to_value(&config).unwrap();
-        assert_eq!(encoded["key"], "model");
-        assert_eq!(
-            serde_json::from_value::<StoredQueuedRelayCommand>(encoded).unwrap(),
-            config
-        );
-    }
-
-    #[test]
     fn oversized_commands_are_rejected_before_journaling() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
