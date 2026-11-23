@@ -3278,6 +3278,96 @@ async fn deferred_cleanup_serializes_queued_destroy_and_archive_without_holding_
     assert!(root.join("replacement-volume").exists());
 }
 
+#[cfg(unix)]
+// Hard-won: #1628: archive running retained storage cleanup before automatic cleanup held handoff admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_cleanup_inside_archive_yields_handoff_without_destroying_session() {
+    const NAME: &str = "deferred_cleanup_inside_archive_yields_handoff_without_destroying_session";
+    let Some((root, _)) = deferred_cleanup_test(NAME, &["archive"]) else {
+        return;
+    };
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let id = DEFERRED_CLEANUP_TEST_SESSION;
+    let (state, mut upgrades) = start_deferred_cleanup_test(&root);
+    let mut stopped = mj_controller::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    let mut input = mj_controller::controller::test_support::checkpoint_archive_input(
+        id,
+        1,
+        Vec::new(),
+        Vec::new(),
+    );
+    input
+        .canonical_session
+        .transcript
+        .push(mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "prompt".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_700_000_000_000,
+            last_changed_at_ms: 1_700_000_000_000,
+            body: mj_core::archive::CanonicalTranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "archive this session"})],
+            },
+        });
+    let archives = mj_core::config::sessions_dir();
+    fs::create_dir_all(&archives).unwrap();
+    stopped.checkpoint = Some(Box::new(
+        mj_controller::controller::test_support::write_checkpoint_archive_input(
+            &archives, id, &input,
+        ),
+    ));
+    let repository = mj_controller::controller::test_support::committed_repository();
+    stopped.project_directory = Some(repository.path().to_owned());
+    stopped.updated_at = "2000-01-01T00:00:00Z".into();
+    mj_controller::database::save_session(&stopped).unwrap();
+
+    let archive = state.archive_aged_sessions(1);
+    tokio::pin!(archive);
+    let pids: Vec<u32> = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures::poll!(&mut archive).is_pending());
+            if let Ok(pids) = fs::read_to_string(root.join("removal-started")) {
+                return pids
+                    .split_whitespace()
+                    .map(|pid| pid.parse().unwrap())
+                    .collect();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("archive reached the stopped session's retained removal command");
+
+    let metadata = test_metadata("127.0.0.1:0".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    assert!(matches!(
+        handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+        DaemonReply::Done
+    ));
+    assert!(shutdown.is_cancelled());
+    upgrades.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), state.cancel_and_wait_lifecycles())
+        .await
+        .expect("shutdown must interrupt archive's retained storage cleanup")
+        .unwrap();
+    assert_eq!(archive.await.unwrap(), 0);
+    assert!(
+        pids.iter()
+            .all(|&pid| !mj_client::daemon::process_is_alive(pid))
+    );
+    let retained = mj_controller::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.state, SessionState::Stopped);
+    assert!(retained.target.is_some());
+    assert!(root.join("volume").exists());
+    assert!(root.join("replacement-volume").exists());
+}
+
 #[test]
 fn create_cancellation_and_commit_have_one_winner() {
     for _ in 0..32 {

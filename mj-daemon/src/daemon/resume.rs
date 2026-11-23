@@ -516,36 +516,34 @@ impl RuntimeState {
         self.run_lifecycle(session_id, kind, {
             let retained = retained.clone();
             move |state, session_id, cancelled, _session_admission| async move {
-                blocking(move || {
-                    let mut controller = Controller::load()?;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state,
-                        session_id.clone(),
-                    );
-                    // If archive won the queue before automatic cleanup,
-                    // finish the stopped target's checkpoint-preserving
-                    // retirement before applying the archive branch policy.
-                    if controller
-                        .state
-                        .sessions
-                        .get(&session_id)
-                        .is_some_and(|session| {
-                            session.state == SessionState::Stopped && session.target.is_some()
-                        })
-                    {
-                        controller.cleanup_stopped_target(&session_id, &executor)?;
-                    }
-                    let kept = controller.destroy_session_controlled_with_checkout(
-                        &session_id,
-                        &executor,
-                        branch,
-                        checkout,
-                    )?;
-                    *retained.lock().unwrap_or_else(PoisonError::into_inner) = kept;
-                    Ok(DaemonLifecycleResult::Done)
-                })
-                .await
+                let mut controller = Controller::load()?;
+                let executor = DaemonStageReportingExecutor::new(
+                    CancellableProcessExecutor::new(cancelled),
+                    state,
+                    session_id.clone(),
+                );
+                // If archive won the queue before automatic cleanup, finish
+                // the stopped target's checkpoint-preserving retirement
+                // without holding daemon handoff admission.
+                if controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|session| {
+                        session.state == SessionState::Stopped && session.target.is_some()
+                    })
+                {
+                    mj_controller::targets::CommandExecutor::begin_resumable_work(&executor)?;
+                    controller.cleanup_stopped_target_resumable(&session_id, &executor)?;
+                }
+                let kept = controller.destroy_session_controlled_with_checkout(
+                    &session_id,
+                    &executor,
+                    branch,
+                    checkout,
+                )?;
+                *retained.lock().unwrap_or_else(PoisonError::into_inner) = kept;
+                Ok(DaemonLifecycleResult::Done)
             }
         })
         .await?;
