@@ -120,8 +120,7 @@ impl SessionUsageEstimate {
     /// Some turns in the period are still running or reported no full usage,
     /// so a known cost is a lower bound.
     pub fn is_partial(&self) -> bool {
-        self.coverage.full_turn_reports < self.coverage.recorded_turns
-            || self.coverage.unfinished_turns > 0
+        self.coverage.is_partial()
     }
 }
 

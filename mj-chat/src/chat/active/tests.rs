@@ -1068,6 +1068,7 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         title: "work".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
         last_profile: "codex-1".into(),
+        staged_aws_profile: None,
         bundle_id: "bundle-1".into(),
         project_directory: None,
         managed_worktree: None,

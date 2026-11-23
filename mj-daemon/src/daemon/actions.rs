@@ -123,7 +123,7 @@ pub(super) async fn handle_action(
                 let checks = mj_setup::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
                     &executor,
-                    mj_setup::doctor::current_apple_platform(&executor),
+                    mj_controller::targets::current_apple_platform(&executor),
                     mj_setup::doctor::DoctorOptions { smoke: false },
                 );
                 mj_setup::setup::welcome_errors(&checks)
@@ -263,20 +263,16 @@ pub(super) async fn handle_action(
         DaemonAction::ListWorkspaceDrafts => {
             let drafts = blocking(mj_controller::database::list_all_detached_drafts).await?;
             let mut grouped: Vec<WorkspaceDrafts> = Vec::new();
+            let sessions = state.session_records();
             for draft in drafts {
-                let preview = DraftPreview {
-                    id: draft.id,
-                    session_id: draft.session_id,
-                    source: draft.source,
-                    owner_pid: draft.owner_pid,
-                    saved_at: draft.saved_at,
-                };
+                let workspace_id = draft.workspace_id.clone();
+                let preview = super::guards::draft_preview(draft, &sessions);
                 match grouped.last_mut() {
-                    Some(group) if group.workspace_id == draft.workspace_id => {
+                    Some(group) if group.workspace_id == workspace_id => {
                         group.drafts.push(preview);
                     }
                     _ => grouped.push(WorkspaceDrafts {
-                        workspace_id: draft.workspace_id,
+                        workspace_id,
                         drafts: vec![preview],
                     }),
                 }
@@ -1292,8 +1288,23 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::RecoverDraft { draft_id } => {
-            blocking(move || mj_controller::database::recover_detached_draft(&draft_id)).await?;
-            Ok(DaemonReply::Done)
+            let draft =
+                blocking(move || mj_controller::database::read_detached_draft(&draft_id)).await?;
+            Ok(DaemonReply::RecoveredDraft {
+                session_id: draft.session_id,
+                text: draft.text,
+                revision: draft.revision,
+            })
+        }
+        DaemonAction::DiscardDrafts {
+            workspace_id,
+            draft_id,
+        } => {
+            let count = blocking(move || {
+                mj_controller::database::discard_detached_drafts(&workspace_id, draft_id.as_deref())
+            })
+            .await?;
+            Ok(DaemonReply::Count(count))
         }
         DaemonAction::Stop => {
             if cancellation.is_cancelled() {

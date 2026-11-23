@@ -700,6 +700,7 @@ impl ApiClient {
         &self,
         session_id: &str,
         base: Option<&str>,
+        paths: &[String],
         json: bool,
     ) -> Result<String> {
         let mut request = self
@@ -711,7 +712,10 @@ impl ApiClient {
         if json {
             request = request.query(&[("json", "true")]);
         }
-        let response = self.send(request.timeout(EXPORT_TIMEOUT)).await?;
+        let paths: Vec<_> = paths.iter().map(|path| ("path", path.as_str())).collect();
+        let response = self
+            .send(request.query(&paths).timeout(EXPORT_TIMEOUT))
+            .await?;
         response.text().await.context("read the session diff")
     }
 
@@ -1322,10 +1326,10 @@ mod tests {
             )
             .route(
                 "/api/v1/sessions/{session_id}/diff",
-                get(|State(seen): State<Seen>, Query(query): Query<std::collections::BTreeMap<String, String>>, headers: HeaderMap| async move {
+                get(|State(seen): State<Seen>, Query(query): Query<Vec<(String, String)>>, headers: HeaderMap| async move {
                     record_authorization(&seen, &headers);
-                    if query.get("json").is_some_and(|value| value == "true") {
-                        seen.lock().unwrap().push(format!("base={}", query["base"]));
+                    if query.iter().any(|(key, value)| key == "json" && value == "true") {
+                        seen.lock().unwrap().extend(query.iter().map(|(key, value)| format!("{key}={value}")));
                         return (StatusCode::OK, Json(serde_json::json!({
                             "diff": "+task work\n", "base": "a".repeat(40), "head": "c".repeat(40),
                             "head_descends_from_base": false
@@ -1370,7 +1374,12 @@ mod tests {
         let (url, seen) = serve(Some("1")).await;
         let client = ApiClient::new(url, "secret-token".into()).unwrap();
         let body = client
-            .diff("session-1", Some("HEAD@{1}"), true)
+            .diff(
+                "session-1",
+                Some("HEAD@{1}"),
+                &["-leading".into(), "src/file & notes".into()],
+                true,
+            )
             .await
             .unwrap();
         let diff: mj_checkpoint::archive::SessionDiff = serde_json::from_str(&body).unwrap();
@@ -1380,7 +1389,13 @@ mod tests {
         assert_eq!(diff.head_descends_from_base, Some(false));
         assert_eq!(
             *seen.lock().unwrap(),
-            vec!["Bearer secret-token", "base=HEAD@{1}"]
+            vec![
+                "Bearer secret-token",
+                "base=HEAD@{1}",
+                "json=true",
+                "path=-leading",
+                "path=src/file & notes"
+            ]
         );
 
         // A worker from before the field answers without it, and the absence
@@ -1427,7 +1442,10 @@ mod tests {
         );
 
         // A refusal reaches the caller as the reason the API gave it.
-        let error = client.diff("session-1", None, false).await.unwrap_err();
+        let error = client
+            .diff("session-1", None, &[], false)
+            .await
+            .unwrap_err();
         assert!(
             format!("{error:#}").contains("no session base recorded"),
             "unexpected error: {error:#}"

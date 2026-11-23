@@ -1,6 +1,5 @@
-//! The viewer's Settings page. These routes are on the signed-in viewer
-//! surface only, never under `/api/v1`, whose bearer token agents inside
-//! sessions hold: an agent must not rewrite the user's configuration.
+//! The viewer's Settings page under `/api/v1/settings`. These routes require
+//! a signed viewer cookie and can edit the user's configuration.
 //!
 //! The browser holds the draft and sends it back with every request, so the
 //! daemon keeps no per-browser state. Each page is rendered and each edit

@@ -784,51 +784,6 @@ impl ScratchIndex {
     }
 }
 
-/// Records `start` plus the current content of `paths` as a Git tree object
-/// and returns its id. `start` is the commit or tree to begin from, or `None`
-/// for an unborn branch, which has no tree to start from.
-///
-/// This is deliberately proportional to `paths` and not to the working tree.
-/// The scratch index is built with `read-tree`, so it has no stat cache and
-/// `git add` reads exactly the paths it is given: every other tracked file is
-/// carried over from `start` without being opened, and an untracked file that
-/// is not named is simply not in the tree. A capture of the whole working tree
-/// would instead hash every untracked file in it, which in a large workspace is
-/// hundreds of thousands of files and object writes.
-///
-/// After this call `git status` reports exactly what it reported before.
-/// `git add -A` with a pathspec records a deletion as a deletion, and honours
-/// the ignore rules, which is what makes two captures comparable as "what the
-/// agent changed".
-pub fn capture_paths(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    start: Option<&str>,
-    paths: &[PathBuf],
-) -> Result<String> {
-    let scratch = ScratchIndex::create(runner, repository)?;
-    scratch.run(
-        runner,
-        repository,
-        ["read-tree", start.unwrap_or("--empty")],
-        Vec::new(),
-        "initialize the scratch index",
-    )?;
-    if !paths.is_empty() {
-        scratch.run(
-            runner,
-            repository,
-            ["add", "-A", "--"]
-                .into_iter()
-                .map(OsString::from)
-                .chain(paths.iter().map(OsString::from)),
-            Vec::new(),
-            "stage the changed paths into a scratch index",
-        )?;
-    }
-    scratch.write_tree(runner, repository)
-}
-
 /// The tree a review point names, the commit HEAD was at when it was taken,
 /// where that sits in HEAD's reflog, the turn's commits no review has seen
 /// yet, and the session that took it.
@@ -1139,388 +1094,6 @@ pub fn tree_without_paths(
     scratch.write_tree(runner, repository)
 }
 
-/// What [`merge_trees`] records where both sides changed the same lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeConflicts {
-    /// Conflict markers holding both sides.
-    Mark,
-    /// The `ours` side's lines.
-    KeepOurs,
-}
-
-/// Three-way merges `theirs` into `ours` from their common `ancestor` (`None`
-/// for histories with no common ancestor) and returns the resulting tree.
-///
-/// This is Git's resolve strategy run in a scratch index, and it works on any
-/// Git a worker may have; `git merge-tree --write-tree` needs Git 2.38.
-/// `read-tree -m` settles every path only one side changed. A path both sides
-/// changed as regular files is merged with `git merge-file`, which settles
-/// lines where the changes overlap as `conflicts` says. Any other path both
-/// sides changed, and a file `merge-file` cannot merge such as a binary one,
-/// keeps `ours`. There is no rename detection: a file `theirs` renamed while
-/// `ours` changed it ends up under both names.
-pub fn merge_trees(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    ancestor: Option<&str>,
-    ours: &str,
-    theirs: &str,
-    conflicts: MergeConflicts,
-) -> Result<String> {
-    let ancestor = match ancestor {
-        Some(ancestor) => ancestor.to_owned(),
-        None => empty_tree_id(runner, repository)?,
-    };
-    let scratch = ScratchIndex::create(runner, repository)?;
-    scratch.run(
-        runner,
-        repository,
-        [
-            "read-tree",
-            "-m",
-            "-i",
-            "--aggressive",
-            &ancestor,
-            ours,
-            theirs,
-        ],
-        Vec::new(),
-        "merge the trees into a scratch index",
-    )?;
-    let unmerged = scratch.run(
-        runner,
-        repository,
-        ["ls-files", "--unmerged", "-z"],
-        Vec::new(),
-        "list the paths both sides changed",
-    )?;
-    let unmerged = unmerged_paths(&unmerged)?;
-    if !unmerged.is_empty() {
-        let resolutions = resolve_conflicts(runner, repository, &unmerged, conflicts)?;
-        scratch.run(
-            runner,
-            repository,
-            ["update-index", "-z", "--index-info"],
-            resolutions,
-            "record the resolved paths",
-        )?;
-    }
-    scratch.write_tree(runner, repository)
-}
-
-/// One index entry: its mode and object id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct IndexEntry {
-    mode: String,
-    object: String,
-}
-
-impl IndexEntry {
-    fn is_regular_file(&self) -> bool {
-        self.mode == "100644" || self.mode == "100755"
-    }
-}
-
-/// A path `read-tree -m` left unmerged, with its ancestor, ours and theirs
-/// entries (index stages 1, 2 and 3); a side without the path has no entry.
-#[derive(Debug, Default)]
-struct UnmergedPath {
-    path: Vec<u8>,
-    stages: [Option<IndexEntry>; 3],
-}
-
-impl UnmergedPath {
-    fn ours(&self) -> Option<&IndexEntry> {
-        self.stages[1].as_ref()
-    }
-
-    /// The ancestor, ours and theirs entries when both sides changed the path
-    /// as regular files, which is the one kind of conflict merged by content.
-    fn content_merge(&self) -> Option<(Option<&IndexEntry>, &IndexEntry, &IndexEntry)> {
-        let [ancestor, Some(ours), Some(theirs)] = &self.stages else {
-            return None;
-        };
-        let ancestor = ancestor.as_ref().filter(|entry| entry.is_regular_file());
-        (ours.is_regular_file() && theirs.is_regular_file()).then_some((ancestor, ours, theirs))
-    }
-
-    /// The `update-index -z --index-info` record that settles this path at
-    /// `entry`, or removes it when there is none.
-    fn index_info(&self, entry: Option<&IndexEntry>) -> Vec<u8> {
-        let mut record = match entry {
-            Some(entry) => format!("{} {}\t", entry.mode, entry.object).into_bytes(),
-            // Mode 0 removes every stage of the path. Git checks the object id
-            // only for the repository's id length, which any stage shows.
-            None => {
-                let length = self
-                    .stages
-                    .iter()
-                    .flatten()
-                    .next()
-                    .map_or(40, |entry| entry.object.len());
-                format!("0 {}\t", "0".repeat(length)).into_bytes()
-            }
-        };
-        record.extend_from_slice(&self.path);
-        record.push(0);
-        record
-    }
-}
-
-/// Reads `git ls-files --unmerged -z`: `<mode> <object> <stage>\t<path>\0`,
-/// one record per stage, grouped by path.
-fn unmerged_paths(output: &[u8]) -> Result<Vec<UnmergedPath>> {
-    let mut paths: Vec<UnmergedPath> = Vec::new();
-    for record in output.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
-        let tab = record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .context("an unmerged index entry has no path")?;
-        let fields = std::str::from_utf8(&record[..tab]).context("decode an unmerged entry")?;
-        let [mode, object, stage] = fields.split(' ').collect::<Vec<_>>()[..] else {
-            bail!("malformed unmerged index entry {fields:?}");
-        };
-        let stage: usize = stage.parse().context("parse an unmerged entry's stage")?;
-        ensure!((1..=3).contains(&stage), "unexpected index stage {stage}");
-        let path = &record[tab + 1..];
-        if paths.last().is_none_or(|last| last.path != path) {
-            paths.push(UnmergedPath {
-                path: path.to_vec(),
-                ..UnmergedPath::default()
-            });
-        }
-        paths.last_mut().expect("pushed above").stages[stage - 1] = Some(IndexEntry {
-            mode: mode.to_owned(),
-            object: object.to_owned(),
-        });
-    }
-    Ok(paths)
-}
-
-/// Settles every unmerged path and returns the `update-index -z --index-info`
-/// input that records the results.
-fn resolve_conflicts(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    conflicts: &[UnmergedPath],
-    lines: MergeConflicts,
-) -> Result<Vec<u8>> {
-    let blobs = read_blobs(
-        runner,
-        repository,
-        conflicts
-            .iter()
-            .filter_map(UnmergedPath::content_merge)
-            .flat_map(|(ancestor, ours, theirs)| ancestor.into_iter().chain([ours, theirs]))
-            .map(|entry| entry.object.as_str()),
-    )?;
-    let files = tempfile::tempdir().context("create a directory for merging conflicted files")?;
-    let mut index_info = Vec::new();
-    let mut merged = Vec::new();
-    for (number, conflict) in conflicts.iter().enumerate() {
-        let file = match conflict.content_merge() {
-            Some(sides) => merge_file(
-                runner,
-                repository,
-                &files.path().join(number.to_string()),
-                sides,
-                &blobs,
-                lines,
-            )?,
-            None => None,
-        };
-        match file {
-            Some(file) => merged.push((conflict, file)),
-            None => index_info.extend(conflict.index_info(conflict.ours())),
-        }
-    }
-    if merged.is_empty() {
-        return Ok(index_info);
-    }
-    let list = merged
-        .iter()
-        .flat_map(|(_, (_, file))| {
-            let mut line = file.as_os_str().as_encoded_bytes().to_vec();
-            line.push(b'\n');
-            line
-        })
-        .collect::<Vec<_>>();
-    let ids = git_bytes(
-        runner,
-        repository,
-        ["hash-object", "-w", "--no-filters", "--stdin-paths"],
-        &list,
-        "store the merged files",
-    )?;
-    let ids = std::str::from_utf8(&ids).context("decode the merged file ids")?;
-    let ids = ids.lines().collect::<Vec<_>>();
-    ensure!(
-        ids.len() == merged.len(),
-        "git hash-object stored {} of {} merged files",
-        ids.len(),
-        merged.len()
-    );
-    for ((conflict, (mode, _)), object) in merged.into_iter().zip(ids) {
-        let entry = IndexEntry {
-            mode,
-            object: object.to_owned(),
-        };
-        index_info.extend(conflict.index_info(Some(&entry)));
-    }
-    Ok(index_info)
-}
-
-/// Merges one file's three versions with `git merge-file` and returns the
-/// merged file and its mode, or `None` when Git cannot merge it, such as a
-/// binary file.
-fn merge_file(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    stem: &Path,
-    (ancestor, ours, theirs): (Option<&IndexEntry>, &IndexEntry, &IndexEntry),
-    blobs: &BTreeMap<String, Vec<u8>>,
-    conflicts: MergeConflicts,
-) -> Result<Option<(String, PathBuf)>> {
-    let write = |side: &str, entry: Option<&IndexEntry>| -> Result<OsString> {
-        let path = stem.with_extension(side);
-        let content = match entry {
-            Some(entry) => blobs
-                .get(&entry.object)
-                .with_context(|| format!("blob {} was not read", entry.object))?
-                .as_slice(),
-            None => &[],
-        };
-        std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
-        Ok(path.into_os_string())
-    };
-    let current = write("ours", Some(ours))?;
-    let mut arguments: Vec<OsString> = ["merge-file", "-q"]
-        .into_iter()
-        .chain((conflicts == MergeConflicts::KeepOurs).then_some("--ours"))
-        .chain(["-L", "reviewed", "-L", "ancestor", "-L", "merged in"])
-        .map(OsString::from)
-        .collect();
-    arguments.extend([
-        current.clone(),
-        write("ancestor", ancestor)?,
-        write("theirs", Some(theirs))?,
-    ]);
-    let output = runner.run(
-        repository,
-        &GitCommand {
-            arguments,
-            stdin: Vec::new(),
-            env: Vec::new(),
-        },
-    )?;
-    // The status is the number of conflicts, capped at 127; anything else is
-    // an error and leaves the file unmerged.
-    if !(0..=127).contains(&output.status) {
-        return Ok(None);
-    }
-    // A mode only one side changed takes that side's mode.
-    let mode = match ancestor {
-        Some(ancestor) if ancestor.mode == ours.mode => theirs.mode.clone(),
-        _ => ours.mode.clone(),
-    };
-    Ok(Some((mode, PathBuf::from(current))))
-}
-
-/// Reads blobs in one `git cat-file --batch`, keyed by object id.
-fn read_blobs<'a>(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    objects: impl Iterator<Item = &'a str>,
-) -> Result<BTreeMap<String, Vec<u8>>> {
-    let objects = objects.collect::<BTreeSet<_>>();
-    if objects.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let request = objects
-        .iter()
-        .map(|object| format!("{object}\n"))
-        .collect::<String>();
-    let output = git_bytes(
-        runner,
-        repository,
-        ["cat-file", "--batch"],
-        request.as_bytes(),
-        "read the conflicted files",
-    )?;
-    // Each answer is `<id> <type> <size>\n<content>\n`, in request order.
-    let mut blobs = BTreeMap::new();
-    let mut rest = &output[..];
-    for object in objects {
-        let end = rest
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .context("git cat-file --batch ended early")?;
-        let header = std::str::from_utf8(&rest[..end]).context("decode a cat-file header")?;
-        let size: usize = header
-            .rsplit(' ')
-            .next()
-            .and_then(|size| size.parse().ok())
-            .with_context(|| format!("git cat-file could not read {object}: {header}"))?;
-        let content = rest
-            .get(end + 1..end + 1 + size)
-            .context("git cat-file --batch output is truncated")?;
-        blobs.insert(object.to_owned(), content.to_vec());
-        rest = rest.get(end + 2 + size..).unwrap_or_default();
-    }
-    Ok(blobs)
-}
-
-/// Records the working tree, tracked and untracked alike, as a Git tree object
-/// and returns its id.
-///
-/// The staging runs against a scratch index file named by `GIT_INDEX_FILE`, so
-/// the repository's real index, working tree and HEAD are untouched: after this
-/// call `git status` reports exactly what it reported before. Untracked ignored files stay
-/// out, because `git add -A` honours the ignore rules, which is what makes two
-/// captures comparable as "what the agent changed".
-pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
-    let scratch = ScratchIndex::create(runner, repository)?;
-    let (_, real_index) = operation::git_paths(runner, repository, ["index"].into_iter())
-        .context("locate the real Git index")?
-        .pop()
-        .context("Git omitted the real index location")?;
-    match std::fs::copy(&real_index, &scratch.path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let head = run_git(
-                runner,
-                repository,
-                ["rev-parse", "--verify", "--quiet", "HEAD"],
-                &[],
-            )?;
-            ensure!(
-                head.status == 0 || head.status == 1,
-                "{}",
-                git_failure("resolve capture HEAD", &head)
-            );
-            let base = if head.status == 0 { "HEAD" } else { "--empty" };
-            scratch.run(
-                runner,
-                repository,
-                ["read-tree", base],
-                Vec::new(),
-                "initialize the scratch index",
-            )?;
-        }
-        Err(error) => return Err(error).context("copy the real Git index for capture"),
-    }
-    // `:/` names the whole working tree even when `repository` is a
-    // subdirectory of its checkout; `.` would stage only that subdirectory.
-    scratch.run(
-        runner,
-        repository,
-        ["add", "-A", "--", ":/"],
-        Vec::new(),
-        "stage the working tree into a scratch index",
-    )?;
-    scratch.write_tree(runner, repository)
-}
-
 /// Points `reference` at `tree` so the capture survives garbage collection.
 ///
 /// A failure here is not fatal to a review -- the objects are still reachable
@@ -1578,7 +1151,10 @@ pub fn empty_tree_id(runner: &dyn GitCommandRunner, repository: &Path) -> Result
     let output = runner.run(
         repository,
         &GitCommand {
-            arguments: vec![OsString::from("mktree")],
+            arguments: ["hash-object", "-t", "tree", "--stdin"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
             stdin: Vec::new(),
             env: Vec::new(),
         },
@@ -3887,33 +3463,45 @@ impl From<anyhow::Error> for SessionExportError {
     }
 }
 
-/// The work a session did in one repository, as a unified diff.
-///
-/// The comparison is the session's base commit against the working tree,
-/// tracked and untracked alike, so a caller sees what the agent produced
-/// whether or not it committed. The base is resolved in the order the caller
-/// can trust: an explicit base, then the immutable base a managed network
-/// workspace records, then the commit the session branch was created at.
+/// A summary or selected-file patch against the session's resolved base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDiff {
     pub diff: String,
     pub base: String,
     pub head: String,
-    /// Whether the base is an ancestor of HEAD. `false` means the session
-    /// rewrote history the base was on, so the diff carries changes the
-    /// session did not make. `None` is an older worker whose JSON predates
-    /// this field.
+    /// Whether the base is an ancestor of HEAD. Older workers omit this field.
     #[serde(default)]
     pub head_descends_from_base: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracked_files: Vec<DiffStatFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untracked_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untracked_total: Option<usize>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffStatFile {
+    pub path: String,
+    pub insertions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub binary: bool,
+}
+
+// Bound summary JSON and the web Changed Files DOM for checkouts like the
+// brokkbench checkout with 424,715 untracked files (#1083). The total stays exact.
+const UNTRACKED_DIFFSTAT_LIMIT: usize = 500;
+// Git normally writes refreshed stat metadata to the real index during diff.
+const SESSION_DIFF_CONFIG: [&str; 2] = ["-c", "diff.autoRefreshIndex=false"];
 
 pub fn session_diff(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
+    paths: &[String],
 ) -> Result<String, SessionExportError> {
-    Ok(session_diff_details(runner, repository, base, branch)?.diff)
+    Ok(session_diff_details(runner, repository, base, branch, paths)?.diff)
 }
 
 pub fn session_diff_details(
@@ -3921,7 +3509,34 @@ pub fn session_diff_details(
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
+    paths: &[String],
 ) -> Result<SessionDiff, SessionExportError> {
+    session_diff_with_mode(runner, repository, base, branch, Some(paths))
+}
+
+/// Export a unified patch of all tracked changes in the checkout.
+pub fn session_diff_patch(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> Result<String, SessionExportError> {
+    Ok(session_diff_with_mode(runner, repository, base, branch, None)?.diff)
+}
+
+fn session_diff_with_mode(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+    // None selects the whole-checkout patch used by export.
+    paths: Option<&[String]>,
+) -> Result<SessionDiff, SessionExportError> {
+    if paths.unwrap_or_default().iter().any(|path| path.is_empty()) {
+        return Err(SessionExportError::refused("diff paths must not be empty"));
+    }
+    let checkout = locate_checkout(runner, repository)?;
+    let repository = &checkout.top_level;
     let base = match base.map(str::trim) {
         Some("") => return Err(SessionExportError::refused("diff base must not be empty")),
         Some(base) => base.to_owned(),
@@ -3978,20 +3593,191 @@ pub fn session_diff_details(
             )));
         }
     };
-    let base_tree = git_text(
-        runner,
-        repository,
-        ["rev-parse", &format!("{base}^{{tree}}")],
-    )
-    .context("resolve the session base tree")?;
-    let current = capture_worktree_tree(runner, repository)?;
-    let diff = diff_between_trees(runner, repository, Some(&base_tree), &current)?;
-    Ok(SessionDiff {
-        diff,
+    let mut result = SessionDiff {
+        diff: String::new(),
         base,
         head,
         head_descends_from_base,
-    })
+        tracked_files: Vec::new(),
+        untracked_files: Vec::new(),
+        untracked_total: None,
+    };
+    match paths {
+        Some([]) => summarize_session_diff(runner, repository, &mut result)?,
+        Some(paths) => {
+            let untracked = git_bytes_owned(
+                runner,
+                repository,
+                &[
+                    "--literal-pathspecs",
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                ]
+                .into_iter()
+                .map(String::from)
+                .chain(paths.iter().cloned())
+                .collect::<Vec<_>>(),
+                "check selected paths for untracked files",
+            )?;
+            let untracked: Vec<_> = nul_records(&untracked)
+                .map(|path| format!("{path:?}"))
+                .collect();
+            if !untracked.is_empty() {
+                return Err(SessionExportError::refused(format!(
+                    "untracked path(s) cannot be diffed: {} — use `mj fetch` to read untracked files",
+                    untracked.join(", ")
+                )));
+            }
+            result.diff = session_patch(runner, repository, &result.base, Some(paths))?;
+        }
+        None => result.diff = session_patch(runner, repository, &result.base, None)?,
+    }
+    Ok(result)
+}
+
+fn session_patch(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+    paths: Option<&[String]>,
+) -> Result<String> {
+    let mut arguments = SESSION_DIFF_CONFIG.map(String::from).to_vec();
+    if paths.is_some() {
+        arguments.push("--literal-pathspecs".to_owned());
+    }
+    arguments.extend(
+        [
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--ignore-submodules=dirty",
+            base,
+            "--",
+        ]
+        .map(String::from),
+    );
+    if let Some(paths) = paths {
+        arguments.extend_from_slice(paths);
+    } else {
+        arguments.push(":/".to_owned());
+    }
+    let patch = git_bytes_owned(runner, repository, &arguments, "diff tracked session paths")?;
+    Ok(String::from_utf8_lossy(&patch).into_owned())
+}
+
+fn nul_records(bytes: &[u8]) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(String::from_utf8_lossy)
+}
+
+fn summarize_session_diff(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    result: &mut SessionDiff,
+) -> Result<()> {
+    use std::fmt::Write as _;
+
+    // Keep stat and numstat aligned. Disabling renames gives each old/new
+    // name its own row and each row a single literal path.
+    // Textconv can write cached conversions into the object store.
+    let diff = |flags: &[&str], action| {
+        let arguments = SESSION_DIFF_CONFIG
+            .into_iter()
+            .chain(["diff"])
+            .chain(flags.iter().copied())
+            .chain([
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--ignore-submodules=dirty",
+                "--no-renames",
+                &result.base,
+                "--",
+                ":/",
+            ])
+            .map(String::from)
+            .collect::<Vec<_>>();
+        git_bytes_owned(runner, repository, &arguments, action)
+    };
+    let stat = diff(&["--stat"], "summarize tracked session changes")?;
+    let numstat = diff(&["--numstat", "-z"], "count tracked session changes")?;
+    result.tracked_files = nul_records(&numstat)
+        .map(|entry| {
+            let mut fields = entry.splitn(3, '\t');
+            let insertions = fields.next().context("missing Git numstat insertions")?;
+            let deletions = fields.next().context("missing Git numstat deletions")?;
+            let path = fields
+                .next()
+                .context("missing Git numstat path")?
+                .to_owned();
+            let binary = insertions == "-" && deletions == "-";
+            let counts = if binary {
+                (None, None)
+            } else {
+                (Some(insertions.parse()?), Some(deletions.parse()?))
+            };
+            Ok(DiffStatFile {
+                path,
+                insertions: counts.0,
+                deletions: counts.1,
+                binary,
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    let listed = git_bytes(
+        runner,
+        repository,
+        [
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+            "--",
+            ":/",
+        ],
+        &[],
+        "list untracked session files",
+    )?;
+    let mut untracked: Vec<_> = nul_records(&listed).collect();
+    let total = untracked.len();
+    untracked.sort_unstable();
+    untracked.truncate(UNTRACKED_DIFFSTAT_LIMIT);
+    result.untracked_total = Some(total);
+    result.untracked_files = untracked
+        .into_iter()
+        .map(std::borrow::Cow::into_owned)
+        .collect();
+    result.diff = String::from_utf8_lossy(&stat).into_owned();
+    if total > 0 {
+        if !result.diff.is_empty() {
+            result.diff.push('\n');
+        }
+        result
+            .diff
+            .push_str("Untracked files (use `mj fetch` to read):\n");
+        for path in &result.untracked_files {
+            let path = if path.chars().any(char::is_control) {
+                format!("{path:?}")
+            } else {
+                path.clone()
+            };
+            writeln!(result.diff, "  {path} (untracked)")?;
+        }
+        let remaining = total - result.untracked_files.len();
+        if remaining > 0 {
+            writeln!(result.diff, "  ... and {remaining} more untracked files")?;
+        }
+    }
+    Ok(())
 }
 
 /// The commit a branch was created at, read from its reflog.

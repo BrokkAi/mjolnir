@@ -39,7 +39,9 @@ use super::provisioning::{
 use super::readiness::{
     connect_started_worker, wait_for_harness_prepared_in_stage, wait_for_native_session_in_stage,
 };
-use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
+use super::worker_binary::{
+    bridge_readiness_stage, start_worker_durably_with_aws_profile, worker_probe_diagnosis,
+};
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, capture_legacy_raw_checkout_snapshot, create_managed_worktree,
@@ -983,9 +985,9 @@ impl Controller {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
                 self.prepare_subagent_report_dir(session_id, &backend, syncing)?;
             }
-            if retain_native {
+            let staged_aws_profile = if retain_native {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                self.prepare_worker_files_for(
+                let staged = self.prepare_worker_files_for(
                     session_id,
                     &backend,
                     &worker_root,
@@ -1007,6 +1009,7 @@ impl Controller {
                     &mj_core::relay::restored_relay_seed_path(Path::new(&worker_root)),
                 );
                 upload_checkpoint_spec(syncing, &backend, session_id, &local_seed, &remote_seed)?;
+                staged.aws_profile
             } else {
                 let staging = tempfile::tempdir().context("create restore staging")?;
                 let local_spec = staging.path().join("restore-spec.json");
@@ -1015,14 +1018,14 @@ impl Controller {
                 let backend_ref = &backend;
                 let worker_root_ref = worker_root.as_str();
                 let local_spec_ref = local_spec.as_path();
-                if let Some(transfer) = move_transfer.as_mut() {
+                let staged_aws_profile = if let Some(transfer) = move_transfer.as_mut() {
                     // Direct cross-target Move: install destination worker
                     // binary first so `receive-move-stream` is available, then
                     // stream archive + `.mj/keep/` directly from source target
                     // to destination target without touching daemon disk.
-                    {
+                    let staged = {
                         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                        controller.prepare_worker_files(
+                        let staged = controller.prepare_worker_files(
                             session_id,
                             backend_ref,
                             worker_root_ref,
@@ -1034,7 +1037,8 @@ impl Controller {
                             backend_ref,
                             session_id,
                         )?;
-                    }
+                        staged
+                    };
                     if !transfer.already_transferred {
                         transfer.operation.phase = mj_core::state::MovePhase::Transferring;
                         transfer.operation.updated_at = now();
@@ -1086,6 +1090,7 @@ impl Controller {
                         local_spec_ref,
                         &remote_spec,
                     )?;
+                    staged
                 } else {
                     // Two independent lanes into the target. The checkpoint transfer
                     // needs nothing from the worker install, and the worker install
@@ -1106,10 +1111,10 @@ impl Controller {
                         },
                         "restore the checkpoint",
                     )?;
-                    execute_concurrent_lanes(
+                    let (staged, ()) = execute_concurrent_lanes(
                         || {
                             let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                            controller.prepare_worker_files(
+                            let staged = controller.prepare_worker_files(
                                 session_id,
                                 backend_ref,
                                 worker_root_ref,
@@ -1121,7 +1126,7 @@ impl Controller {
                                 backend_ref,
                                 session_id,
                             )?;
-                            Ok(())
+                            Ok(staged)
                         },
                         || {
                             let restoring =
@@ -1160,7 +1165,8 @@ impl Controller {
                             )
                         },
                     )?;
-                }
+                    staged
+                };
                 {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
                     let output = execute_checked(
@@ -1219,7 +1225,8 @@ impl Controller {
                         syncing,
                     )?;
                 }
-            }
+                staged_aws_profile
+            };
             match projection_build {
                 Some(build) => {
                     let mut restored_projection = build
@@ -1246,7 +1253,7 @@ impl Controller {
             let readiness = async {
                 let mut relay = {
                     let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-                    start_worker_durably(
+                    start_worker_durably_with_aws_profile(
                         &crate::worker_lifecycle::require(session_id)?,
                         self.state.sessions[session_id]
                             .target
@@ -1256,6 +1263,7 @@ impl Controller {
                         &backend,
                         &worker_root,
                         &self.config.github,
+                        Some(staged_aws_profile.as_deref()),
                     )?;
                     connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
                         .await?
@@ -2578,6 +2586,8 @@ impl Controller {
                         )?;
                         let (local_dest_locator, local_worker_root_str) =
                             self.worker_placement(session_id)?;
+                        // This bootstrap makes receive-move-stream available. The
+                        // final staging pass owns the profile published at cutover.
                         self.prepare_worker_files(
                             session_id,
                             &local_dest_locator,

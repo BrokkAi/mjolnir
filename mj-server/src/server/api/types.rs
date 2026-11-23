@@ -103,6 +103,10 @@ pub struct DiffOptions {
     pub base: Option<String>,
     #[serde(default)]
     pub json: bool,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(skip)]
+    pub full_patch: bool,
 }
 
 /// One session as the API presents it. This is a narrower, more stable shape

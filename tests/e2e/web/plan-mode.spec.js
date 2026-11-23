@@ -227,7 +227,7 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
   };
   state.snapshot.sessions[0].pending_elicitations = initialPending;
 
-  await page.route('**/api/snapshot', route => {
+  await page.route('**/api/v1/snapshot', route => {
     state.snapshotRequests += 1;
     const wire = viewerWireSnapshot(state.snapshot);
     state.lastWireSnapshot = wire;
@@ -240,18 +240,18 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
   });
   // Keep the viewer's EventSource from reaching the daemon; tests publish
   // recorded-shape deltas directly to the fixture stream.
-  await page.route('**/api/events', route =>
+  await page.route('**/api/v1/viewer/events', route =>
     route.fulfill({
       status: 200,
       headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
       body: ': mocked event stream\n\n',
     }),
   );
-  await page.route(`**/api/conversations/${SESSION_ID}/read`, async route => {
+  await page.route(`**/api/v1/conversations/${SESSION_ID}/read`, async route => {
     state.readRequests += 1;
     await route.fulfill({ status: 204, body: '' });
   });
-  await page.route(`**/api/conversations/${SESSION_ID}*`, async route => {
+  await page.route(`**/api/v1/conversations/${SESSION_ID}*`, async route => {
     state.conversationRequests += 1;
     await route.fulfill({
       status: 200,
@@ -259,7 +259,7 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
       body: JSON.stringify(state.conversation),
     });
   });
-  await page.route(`**/api/sessions/${SESSION_ID}/client-state`, async route => {
+  await page.route(`**/api/v1/sessions/${SESSION_ID}/client-state`, async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -269,12 +269,12 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
       }),
     });
   });
-  await page.route(`**/api/sessions/${SESSION_ID}/draft`, async route => {
+  await page.route(`**/api/v1/sessions/${SESSION_ID}/draft`, async route => {
     const body = JSON.parse(route.request().postData() || '{}');
     state.drafts.set(SESSION_ID, body.draft || '');
     await route.fulfill({ status: 204, body: '' });
   });
-  await page.route('**/api/actions', async route => {
+  await page.route('**/api/v1/actions', async route => {
     const body = JSON.parse(route.request().postData() || '{}');
     state.actions.push(body);
     if (body.action === 'set-plan-mode') {
@@ -352,7 +352,7 @@ async function captureConversationState(output, page, label, state, extra = null
     disabled: 'disabled' in node ? node.disabled : null,
   })));
   output.push(`controls: ${JSON.stringify(controls)}`);
-  if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions.map(({ command_id, ...action }) => ({ ...action, command_id: command_id ? '<generated>' : null })))}`);
+  if (state.actions.length) output.push(`action: POST /api/v1/actions ${JSON.stringify(state.actions.map(({ command_id, ...action }) => ({ ...action, command_id: command_id ? '<generated>' : null })))}`);
   if (extra !== null) output.push(`layout: ${JSON.stringify(extra)}`);
 }
 
@@ -1094,7 +1094,7 @@ test('a free-text alternative is the answer only while it is chosen', async ({ p
 test('submitted content appears while the request is held and a newer draft survives acceptance', async ({ page }) => {
   const state = await mockViewerApi(page);
   let held;
-  await page.route('**/api/actions', route => { held = route; });
+  await page.route('**/api/v1/actions', route => { held = route; });
   const prompt = page.locator('#prompt-text');
   await prompt.fill('show this immediately');
   await page.keyboard.press('Enter');
@@ -1109,7 +1109,7 @@ test('submitted content appears while the request is held and a newer draft surv
   await held.fulfill({ status: 202, body: '' });
   await expect(pending).toContainText('Queued');
   await expect(prompt).toHaveText('a newer draft');
-  await page.route(`**/api/conversations/${SESSION_ID}*`, route => {
+  await page.route(`**/api/v1/conversations/${SESSION_ID}*`, route => {
     if (new URL(route.request().url()).pathname.endsWith('/read')) return route.fallback();
     const projected = conversation();
     projected.reset = true;
@@ -1129,7 +1129,7 @@ test('submitted content appears while the request is held and a newer draft surv
 test('an accepted /clear leaves no queued row, and a refused one stays recoverable', async ({ page }) => {
   const state = await mockViewerApi(page);
   let held;
-  await page.route('**/api/actions', route => { held = route; });
+  await page.route('**/api/v1/actions', route => { held = route; });
   const prompt = page.locator('#prompt-text');
   const pending = page.locator('#pending-submissions');
 
@@ -1157,7 +1157,7 @@ test('an accepted /clear leaves no queued row, and a refused one stays recoverab
 test('projection before a lost acknowledgement reconciles only the matching identical prompt', async ({ page }) => {
   const state = await mockViewerApi(page);
   const held = [];
-  await page.route('**/api/actions', route => { held.push(route); });
+  await page.route('**/api/v1/actions', route => { held.push(route); });
   const prompt = page.locator('#prompt-text');
   for (let i = 0; i < 2; i += 1) {
     await prompt.fill('same text');
@@ -1182,7 +1182,7 @@ test('projection before a lost acknowledgement reconciles only the matching iden
 test('a failed mode prerequisite leaves its follow-up unsent and recoverable', async ({ page }) => {
   await mockViewerApi(page);
   const actions = [];
-  await page.route('**/api/actions', route => {
+  await page.route('**/api/v1/actions', route => {
     actions.push(route.request().postDataJSON());
     return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'mode change failed' }) });
   });
@@ -1198,7 +1198,7 @@ test('a failed mode prerequisite leaves its follow-up unsent and recoverable', a
 test('pending content stays with its session and does not alter drafts after navigation', async ({ page }) => {
   await mockViewerApi(page);
   let held;
-  await page.route('**/api/actions', route => { held = route; });
+  await page.route('**/api/v1/actions', route => { held = route; });
   const prompt = page.locator('#prompt-text');
   await prompt.fill('pending through navigation');
   await page.keyboard.press('Enter');

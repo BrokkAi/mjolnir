@@ -566,6 +566,9 @@ impl RuntimeState {
                 return;
             }
             operation.progress.last_stage_change = tokio::time::Instant::now();
+            if let Some(changed) = &operation.progress.stall_progress_changed {
+                changed.notify_one();
+            }
             if active {
                 let started_at = stage
                     .started_at_epoch_seconds()
@@ -651,7 +654,7 @@ impl RuntimeState {
                         last_byte: now,
                     },
                 );
-                if let Some(started) = &progress.stream_started {
+                if let Some(started) = &progress.stall_progress_changed {
                     started.notify_one();
                 }
             }
@@ -668,6 +671,54 @@ impl RuntimeState {
                 }
             }
             CommandActivity::StageStarted(_) | CommandActivity::StageFinished(_) => unreachable!(),
+        }
+    }
+
+    /// A stage change or stream start wakes a paused clock. Byte progress
+    /// can only postpone a stream's deadline, so it needs no notification.
+    pub(super) async fn watch_lifecycle_stall(
+        &self,
+        session_id: &str,
+        kind: LifecycleKind,
+        progress_changed: &tokio::sync::Notify,
+    ) -> Option<String> {
+        loop {
+            match self.cancel_stalled_lifecycle(session_id, kind, LIFECYCLE_STALL_BOUND) {
+                LifecycleStallProgress::Running(Some(next_check)) => {
+                    tokio::time::sleep_until(next_check).await;
+                }
+                LifecycleStallProgress::Running(None) => progress_changed.notified().await,
+                LifecycleStallProgress::Stalled {
+                    idle,
+                    stages,
+                    stream,
+                    phase: StalledLifecycle::Cancelled,
+                } => {
+                    let detail = match stream {
+                        Some(stream) if kind == LifecycleKind::Unpark => format!(
+                            "{stream} made no progress for {} minutes",
+                            LIFECYCLE_STALL_BOUND.as_secs() / 60,
+                        ),
+                        Some(stream) => format!("{stream} moved no bytes for {} s", idle.as_secs()),
+                        None => {
+                            let stage = if stages.is_empty() {
+                                "between stages".to_owned()
+                            } else {
+                                stages.join(" + ")
+                            };
+                            format!(
+                                "no stage started or finished for {} s (stalled in: {stage})",
+                                idle.as_secs(),
+                            )
+                        }
+                    };
+                    return Some(format!(
+                        "{} stalled for {session_id}: {detail}",
+                        kind.label()
+                    ));
+                }
+                _ => return None,
+            }
         }
     }
 

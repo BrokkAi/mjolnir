@@ -3,7 +3,6 @@
 //! serializes it with the child's close, suspend, destroy and every other
 //! park or unpark. The work itself is in `mj_controller::controller::subagent_park`.
 
-use super::views::{LifecycleStallProgress, StalledLifecycle};
 use super::*;
 
 /// How long a whole park may run: an idle reservation, one stop, one write.
@@ -331,7 +330,7 @@ impl RuntimeState {
                         session_id.clone(),
                     );
                     executor.begin_resumable_work()?;
-                    let controller = blocking(Controller::load).await?;
+                    let mut controller = blocking(Controller::load).await?;
                     controller
                         .unpark_subagent_worker(
                             &admission,
@@ -436,7 +435,7 @@ impl RuntimeState {
                         state.clone(),
                         session_id.clone(),
                     );
-                    let controller = blocking(Controller::load).await?;
+                    let mut controller = blocking(Controller::load).await?;
                     controller
                         .unpark_subagent_worker(&session_admission, &session_id, None, &executor)
                         .await?;
@@ -447,39 +446,6 @@ impl RuntimeState {
             self.publish_revision();
         }
         Ok(())
-    }
-
-    /// Runs alongside the lifecycle's blocking work. A stream start wakes
-    /// the check when there is no timer. Byte progress can only move the
-    /// next check later, so it need not wake the task on every write.
-    pub(super) async fn cancel_unpark_when_stream_stalls(
-        &self,
-        session_id: &str,
-        stream_started: &tokio::sync::Notify,
-    ) -> Option<String> {
-        loop {
-            match self.cancel_stalled_lifecycle(
-                session_id,
-                LifecycleKind::Unpark,
-                LIFECYCLE_STALL_BOUND,
-            ) {
-                LifecycleStallProgress::Running(Some(next_check)) => {
-                    tokio::time::sleep_until(next_check).await;
-                }
-                LifecycleStallProgress::Running(None) => stream_started.notified().await,
-                LifecycleStallProgress::Stalled {
-                    stream: Some(stream),
-                    phase: StalledLifecycle::Cancelled,
-                    ..
-                } => {
-                    return Some(format!(
-                        "{stream} made no progress for {} minutes",
-                        LIFECYCLE_STALL_BOUND.as_secs() / 60
-                    ));
-                }
-                _ => return None,
-            }
-        }
     }
 
     pub(crate) fn child_park_snapshot(&self, child: &str) -> (Option<SessionRecord>, bool) {

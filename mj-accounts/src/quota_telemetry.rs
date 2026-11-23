@@ -5,6 +5,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
+use mj_core::usage::pricing::normalize_model;
+
+use crate::database::{CellCostKey, CellCostObservation, canonical_observed_category};
+use crate::profile_scheduler::{
+    benchmark_task_usd, calibrated_prior_scale, cell_prior_usd, shrink_cell_cost_usd,
+};
 
 /// Tolerance for reset-deadline jitter before an interval is treated as a
 /// shifted deadline (Codex / Antigravity) and dropped from velocity.
@@ -33,6 +39,9 @@ pub const LOCAL_CATEGORY_SWITCHOVER_MIN_SAMPLES: usize = 200;
 /// Maximum recent completed sessions inspected per category during the hourly
 /// background refresh.
 pub const LOCAL_CATEGORY_MAX_SAMPLES: usize = 1000;
+
+/// Maximum priced terminal sessions retained per category, model and effort.
+pub const LOCAL_CELL_MAX_SAMPLES: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WindowKind {
@@ -68,6 +77,8 @@ pub struct WindowTelemetry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentPlacement {
     pub category: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub created_at_epoch_seconds: i64,
 }
 
@@ -118,27 +129,34 @@ pub fn default_category_burn_stats(category: &str) -> CategoryBurnStats {
     }
 }
 
-/// Convert `mean_api_usd` into weekly percentage points using
-/// `weekly_budget_usd` from `PowerRankingSnapshot` scaled by
-/// `p_eff / plan_usd_per_month`.
+/// Scale the benchmark weekly budget to the profile's monthly plan price.
+pub fn effective_weekly_budget_usd(
+    weekly_budget_usd: Option<f64>,
+    p_eff: f64,
+    plan_usd_per_month: Option<f64>,
+) -> Option<f64> {
+    let weekly_budget = weekly_budget_usd.filter(|v| v.is_finite() && *v > 0.0)?;
+    let plan_price = plan_usd_per_month
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(200.0);
+    let scale = if p_eff.is_finite() && p_eff > 0.0 {
+        p_eff / plan_price
+    } else {
+        1.0
+    };
+    let effective_budget = weekly_budget * scale;
+    (effective_budget.is_finite() && effective_budget > 0.0).then_some(effective_budget)
+}
+
+/// Convert a task's USD cost into weekly quota percentage points.
 pub fn mean_burn_weekly_pct(
     mean_api_usd: f64,
     weekly_budget_usd: Option<f64>,
     p_eff: f64,
     plan_usd_per_month: Option<f64>,
 ) -> f64 {
-    let Some(weekly_budget) = weekly_budget_usd.filter(|v| v.is_finite() && *v > 0.0) else {
-        return 0.0;
-    };
-    let scale = match plan_usd_per_month.filter(|v| v.is_finite() && *v > 0.0) {
-        Some(plan_price) if p_eff.is_finite() && p_eff > 0.0 => p_eff / plan_price,
-        _ => 1.0,
-    };
-    let effective_budget = weekly_budget * scale;
-    if !effective_budget.is_finite() || effective_budget <= 0.0 {
-        return 0.0;
-    }
-    (100.0 * mean_api_usd / effective_budget).max(0.0)
+    effective_weekly_budget_usd(weekly_budget_usd, p_eff, plan_usd_per_month)
+        .map_or(0.0, |budget| (100.0 * mean_api_usd / budget).max(0.0))
 }
 
 /// Convert a weekly percentage burn into a 5-hour percentage burn when the
@@ -171,6 +189,7 @@ pub struct QuotaTelemetrySnapshot {
     pub windows: BTreeMap<WindowKey, WindowTelemetry>,
     pub recent_placements: BTreeMap<String, Vec<RecentPlacement>>,
     pub category_stats: BTreeMap<String, CategoryBurnStats>,
+    pub cell_costs: BTreeMap<CellCostKey, CellCostObservation>,
 }
 
 impl QuotaTelemetrySnapshot {
@@ -179,6 +198,47 @@ impl QuotaTelemetrySnapshot {
             .get(category)
             .cloned()
             .unwrap_or_else(|| default_category_burn_stats(category))
+    }
+
+    pub fn cell_cost_observation(
+        &self,
+        category: &str,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Option<CellCostObservation> {
+        let mut key = CellCostKey {
+            category: canonical_observed_category(category)
+                .unwrap_or(category)
+                .to_owned(),
+            model: normalize_model(model.trim()),
+            effort: None,
+        };
+        let mut total = CellCostObservation {
+            total_api_usd: 0.0,
+            sample_count: 0,
+        };
+        let mut add = |obs: &CellCostObservation| {
+            total.total_api_usd += obs.total_api_usd;
+            total.sample_count += obs.sample_count;
+        };
+        if let Some(effort) = normalized_cell_effort(effort) {
+            if let Some(obs) = self.cell_costs.get(&key) {
+                add(obs);
+            }
+            key.effort = Some(effort);
+            if let Some(obs) = self.cell_costs.get(&key) {
+                add(obs);
+            }
+        } else {
+            for (_, obs) in self
+                .cell_costs
+                .range(key.clone()..)
+                .take_while(|(cell, _)| cell.category == key.category && cell.model == key.model)
+            {
+                add(obs);
+            }
+        }
+        (total.sample_count > 0).then_some(total)
     }
 
     pub fn window_telemetry(
@@ -209,6 +269,21 @@ impl QuotaTelemetrySnapshot {
         })
     }
 
+    pub fn qualifying_placements(
+        &self,
+        profile_id: &str,
+        second_to_last_clean_ts: Option<i64>,
+    ) -> impl Iterator<Item = &RecentPlacement> + use<'_> {
+        self.recent_placements
+            .get(profile_id)
+            .into_iter()
+            .flatten()
+            .filter(move |placement| {
+                second_to_last_clean_ts
+                    .is_none_or(|cutoff| placement.created_at_epoch_seconds > cutoff)
+            })
+    }
+
     /// Sum `mean_burn_pct(placement.category, window_kind)` over placements on
     /// `profile_id` created strictly after `second_to_last_clean_ts` (or all
     /// recent placements if `second_to_last_clean_ts` is `None`).
@@ -223,15 +298,7 @@ impl QuotaTelemetrySnapshot {
         plan_usd_per_month: Option<f64>,
         five_hour_to_weekly_ratio: Option<f64>,
     ) -> f64 {
-        let Some(placements) = self.recent_placements.get(profile_id) else {
-            return 0.0;
-        };
-        placements
-            .iter()
-            .filter(|placement| {
-                second_to_last_clean_ts
-                    .is_none_or(|cutoff| placement.created_at_epoch_seconds > cutoff)
-            })
+        self.qualifying_placements(profile_id, second_to_last_clean_ts)
             .map(|placement| {
                 let stats = self.category_stats(&placement.category);
                 mean_burn_for_window_pct(
@@ -245,6 +312,13 @@ impl QuotaTelemetrySnapshot {
             })
             .sum()
     }
+}
+
+pub(crate) fn normalized_cell_effort(effort: Option<&str>) -> Option<String> {
+    effort
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// Extract usage percentage in `[0.0, 100.0]` from a `QuotaWindow`:
@@ -488,6 +562,7 @@ struct QuotaTelemetryStoreInner {
     ratio_ledgers: BTreeMap<(String, String), RatioLedger>,
     durable_placements: BTreeMap<String, Vec<RecentPlacement>>,
     category_stats: BTreeMap<String, CategoryBurnStats>,
+    cell_costs: BTreeMap<CellCostKey, CellCostObservation>,
     next_reservation_id: u64,
     in_flight: BTreeMap<u64, (String, RecentPlacement)>,
     committed_pending: BTreeMap<(String, String), (String, RecentPlacement)>,
@@ -512,6 +587,7 @@ impl QuotaTelemetryStoreInner {
             windows: self.windows.clone(),
             recent_placements,
             category_stats: self.category_stats.clone(),
+            cell_costs: self.cell_costs.clone(),
         }
     }
 }
@@ -633,6 +709,8 @@ impl QuotaTelemetryStore {
                 first.as_ref().profile_id.clone(),
                 RecentPlacement {
                     category: category.unwrap_or("primary").to_owned(),
+                    model: Some(first.as_ref().model.clone()),
+                    effort: first.as_ref().effort.clone(),
                     created_at_epoch_seconds: now_seconds,
                 },
             ),
@@ -678,6 +756,8 @@ impl QuotaTelemetryStore {
                 profile_id.to_owned(),
                 RecentPlacement {
                     category: category.to_owned(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds,
                 },
             ),
@@ -701,10 +781,20 @@ impl QuotaTelemetryStore {
                 profile_id.to_owned(),
                 RecentPlacement {
                     category: category.to_owned(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds,
                 },
             ),
         );
+    }
+
+    pub fn replace_cell_costs(&self, cell_costs: BTreeMap<CellCostKey, CellCostObservation>) {
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.cell_costs = cell_costs;
     }
 
     pub fn replace_category_stats(&self, stats: BTreeMap<String, CategoryBurnStats>) {
@@ -836,6 +926,8 @@ impl QuotaTelemetryStore {
                 .or_default()
                 .push(RecentPlacement {
                     category: row.category,
+                    model: row.model,
+                    effort: row.effort,
                     created_at_epoch_seconds: row.created_at_epoch_seconds,
                 });
         }
@@ -880,13 +972,113 @@ impl QuotaTelemetryStore {
                 )
             })
             .collect();
-        self.replace_category_stats(stats);
+        let cell_costs = crate::database::load_cell_cost_observations(LOCAL_CELL_MAX_SAMPLES)?;
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.category_stats = stats;
+        guard.cell_costs = cell_costs;
         Ok(())
+    }
+
+    pub fn log_cell_cost_estimates(
+        &self,
+        power_ranking: &crate::power_ranking::PowerRankingSnapshot,
+    ) {
+        let (cell_costs, category_stats) = {
+            let guard = self
+                .inner
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (guard.cell_costs.clone(), guard.category_stats.clone())
+        };
+        let mut categories = BTreeMap::<_, Vec<_>>::new();
+        for (key, obs) in &cell_costs {
+            if obs.sample_count == 0 {
+                continue;
+            }
+            // Stored cells have no harness. Find a benchmark through the normal
+            // lookup, including its fallback to untagged rows.
+            let bench = mj_core::config::HarnessKind::ALL
+                .into_iter()
+                .find_map(|harness| {
+                    power_ranking
+                        .lookup(&key.model, key.effort.as_deref(), harness)
+                        .as_ref()
+                        .and_then(benchmark_task_usd)
+                });
+            categories
+                .entry(key.category.as_str())
+                .or_default()
+                .push((key, obs, bench));
+        }
+        for (category, cells) in categories {
+            let default_usd = category_stats.get(category).map_or_else(
+                || default_category_burn_stats(category).mean_api_usd,
+                |stats| stats.mean_api_usd,
+            );
+            let prior_scale = calibrated_prior_scale(
+                default_usd,
+                cells
+                    .iter()
+                    .filter_map(|(_, obs, bench)| bench.map(|b| (b, Some(*obs)))),
+            );
+            for (key, obs, bench) in cells {
+                let prior_usd = cell_prior_usd(bench, prior_scale, default_usd);
+                tracing::debug!(
+                    category,
+                    model = %key.model,
+                    effort = ?key.effort,
+                    n = obs.sample_count,
+                    observed_mean_usd = obs.total_api_usd / obs.sample_count as f64,
+                    prior_usd,
+                    estimate_usd = shrink_cell_cost_usd(Some(obs), prior_usd),
+                    "local empirical cell cost"
+                );
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cell_cost_observation_matches_unknown_effort_and_aggregates_none_effort() {
+        let mut snapshot = QuotaTelemetrySnapshot::default();
+        for (effort, total_api_usd, sample_count) in [
+            (None, 2.0, 1),
+            (Some("high"), 6.0, 3),
+            (Some("low"), 10.0, 5),
+        ] {
+            snapshot.cell_costs.insert(
+                CellCostKey {
+                    category: "orchestrator".into(),
+                    model: "grok-4.7".into(),
+                    effort: effort.map(str::to_owned),
+                },
+                CellCostObservation {
+                    total_api_usd,
+                    sample_count,
+                },
+            );
+        }
+        assert_eq!(
+            snapshot.cell_cost_observation(" Supervisor ", " x-ai/grok-4.7 ", Some(" HIGH ")),
+            Some(CellCostObservation {
+                total_api_usd: 8.0,
+                sample_count: 4
+            }),
+        );
+        assert_eq!(
+            snapshot.cell_cost_observation("orchestrator", "grok-4.7", None),
+            Some(CellCostObservation {
+                total_api_usd: 18.0,
+                sample_count: 9
+            }),
+        );
+    }
+
     use super::*;
     use mj_core::config::HarnessKind;
 
@@ -1200,6 +1392,8 @@ mod tests {
                 session_id: "sess-dedup-1".into(),
                 profile_id: first_profile.clone(),
                 category: "subtle".into(),
+                model: None,
+                effort: None,
                 created_at_epoch_seconds: now,
             }],
             now - 3600,
@@ -1237,6 +1431,8 @@ mod tests {
                     session_id: "moved-session".into(),
                     profile_id: profile_id.into(),
                     category: "primary".into(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds,
                 }],
                 now - 7200,
@@ -1253,6 +1449,8 @@ mod tests {
                 session_id: "moved-session".into(),
                 profile_id: "profile-b".into(),
                 category: "primary".into(),
+                model: None,
+                effort: None,
                 created_at_epoch_seconds: now,
             }],
             now - 7200,

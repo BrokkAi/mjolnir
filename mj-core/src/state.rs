@@ -1637,6 +1637,9 @@ pub struct SessionRecord {
     pub title: String,
     pub harness_kind: HarnessKind,
     pub last_profile: String,
+    /// AWS profile selected when this worker's AWS configuration was staged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_aws_profile: Option<String>,
     pub bundle_id: String,
     /// Accepted bundle for every target, including a raw directory's bundle of one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

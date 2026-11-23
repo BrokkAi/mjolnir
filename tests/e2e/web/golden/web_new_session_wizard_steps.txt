@@ -63,7 +63,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"only","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"only","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0
 === several profiles keep Account: Step 1 of 4 · Account (390x844) ===
 New session
@@ -145,7 +145,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0
 === only usable raw target omits Where to run: Step 1 of 3 · Account (390x844) ===
 New session
@@ -211,7 +211,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0
 === unknown target remains offered: Step 1 of 4 · Account (390x844) ===
 New session
@@ -293,7 +293,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0
 === single sized target keeps Where to run: Step 1 of 4 · Account (390x844) ===
 New session
@@ -401,7 +401,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review after skipped steps supplies all required values (390x844) ===
 New session
@@ -428,7 +428,7 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0
 === launch payload after skipped steps (390x844) ===
 New session
@@ -455,6 +455,6 @@ Start
 Cancel
 controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","create_managed_worktree":true,"no_github_events":false}]
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+action: POST /api/v1/actions [{"action":"new","workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","create_managed_worktree":true,"no_github_events":false}]
+request: POST /api/v1/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
 project creation requests: 0

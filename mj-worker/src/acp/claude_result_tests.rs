@@ -751,6 +751,78 @@ async fn claude_prompt_usage_includes_native_agents_without_recounting_the_paren
     probe.close().await;
 }
 
+// Hard-won: #1106: Claude session-limit turns lost usage before AIR sessionFailure preserved response usage
+#[tokio::test]
+async fn claude_session_failure_preserves_whole_turn_usage() {
+    let mut probe = ClaudeProbe::new().await;
+    let prompt = probe
+        .prompt("quota-limited", "Run the delegated work")
+        .await;
+    let title = "The Claude account has no available quota.";
+    probe
+        .result(
+            &prompt,
+            json!({
+                "stopReason": "end_turn",
+                "usage": {"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                    "cachedReadTokens":1000,"cachedWriteTokens":10},
+                "_meta": {
+                    "jetbrains": {"air": {"version": 1, "sessionFailure": {
+                        "id": "turn-1:error", "revision": 1, "category": "limit",
+                        "severity": "error", "actions": [], "title": title
+                    }}},
+                    "quota": {
+                        "token_count":{"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                            "cachedInputTokens":1000,"cachedWriteTokens":10,"reasoningOutputTokens":0},
+                        "model_usage": [
+                            {"model":"claude-opus-5-5","token_count":{"totalTokens":1117,
+                                "inputTokens":100,"outputTokens":7,"cachedInputTokens":1000,
+                                "cachedWriteTokens":10,"reasoningOutputTokens":0}},
+                            {"model":"claude-sonnet-5-5","token_count":{"totalTokens":2234,
+                                "inputTokens":200,"outputTokens":14,"cachedInputTokens":2000,
+                                "cachedWriteTokens":20,"reasoningOutputTokens":0}}
+                        ]
+                    }
+                }
+            }),
+        )
+        .await;
+
+    let (stop_reason, diagnostic, usage) = loop {
+        if let RuntimeEvent::PromptFinished {
+            request_id,
+            stop_reason,
+            diagnostic,
+            usage,
+            ..
+        } = probe.event().await
+        {
+            assert_eq!(request_id, "quota-limited");
+            break (stop_reason, diagnostic, usage);
+        }
+    };
+    assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
+    let diagnostic = diagnostic.expect("quota failure carries a diagnostic");
+    assert_eq!(diagnostic.message, title);
+    assert_eq!(diagnostic.code.as_deref(), Some("usageLimitExceeded"));
+
+    let usage = usage.expect("the failed prompt still reported usage");
+    assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
+    assert_eq!(
+        (usage.total_tokens, usage.input_tokens, usage.output_tokens),
+        (3351, 300, 21)
+    );
+    assert_eq!(
+        (usage.cached_read_tokens, usage.cached_write_tokens),
+        (Some(3000), Some(30))
+    );
+    let models = usage.provider_details.unwrap().model_usage;
+    assert_eq!(models.len(), 2);
+    assert_eq!(models["claude-opus-5-5"].total_tokens, 1117);
+    assert_eq!(models["claude-sonnet-5-5"].total_tokens, 2234);
+    probe.close().await;
+}
+
 #[tokio::test]
 async fn malformed_claude_model_accounting_reports_incomplete_usage() {
     let mut probe = ClaudeProbe::new().await;

@@ -201,7 +201,8 @@ EC2 targets also work in their own clone and do not touch your checkout.
 
 To get the work out:
 
-- Print the diff: `mj diff --session <id>`.
+- List changes with `mj diff --session <id>`, or inspect a tracked file with
+  `mj diff --session <id> <path>`.
 - Write a patch file: `mj export --session <id> --kind patch --out work.patch`.
 - Push it as a branch: `mj export --session <id> --kind branch --branch <name>`
   pushes the session's work to `origin` as `<name>`.

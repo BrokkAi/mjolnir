@@ -1,4 +1,3 @@
-use super::views::{LifecycleStallProgress, StalledLifecycle};
 use super::*;
 use mj_core::subagent::SubagentPolicy;
 
@@ -10,44 +9,6 @@ pub(super) enum CreateDelegationDefault {
 
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Bounds one reviewer readiness wait that runs with no Create to end it.
-///
-/// The clock runs only while no Create is running, so it starts when the wait
-/// began or when the Create finished, whichever is later. A running Create is
-/// bounded by its own stall check instead, which lets a slow Create take as
-/// long as it keeps making progress.
-pub(super) struct PostCreateWait {
-    what: &'static str,
-    since: Option<tokio::time::Instant>,
-}
-
-impl PostCreateWait {
-    pub(super) fn new(what: &'static str) -> Self {
-        Self {
-            what,
-            since: Some(tokio::time::Instant::now()),
-        }
-    }
-
-    fn create_running(&mut self) {
-        self.since = None;
-    }
-
-    /// The harness startup bound the other readiness waits share, so a
-    /// reviewer is given as long as any other session to open.
-    fn check(&mut self, child: &str) -> Result<()> {
-        let since = *self.since.get_or_insert_with(tokio::time::Instant::now);
-        let bound = mj_controller::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
-        anyhow::ensure!(
-            since.elapsed() < bound,
-            "the reviewer child {child} did not {} within {} s of its Create finishing",
-            self.what,
-            bound.as_secs()
-        );
-        Ok(())
-    }
-}
 
 impl RuntimeState {
     pub(super) async fn start_create_session(
@@ -536,15 +497,47 @@ impl RuntimeState {
         needs_provisioning: bool,
     ) -> Result<()> {
         self.reload_controller().await?;
-        if relation.kind != mj_core::subagent::SubagentKind::Reviewer {
-            let id = relation.child_session_id.clone();
-            if let Some(delivery) =
-                blocking(move || mj_controller::database::next_startup_delivery(&id)).await?
-            {
-                self.start_persisted_startup_delivery(delivery, &CancellationToken::new());
-            }
+        let id = relation.child_session_id.clone();
+        if let Some(delivery) =
+            blocking(move || mj_controller::database::next_startup_delivery(&id)).await?
+        {
+            self.start_persisted_startup_delivery(delivery, &CancellationToken::new());
         }
         if !needs_provisioning {
+            if let Some(launch) = &relation.reviewer_launch {
+                let id = relation.child_session_id.clone();
+                let steps =
+                    blocking(move || mj_controller::database::load_latest_startup_group(&id))
+                        .await?;
+                if steps.is_empty()
+                    && matches!(
+                        self.session_state(&relation.child_session_id),
+                        Some(SessionState::Running | SessionState::Disconnected)
+                    )
+                {
+                    // An older Create could reach Running before the review
+                    // host queued its brief. The running worker can only take
+                    // that missing input through the legacy delivery path.
+                    self.queue_api_followup(
+                        &relation.child_session_id,
+                        relation.request_key.clone(),
+                        mj_controller::database::StartFollowup {
+                            model: relation.model.clone(),
+                            effort: relation.effort.clone(),
+                            fast_mode: launch.fast_mode.unwrap_or(false),
+                            prompt: Some(relation.initial_prompt.clone()),
+                        },
+                    )
+                    .await?;
+                }
+                if let Some(reason) = steps
+                    .iter()
+                    .filter(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
+                    .find_map(|step| step.error.as_deref())
+                {
+                    self.report_reviewer_startup_rejection(&relation.child_session_id, reason);
+                }
+            }
             return Ok(());
         }
         self.start_create_lifecycle(
@@ -615,152 +608,7 @@ impl RuntimeState {
             .to_owned(),
         })
         .await?;
-        // No total deadline here: one counted queue time and cancelled an
-        // accepted Create mid-provision, which left the child without a worker
-        // root (#1438). While the Create runs, each wait ends with its
-        // outcome: the child is ready, its record says the Create failed or
-        // it was closed, or the Create stalled for `LIFECYCLE_STALL_BOUND` and
-        // was cancelled. Once no Create is running (it finished, or the
-        // reviewer was restored without one) nothing else ends a wait, so
-        // `PostCreateWait` bounds it.
-        let mut waiting = PostCreateWait::new("open its session");
-        let handle = loop {
-            self.reviewer_child_can_still_start(child, &mut waiting)?;
-            // `None` is the normal wait for the actor; a stopped session
-            // manager is a real failure and ends the start now.
-            if let Some(handle) = self.session_manager.find_session(child.to_owned()).await? {
-                break handle;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        let mut waiting = PostCreateWait::new("report its capabilities");
-        loop {
-            let view = handle.view();
-            if view.connected
-                && view
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.operational.agent_capabilities.is_some())
-            {
-                break;
-            }
-            if let Some(error) = view.error {
-                anyhow::bail!("{error:?}");
-            }
-            self.reviewer_child_can_still_start(child, &mut waiting)?;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        use crate::server_runtime::api::ExportRuntime;
-        Arc::clone(self)
-            .queue_startup(
-                child.to_owned(),
-                relation.request_key.clone(),
-                crate::server::api::StartFollowup {
-                    model: relation.model,
-                    effort: relation.effort,
-                    fast_mode: launch.fast_mode.unwrap_or(false),
-                    prompt: Some(relation.initial_prompt),
-                },
-            )
-            .await?;
-        // The startup delivery fails the step when the session reaches a state
-        // that cannot take it; `PostCreateWait` bounds a harness that never
-        // answers.
-        let mut waiting = PostCreateWait::new("take its first prompt");
-        loop {
-            match self.startup_status(child.to_owned()).await? {
-                Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
-                Some(crate::server::api::StartStatus::Failed { message }) => {
-                    anyhow::bail!("{message}")
-                }
-                _ => {
-                    self.reviewer_child_can_still_start(child, &mut waiting)?;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-    }
-
-    /// Fail unless the reviewer child's record is still one a Create can
-    /// finish: missing, closed, failed or destroyed children never become
-    /// ready, so waiting for them would never end. Also fail, and cancel, a
-    /// Create that has stalled (see [`LIFECYCLE_STALL_BOUND`]), and a readiness
-    /// wait that has gone on too long with no Create running.
-    fn reviewer_child_can_still_start(
-        &self,
-        child: &str,
-        waiting: &mut PostCreateWait,
-    ) -> Result<()> {
-        self.check_create_progress(child, LIFECYCLE_STALL_BOUND, waiting)?;
-        let Some(record) = self.session_record(child) else {
-            anyhow::bail!("reviewer child {child} no longer exists");
-        };
-        match record.state {
-            // `StartupCleanup` is provisioning retrying a worker start that
-            // failed before publishing its socket; the retry can still end
-            // in `Running`.
-            mj_core::state::SessionState::Provisioning
-            | mj_core::state::SessionState::StartupCleanup
-            | mj_core::state::SessionState::Running
-            | mj_core::state::SessionState::Disconnected
-            | mj_core::state::SessionState::Checkpointing => Ok(()),
-            state => match record.last_error {
-                Some(cause) => anyhow::bail!("reviewer child {child} is {state:?}: {cause}"),
-                None => anyhow::bail!("reviewer child {child} is {state:?}"),
-            },
-        }
-    }
-
-    /// Fail when the child's running Create has gone `bound` without a
-    /// provisioning stage change or transfer progress, and cancel that Create in
-    /// the same decision, through the cancellation close and destroy use, so
-    /// it stops holding its lifecycle admission. The stage signal is the one
-    /// the lifecycle already keeps for its progress display. Waiting for a
-    /// slot is a stage of its own and is never a stall; admission ends it and
-    /// so restarts the clock.
-    ///
-    /// With no Create running, `waiting` bounds the readiness wait instead.
-    pub(super) fn check_create_progress(
-        &self,
-        child: &str,
-        bound: Duration,
-        waiting: &mut PostCreateWait,
-    ) -> Result<()> {
-        match self.cancel_stalled_lifecycle(child, LifecycleKind::Create, bound) {
-            LifecycleStallProgress::NotRunning => waiting.check(child),
-            LifecycleStallProgress::Running(_) => {
-                waiting.create_running();
-                Ok(())
-            }
-            LifecycleStallProgress::Stalled {
-                idle,
-                stages,
-                stream,
-                phase,
-            } => {
-                let stage = if stages.is_empty() {
-                    "between stages".to_owned()
-                } else {
-                    stages.join(" + ")
-                };
-                let outcome = match phase {
-                    StalledLifecycle::Cancelled => "its Create was cancelled",
-                    StalledLifecycle::AlreadyCancelling => "its Create was already being cancelled",
-                    StalledLifecycle::Committed => "its Create had committed and was left running",
-                };
-                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?stream, ?phase, "reviewer child Create stalled");
-                let detail = match stream {
-                    Some(stream) => format!("{stream} moved no bytes for {} s", idle.as_secs()),
-                    None => format!(
-                        "no stage started or finished for {} s (stalled in: {stage})",
-                        idle.as_secs()
-                    ),
-                };
-                anyhow::bail!(
-                    "the reviewer child {child} stalled while provisioning: {detail}; {outcome}"
-                )
-            }
-        }
+        Ok(())
     }
 
     pub async fn start_create_session_controlled(
@@ -1304,6 +1152,21 @@ impl RuntimeState {
             tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
             let inputs = match mj_controller::database::load_subagent(&intent.session_id)? {
                 Some(relation) => {
+                    let relation = blocking(move || {
+                        let fast_mode = relation
+                            .reviewer_launch
+                            .as_ref()
+                            .and_then(|launch| launch.fast_mode)
+                            .unwrap_or(false);
+                        // Existing groups preserve the requested settings.
+                        if relation.reviewer_launch.is_some() {
+                            mj_controller::controller::recover_registered_subagent_startup(
+                                &relation, fast_mode,
+                            )?;
+                        }
+                        Ok(relation)
+                    })
+                    .await?;
                     self.session_manager
                         .restore_starting(intent.session_id.clone())
                         .await?;

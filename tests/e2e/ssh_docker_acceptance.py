@@ -445,7 +445,7 @@ class AcceptanceLab:
             "In particular, leave /mnt/attachment/original.txt unchanged. "
             "Read all three files back after writing and report what you verified."
         )
-        status, value = self.lab.request("POST", "/api/actions", {"action": "prompt", "session_id": session_id, "text": prompt})
+        status, value = self.lab.request("POST", "/api/v1/actions", {"action": "prompt", "session_id": session_id, "text": prompt})
         if status != 202:
             raise AcceptanceFailure(f"prompt action returned {status}: {value!r}")
         self.lab.record_action("prompt", session_id=session_id, ordinal=ordinal)
@@ -480,7 +480,7 @@ class AcceptanceLab:
         )
         if overlay_source != "original attachment fixture\n":
             raise AcceptanceFailure(f"writable overlay source changed for session {ordinal}")
-        status, transcript = self.lab.request("GET", f"/api/conversations/{session_id}")
+        status, transcript = self.lab.request("GET", f"/api/v1/conversations/{session_id}")
         if status != 200:
             raise AcceptanceFailure(f"conversation read failed: {status}")
         record_json(self.artifact / f"conversation-{ordinal}.json", transcript)
@@ -488,7 +488,7 @@ class AcceptanceLab:
         while time.monotonic() < deadline:
             row = self.wait_state(session_id, "running")
             if row.get("is_idle") and row.get("latest_event_ordinal", 0) > before_ordinal:
-                status, transcript = self.lab.request("GET", f"/api/conversations/{session_id}")
+                status, transcript = self.lab.request("GET", f"/api/v1/conversations/{session_id}")
                 if status != 200:
                     raise AcceptanceFailure(f"completed conversation read failed: {status}")
                 record_json(self.artifact / f"conversation-{ordinal}.json", transcript)

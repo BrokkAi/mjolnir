@@ -16,14 +16,15 @@ use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
 use crate::targets::{
-    APPLE_CONTAINER_MINIMUM_MACOS, BoundedProcessExecutor, CommandExecutor, CommandSpec,
+    AppleContainerObservation, ApplePlatform, BoundedProcessExecutor, CommandExecutor, CommandSpec,
     CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
     MICROVM_ENGINE, PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor,
-    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
-    effective_target_images, failed_podman_postcondition, local_docker_vm_share,
-    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
-    ssh_engine_command, ssh_validation_command, verify_local_docker, verify_local_podman,
-    verify_ssh_apple_container, verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
+    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate, current_apple_platform,
+    effective_target_images, ensure_apple_container_runtime, failed_podman_postcondition,
+    observe_apple_container, observe_ssh_apple_container, podman_probe_observation,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_engine_command,
+    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_docker,
+    verify_ssh_nitro, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -167,16 +168,6 @@ impl DoctorCheck {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DoctorOptions {
     pub smoke: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplePlatform {
-    Linux,
-    Macos {
-        architecture: String,
-        major_version: u32,
-    },
-    Other(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -880,7 +871,7 @@ Run these commands as the user who will run `mj`:\n\n\
    no check is `fixable`. Review warnings for any target you intend to use;\n\
    `unsupported` runtimes are unavailable, not ready.\n\
 3. If you intend to use containers, start the runtime and run\n\
-   `mj doctor --json --smoke`. Do this for Podman, Docker Desktop, and Apple\n\
+   `mj doctor --json --smoke`. Do this for Docker Desktop or Apple\n\
    container. Resolve failures for the target you intend to use.\n\
 4. Run `mj` and choose Create session (Ctrl-B then c by default).\n\
    If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
@@ -908,23 +899,6 @@ then send SSH GitHub URLs over HTTPS:\n\n\
 ```\n\n\
 `mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
 GitHub can ignore them.\n\n\
-## Podman\n\n\
-A local Podman target on macOS uses a rootless `podman machine`. Install\n\
-Podman and create the machine:\n\n\
-```console\n\
-brew install podman\n\
-podman machine init --now\n\
-```\n\n\
-Ensure the machine is rootless:\n\n\
-```console\n\
-podman machine set --rootful=false\n\
-podman machine stop\n\
-podman machine start\n\
-```\n\n\
-Mjolnir checks `podman info` for rootless mode and a UID map covering\n\
-container IDs 0 and 1. The machine shares `$HOME:$HOME` by default, so keep\n\
-projects under your home directory or add the directory when creating the\n\
-machine. Finish with `mj doctor --json --smoke`.\n\n\
 ## Docker Desktop\n\n\
 Start Docker Desktop and wait for its Linux daemon to be ready before setup\n\
 or the smoke test. `mj doctor --json --smoke` checks the container image and\n\
@@ -937,13 +911,12 @@ On an Intel Mac or an older macOS release, the target is unsupported; use the\n\
 local bare runtime, an SSH target, or an AWS target instead.\n\n\
 On a supported Mac, if `container` is absent, install only the official signed package:\n\n\
 <https://github.com/apple/container#initial-install>\n\n\
-Mjolnir never downloads or installs that package. If doctor reports a stopped\n\
-daemon, run exactly:\n\n```console\ncontainer system start\n```\n\n\
+Mjolnir starts the service when launching a session and installs the default\n\
+kernel if needed.\n\n\
 Finish with the opt-in disposable runtime test in JSON mode:\n\n```console\nmj doctor --json --smoke\n```\n\n\
-Apple container is ready only when that smoke test creates a disposable\n\
-container, executes `true` in it, and removes it successfully. Use the image\n\
-configured by an `apple-container` target; without one, doctor uses\n\
-`{SMOKE_TEST_IMAGE}` for the smoke test.\n\n\
+The smoke test creates a disposable container, executes `true` in it, and\n\
+removes it. Doctor uses the image configured by an `apple-container` target,\n\
+or `{SMOKE_TEST_IMAGE}` when no Apple container target is configured.\n\n\
 ## Shared Mjolnir prerequisites\n\n\
 `mj doctor --json` also checks the configuration, each configured harness home\n\
 and authentication marker, selected container worker binaries, and any relevant\n\
@@ -1717,7 +1690,7 @@ fn podman_check(
             );
         }
     };
-    if local_podman_targets(config).is_empty() {
+    if !matches!(platform, ApplePlatform::Macos { .. }) && local_podman_targets(config).is_empty() {
         return DoctorCheck::unsupported(
             "runtime.podman",
             "Rootless Podman",
@@ -1737,11 +1710,18 @@ pub fn local_podman_runtime_check(
     executor: &impl CommandExecutor,
     platform: &ApplePlatform,
 ) -> DoctorCheck {
-    if !matches!(platform, ApplePlatform::Linux | ApplePlatform::Macos { .. }) {
+    if matches!(platform, ApplePlatform::Macos { .. }) {
+        return DoctorCheck::unsupported(
+            "runtime.podman",
+            "Podman",
+            crate::targets::PODMAN_UNSUPPORTED_ON_MACOS,
+        );
+    }
+    if !matches!(platform, ApplePlatform::Linux) {
         return DoctorCheck::unsupported(
             "runtime.podman",
             "Rootless Podman",
-            "Mjolnir's local Podman target requires Linux, WSL2, or macOS with a rootless Podman machine.",
+            "Mjolnir's local Podman target requires Linux or WSL2.",
         );
     }
     match verify_local_podman(executor) {
@@ -1816,7 +1796,7 @@ fn podman_image_check(
             workspace_storage: Default::default(),
         });
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
+            Ok(_) => DoctorCheck::ready(
                 check_id,
                 title,
                 format!("Disposable run/exec/remove smoke test passed for image {image}."),
@@ -2009,12 +1989,12 @@ fn docker_image_check(
             workspace_storage: Default::default(),
         });
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
+            Ok(mode) => DoctorCheck::ready(
                 check_id,
                 title,
-                match local_docker_vm_share(executor) {
-                    Ok(Some(reason)) => format!(
-                        "Disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}, so attached directories mount read-only instead of copy-on-write."
+                match mode {
+                    Some(crate::targets::DockerAttachmentMode::ReadOnly { reason }) => format!(
+                        "Disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}."
                     ),
                     _ => format!(
                         "Disposable run/exec/remove and OverlayFS attachment smoke test passed for image {image}."
@@ -2347,9 +2327,9 @@ fn ssh_podman_checks(
                 let ssh = RuntimeSshTarget::from(ssh);
                 let (check, reachable) =
                     ssh_podman_check(id, &ssh, &container.image, executor, smoke);
+                let probe_limits = reachable && check.status != CheckStatus::Unsupported;
                 let mut checks = vec![check];
-                // An unreachable host has one problem, not two.
-                if reachable {
+                if probe_limits {
                     checks.push(ssh_podman_limits_check(id, &ssh, executor));
                 }
                 checks
@@ -2419,6 +2399,9 @@ fn ssh_podman_runtime_check(
     let destination = &ssh.destination;
     let preflight = match verify_ssh_podman(ssh, executor) {
         Ok(preflight) => preflight,
+        Err(error) if error.is::<crate::targets::PodmanUnsupportedOnMacos>() => {
+            return DoctorCheck::unsupported(check_id, title, error.to_string());
+        }
         Err(error) => {
             let (detail, remediation) = ssh_podman_failure(destination, &error);
             return DoctorCheck::fixable(check_id, title, detail, remediation);
@@ -2458,7 +2441,7 @@ fn ssh_podman_runtime_check(
         },
     };
     match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-        Ok(()) if !preflight.warnings.is_empty() => DoctorCheck::warning(
+        Ok(_) if !preflight.warnings.is_empty() => DoctorCheck::warning(
             check_id,
             title,
             format!(
@@ -2467,7 +2450,7 @@ fn ssh_podman_runtime_check(
             ),
             preflight_warning_remediations(&preflight.warnings),
         ),
-        Ok(()) => DoctorCheck::ready(
+        Ok(_) => DoctorCheck::ready(
             check_id,
             title,
             format!(
@@ -2985,13 +2968,19 @@ fn ssh_docker_check(
             },
         };
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
+            Ok(mode) => DoctorCheck::ready(
                 check_id,
                 title,
-                format!(
-                    "Remote Docker {} is available via {destination}; disposable run/exec/remove and remote OverlayFS attachment smoke test passed for image {image}.",
-                    preflight.version
-                ),
+                match mode {
+                    Some(crate::targets::DockerAttachmentMode::ReadOnly { reason }) => format!(
+                        "Remote Docker {} is available via {destination}; disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}.",
+                        preflight.version
+                    ),
+                    _ => format!(
+                        "Remote Docker {} is available via {destination}; disposable run/exec/remove and remote OverlayFS attachment smoke test passed for image {image}.",
+                        preflight.version
+                    ),
+                },
             ),
             Err(error) => DoctorCheck::fixable(
                 check_id,
@@ -3023,7 +3012,7 @@ fn ssh_docker_check(
             check_id,
             title,
             format!(
-                "Remote Docker {} is available via {destination}; image {image} is present.{} Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.",
+                "Remote Docker {} is available via {destination}; image {image} is present.{} Run `mj doctor --json --smoke` to verify remote attachments.",
                 preflight.version,
                 image_worker_summary(&output.stdout)
             ),
@@ -3098,19 +3087,16 @@ fn ssh_apple_container_check(
         return DoctorCheck::fixable(check_id, title, detail, remediation);
     }
 
-    let preflight = match verify_ssh_apple_container(ssh, executor) {
-        Ok(preflight) => preflight,
-        Err(error) => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!("{error:#}"),
-                format!(
-                    "Verify `ssh {destination}` succeeds noninteractively from this host, that the remote Mac is Apple silicon running macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and that `container system status` succeeds there. Install the runtime from {APPLE_CONTAINER_INSTALL_URL}."
-                ),
-            );
-        }
-    };
+    let check = apple_container_observation_check(
+        check_id.clone(),
+        title.clone(),
+        observe_ssh_apple_container(ssh, executor),
+    );
+    if !matches!(check.status, CheckStatus::Ready | CheckStatus::Warning)
+        || (!smoke && check.status == CheckStatus::Warning)
+    {
+        return check;
+    }
 
     let container = RuntimeContainerTemplate {
         build_cache: None,
@@ -3124,13 +3110,12 @@ fn ssh_apple_container_check(
             ssh: ssh.clone(),
             container,
         };
-        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+        return match apple_container_smoke_test(Some(ssh), &target, executor) {
             Ok(()) => DoctorCheck::ready(
                 check_id,
                 title,
                 format!(
-                    "Apple container {} is available via {destination} on macOS {}; disposable run/exec/remove smoke test passed for image {image}.",
-                    preflight.version, preflight.macos_version
+                    "Apple container on {destination} passed the disposable run/exec/remove smoke test for image {image}."
                 ),
             ),
             Err(error) => DoctorCheck::fixable(
@@ -3161,8 +3146,8 @@ fn ssh_apple_container_check(
             check_id,
             title,
             format!(
-                "Apple container {} is available via {destination} on macOS {}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable run.",
-                preflight.version, preflight.macos_version
+                "{} Image {image} is present on {destination}. Run `mj doctor --json --smoke` to verify a disposable run.",
+                check.detail
             ),
         ),
         Ok(output) => DoctorCheck::fixable(
@@ -3611,7 +3596,7 @@ fn offered_targets<'a>(
 ) -> Config {
     let ready = engine_checks
         .into_iter()
-        .filter(|check| check.status == CheckStatus::Ready)
+        .filter(|check| matches!(check.status, CheckStatus::Ready | CheckStatus::Warning))
         .map(|check| check.id.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let engine_ready = |target_id: &str| match target_id {
@@ -3857,42 +3842,44 @@ pub fn apple_container_runtime_check(
     platform: &ApplePlatform,
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
-    match platform {
-        ApplePlatform::Linux => {
-            return DoctorCheck::unsupported(
-                "runtime.apple-container",
-                "Apple container runtime",
-                "macOS only",
-            );
-        }
-        ApplePlatform::Other(current) => {
-            return DoctorCheck::unsupported(
-                "runtime.apple-container",
-                "Apple container runtime",
-                format!("macOS only (current platform: {current})"),
-            );
-        }
-        ApplePlatform::Macos {
-            architecture,
-            major_version,
-        } if architecture != "aarch64" && architecture != "arm64" => {
-            return DoctorCheck::unsupported(
-                "runtime.apple-container",
-                "Apple container runtime",
-                "Apple container requires Apple silicon; Intel Macs are unsupported.",
-            );
-        }
-        ApplePlatform::Macos { major_version, .. } if *major_version < 26 => {
-            return DoctorCheck::unsupported(
-                "runtime.apple-container",
-                "Apple container runtime",
-                format!("Apple container requires macOS 26 or newer (found {major_version})."),
-            );
-        }
-        ApplePlatform::Macos { .. } => {}
-    }
+    apple_container_observation_check(
+        "runtime.apple-container",
+        "Apple container runtime",
+        observe_apple_container(platform, executor),
+    )
+}
 
-    apple_container_daemon_check(executor)
+pub(crate) fn apple_container_observation_check(
+    id: impl Into<String>,
+    title: impl Into<String>,
+    observation: Result<AppleContainerObservation>,
+) -> DoctorCheck {
+    use AppleContainerObservation as Observation;
+    match observation {
+        Ok(Observation::Running { version }) => DoctorCheck::ready(
+            id, title, format!("Apple container {version} is available and its service is running."),
+        ),
+        Ok(Observation::Stopped) => DoctorCheck {
+            id: id.into(),
+            title: title.into(),
+            status: CheckStatus::Warning,
+            detail: "Apple container is installed, but its service is stopped. Mjolnir starts it automatically when launching a session.".into(),
+            remediation: None,
+        },
+        Ok(Observation::NotInstalled { detail }) => DoctorCheck::fixable(
+            id, title, format!("The `container` command is not installed: {detail}"),
+            format!("Install the official signed package: {APPLE_CONTAINER_INSTALL_URL}"),
+        ),
+        Ok(Observation::Broken { status, detail }) => DoctorCheck::fixable(
+            id, title, format!("The Apple container check exited with status {status}: {detail}"),
+            format!("Repair the installation or reinstall the official signed package: {APPLE_CONTAINER_INSTALL_URL}"),
+        ),
+        Ok(Observation::UnsupportedPlatform { detail }) => DoctorCheck::unsupported(id, title, detail),
+        Err(error) => DoctorCheck::fixable(
+            id, title, format!("Could not check Apple container: {error:#}"),
+            "Verify that the host is reachable and that `container system status --format json` answers.",
+        ),
+    }
 }
 
 pub fn apple_container_check(
@@ -3902,17 +3889,8 @@ pub fn apple_container_check(
     image: String,
 ) -> DoctorCheck {
     let daemon = apple_container_runtime_check(platform, executor);
-    if daemon.status != CheckStatus::Ready {
+    if !smoke || !matches!(daemon.status, CheckStatus::Ready | CheckStatus::Warning) {
         return daemon;
-    }
-
-    if !smoke {
-        return DoctorCheck::fixable(
-            "runtime.apple-container",
-            "Apple container runtime",
-            "The daemon is running, but the required disposable smoke test was not requested.",
-            "Run `mj doctor --json --smoke`.",
-        );
     }
 
     let target = RuntimeTargetTemplate::AppleContainer(RuntimeContainerTemplate {
@@ -3922,7 +3900,7 @@ pub fn apple_container_check(
         extra_run_args: vec![],
         workspace_storage: Default::default(),
     });
-    match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+    match apple_container_smoke_test(None, &target, executor) {
         Ok(()) => DoctorCheck::ready(
             "runtime.apple-container",
             "Apple container runtime",
@@ -3937,86 +3915,13 @@ pub fn apple_container_check(
     }
 }
 
-/// Probe that the Apple `container` command is installed and its daemon is
-/// running, phrased as a doctor check.
-///
-/// Called only after [`apple_container_runtime_check`] checks platform support.
-fn apple_container_daemon_check(executor: &impl CommandExecutor) -> DoctorCheck {
-    let installed =
-        CommandSpec::new("container", ["--version"]).purpose("check Apple container installation");
-    match executor.execute(&installed) {
-        Err(error) => {
-            return DoctorCheck::fixable(
-                "runtime.apple-container",
-                "Apple container runtime",
-                format!(
-                    "The `container` command is not available: {}",
-                    error.root_cause()
-                ),
-                format!("Install the official signed package: {APPLE_CONTAINER_INSTALL_URL}"),
-            );
-        }
-        Ok(output) if output.status != 0 => {
-            return DoctorCheck::fixable(
-                "runtime.apple-container",
-                "Apple container runtime",
-                format!(
-                    "The installed `container --version` command failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                format!("Reinstall the official signed package: {APPLE_CONTAINER_INSTALL_URL}"),
-            );
-        }
-        Ok(_) => {}
-    }
-
-    let status =
-        CommandSpec::new("container", ["system", "status"]).purpose("check Apple container daemon");
-    match executor.execute(&status) {
-        Ok(output) if output.status == 0 => DoctorCheck::ready(
-            "runtime.apple-container",
-            "Apple container runtime",
-            "Installed, and the Apple container daemon is running.",
-        ),
-        Ok(output) => DoctorCheck::fixable(
-            "runtime.apple-container",
-            "Apple container runtime",
-            format!(
-                "The Apple container daemon is stopped: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            "Run `container system start`.",
-        ),
-        Err(error) => DoctorCheck::fixable(
-            "runtime.apple-container",
-            "Apple container runtime",
-            format!("Could not query the Apple container daemon: {error}"),
-            "Run `container system start`.",
-        ),
-    }
-}
-
-pub fn current_apple_platform(executor: &impl CommandExecutor) -> ApplePlatform {
-    if cfg!(target_os = "linux") {
-        return ApplePlatform::Linux;
-    }
-    if !cfg!(target_os = "macos") {
-        return ApplePlatform::Other(std::env::consts::OS.into());
-    }
-    let major_version = executor
-        .execute(&CommandSpec::new("sw_vers", ["-productVersion"]).purpose("detect macOS version"))
-        .ok()
-        .filter(|output| output.status == 0)
-        .and_then(|output| {
-            String::from_utf8(output.stdout)
-                .ok()
-                .and_then(|value| value.trim().split('.').next()?.parse().ok())
-        })
-        .unwrap_or(0);
-    ApplePlatform::Macos {
-        architecture: std::env::consts::ARCH.into(),
-        major_version,
-    }
+fn apple_container_smoke_test(
+    ssh: Option<&RuntimeSshTarget>,
+    target: &RuntimeTargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    ensure_apple_container_runtime(ssh, executor)?;
+    run_setup_smoke_test(target, &doctor_smoke_id(), executor).map(|_| ())
 }
 
 #[cfg(test)]

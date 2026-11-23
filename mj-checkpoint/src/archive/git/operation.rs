@@ -197,19 +197,27 @@ pub(super) fn collect(
         "inspect clone merge conflicts",
     )?;
     let mut unmerged = Vec::new();
-    for path in unmerged_paths(&listed)? {
-        let relative = mj_core::path_input::from_git_bytes(&path.path)?;
-        validate_worktree_relative_path(&relative)?;
-        for (index, stage) in path.stages.iter().enumerate() {
-            if let Some(stage) = stage {
-                unmerged.push(SavedUnmergedEntry {
-                    path: relative.clone(),
-                    stage: index as u8 + 1,
-                    mode: stage.mode.clone(),
-                    object: stage.object.clone(),
-                });
-            }
-        }
+    // `git ls-files --unmerged -z` emits one mode/object/stage and path
+    // record per index entry, ordered by path and stage.
+    for record in listed.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("an unmerged index entry has no path")?;
+        let fields = std::str::from_utf8(&record[..tab]).context("decode an unmerged entry")?;
+        let [mode, object, stage] = fields.split(' ').collect::<Vec<_>>()[..] else {
+            bail!("malformed unmerged index entry {fields:?}");
+        };
+        let stage = stage.parse().context("parse an unmerged entry's stage")?;
+        ensure!((1..=3).contains(&stage), "unexpected index stage {stage}");
+        let path = mj_core::path_input::from_git_bytes(&record[tab + 1..])?;
+        validate_worktree_relative_path(&path)?;
+        unmerged.push(SavedUnmergedEntry {
+            path,
+            stage,
+            mode: mode.to_owned(),
+            object: object.to_owned(),
+        });
     }
     let locations = git_paths(
         runner,

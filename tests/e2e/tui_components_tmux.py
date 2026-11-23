@@ -452,7 +452,7 @@ def create_session(
         ),
         "created session accepts rename after launch",
     )
-    status, response = lab.request("POST", "/api/actions", {"action": "rename", "session_id": session_id, "title": title})
+    status, response = lab.request("POST", "/api/v1/actions", {"action": "rename", "session_id": session_id, "title": title})
     if status != 202:
         raise ScenarioFailure(f"fixture rename returned {status}: {response!r}")
     lab.wait_snapshot(lambda value: any(item.get("id") == session_id and item.get("state") == "running" and item.get("title") == title for item in value.get("sessions", [])), "created session running")
@@ -461,7 +461,7 @@ def create_session(
     prompt = f"component prompt {seed}"
     status, _ = lab.request(
         "POST",
-        "/api/actions",
+        "/api/v1/actions",
         {"action": "prompt", "session_id": session_id, "text": prompt},
     )
     if status != 202:

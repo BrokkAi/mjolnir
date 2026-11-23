@@ -1,0 +1,875 @@
+=== grouped Settings root (140x42) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────                                                                                                                       │
+│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│hel ───────────────  │ Changes stay in this draft until you save.                                                   │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │   Setup                                                                                      │                     │
+│  │                  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │                     │
+│                     │   Projects                        hel                                                        │                     │
+│                     │   Runtimes                        podman                                                     │                     │
+│                     │   Machines                        local                                                      │                     │
+│                     │   Daemon                          Host                                                       │                     │
+│                     │                                                                                              │                     │
+│                     │   Sessions                                                                                   │                     │
+│                     │   Guardian                        On · local classifier                                      │                     │
+│                     │   Code Review                     Off                                                        │                     │
+│                     │   Sub-agents                      Up to 8 at once                                            │                     │
+│                     │   Quota checks                    Host                                                       │                     │
+│                     │   SessionWiki                     Keeps every session                                        │                     │
+│                     │   Web Access                      On · 127.0.0.1:3765                                        │                     │
+│                     │                                                                                              │                     │
+│                     │   Display                                                                                    │  ───────────────────╯
+│                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ───────────────────╮
+│                     │   Notifications                   Terminal                                                   │                     │
+│                     │   Advanced                        All off                                                    │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Privacy                                                                                    │  ──────────── ▁   ▄ ╮
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Other                                                                                      │  ──────────── ▁   ▄ ╮
+│                     │   GitHub events                   On · GitHub activity                                       │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Save and Close                                                                             │                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                       ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+root footer alignment: save=(24,35); body=(26,11)
+
+=== virtual Interface page (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== Interface theme choices (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
+  │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
+  │                                   │Auto                                   ▐│                 │
+  │                                   │Midnight                               ▐│                 │
+  │                                   │Light                                  ▐│                 │
+  │                                   │Darcula                                ││                 │
+  │                                   │High Contrast                          ││                 │
+  │                                   │High Contrast Light                    ││                 │
+  │                                   │Colorblind Dark                        ││                 │
+  │                                   │Colorblind Light                       ││                 │
+  │                                   ╰────────────────────────────────────────╯                 │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== theme selection stays at the root config path (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
+
+=== compact root body (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Changes stay in this draft until you save.                                                   │
+  │                                                                                              │
+  │                                                                                              │
+  │   Setup                                                                                      │
+  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │
+  │   Projects                        hel                                                        │
+  │   Runtimes                        podman                                                     │
+  │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
+  │                                                                                              │
+  │   Sessions                                                                                   │
+  │   Guardian                        On · local classifier                                      │
+  │   Code Review                     Off                                                        │
+  │   Sub-agents                      Up to 8 at once                                            │
+  │   Quota checks                    Host                                                       │
+  │   SessionWiki                     Keeps every session                                        │
+  │   Web Access                      On · 127.0.0.1:3765                                        │
+  │                                                                                              │
+  │   Display                                                                                    │
+  │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
+  │   Notifications                   Terminal                                                   │
+  │   Advanced                        All off                                                    │
+  │                                                                                              │
+  │   Save and Close                                                                             │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
+
+=== compact nested page body (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
+
+=== compact choice popup body (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Midnight ▾                                                 │
+  │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
+  │                                   │Auto                                   ▐│                 │
+  │                                   │Midnight                               ▐│                 │
+  │                                   │Light                                  ▐│                 │
+  │                                   │Darcula                                ││                 │
+  │                                   │High Contrast                          ││                 │
+  │                                   │High Contrast Light                    ││                 │
+  │                                   │Colorblind Dark                        ││                 │
+  │                                   │Colorblind Light                       ││                 │
+  │                                   ╰────────────────────────────────────────╯                 │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
+
+=== compact Advanced page body (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Advanced                                                                          │
+  │ Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.     │
+  │                                                                                              │
+  │                                                                                              │
+  │ ☐ Detailed activity clocks                                                                   │
+  │ Session order                     project ▾                                                  │
+  │ Symbols                           Default (Follows the terminal) ▾                           │
+  │ Tool calls                        Grouped ▾                                                  │
+  │ Tool output lines                 5                                                          │
+  │ Auto-AFK after (minutes)          0                                                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
+
+=== compact text editor body (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Web Access                                                                        │
+  │ Web access changes take effect when the background server next starts. Remote access         │
+  │ requires a certificate and key.                                                              │
+  │                                                                                              │
+  │ ☒ Enabled                                                                                    │
+  │ Listen address and port           127.0.0.1:3765                                             │
+  │ ☒ Detect Tailscale                                                                           │
+  │ TLS certificate file              Default                                                    │
+  │ TLS private key file              Default                                                    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
+
+=== compact Code Review body (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │  Add reviewer     Autoconfigure                                                              │
+  │Loading review models…                                                                        │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │  Cancel     Back     Save Settings                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
+
+=== root footer action (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Changes stay in this draft until you save.                                                   │
+  │                                                                                              │
+  │                                                                                              │
+  │   Setup                                                                                      │
+  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │
+  │   Projects                        hel                                                        │
+  │   Runtimes                        podman                                                     │
+  │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
+  │                                                                                              │
+  │   Sessions                                                                                   │
+  │   Guardian                        On · local classifier                                      │
+  │   Code Review                     Off                                                        │
+  │   Sub-agents                      Up to 8 at once                                            │
+  │   Quota checks                    Host                                                       │
+  │   SessionWiki                     Keeps every session                                        │
+  │   Web Access                      On · 127.0.0.1:3765                                        │
+  │                                                                                              │
+  │   Display                                                                                    │
+  │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
+  │   Notifications                   Terminal                                                   │
+  │   Advanced                        All off                                                    │
+  │                                                                                              │
+  │   Save and Close                                                                             │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== runtime collection actions (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Runtimes                                                                          │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
+  │                                                                                              │
+  │   podman                          10 settings  ›                           Add               │
+  │                                                                            Detect runtimes   │
+  │                                                                            Machines          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== project collection actions (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Projects                                                                          │
+  │ Projects can contain one or more repositories. Choose the main repository where the agent    │
+  │ starts.                                                                                      │
+  │                                                                                              │
+  │   hel                             2 settings  ›                                     Create   │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== profile collection actions (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Agent Profiles                                                                    │
+  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │
+  │                                                                                              │
+  │                                                                                              │
+  │   claude-1                        9 settings  ›                            Add               │
+  │   codex-1                         10 settings  ›                           Detect profiles   │
+  │   codex-2                         10 settings  ›                           Set up managed    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== leaf page footer (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Web Access                                                                        │
+  │ Web access changes take effect when the background server next starts. Remote access         │
+  │ requires a certificate and key.                                                              │
+  │                                                                                              │
+  │ ☒ Enabled                                                                                    │
+  │ Listen address and port           127.0.0.1:3765                                             │
+  │ ☒ Detect Tailscale                                                                           │
+  │ TLS certificate file              Default                                                    │
+  │ TLS private key file              Default                                                    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== text editor actions (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Web Access                                                                        │
+  │ Web access changes take effect when the background server next starts. Remote access         │
+  │ requires a certificate and key.                                                              │
+  │                                                                                              │
+  │ ☒ Enabled                                                                                    │
+  │ Listen address and port           127.0.0.1:3765                                             │
+  │ ☒ Detect Tailscale                                                                           │
+  │ TLS certificate file              Default                                                    │
+  │ TLS private key file              Default                                                    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== runtime collection actions (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Runtimes                                                                          │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
+  │                                                                                              │
+  │   podman                          10 settings  ›                           Add               │
+  │                                                                            Detect runtimes   │
+  │                                                                            Machines          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+
+=== runtime Add reached from the keyboard (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Runtimes                                                                          │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
+  │                                                                                              │
+  │   podman                          10 settings  ›                           Add               │
+  │                                                                            Detect runtimes   │
+  │                                                                            Machines          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+focused control: Some(Add)
+
+=== runtime Add opens a new-entry editor (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Runtimes                                                                          │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
+  │                                                                                              │
+  │ Name for the new entry                                                               Apply   │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back                                                                                       │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+action: None; new entry: true
+
+=== project Create reached with Tab (100x24) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Projects                                                                          │
+  │ Projects can contain one or more repositories. Choose the main repository where the agent    │
+  │ starts.                                                                                      │
+  │                                                                                              │
+  │   hel                             2 settings  ›                                     Create   │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+entry editor adding: false
+
+=== project Create reached with Down (100x24) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Projects                                                                          │
+  │ Projects can contain one or more repositories. Choose the main repository where the agent    │
+  │ starts.                                                                                      │
+  │                                                                                              │
+  │   hel                             2 settings  ›                                     Create   │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+entry editor adding: false
+
+=== Light selected while Midnight remains active (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(157, 229, 202)
+saved theme: Light
+
+=== active theme before save acknowledgement (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │ Saving settings…                                                                             │
+  │   Back     Saving…                                                                           │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(157, 229, 202)
+
+=== Light theme after save acknowledgement (100x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                     ✦  M J O L N I R                     │
+│ Create   Open   Filter: _____________││                                                          │
+│hel ──────────────────────────────────││        Select a session to open its conversation.        │
+│› ■ ACP pretty name               ◇ ⋯ ││                                                          │
+│  Stopped  podman  codex-1            ││                                                          │
+│  │ No messages yet                   ││                                                          │
+│  │                                   ││                                                          │
+│                                      ││                                                          │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────╮
+│                                      ││No conversation open.                                     │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.    │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                                         │
+│  claude-1: refreshing…                                                                           │
+│OPENAI                                                                                            │
+│  codex-1: refreshing…                                                                            │
+│  codex-2: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Settings saved. New sessions use these defaults. Web listener changes apply on its next start.
+rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35, 104, 77)
+
+=== reopened theme choice (100x30) ===
+
+
+  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
+  │ Settings › Interface                                                                         │
+  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │
+  │                                                                                              │
+  │                                                                                              │
+  │ Prefix key                        ctrl+b                                                     │
+  │ Session sidebar position          Left ▾                                                     │
+  │ Activity animation                scan ▾                                                     │
+  │ Theme                             Light ▾                                                    │
+  │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
+  │                                   │Auto                                   ▐│                 │
+  │                                   │Midnight                               ▐│                 │
+  │                                   │Light                                  ▐│                 │
+  │                                   │Darcula                                ││                 │
+  │                                   │High Contrast                          ││                 │
+  │                                   │High Contrast Light                    ││                 │
+  │                                   │Colorblind Dark                        ││                 │
+  │                                   │Colorblind Light                       ││                 │
+  │                                   ╰────────────────────────────────────────╯                 │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │   Back     Save and Close                                                                    │
+  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
+
+
+reopened selected theme: "light"
+saved theme: Auto
+Auto after save acknowledgement: rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(22, 27, 30); accent fg=Rgb(157, 229, 202)
+saved theme: High Contrast Light
+High Contrast Light after save acknowledgement: rendered colors: text fg=Rgb(0, 0, 0) bg=Rgb(255, 255, 255); accent fg=Rgb(0, 60, 168)
+saved theme: Colorblind Dark
+Colorblind Dark after save acknowledgement: rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(22, 27, 30); accent fg=Rgb(86, 180, 233)
+saved theme: Colorblind Light
+Colorblind Light after save acknowledgement: rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(0, 106, 170)
+saved theme: Catppuccin Mocha
+Catppuccin Mocha after save acknowledgement: rendered colors: text fg=Rgb(205, 214, 244) bg=Rgb(30, 30, 46); accent fg=Rgb(203, 166, 247)
+saved theme: Catppuccin Latte
+Catppuccin Latte after save acknowledgement: rendered colors: text fg=Rgb(76, 79, 105) bg=Rgb(239, 241, 245); accent fg=Rgb(128, 45, 229)
+saved theme: Campbell
+Campbell after save acknowledgement: rendered colors: text fg=Rgb(204, 204, 204) bg=Rgb(19, 19, 19); accent fg=Rgb(97, 214, 214)
+saved theme: One Half Dark
+One Half Dark after save acknowledgement: rendered colors: text fg=Rgb(220, 223, 228) bg=Rgb(44, 49, 58); accent fg=Rgb(94, 186, 197)
+saved theme: One Half Light
+One Half Light after save acknowledgement: rendered colors: text fg=Rgb(56, 58, 66) bg=Rgb(255, 255, 255); accent fg=Rgb(1, 108, 154)
+saved theme: Solarized Dark
+Solarized Dark after save acknowledgement: rendered colors: text fg=Rgb(238, 232, 213) bg=Rgb(3, 47, 59); accent fg=Rgb(91, 183, 176)
+saved theme: Solarized Light
+Solarized Light after save acknowledgement: rendered colors: text fg=Rgb(7, 54, 66) bg=Rgb(255, 250, 236); accent fg=Rgb(28, 108, 102)
+saved theme: Terminal Dark
+Terminal Dark after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(6)
+saved theme: Terminal Light
+Terminal Light after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(4)
+
+=== managed agent buttons (100x30) ===
+
+
+  ╭ ×  Set up a managed agent  ──────────────────────────────────────────────────────────────────╮
+  │ Choose an agent. Mjolnir prepares its exact pinned version and opens its sign-in flow.       │
+  │                                                                                              │
+  │   Codex                                                                                      │
+  │ ChatGPT subscription or an OpenAI-compatible provider                                        │
+  │   Claude Code                                                                                │
+  │ Claude Pro, Max, Team, or an Anthropic API key                                               │
+  │   Kimi Code                                                                                  │
+  │ Kimi Code subscription                                                                       │
+  │   Grok Build                                                                                 │
+  │ Grok Build subscription                                                                      │
+  │   Muse Code                                                                                  │
+  │ Muse account; container use is supported                                                     │
+  │   OpenCode                                                                                   │
+  │ OpenCode provider login or an API key                                                        │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │ Where it runs is chosen when you create a session. Use a local Podman, Docker, or Apple      │
+  │ container when you want the agent isolated from your normal host account.                    │
+  │                                                                                              │
+  │   Back     Set up and sign in                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+managed chooser Back returns to Agent Profiles
