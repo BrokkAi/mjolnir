@@ -18461,3 +18461,57 @@ async fn terminal_setup_and_viewer_round_trip_and_only_writes_refuse_during_drai
     shutdown.cancel();
     server.await.unwrap().unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_recovery_destroy_holds_bounded_admission_after_disconnect() {
+    let Some(_writer) = startup_prompt_test_store(
+        "terminal_recovery_destroy_holds_bounded_admission_after_disconnect",
+    ) else {
+        return;
+    };
+    let (state, recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
+    let session_id = "held-orphan";
+    // Hold the session slot so the HTTP backend cannot finish its teardown.
+    let session_hold = recovery
+        .try_enter_foreground(
+            session_id,
+            "test session reservation",
+            mj_controller::recovery_gate::LifecycleOrigin::Person,
+        )
+        .unwrap();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state).await;
+    let gate = mj_controller::upgrade::gate();
+    let destroy = mj_core::runtime::spawn(async move {
+        http.destroy_recovery(session_id.into(), "bare".into(), session_id.into(), false)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gate.active_labels().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the HTTP destroy must acquire admission");
+    assert_eq!(gate.active_labels(), ["session destroy"]);
+    assert!(!gate.try_close());
+    assert!(gate.destroys_hold_the_stop());
+
+    destroy.abort();
+    assert!(destroy.await.unwrap_err().is_cancelled());
+    // Wait for the HTTP server to drop the handler before checking ownership.
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+    assert!(!gate.try_close());
+    assert!(gate.destroys_hold_the_stop());
+    drop(session_hold);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !gate.active_labels().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the detached destroy must finish and release admission");
+    assert!(!gate.destroys_hold_the_stop());
+    assert!(gate.try_close());
+}

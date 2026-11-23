@@ -106,18 +106,14 @@ impl HttpDaemonClient {
         confirmation: String,
         all_instances: bool,
     ) -> anyhow::Result<()> {
-        self.json(
-            reqwest::Method::POST,
+        self.post_json(
             "/api/v1/recovery/destroy",
-            |request| {
-                request.json(&DestroyRecoveryRequest {
-                    session_id,
-                    target_id,
-                    confirmation,
-                    all_instances,
-                })
+            &DestroyRecoveryRequest {
+                session_id,
+                target_id,
+                confirmation,
+                all_instances,
             },
-            false,
         )
         .await
     }

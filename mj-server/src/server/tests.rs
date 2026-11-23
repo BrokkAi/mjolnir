@@ -61,6 +61,35 @@ async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
     assert_eq!(rejected.headers()["x-mj-upgrade"], "pending");
 }
 
+#[tokio::test]
+async fn terminal_recovery_destroy_refuses_during_drain_before_dispatch() {
+    let gate = Arc::new(mj_store::upgrade::Gate::default());
+    let mut options = detached_options();
+    options.set_loopback_token("terminal-test-token".into());
+    options.set_upgrade_gate(gate.clone());
+    gate.begin_draining();
+    assert!(gate.is_open());
+
+    let response = router(options)
+        .oneshot(
+            Request::post("/api/v1/recovery/destroy")
+                .header(axum::http::header::AUTHORIZATION, "Bearer terminal-test-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"session_id":"orphan","target_id":"bare","confirmation":"orphan","all_instances":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[UPGRADE_HEADER], "pending");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], api::DAEMON_HANDOFF_CODE);
+    assert!(gate.active_labels().is_empty());
+}
+
 use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,

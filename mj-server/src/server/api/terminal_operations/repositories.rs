@@ -103,11 +103,15 @@ async fn destroy_recovery(
     State(state): State<ServerState>,
     Json(request): Json<DestroyRecoveryRequest>,
 ) -> Result<Json<()>, ApiFailure> {
+    let admission = state
+        .upgrade_gate
+        .enter_destroy_unless_draining(&request.session_id)
+        .map_err(|_| ApiFailure::handoff())?;
     let backend = dashboard_backend(&state)?;
-    super::run_detached(
-        "destroy recovered environment",
-        backend.destroy_recovery(request),
-    )
+    super::run_detached("destroy recovered environment", async move {
+        let _admission = admission;
+        backend.destroy_recovery(request).await
+    })
     .await
     .map(Json)
 }
