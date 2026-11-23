@@ -263,7 +263,10 @@ impl DurableRelay {
         if let Some(head) = self.snapshot.queued_prompts.first() {
             let dispatch = self.snapshot.dispatches.get(&head.command_id);
             let can_steer = dispatch
-                .filter(|dispatch| dispatch.state == RelayDispatchState::Queued)
+                .filter(|dispatch| {
+                    dispatch.state == RelayDispatchState::Queued
+                        && self.mailbox_command_can_steer(&head.command_id, &dispatch.command)
+                })
                 .and_then(|dispatch| dispatch.command.prompt_blocks())
                 .is_some_and(|prompt| {
                     !mj_core::acp::prompt_is_slash_command(&prompt)
@@ -1064,17 +1067,25 @@ impl DurableRelay {
                 )));
             }
         }
-        if let RelayCommand::MailboxWake { events } = &command
-            && (events.is_empty()
-                || !events.iter().any(|event| event.wake)
-                || events != &self.snapshot.pending_mailbox_events)
-        {
-            return Ok(Err(relay_protocol_error(
-                RelayErrorCode::InvalidState,
-                "mailbox wake must carry all currently pending events, including a waking event",
-                false,
-                None,
-            )));
+        if let RelayCommand::MailboxWake { events } = &command {
+            let partition = self
+                .is_codex()
+                .then(|| {
+                    events
+                        .first()
+                        .map(mj_core::mailbox::MailboxEvent::is_parent_message)
+                })
+                .flatten();
+            if !events.iter().any(|event| event.wake)
+                || !self.pending_mailbox_partition(partition).eq(events)
+            {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "mailbox wake must carry all pending events of its partition, including a waking event",
+                    false,
+                    None,
+                )));
+            }
         }
         // A late cancellation must not advance the checkpoint cursor or leave
         // a cancellation queued for a future turn after the barrier releases.
@@ -1714,16 +1725,12 @@ impl DurableRelay {
         // Claim the events into the durable queue before dispatch, so a hook,
         // retry, restart or idle wake cannot also deliver them.
         if self.snapshot.in_place_move_hold.is_none()
-            && self.steering_delivery_mode == SteeringDeliveryMode::AcpWithMailbox
+            && (self.steering_delivery_mode == SteeringDeliveryMode::AcpWithMailbox
+                || self.codex_parent_steering())
             && self.snapshot.queued_prompts.is_empty()
             && self.automatic_steer_active_prompt().is_some()
-            && self
-                .snapshot
-                .pending_mailbox_events
-                .iter()
-                .any(|event| event.wake)
         {
-            self.enqueue_mailbox_wake()?;
+            self.enqueue_mailbox_wake(self.is_codex().then_some(true))?;
         }
         self.submit_automatic_steer()?;
         self.promote_next_queued_command()?;
@@ -1806,31 +1813,35 @@ impl DurableRelay {
             self.snapshot
                 .dispatches
                 .get(command_id)
-                .is_some_and(|dispatch| mailbox_prompt_eligible(&dispatch.command))
+                .is_some_and(|dispatch| {
+                    mailbox_prompt_eligible(&dispatch.command)
+                        && !(self.is_codex()
+                            && mj_core::continuation::carries_mailbox_wake(command_id))
+                })
         }) && !self
             .snapshot
             .mailbox_prompt_contexts
             .contains_key(command_id)
-            && !self.snapshot.pending_mailbox_events.is_empty()
         {
-            let event_keys = self
-                .snapshot
-                .pending_mailbox_events
-                .iter()
-                .map(|event| event.key.clone())
+            let events: Vec<_> = self
+                .pending_mailbox_partition(self.is_codex().then_some(false))
+                .cloned()
                 .collect();
-            self.append_relay_event(
-                None,
-                RelayObservation::MailboxEventsDelivered {
-                    event_keys,
-                    path: mj_core::mailbox::MailboxDeliveryPath::Prompt,
-                    prompt_command_id: Some(command_id.clone()),
-                    hook_event: None,
-                    events: self.snapshot.pending_mailbox_events.clone(),
-                    lease_id: None,
-                    steering: None,
-                },
-            )?;
+            if !events.is_empty() {
+                let event_keys = events.iter().map(|event| event.key.clone()).collect();
+                self.append_relay_event(
+                    None,
+                    RelayObservation::MailboxEventsDelivered {
+                        event_keys,
+                        path: mj_core::mailbox::MailboxDeliveryPath::Prompt,
+                        prompt_command_id: Some(command_id.clone()),
+                        hook_event: None,
+                        events,
+                        lease_id: None,
+                        steering: None,
+                    },
+                )?;
+            }
         }
         let mut claimed = Vec::with_capacity(claimable.len());
         let mut next_snapshot = self.snapshot.clone();
@@ -1844,11 +1855,11 @@ impl DurableRelay {
             .then(|| next_snapshot.queued_prompts.first())
             .flatten()
             .and_then(|queued| {
-                let prompt = next_snapshot
-                    .dispatches
-                    .get(&queued.command_id)?
-                    .command
-                    .prompt_blocks()?;
+                let command = &next_snapshot.dispatches.get(&queued.command_id)?.command;
+                if !self.mailbox_command_can_steer(&queued.command_id, command) {
+                    return None;
+                }
+                let prompt = command.prompt_blocks()?;
                 Some(ClaimedSteeringPrompt {
                     attachment_root: None,
                     queued_command_id: queued.command_id.clone(),
@@ -2833,7 +2844,16 @@ impl DurableRelay {
         let Some(queued) = recovery.or_else(|| self.snapshot.queued_prompts.first().cloned())
         else {
             if self.mailbox_wake_is_allowed() {
-                self.enqueue_mailbox_wake()?;
+                let parent_only = if self.is_codex() {
+                    self.snapshot
+                        .pending_mailbox_events
+                        .iter()
+                        .find(|event| event.wake)
+                        .map(|event| event.is_parent_message())
+                } else {
+                    None
+                };
+                self.enqueue_mailbox_wake(parent_only)?;
                 return self.promote_next_queued_command();
             }
             return Ok(None);
@@ -2889,12 +2909,46 @@ impl DurableRelay {
             })
     }
 
-    fn enqueue_mailbox_wake(&mut self) -> Result<()> {
-        let events = self.snapshot.pending_mailbox_events.clone();
-        anyhow::ensure!(
-            !events.is_empty() && events.iter().any(|event| event.wake),
-            "mailbox wake lost its waking event"
-        );
+    fn is_codex(&self) -> bool {
+        self.verdict_harness == Some(mj_core::config::HarnessKind::Codex)
+    }
+
+    fn codex_parent_steering(&self) -> bool {
+        self.is_codex()
+            && self.mailbox_delivery_mode
+                == Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary)
+            && self.steering_supported == Some(true)
+    }
+
+    fn mailbox_command_can_steer(&self, id: &str, command: &RelayCommand) -> bool {
+        if !self.is_codex() || !mj_core::continuation::carries_mailbox_wake(id) {
+            return true;
+        }
+        self.codex_parent_steering()
+            && matches!(command, RelayCommand::MailboxWake { events }
+                if events.iter().all(mj_core::mailbox::MailboxEvent::is_parent_message))
+    }
+
+    fn pending_mailbox_partition(
+        &self,
+        parent_partition: Option<bool>,
+    ) -> impl Iterator<Item = &mj_core::mailbox::MailboxEvent> {
+        self.snapshot
+            .pending_mailbox_events
+            .iter()
+            .filter(move |event| {
+                parent_partition.is_none_or(|parent| event.is_parent_message() == parent)
+            })
+    }
+
+    fn enqueue_mailbox_wake(&mut self, parent_partition: Option<bool>) -> Result<()> {
+        let events: Vec<_> = self
+            .pending_mailbox_partition(parent_partition)
+            .cloned()
+            .collect();
+        if !events.iter().any(|event| event.wake) {
+            return Ok(());
+        }
         let mut random = [0u8; 16];
         getrandom::fill(&mut random)
             .map_err(|error| anyhow!("generate mailbox wake ID: {error}"))?;
@@ -3025,7 +3079,11 @@ impl DurableRelay {
                 contexts: Vec::new(),
             });
         }
-        let events = self.snapshot.pending_mailbox_events.clone();
+        let reserve_parent = hook_event == "PostToolUse" && self.codex_parent_steering();
+        let events: Vec<_> = self
+            .pending_mailbox_partition(reserve_parent.then_some(false))
+            .cloned()
+            .collect();
         let hook_steering = self.pending_hook_steering(hook_event);
         if events.is_empty() && hook_steering.is_none() {
             return Ok(RelayResponsePayload::MailboxDrained {

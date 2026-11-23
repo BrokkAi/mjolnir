@@ -132,6 +132,12 @@ impl GuardianClassifier {
     pub async fn classify(&self, request: &GuardianReviewRequest) -> GuardianStage1Result {
         use GuardianStage1Result as Verdict;
 
+        // Wolf's calibrated packet has no representation of delegated authority.
+        if !request.parent_instructions.is_empty() || request.parent_instructions_omitted {
+            return Verdict::Unavailable {
+                reason: "delegated parent instructions require full review",
+            };
+        }
         if wolf_action_exceeds_stage1_limit(request) {
             return Verdict::EscalatedActionTooLong;
         }
@@ -560,6 +566,8 @@ mod tests {
             user_instructions_omitted: false,
             project_instructions: None,
             trusted_user_inputs: Vec::new(),
+            parent_instructions: Vec::new(),
+            parent_instructions_omitted: false,
             prior_reviews: Vec::new(),
             retry_reason: None,
             transcript: String::new(),

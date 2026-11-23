@@ -214,7 +214,9 @@ pub const RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL: u32 = 85;
 pub const RELAY_CANCEL_TURN_TARGET_PROTOCOL: u32 = 86;
 /// 87 includes trusted user inputs, prior reviews, and retry context in guardian requests.
 pub const RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL: u32 = 87;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL;
+/// 88 includes verified delegated parent instructions in guardian requests.
+pub const RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL: u32 = 88;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -259,7 +261,9 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 29 is breaking: older writers drop an active in-place move dispatch hold.
 // Revision 30 is breaking: the dispatch is the only stored live command payload.
 // Revision 31 is breaking: older readers cannot replay CancelTurnTarget commands.
-pub const RELAY_STATE_VERSION: u32 = 31;
+// Revision 32 is breaking: older readers cannot preserve delegated authorization
+// or replay a PostToolUse lease that claims the non-parent partition.
+pub const RELAY_STATE_VERSION: u32 = 32;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

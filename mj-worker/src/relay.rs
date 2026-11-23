@@ -1213,6 +1213,9 @@ impl DurableRelay {
             .set_trusted_user_inputs(relay.snapshot.trusted_user_inputs());
         relay
             .turn_context
+            .set_delegated_parent_instructions(&relay.snapshot);
+        relay
+            .turn_context
             .set_prior_guardian_reviews(relay.snapshot.prior_guardian_reviews());
         // Live-only work cannot be reconstructed on reopen. Nor can replay
         // prove an idle transition that was not yet saved with the snapshot.

@@ -3,7 +3,9 @@ use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use mj_core::activity::ActivityFacts;
 use mj_core::activity::verdict::*;
 use mj_core::config::HarnessKind;
-use mj_core::guardian::{MAX_PRIOR_GUARDIAN_REVIEWS, PriorGuardianReview, TrustedUserInput};
+use mj_core::guardian::{
+    DelegatedParentInstruction, MAX_PRIOR_GUARDIAN_REVIEWS, PriorGuardianReview, TrustedUserInput,
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +29,7 @@ struct TurnContextState {
     /// none; a recovery continues the same request and keeps them.
     guardian_reviews: GuardianReviews,
     trusted_user_inputs: GuardianUserInputs,
+    delegated_parent_instructions: (Vec<DelegatedParentInstruction>, bool),
     prior_guardian_reviews: Vec<PriorGuardianReview>,
     // These verdicts have settled but their journal events have not arrived.
     pending_prior_guardian_reviews: VecDeque<PriorGuardianReview>,
@@ -156,6 +159,7 @@ impl TurnContext {
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
             trusted_user_inputs: std::mem::take(&mut state.trusted_user_inputs),
+            delegated_parent_instructions: std::mem::take(&mut state.delegated_parent_instructions),
             prior_guardian_reviews: std::mem::take(&mut state.prior_guardian_reviews),
             pending_prior_guardian_reviews: std::mem::take(
                 &mut state.pending_prior_guardian_reviews,
@@ -415,6 +419,24 @@ impl TurnContext {
             .expect("turn context lock poisoned")
             .summary
             .render(limit)
+    }
+
+    pub fn set_delegated_parent_instructions(&self, snapshot: &mj_core::relay::RelaySnapshot) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .delegated_parent_instructions = (
+            snapshot.delegated_parent_instructions.clone(),
+            snapshot.delegated_parent_instructions_omitted,
+        );
+    }
+
+    pub fn delegated_parent_instructions(&self) -> (Vec<DelegatedParentInstruction>, bool) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .delegated_parent_instructions
+            .clone()
     }
 
     pub fn set_trusted_user_inputs(&self, durable: Vec<TrustedUserInput>) {

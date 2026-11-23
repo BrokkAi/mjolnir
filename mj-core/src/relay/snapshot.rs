@@ -1841,6 +1841,10 @@ pub struct RelaySnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_user_inputs: Vec<crate::guardian::TrustedUserInput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegated_parent_instructions: Vec<crate::guardian::DelegatedParentInstruction>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delegated_parent_instructions_omitted: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prior_guardian_reviews: Vec<crate::guardian::PriorGuardianReview>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2054,6 +2058,8 @@ impl RelaySnapshot {
             person_input_through: 0,
             assessment_context: Some(Default::default()),
             trusted_user_inputs: Vec::new(),
+            delegated_parent_instructions: Vec::new(),
+            delegated_parent_instructions_omitted: false,
             prior_guardian_reviews: Vec::new(),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,

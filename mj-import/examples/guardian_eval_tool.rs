@@ -70,6 +70,8 @@ impl CorpusRow {
             user_instructions_omitted: true,
             project_instructions,
             trusted_user_inputs: Vec::new(),
+            parent_instructions: Vec::new(),
+            parent_instructions_omitted: false,
             prior_reviews: Vec::new(),
             retry_reason: None,
             transcript: self.recent_transcript,

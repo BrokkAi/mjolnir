@@ -863,6 +863,19 @@ impl DurableRelay {
             } => true,
             _ => false,
         };
+        if matches!(
+            &event.observation,
+            RelayObservation::CommandStarted { .. }
+                | RelayObservation::MailboxEventsDelivered { .. }
+                | RelayObservation::CommandCompleted {
+                    outcome: RelayCommandOutcome::Steered { .. }
+                        | RelayCommandOutcome::ContextCleared { .. },
+                    ..
+                }
+        ) {
+            self.turn_context
+                .set_delegated_parent_instructions(&self.snapshot);
+        }
         if authorization_changed {
             self.turn_context
                 .set_authorization_context(self.snapshot.authorization_context());

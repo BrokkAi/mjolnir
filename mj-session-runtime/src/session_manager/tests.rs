@@ -1755,6 +1755,8 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
                 user_instructions_omitted: false,
                 project_instructions: None,
                 trusted_user_inputs: Vec::new(),
+                parent_instructions: Vec::new(),
+                parent_instructions_omitted: false,
                 prior_reviews: Vec::new(),
                 retry_reason: None,
                 transcript: String::new(),

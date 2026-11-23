@@ -62,7 +62,7 @@ impl AcpReviewError {
 /// retry on a fresh reviewer and a reminder for a reply without a verdict.
 const MAX_REVIEW_ATTEMPTS: usize = 3;
 const STALE_AUTHORIZATION_RETRY_REASON: &str =
-    "New user authorization arrived while the previous review was in flight.";
+    "New authorization arrived while the previous review was in flight.";
 /// How long a retiring reviewer bridge gets to reap its process group after
 /// its stdin closes, the grace `run_bridge` gives the session's own bridge.
 #[cfg(not(test))]
@@ -240,12 +240,12 @@ impl Guardian {
                 return Ok(result.decision);
             }
             let current = self.collect_evidence(tool_call_id, action, project_instructions);
-            if !current.person_wrote_since(&evidence) {
+            if !current.authorization_changed_since(&evidence) {
                 return Ok(result.decision);
             }
             evidence = current;
             evidence.request.retry_reason = Some(STALE_AUTHORIZATION_RETRY_REASON.into());
-            tracing::info!(target: "mj_guardian", "the person wrote during a guardian review; reviewing again");
+            tracing::info!(target: "mj_guardian", "authorization changed during a guardian review; reviewing again");
         }
     }
 
@@ -376,9 +376,9 @@ impl Guardian {
         )
     }
 
-    /// Review `action` against the evidence as it stands. If the person wrote
+    /// Review `action` against the evidence as it stands. If new authorization arrived
     /// while it was reviewed, the verdict may rest on stale authorization, so
-    /// it is reviewed again on what they now say, as Codex discards a stale
+    /// it is reviewed again with the new evidence, as Codex discards a stale
     /// verdict (`review_request.rs`). Each repeat follows a new message; the
     /// review deadline bounds them.
     async fn decide(
@@ -398,14 +398,14 @@ impl Guardian {
             ];
             let assessment = self.assess(&mut slot, &prompt, &mut attempts).await?;
             let current = self.collect_evidence(tool_call_id, action, project_instructions);
-            if !current.person_wrote_since(&evidence) {
+            if !current.authorization_changed_since(&evidence) {
                 return Ok(assessment);
             }
             evidence = current;
             evidence.request.retry_reason = Some(STALE_AUTHORIZATION_RETRY_REASON.into());
             tracing::info!(
                 target: "mj_guardian",
-                "the person wrote during a guardian review; reviewing again"
+                "authorization changed during a guardian review; reviewing again"
             );
         }
     }

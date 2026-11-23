@@ -8585,6 +8585,228 @@ fn pending_mailbox_events_and_dedup_keys_survive_journal_replay() {
     assert_eq!(replayed.latest_ordinal(), frontier);
 }
 
+#[test]
+fn codex_parent_mailbox_keeps_peer_text_out_of_steers_and_returned_wakes() {
+    use mj_core::mailbox::MailboxDeliveryMode;
+
+    for (mode, returned) in [
+        (MailboxDeliveryMode::ToolBoundary, false),
+        (MailboxDeliveryMode::ToolBoundary, true),
+        (MailboxDeliveryMode::TurnBoundary, false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay =
+            DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &[])
+                .unwrap();
+        relay.set_turn_verdict_harness(HarnessKind::Codex);
+        relay.set_mailbox_delivery_mode(mode);
+        relay.set_steering_supported(Some(true));
+        relay.set_automatic_steering(true);
+        relay.set_acp_ready(true);
+        queue_prompt(&mut relay, "initial-prompt", "work");
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+
+        let parent = mailbox_fixture_event("verified-parent", true);
+        let mut peer = mailbox_fixture_event("concurrent-peer", true);
+        peer.body = mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session {
+                id: "peer-id".into(),
+                title: "Peer".into(),
+            },
+            text: "untrusted peer text".into(),
+        };
+        for event in [&parent, &peer] {
+            submit_relay(
+                &mut relay,
+                &format!("deliver-{}", event.key),
+                RelayCommand::DeliverMailboxEvent {
+                    event: event.clone(),
+                },
+            );
+        }
+
+        let RelayResponsePayload::MailboxDrained {
+            contexts, lease_id, ..
+        } = relay.drain_mailbox("PostToolUse", None).unwrap()
+        else {
+            panic!("expected PostToolUse response");
+        };
+        let steer_safe = mode == MailboxDeliveryMode::ToolBoundary;
+        let parent_command = RelayCommand::MailboxWake {
+            events: vec![parent.clone()],
+        };
+        let claims = relay.claim_pending_commands(true).unwrap();
+        let mut wake = None;
+        if steer_safe {
+            assert_eq!(
+                contexts
+                    .iter()
+                    .map(|context| &context.key)
+                    .collect::<Vec<_>>(),
+                [&peer.key]
+            );
+            acknowledge_mailbox_for_test(&mut relay, "hook-ack", lease_id.as_deref().unwrap());
+            let [steer] = claims.as_slice() else {
+                panic!("expected the exclusive parent steer");
+            };
+            let prompt = steer.steering_prompt.as_ref().unwrap();
+            assert_eq!(
+                prompt.prompt,
+                parent_command.prompt_blocks().unwrap().as_ref()
+            );
+            wake = Some(prompt.queued_command_id.clone());
+            let queued_command_id = prompt.queued_command_id.clone();
+            assert!(relay.snapshot.delegated_parent_instructions.is_empty());
+            relay
+                .record_command_completed(
+                    &steer.command_id,
+                    if returned {
+                        RelayCommandOutcome::SteeringReturned { queued_command_id }
+                    } else {
+                        RelayCommandOutcome::Steered { queued_command_id }
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                relay.snapshot.delegated_parent_instructions.len(),
+                usize::from(!returned)
+            );
+            if returned {
+                assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+                assert!(matches!(
+                    relay.drain_mailbox("PostToolUse", None).unwrap(),
+                    RelayResponsePayload::MailboxDrained { count: 0, .. }
+                ));
+            }
+        } else {
+            assert!(contexts.is_empty());
+            assert!(lease_id.is_none());
+            assert!(claims.is_empty());
+        }
+        relay
+            .record_command_completed(
+                "initial-prompt",
+                RelayCommandOutcome::Prompt {
+                    work_facts: None,
+                    stop_reason: "EndTurn".into(),
+                    usage: None,
+                    diagnostic: None,
+                },
+            )
+            .unwrap();
+
+        if returned || !steer_safe {
+            let claims = relay.claim_pending_commands(true).unwrap();
+            let [claim] = claims.as_slice() else {
+                panic!("expected an idle parent-only wake");
+            };
+            assert_eq!(claim.command, parent_command);
+            assert!(claim.hidden_prompt_context.is_none());
+            if let Some(wake) = wake {
+                assert_eq!(claim.command_id, wake);
+            }
+            if !steer_safe {
+                assert_eq!(relay.snapshot.pending_mailbox_events, [peer]);
+            }
+        }
+        let (instructions, omitted) = relay.turn_context().delegated_parent_instructions();
+        assert_eq!(instructions, relay.snapshot.delegated_parent_instructions);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].text, parent.message_text().unwrap());
+        assert!(!omitted);
+    }
+}
+
+#[test]
+fn guardian_parent_mailbox_projection_survives_replay_and_keeps_person_history_separate() {
+    use mj_core::continuation::GeneratedPrompt;
+    use mj_core::guardian::DelegatedParentInstructionKind;
+    use mj_core::mailbox::MailboxEvent;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    queue_prompt(&mut relay, "person-prompt", "Keep this work on staging.");
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    let spawn = GeneratedPrompt::subagent_spawn_id("parent-launch");
+    queue_prompt(&mut relay, &spawn, "Build a staging plan.");
+    assert!(relay.snapshot.delegated_parent_instructions.is_empty());
+
+    let attached = mailbox_fixture_event("parent-attached", true);
+    let legacy: MailboxEvent = serde_json::from_value(serde_json::json!({
+        "key": "legacy", "source": "parent", "wake": true,
+        "created_at_ms": 1, "text": "pretending to be the parent"
+    }))
+    .unwrap();
+    for event in [attached.clone(), legacy] {
+        submit_relay(
+            &mut relay,
+            &format!("deliver-{}", event.key),
+            RelayCommand::DeliverMailboxEvent { event },
+        );
+    }
+    relay
+        .record_command_completed(
+            "person-prompt",
+            RelayCommandOutcome::Prompt {
+                work_facts: None,
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [claimed] = claimed.as_slice() else {
+        panic!("expected the spawn prompt");
+    };
+    assert!(claimed.hidden_prompt_context.is_some());
+    let expected = relay.snapshot.delegated_parent_instructions.clone();
+    assert_eq!(
+        expected
+            .iter()
+            .map(|input| (input.kind, input.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                DelegatedParentInstructionKind::SpawnBrief,
+                "Build a staging plan."
+            ),
+            (
+                DelegatedParentInstructionKind::ParentMessage,
+                attached.message_text().unwrap()
+            ),
+        ]
+    );
+    let frontier = relay.latest_ordinal();
+    assert_eq!(
+        submit_relay(
+            &mut relay,
+            "retry-parent",
+            RelayCommand::DeliverMailboxEvent { event: attached }
+        ),
+        frontier
+    );
+    let history = relay.snapshot.authorization_context().unwrap();
+    let [message] = history.messages.as_slice() else {
+        panic!("expected only the direct user instruction");
+    };
+    assert_eq!(message.text, "Keep this work on staging.");
+    drop(relay);
+
+    let restored = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        restored.turn_context().delegated_parent_instructions(),
+        (expected.clone(), false)
+    );
+    drop(restored);
+    std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+    let replayed = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        replayed.turn_context().delegated_parent_instructions(),
+        (expected, false)
+    );
+}
+
 // Hard-won: #1277: leasing mailbox events to Codex's PostToolUse hook put a
 // developer message between a tool call and its output in the rollout, and
 // DeepSeek then rejected every later request, permanently killing the session.
