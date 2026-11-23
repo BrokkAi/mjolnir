@@ -12,45 +12,37 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
-// ReadSessionFileInput reads a file sent to a session, bounding input on
-// both sides of the transport, including stdin with no length. A file over
-// MaxSessionFileBytes is a SessionExportError refusal.
-func ReadSessionFileInput(reader io.Reader) ([]byte, error) {
-	var buffer bytes.Buffer
-	if _, err := buffer.ReadFrom(io.LimitReader(reader, int64(MaxSessionFileBytes)+1)); err != nil {
-		return nil, SessionExportErrorFailed{fmt.Errorf("read incoming session file: %w", err)}
-	}
-	if uint64(buffer.Len()) > MaxSessionFileBytes {
-		return nil, SessionExportErrorRefused(fmt.Sprintf("file exceeds %d bytes", MaxSessionFileBytes))
-	}
-	return buffer.Bytes(), nil
-}
-
 // WriteSessionFile publishes a complete file in an idle session's workspace.
 // The caller owns the worker barrier through completion, so queued harness
 // work cannot race it. A refusal is a SessionExportError refusal; any other
 // failure is a SessionExportError failure.
-func WriteSessionFile(root, relative string, bytes []byte, overwrite bool) error {
+func WriteSessionFile(root, relative string, data []byte, overwrite bool) error {
+	length := uint64(len(data))
+	_, err := WriteSessionFileFromReader(root, relative, bytes.NewReader(data), &length, overwrite)
+	return err
+}
+
+// WriteSessionFileFromReader streams a file from reader and atomically
+// publishes it in an idle session's workspace. When expectedLen is set, it
+// rejects short reads and trailing extra bytes without publishing.
+func WriteSessionFileFromReader(root, relative string, reader io.Reader, expectedLen *uint64, overwrite bool) (uint64, error) {
 	refuse := func(err error) error { return SessionExportErrorRefused(err.Error()) }
 	if err := core.ValidateRelativeDestination(relative); err != nil {
-		return refuse(err)
-	}
-	if uint64(len(bytes)) > MaxSessionFileBytes {
-		return SessionExportErrorRefused(fmt.Sprintf("file exceeds %d bytes", MaxSessionFileBytes))
+		return 0, refuse(err)
 	}
 	resolvedRoot, err := archiveCanonicalize(root)
 	if err != nil {
-		return SessionExportErrorFailed{fmt.Errorf("resolve session workspace: %w", err)}
+		return 0, SessionExportErrorFailed{fmt.Errorf("resolve session workspace: %w", err)}
 	}
 	// The workspace's own processes can rename and relink its directories
 	// while this runs, so every step resolves from handles opened without
 	// following a link rather than from path text (#1419).
 	confined, err := core.ConfinedDirOpenRoot(resolvedRoot)
 	if err != nil {
-		return SessionExportErrorFailed{err}
+		return 0, SessionExportErrorFailed{err}
 	}
 	if confined == nil {
-		return SessionExportErrorFailed{errors.New("session workspace disappeared")}
+		return 0, SessionExportErrorFailed{errors.New("session workspace disappeared")}
 	}
 	defer confined.Close()
 	// The destination is validated: every component is a plain name.
@@ -59,28 +51,32 @@ func WriteSessionFile(root, relative string, bytes []byte, overwrite bool) error
 		names = append(names, component.text)
 	}
 	if len(names) == 0 {
-		return SessionExportErrorFailed{errors.New("file destination has no name")}
+		return 0, SessionExportErrorFailed{errors.New("file destination has no name")}
 	}
 	parent, name := names[:len(names)-1], names[len(names)-1]
 	directory, err := confined.CreateDirAll(filepath.Join(parent...))
 	if err != nil {
-		return refuse(err)
+		return 0, refuse(err)
 	}
 	defer directory.Close()
 	publish := core.PublishCreateNew
 	if overwrite {
 		publish = core.PublishReplace
 	}
-	switch failure := directory.WriteAtomically(name, bytes, publish).(type) {
+	written, failure := directory.WriteAtomicallyFromReader(name, reader, expectedLen, publish)
+	switch failure := failure.(type) {
 	case nil:
-		return nil
+		return written, nil
 	case core.PublishErrorNotARegularFile:
-		return SessionExportErrorRefused("destination is not a regular file")
+		return 0, SessionExportErrorRefused("destination is not a regular file")
 	case core.PublishErrorAlreadyExists:
-		return SessionExportErrorRefused("file already exists; request overwrite explicitly")
+		return 0, SessionExportErrorRefused("file already exists; request overwrite explicitly")
+	case core.PublishErrorLengthMismatch:
+		return 0, SessionExportErrorRefused(fmt.Sprintf(
+			"incomplete file upload: expected %d bytes, received %d", failure.Expected, failure.Received))
 	case core.PublishErrorFailed:
-		return SessionExportErrorFailed{fmt.Errorf("publish session file: %w", failure.Err)}
+		return 0, SessionExportErrorFailed{fmt.Errorf("publish session file: %w", failure.Err)}
 	default:
-		return SessionExportErrorFailed{fmt.Errorf("publish session file: %w", failure)}
+		return 0, SessionExportErrorFailed{fmt.Errorf("publish session file: %w", failure)}
 	}
 }

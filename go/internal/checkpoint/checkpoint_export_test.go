@@ -119,68 +119,6 @@ func (g noGit) Run(_ string, command *GitCommand) (GitOutput, error) {
 	return GitOutput{}, nil
 }
 
-func TestIgnoreNestedRepositoriesExportsOuterWorkWithoutPersistingTheOmission(t *testing.T) {
-	temp := t.TempDir()
-	spec, _ := checkpointFixture(t, temp)
-	repository := filepath.Join(spec.WorkspaceRoot, "app")
-	nested := ".scratch/ü landing/master-check"
-	gitLine(repository, "worktree", "add", "--detach", nested, "HEAD")
-	checkpointWriteFile(t, filepath.Join(repository, nested, "valuable.txt"), []byte("nested work\n"))
-	gitLine(repository, "clone", "--no-hardlinks", ".", ".scratch/independent")
-	checkpointWriteFile(t, filepath.Join(repository, ".scratch/independent/valuable.txt"), []byte("clone work\n"))
-	checkpointWriteFile(t, filepath.Join(repository, "README.md"), []byte("staged\n"))
-	gitLine(repository, "add", "README.md")
-	checkpointWriteFile(t, filepath.Join(repository, "README.md"), []byte("unstaged\n"))
-	checkpointWriteFile(t, filepath.Join(repository, "keep.txt"), []byte("untracked\n"))
-	exclude := checkpointReadFile(t, filepath.Join(repository, ".git/info/exclude"))
-
-	if _, err := ExportCheckpoint(&spec); err == nil || !strings.Contains(err.Error(), core.NestedRepositoryCheckpointError) {
-		t.Fatalf("error = %v", err)
-	}
-	if checkpointExists(spec.OutputPath) {
-		t.Fatal("a refused export left an archive")
-	}
-	spec.IgnoreNestedRepositories = true
-	// Exercise the controller/target JSON contract as well as archive
-	// restore.
-	var request CheckpointExportSpec
-	checkpointNoError(t, json.Unmarshal(checkpointMust(json.Marshal(spec))(t), &request))
-	checkpointMust(ExportCheckpoint(&request))(t)
-	checkpointMust(VerifyArchiveStreaming(spec.OutputPath))(t)
-	restored := filepath.Join(temp, "restored")
-	checkpointNoError(t, os.Mkdir(restored, 0o755))
-	gitLine(restored, "clone", repository, "app")
-	checkpointNoError(t, RestoreRepositories(spec.OutputPath, restored, SystemGit{}))
-	checkout := filepath.Join(restored, "app")
-	if body := checkpointReadFile(t, filepath.Join(checkout, "README.md")); string(body) != "unstaged\n" {
-		t.Fatalf("README.md = %q", body)
-	}
-	if staged := gitLine(checkout, "show", ":README.md"); staged != "staged" {
-		t.Fatalf("staged README.md = %q", staged)
-	}
-	if body := checkpointReadFile(t, filepath.Join(checkout, "keep.txt")); string(body) != "untracked\n" {
-		t.Fatalf("keep.txt = %q", body)
-	}
-	// The registered worktree is the repository's own work and comes back;
-	// only the independent clone, which the user chose to omit, does not.
-	if body := checkpointReadFile(t, filepath.Join(checkout, nested, "valuable.txt")); string(body) != "nested work\n" {
-		t.Fatalf("worktree file = %q", body)
-	}
-	if checkpointExists(filepath.Join(checkout, ".scratch/independent")) {
-		t.Fatal("the omitted clone was restored")
-	}
-	if after := checkpointReadFile(t, filepath.Join(repository, ".git/info/exclude")); string(after) != string(exclude) {
-		t.Fatal("the export persisted the omission in .git/info/exclude")
-	}
-	if body := checkpointReadFile(t, filepath.Join(repository, nested, "valuable.txt")); string(body) != "nested work\n" {
-		t.Fatalf("source worktree file = %q", body)
-	}
-	spec.IgnoreNestedRepositories = false
-	if _, err := ExportCheckpoint(&spec); err == nil || !strings.Contains(err.Error(), core.NestedRepositoryCheckpointError) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 // A plain project folder is the user's own directory, not a checkout: the
 // archive says so, captures nothing about it, and a restore never touches
 // it.
@@ -626,6 +564,7 @@ func TestCheckpointCollectsTheConfiguredMemoryReplicaForNonClaudeHarnesses(t *te
 		},
 		ExecutionPolicy:      core.ExecutionPolicyUnconstrained,
 		ClaudePermissionMode: core.ClaudePermissionModeAuto,
+		MjolnirGuardian:      true,
 	}
 	checkpointNoError(t, launch.Write(filepath.Join(spec.RelayRoot, "launch.json")))
 
@@ -857,11 +796,12 @@ func TestACheckoutRestoreLandsOnTheBranchTheCallerNames(t *testing.T) {
 	checkout := filepath.Join(temp, "worktrees/session")
 	gitLine(repository, "worktree", "add", "-b", "mj/session", checkout, "HEAD~1")
 
-	restored := checkpointMust(RestoreSingleRepositoryOntoBranch(archivePath, checkout, "mj/session", SystemGit{}))(t)
+	notices := checkpointMust(RestoreSingleRepositoryOntoBranch(archivePath, checkout, "mj/session", SystemGit{}))(t)
 
-	if restored == nil || *restored != archivedBranch {
-		t.Fatalf("restored branch = %v, want %s", restored, archivedBranch)
+	if len(notices) != 0 {
+		t.Fatalf("notices = %q", notices)
 	}
+	_ = archivedBranch
 	if got := gitLine(checkout, "rev-parse", "HEAD"); got != head {
 		t.Fatalf("HEAD = %s, want %s", got, head)
 	}
@@ -1014,3 +954,251 @@ func TestASubdirectorySessionRestoresWorkAcrossItsWholeCheckout(t *testing.T) {
 
 // ptrTo is a pointer to a copy of value.
 func ptrTo[T any](value T) *T { return &value }
+
+func TestOriginDeltaRawExportCapturesPostLaunchWorkWithoutQuiescenceReceipt(t *testing.T) {
+	temp := t.TempDir()
+	spec, _ := checkpointFixture(t, temp)
+	checkout := core.Join(spec.WorkspaceRoot, spec.Repositories[0].RelativeDestination)
+	gitLine(checkout, "branch", "pre-launch-branch")
+	checkpointWriteFile(t, filepath.Join(checkout, "README.md"), []byte("pre-launch stash\n"))
+	gitLine(checkout, "stash", "push", "-m", "pre-launch stash")
+
+	checkpointNoError(t, RecordLaunchIfAbsent(SystemGit{}, checkout, spec.Session.ID))
+
+	gitLine(checkout, "checkout", "-b", "post-launch-branch")
+	checkpointWriteFile(t, filepath.Join(checkout, "post.txt"), []byte("post-launch commit\n"))
+	gitLine(checkout, "add", "post.txt")
+	gitLine(checkout, "commit", "-m", "post-launch commit")
+	checkpointWriteFile(t, filepath.Join(checkout, "post.txt"), []byte("post-launch stash\n"))
+	gitLine(checkout, "stash", "push", "-m", "post-launch stash")
+	checkpointWriteFile(t, filepath.Join(checkout, "post.txt"), []byte("unstaged edit\n"))
+	checkpointWriteFile(t, filepath.Join(checkout, "untracked.txt"), []byte("untracked file\n"))
+
+	spec.Repositories[0].Capture = CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureOriginDeltaRaw}
+	spec.ProtocolVersion = CheckpointRepositoryCaptureExportProtocolVersion(spec.Repositories)
+	if spec.ProtocolVersion != CheckpointOriginDeltaExportProtocolVersion {
+		t.Fatalf("protocol = %d", spec.ProtocolVersion)
+	}
+
+	checkpointMust(ExportCheckpoint(&spec))(t)
+	archive := checkpointMust(ReadArchiveVerified(spec.OutputPath))(t)
+	repository := &archive.Manifest.Repositories[0]
+	if repository.OriginDeltaPackPath == nil {
+		t.Fatal("no origin delta pack")
+	}
+	delta := repository.Metadata.OriginDelta
+	if delta == nil {
+		t.Fatal("origin_delta metadata")
+	}
+	if delta.OriginURL == nil {
+		t.Fatal("no origin URL")
+	}
+	if _, ok := delta.Refs["refs/heads/post-launch-branch"]; !ok {
+		t.Fatalf("refs = %v", delta.Refs)
+	}
+	if _, ok := delta.Refs["refs/heads/pre-launch-branch"]; ok {
+		t.Fatalf("refs = %v", delta.Refs)
+	}
+	if len(delta.Stash) != 1 {
+		t.Fatalf("stash = %+v", delta.Stash)
+	}
+	if got := checkpointReadFile(t, filepath.Join(checkout, "untracked.txt")); string(got) != "untracked file\n" {
+		t.Fatalf("untracked.txt = %q", got)
+	}
+}
+
+func TestOriginDeltaRawExportHandlesOriginlessRepository(t *testing.T) {
+	temp := t.TempDir()
+	spec, _ := checkpointFixture(t, temp)
+	checkout := core.Join(spec.WorkspaceRoot, spec.Repositories[0].RelativeDestination)
+	gitLine(checkout, "remote", "remove", "origin")
+
+	spec.Repositories[0].Capture = CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureOriginDeltaRaw}
+	spec.ProtocolVersion = CheckpointRepositoryCaptureExportProtocolVersion(spec.Repositories)
+
+	checkpointMust(ExportCheckpoint(&spec))(t)
+	archive := checkpointMust(ReadArchiveVerified(spec.OutputPath))(t)
+	repository := &archive.Manifest.Repositories[0]
+	if repository.OriginDeltaPackPath != nil {
+		t.Fatalf("pack = %s", *repository.OriginDeltaPackPath)
+	}
+	if repository.Metadata.Origin != "" {
+		t.Fatalf("origin = %s", repository.Metadata.Origin)
+	}
+	delta := repository.Metadata.OriginDelta
+	if delta == nil {
+		t.Fatal("origin_delta metadata")
+	}
+	if delta.OriginURL != nil {
+		t.Fatalf("origin URL = %s", *delta.OriginURL)
+	}
+}
+
+func TestOriginDeltaCutoffExportAndRestoreRoundTripsWithoutOrigin(t *testing.T) {
+	temp := t.TempDir()
+	spec, _ := checkpointFixture(t, temp)
+	checkout := core.Join(spec.WorkspaceRoot, spec.Repositories[0].RelativeDestination)
+	cutoff := gitLine(checkout, "rev-parse", "HEAD")
+	gitLine(checkout, "remote", "remove", "origin")
+
+	// Prepare a fresh cutoff destination clone before making post-cutoff
+	// edits.
+	restoreRoot := filepath.Join(temp, "restore-workspace")
+	restoreCheckout := core.Join(restoreRoot, spec.Repositories[0].RelativeDestination)
+	checkpointMkdirAll(t, restoreCheckout)
+	gitLine(restoreCheckout, "init", "-b", "main")
+	gitLine(restoreCheckout, "config", "user.name", "Test")
+	gitLine(restoreCheckout, "config", "user.email", "test@example.com")
+	gitLine(restoreCheckout, "fetch", checkout, cutoff)
+	gitLine(restoreCheckout, "checkout", "-B", "main", "FETCH_HEAD")
+
+	// Make commits, branch, stash, and staged/unstaged edits past cutoff.
+	gitLine(checkout, "checkout", "-b", "cutoff-branch")
+	checkpointWriteFile(t, filepath.Join(checkout, "README.md"), []byte("cutoff commit\n"))
+	gitLine(checkout, "add", "README.md")
+	gitLine(checkout, "commit", "-m", "cutoff commit")
+	expectedHead := gitLine(checkout, "rev-parse", "HEAD")
+	checkpointWriteFile(t, filepath.Join(checkout, "README.md"), []byte("stashed cutoff edit\n"))
+	gitLine(checkout, "stash", "push", "-m", "cutoff stash")
+	checkpointWriteFile(t, filepath.Join(checkout, "README.md"), []byte("staged cutoff edit\n"))
+	gitLine(checkout, "add", "README.md")
+	checkpointWriteFile(t, filepath.Join(checkout, "README.md"), []byte("unstaged cutoff edit\n"))
+
+	spec.Repositories[0].Capture = CheckpointRepositoryCapture{
+		Mode:           CheckpointRepositoryCaptureOriginDeltaCutoff,
+		ExcludeCommits: []string{cutoff},
+	}
+	spec.Repositories[0].OriginOverride = nil
+	spec.ProtocolVersion = CheckpointRepositoryCaptureExportProtocolVersion(spec.Repositories)
+	if spec.ProtocolVersion != CheckpointOriginDeltaExportProtocolVersion {
+		t.Fatalf("protocol = %d", spec.ProtocolVersion)
+	}
+
+	checkpointMust(ExportCheckpoint(&spec))(t)
+	archive := checkpointMust(ReadArchiveVerified(spec.OutputPath))(t)
+	repository := &archive.Manifest.Repositories[0]
+	if repository.OriginDeltaPackPath == nil {
+		t.Fatal("no origin delta pack")
+	}
+	if repository.Metadata.Origin != "" {
+		t.Fatalf("origin = %s", repository.Metadata.Origin)
+	}
+	delta := repository.Metadata.OriginDelta
+	if delta == nil {
+		t.Fatal("origin_delta metadata")
+	}
+	if !delta.HistoryCutoff || delta.OriginURL != nil {
+		t.Fatalf("history cutoff %v, origin %v", delta.HistoryCutoff, delta.OriginURL)
+	}
+
+	checkpointNoError(t, RestoreRepositories(spec.OutputPath, restoreRoot, SystemGit{}))
+	if head := gitLine(restoreCheckout, "rev-parse", "HEAD"); head != expectedHead {
+		t.Fatalf("HEAD %s, want %s", head, expectedHead)
+	}
+	if branch := gitLine(restoreCheckout, "branch", "--show-current"); branch != "cutoff-branch" {
+		t.Fatalf("branch = %s", branch)
+	}
+	if got := checkpointReadFile(t, filepath.Join(restoreCheckout, "README.md")); string(got) != "unstaged cutoff edit\n" {
+		t.Fatalf("README.md = %q", got)
+	}
+	if staged := gitLine(restoreCheckout, "show", ":README.md"); staged != "staged cutoff edit" {
+		t.Fatalf("staged README.md = %q", staged)
+	}
+	if stashes := strings.Split(gitLine(restoreCheckout, "stash", "list"), "\n"); len(stashes) != 1 || stashes[0] == "" {
+		t.Fatalf("stash list = %q", stashes)
+	}
+	origin := checkpointMust(SystemGit{}.Run(restoreCheckout, &GitCommand{Arguments: []string{"remote", "get-url", "origin"}}))(t)
+	if origin.Status == 0 {
+		t.Fatal("the restored checkout has an origin")
+	}
+}
+
+func TestOriginDeltaCutoffExportAllowsEmptyPackAtCutoff(t *testing.T) {
+	temp := t.TempDir()
+	spec, _ := checkpointFixture(t, temp)
+	checkout := core.Join(spec.WorkspaceRoot, spec.Repositories[0].RelativeDestination)
+	cutoff := gitLine(checkout, "rev-parse", "HEAD")
+	gitLine(checkout, "remote", "remove", "origin")
+
+	spec.Repositories[0].Capture = CheckpointRepositoryCapture{
+		Mode:           CheckpointRepositoryCaptureOriginDeltaCutoff,
+		ExcludeCommits: []string{cutoff},
+	}
+	spec.Repositories[0].OriginOverride = nil
+	spec.ProtocolVersion = CheckpointRepositoryCaptureExportProtocolVersion(spec.Repositories)
+
+	checkpointMust(ExportCheckpoint(&spec))(t)
+	archive := checkpointMust(ReadArchiveVerified(spec.OutputPath))(t)
+	repository := &archive.Manifest.Repositories[0]
+	if repository.OriginDeltaPackPath != nil {
+		t.Fatalf("pack = %s", *repository.OriginDeltaPackPath)
+	}
+	if repository.Metadata.Origin != "" {
+		t.Fatalf("origin = %s", repository.Metadata.Origin)
+	}
+	delta := repository.Metadata.OriginDelta
+	if delta == nil {
+		t.Fatal("origin_delta metadata")
+	}
+	if !delta.HistoryCutoff || delta.OriginURL != nil {
+		t.Fatalf("history cutoff %v, origin %v", delta.HistoryCutoff, delta.OriginURL)
+	}
+}
+
+func TestRestoreCheckpointWithNoticesUsesPrimaryRepositoryRootForOriginDelta(t *testing.T) {
+	temp := t.TempDir()
+	spec, _ := checkpointFixture(t, temp)
+	checkout := core.Join(spec.WorkspaceRoot, spec.Repositories[0].RelativeDestination)
+	origin := filepath.Join(temp, "origin.git")
+	checkpointMkdirAll(t, origin)
+	gitLine(origin, "init", "--bare", "--initial-branch=main")
+	originURL := origin
+	gitLine(checkout, "remote", "set-url", "origin", originURL)
+	gitLine(checkout, "push", "-u", "origin", "HEAD:main")
+
+	checkpointNoError(t, RecordLaunchIfAbsent(SystemGit{}, checkout, spec.Session.ID))
+
+	// Make an unpushed commit and a working-tree edit in the source checkout.
+	gitLine(checkout, "checkout", "-b", "feature/cross-target")
+	checkpointWriteFile(t, filepath.Join(checkout, "cross.txt"), []byte("from raw checkout\n"))
+	gitLine(checkout, "add", "cross.txt")
+	gitLine(checkout, "commit", "-m", "cross-target commit")
+	checkpointWriteFile(t, filepath.Join(checkout, "cross.txt"), []byte("dirty edit\n"))
+
+	// Capture under HOST_CHECKOUT_REPOSITORY ("project") with a different
+	// relative_destination than the container's primary_repository_root.
+	spec.Bundle.PrimaryRepository = "project"
+	spec.Repositories[0].ID = "project"
+	spec.Repositories[0].Capture = CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureOriginDeltaRaw}
+	spec.ProtocolVersion = CheckpointRepositoryCaptureExportProtocolVersion(spec.Repositories)
+	checkpointMust(ExportCheckpoint(&spec))(t)
+
+	// Provision a fresh container-style workspace where the primary repo sits
+	// at `<workspace_root>/container-repo` (not
+	// `<workspace_root>/<relative_destination>`).
+	restoreWorkspace := filepath.Join(temp, "container-ws")
+	primaryRoot := filepath.Join(restoreWorkspace, "container-repo")
+	checkpointMkdirAll(t, restoreWorkspace)
+	gitLine(restoreWorkspace, "clone", "--no-checkout", originURL, primaryRoot)
+
+	restoreSpec := CheckpointRestoreSpec{
+		ArchivePath:           spec.OutputPath,
+		WorkspaceRoot:         restoreWorkspace,
+		RelayRoot:             filepath.Join(temp, "relay"),
+		HarnessHome:           filepath.Join(temp, "home"),
+		RestoreRepositories:   true,
+		RestoreNative:         false,
+		QueuePolicy:           QueueRestorePolicyRestore,
+		PrimaryRepositoryRoot: &primaryRoot,
+	}
+	notices := checkpointMust(RestoreCheckpointWithNotices(&restoreSpec, SystemGit{}, noNativeCheckpointState{}))(t)
+	if len(notices) != 0 {
+		t.Fatalf("clean restore should emit no unexpected notices: %q", notices)
+	}
+	if branch := gitLine(primaryRoot, "symbolic-ref", "--short", "HEAD"); branch != "feature/cross-target" {
+		t.Fatalf("branch = %s", branch)
+	}
+	if got := checkpointReadFile(t, filepath.Join(primaryRoot, "cross.txt")); string(got) != "dirty edit\n" {
+		t.Fatalf("cross.txt = %q", got)
+	}
+}

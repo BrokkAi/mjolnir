@@ -69,6 +69,10 @@ func (noNativeCheckpointState) Restore(_ *core.SessionManifest, _ string, _ stri
 // controller-to-exporter checkpoint specification contract.
 const CheckpointExportProtocolVersion uint32 = 2
 
+// CheckpointOriginDeltaExportProtocolVersion is the export protocol version
+// of a specification that captures any repository relative to origin.
+const CheckpointOriginDeltaExportProtocolVersion uint32 = 3
+
 // CheckpointStagingProtocolVersion is the version of the two-phase
 // capture/pack contract used by ordinary checkpoints.
 const CheckpointStagingProtocolVersion uint32 = 2
@@ -97,6 +101,16 @@ const (
 	// CheckpointRepositoryCaptureManagedClone saves all clone-owned refs and
 	// stashes beyond the source launch commit (BaseCommit).
 	CheckpointRepositoryCaptureManagedClone CheckpointRepositoryCaptureMode = "managed_clone"
+	// CheckpointRepositoryCaptureOriginDelta is a quiesced independent
+	// managed clone relative to origin.
+	CheckpointRepositoryCaptureOriginDelta CheckpointRepositoryCaptureMode = "origin_delta"
+	// CheckpointRepositoryCaptureOriginDeltaRaw is a raw Git checkout
+	// captured relative to origin and its launch baseline.
+	CheckpointRepositoryCaptureOriginDeltaRaw CheckpointRepositoryCaptureMode = "origin_delta_raw"
+	// CheckpointRepositoryCaptureOriginDeltaCutoff is a history-cutoff
+	// managed clone captured relative to explicit cutoff commits
+	// (ExcludeCommits).
+	CheckpointRepositoryCaptureOriginDeltaCutoff CheckpointRepositoryCaptureMode = "origin_delta_cutoff"
 	// CheckpointRepositoryCaptureDeltaFrom bundles the repository relative to
 	// an explicit commit (BaseCommit).
 	CheckpointRepositoryCaptureDeltaFrom CheckpointRepositoryCaptureMode = "delta_from"
@@ -120,19 +134,44 @@ const (
 // CheckpointRepositoryCapture is the required repository capture semantics
 // for the checkpoint protocol floor. It is Rust's internally tagged enum
 // (tag "mode", snake_case variants) as one struct: BaseCommit is set exactly
-// for ManagedClone and DeltaFrom.
+// for ManagedClone and DeltaFrom, ExcludeCommits for OriginDeltaCutoff.
 type CheckpointRepositoryCapture struct {
-	Mode       CheckpointRepositoryCaptureMode
-	BaseCommit string
+	Mode           CheckpointRepositoryCaptureMode
+	BaseCommit     string
+	ExcludeCommits []string
 }
 
 var checkpointRepositoryCaptureModes = []CheckpointRepositoryCaptureMode{
 	CheckpointRepositoryCaptureSessionDelta,
 	CheckpointRepositoryCaptureManagedClone,
+	CheckpointRepositoryCaptureOriginDelta,
+	CheckpointRepositoryCaptureOriginDeltaRaw,
+	CheckpointRepositoryCaptureOriginDeltaCutoff,
 	CheckpointRepositoryCaptureDeltaFrom,
 	CheckpointRepositoryCaptureRemoteWorkspace,
 	CheckpointRepositoryCaptureMetadataOnly,
 	CheckpointRepositoryCapturePlainDirectory,
+}
+
+// Equal is Rust's derived PartialEq.
+func (c CheckpointRepositoryCapture) Equal(other CheckpointRepositoryCapture) bool {
+	return c.Mode == other.Mode && c.BaseCommit == other.BaseCommit &&
+		slices.Equal(c.ExcludeCommits, other.ExcludeCommits)
+}
+
+// CheckpointRepositoryCaptureExportProtocolVersion is the export protocol a
+// specification for these repositories declares: the origin-delta version
+// when any is captured relative to origin (Rust's
+// CheckpointRepositoryCapture::export_protocol_version).
+func CheckpointRepositoryCaptureExportProtocolVersion(repositories []CheckpointRepositorySpec) uint32 {
+	for index := range repositories {
+		switch repositories[index].Capture.Mode {
+		case CheckpointRepositoryCaptureOriginDelta, CheckpointRepositoryCaptureOriginDeltaRaw,
+			CheckpointRepositoryCaptureOriginDeltaCutoff:
+			return CheckpointOriginDeltaExportProtocolVersion
+		}
+	}
+	return CheckpointExportProtocolVersion
 }
 
 // MarshalJSON writes the variant as serde does: the "mode" tag first, then
@@ -144,7 +183,17 @@ func (c CheckpointRepositoryCapture) MarshalJSON() ([]byte, error) {
 			Mode       CheckpointRepositoryCaptureMode `json:"mode"`
 			BaseCommit string                          `json:"base_commit"`
 		}{c.Mode, c.BaseCommit})
-	case CheckpointRepositoryCaptureSessionDelta, CheckpointRepositoryCaptureRemoteWorkspace,
+	case CheckpointRepositoryCaptureOriginDeltaCutoff:
+		excludeCommits := c.ExcludeCommits
+		if excludeCommits == nil {
+			excludeCommits = []string{}
+		}
+		return checkpointMarshal(struct {
+			Mode           CheckpointRepositoryCaptureMode `json:"mode"`
+			ExcludeCommits []string                        `json:"exclude_commits"`
+		}{c.Mode, excludeCommits})
+	case CheckpointRepositoryCaptureSessionDelta, CheckpointRepositoryCaptureOriginDelta,
+		CheckpointRepositoryCaptureOriginDeltaRaw, CheckpointRepositoryCaptureRemoteWorkspace,
 		CheckpointRepositoryCaptureMetadataOnly, CheckpointRepositoryCapturePlainDirectory:
 		return checkpointMarshal(struct {
 			Mode CheckpointRepositoryCaptureMode `json:"mode"`
@@ -184,7 +233,25 @@ func (c *CheckpointRepositoryCapture) UnmarshalJSON(data []byte) error {
 		}
 		*c = CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureMode(mode), BaseCommit: fields.BaseCommit}
 		return nil
-	case CheckpointRepositoryCaptureSessionDelta, CheckpointRepositoryCaptureRemoteWorkspace,
+	case CheckpointRepositoryCaptureOriginDeltaCutoff:
+		var fields struct {
+			ExcludeCommits []string `json:"exclude_commits"`
+		}
+		delete(members, "mode")
+		rest, err := json.Marshal(members)
+		if err != nil {
+			return err
+		}
+		if err := checkpointStrictDecode(rest, &fields, true); err != nil {
+			return err
+		}
+		if fields.ExcludeCommits == nil {
+			fields.ExcludeCommits = []string{}
+		}
+		*c = CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureMode(mode), ExcludeCommits: fields.ExcludeCommits}
+		return nil
+	case CheckpointRepositoryCaptureSessionDelta, CheckpointRepositoryCaptureOriginDelta,
+		CheckpointRepositoryCaptureOriginDeltaRaw, CheckpointRepositoryCaptureRemoteWorkspace,
 		CheckpointRepositoryCaptureMetadataOnly, CheckpointRepositoryCapturePlainDirectory:
 		*c = CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureMode(mode)}
 		return nil
@@ -200,16 +267,16 @@ func (c *CheckpointRepositoryCapture) UnmarshalJSON(data []byte) error {
 // provenance and paths, never secrets.
 type CheckpointExportSpec struct {
 	ProtocolVersion uint32 `json:"protocol_version"`
-	// IgnoreNestedRepositories is one suspension's explicit consent;
-	// ordinary checkpoints remain strict.
-	IgnoreNestedRepositories bool                       `json:"ignore_nested_repositories,omitempty" serde:"default"`
-	Session                  core.SessionManifest       `json:"session"`
-	Target                   core.TargetManifest        `json:"target"`
-	Bundle                   core.BundleManifest        `json:"bundle"`
-	RelayRoot                string                     `json:"relay_root"`
-	HarnessHome              string                     `json:"harness_home"`
-	WorkspaceRoot            string                     `json:"workspace_root"`
-	Repositories             []CheckpointRepositorySpec `json:"repositories"`
+	// Consent is typed consent for untracked files, keep-dir files, and
+	// in-progress operations.
+	Consent       core.CaptureConsent        `json:"consent" serde:"default"`
+	Session       core.SessionManifest       `json:"session"`
+	Target        core.TargetManifest        `json:"target"`
+	Bundle        core.BundleManifest        `json:"bundle"`
+	RelayRoot     string                     `json:"relay_root"`
+	HarnessHome   string                     `json:"harness_home"`
+	WorkspaceRoot string                     `json:"workspace_root"`
+	Repositories  []CheckpointRepositorySpec `json:"repositories"`
 	// ReportDirectories are the exact child directories owned by this
 	// session. Absent on older controllers.
 	ReportDirectories *[]string `json:"report_directories,omitempty"`
@@ -416,6 +483,10 @@ type TargetCheckpoint struct {
 	// predates this field simply omits it, so the controller must treat it
 	// as optional.
 	Timings *CheckpointExportTimings `json:"timings,omitempty"`
+	// Manifest is the archive manifest written into the archive. It lets a
+	// cross-target Move inspect repository metadata without downloading the
+	// archive to daemon disk.
+	Manifest *core.ArchiveManifest `json:"manifest,omitempty"`
 }
 
 // UnmarshalJSON refuses unknown fields (serde deny_unknown_fields).
@@ -584,12 +655,34 @@ func RepairOriginRefs(git GitCommandRunner, path string, id string) error {
 	return fmt.Errorf("repository '%s' has no origin refs to delta against; refusing to bundle full history (%s)", id, outcome)
 }
 
-// CurrentNativeSessionReceivedPrompt is whether the native session the
-// checkpoint continues ever received a prompt. `/clear` replaces the native
-// session, so only the conversation after the newest context boundary
-// belongs to the current one. Codex writes a rollout, and Claude Code a
-// transcript, only when a turn runs, so a session with no prompt here has no
-// native history to lose.
+// CurrentNativeSessionIsUnused is whether the native session the checkpoint
+// continues is proven unused.
+//
+// When the archive carries worker-owned NativeUseEvidence (schema >= 15),
+// that proof is authoritative: only NativeSessionUseUnused (matching the
+// expected native session ID when supplied) authorizes treating the session
+// as unused. Both Used and Unknown return false.
+//
+// Legacy archives (schema <= 14) lack NativeUseEvidence and fall back to the
+// transcript-based CurrentNativeSessionReceivedPrompt predicate.
+func CurrentNativeSessionIsUnused(snapshot *core.CanonicalSessionSnapshot, expectedNativeSessionID *string) bool {
+	if evidence := snapshot.NativeUseEvidence; evidence != nil {
+		return evidence.Version == 1 &&
+			evidence.Usage == core.NativeSessionUseUnused &&
+			(expectedNativeSessionID == nil || evidence.NativeSessionID == *expectedNativeSessionID)
+	}
+	return !CurrentNativeSessionReceivedPrompt(snapshot)
+}
+
+// CurrentNativeSessionReceivedPrompt is the legacy-archive fallback (schema
+// <= 14) for whether the native session the checkpoint continues ever
+// received a prompt. New archives carry worker-owned NativeUseEvidence
+// (schema 15) and consult CurrentNativeSessionIsUnused.
+//
+// `/clear` replaces the native session, so only the conversation after the
+// newest context boundary belongs to the current one. Codex writes a
+// rollout, and Claude Code a transcript, only when a turn runs, so a session
+// with no prompt here has no native history to lose.
 func CurrentNativeSessionReceivedPrompt(snapshot *core.CanonicalSessionSnapshot) bool {
 	start := snapshot.CurrentContextStart()
 	for i := range snapshot.Transcript {
@@ -598,9 +691,8 @@ func CurrentNativeSessionReceivedPrompt(snapshot *core.CanonicalSessionSnapshot)
 			continue
 		}
 		_, user := item.Body.(core.CanonicalTranscriptBodyUser)
-		// The shipped canonical format rejects unknown fields. Keep adoption
-		// conservative until its native-use proof can be carried by the
-		// planned archive schema revision.
+		// Legacy schema <= 14 adoption archives lacked native_use_evidence;
+		// keep treating the conservative adoption marker as prompted.
 		if user || item.StableID == core.AdoptionHistoryUnavailableItemID {
 			return true
 		}

@@ -7,6 +7,8 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/zlib"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -545,7 +547,7 @@ func TestStreamingVerificationDoesNotRetainLargeNoncanonicalPayloads(t *testing.
 	// A preparation cancellation reaches readers sharing the archive for
 	// parallel verification.
 	cancelled := new(atomic.Bool)
-	archive, err := openArchiveCancellable(path, cancelled)
+	archive, err := openArchiveCancellable(path, cancelled, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2075,7 +2077,7 @@ func TestReviewRefsRoundTripWithNonCommitTipsAndRestoreConflicts(t *testing.T) {
 			conflicting := snapshot
 			conflicting.Metadata.SavedRefs = maps.Clone(snapshot.Metadata.SavedRefs)
 			conflicting.Metadata.SavedRefs[otherStart] = head
-			if err := restoreGitSnapshotForSession(SystemGit{}, destination, &conflicting, archiveRef("moving"), true); err != nil {
+			if _, err := restoreGitSnapshotForSession(SystemGit{}, destination, &conflicting, archiveRef("moving"), true); err != nil {
 				t.Fatal(err)
 			}
 			for _, ref := range [][2]string{{reviewed, later}, {overridden, later}, {start, head}, {otherStart, later}} {
@@ -2125,7 +2127,7 @@ func TestSessionStartsAndExplicitReviewBasesFollowWorktreeNames(t *testing.T) {
 		t.Fatalf("review baseline ref %v", snapshot.Metadata.ReviewBaselineRef)
 	}
 	destination := cloneRepository(t, directory, origin, "destination")
-	if err := restoreGitSnapshotForSession(SystemGit{}, destination, &snapshot, archiveRef("moving"), false); err != nil {
+	if _, err := restoreGitSnapshotForSession(SystemGit{}, destination, &snapshot, archiveRef("moving"), false); err != nil {
 		t.Fatal(err)
 	}
 	relocatedStart := fmt.Sprintf("refs/mj/session-start/%s/%s", digestBytes([]byte("moving")), digestBytes([]byte(mainScope)))
@@ -2255,7 +2257,7 @@ func TestCaptureAndRestoreLeaveARepositorysOldReviewPinsAlone(t *testing.T) {
 			destination = cloneRepository(t, directory, origin, "restored")
 		}
 		beforeRestore := refs(destination)
-		if err := restoreGitSnapshotForSession(SystemGit{}, destination, &snapshot, archiveRef("moving"), true); err != nil {
+		if _, err := restoreGitSnapshotForSession(SystemGit{}, destination, &snapshot, archiveRef("moving"), true); err != nil {
 			t.Fatal(err)
 		}
 		afterRestore := refs(destination)
@@ -2303,7 +2305,7 @@ func TestAnOldCheckpointCarryingAReviewBaselinePinRestoresWithoutIt(t *testing.T
 	snapshot.Metadata.ReviewBaselineRef = archiveRef(mainScope)
 
 	destination := cloneRepository(t, directory, origin, "restored")
-	if err := restoreGitSnapshotForSession(SystemGit{}, destination, &snapshot, archiveRef("moving"), true); err != nil {
+	if _, err := restoreGitSnapshotForSession(SystemGit{}, destination, &snapshot, archiveRef("moving"), true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3275,4 +3277,787 @@ func TestArchiveRoundTripPreservesClearBoundaryAndRequiresContextSchema(t *testi
 	archiveWriteZip(t, downgraded, directory, &manifest, payloads)
 	_, err = ReadArchiveVerified(downgraded)
 	archiveAssertErrorContains(t, err, "message transcript entries require archive schema 9")
+}
+
+func TestNativeUseEvidenceUsesSchema15WithAndWithoutOriginDeltaAndRejectsDowngrade(t *testing.T) {
+	directory := t.TempDir()
+	evidence := core.NativeSessionUseEvidence{
+		Version:         1,
+		NativeSessionID: "native-1",
+		OpenedOrdinal:   archiveRef(uint64(2)),
+		Usage:           core.NativeSessionUseUnknown,
+	}
+
+	// Without origin_delta: writes schema 15, reads back accurately, rejects
+	// downgrade to 13.
+	archiveInput := input()
+	archiveInput.CanonicalSession.NativeUseEvidence = archiveRef(evidence)
+	path := filepath.Join(directory, "native-use.hel.zip")
+	verified := archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(path, &archiveInput))
+	if verified.Manifest.SchemaVersion != core.ArchiveSchemaVersionNativeUse {
+		t.Fatalf("schema = %d", verified.Manifest.SchemaVersion)
+	}
+	if !reflect.DeepEqual(verified.CanonicalSession.NativeUseEvidence, &evidence) {
+		t.Fatalf("evidence = %+v", verified.CanonicalSession.NativeUseEvidence)
+	}
+
+	manifest, payloads, err := prepareArchive(&archiveInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SchemaVersion = core.ArchiveSchemaVersionMailbox
+	downgraded := filepath.Join(directory, "native-use-downgraded.hel.zip")
+	archiveWriteZip(t, downgraded, directory, &manifest, payloads)
+	_, err = ReadArchiveVerified(downgraded)
+	archiveAssertErrorContains(t, err, "native-session-use evidence requires archive schema 15")
+
+	// With origin_delta: also writes schema 15 and verifies cleanly.
+	deltaInput := input()
+	deltaInput.CanonicalSession.NativeUseEvidence = archiveRef(evidence)
+	repository := &deltaInput.Repositories[0]
+	repository.CommittedBundle = nil
+	repository.StagedPatch = nil
+	repository.UnstagedPatch = nil
+	repository.UntrackedTar = nil
+	repository.Metadata.SavedRefs = nil
+	repository.Metadata.StashStack = nil
+	originURL := repository.Metadata.Origin
+	headCommit := repository.Metadata.HeadCommit
+	repository.Metadata.OriginDelta = &core.WorkspaceSnapshotMetadata{
+		OriginURL:             &originURL,
+		ObjectFormat:          "sha1",
+		Notices:               []string{},
+		Head:                  core.SnapshotHead{Kind: core.SnapshotHeadBranch, Name: "main", Commit: headCommit},
+		Refs:                  map[string]string{"refs/heads/main": headCommit},
+		BranchTracking:        map[string]core.BranchTracking{},
+		Stash:                 []core.SnapshotStashEntry{},
+		Worktrees:             []core.SnapshotWorktree{},
+		InitializedSubmodules: []core.SnapshotSubmodule{},
+		IndexGitlinks:         []core.SnapshotGitlink{},
+		Prerequisites:         []string{},
+	}
+	deltaPath := filepath.Join(directory, "native-use-origin-delta.hel.zip")
+	deltaVerified := archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(deltaPath, &deltaInput))
+	if deltaVerified.Manifest.SchemaVersion != core.ArchiveSchemaVersionNativeUse {
+		t.Fatalf("schema = %d", deltaVerified.Manifest.SchemaVersion)
+	}
+	if !reflect.DeepEqual(deltaVerified.CanonicalSession.NativeUseEvidence, &evidence) {
+		t.Fatalf("evidence = %+v", deltaVerified.CanonicalSession.NativeUseEvidence)
+	}
+}
+
+func uncompressedUntrackedExcess(manifest *core.ArchiveManifest) uint64 {
+	var total uint64
+	for index := range manifest.Payloads {
+		payload := &manifest.Payloads[index]
+		if (payload.Role.Kind == core.PayloadRoleGitUntrackedTar || payload.Role.Kind == core.PayloadRoleGitLinkedWorktreeUntrackedTar) &&
+			payload.Size > 1024 {
+			total += payload.Size - 1024
+		}
+	}
+	return total
+}
+
+func compressedUntrackedEntries(t testing.TB, path string) uint64 {
+	t.Helper()
+	archive, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	var total uint64
+	for _, entry := range archive.File {
+		if strings.Contains(entry.Name, "untracked.tar") {
+			total += entry.CompressedSize64
+		}
+	}
+	return total
+}
+
+func originDeltaRepository(repository *RepositorySnapshot) {
+	repository.CommittedBundle = nil
+	repository.StagedPatch = nil
+	repository.UnstagedPatch = nil
+	repository.UntrackedTar = nil
+	repository.OperationPayloads = nil
+	repository.LinkedWorktrees = nil
+	repository.Metadata.SavedRefs = nil
+	repository.Metadata.StashStack = nil
+	repository.Metadata.GitOperation = nil
+	origin := repository.Metadata.Origin
+	head := repository.Metadata.HeadCommit
+	branch := "main"
+	if repository.Metadata.Branch != nil {
+		branch = *repository.Metadata.Branch
+	}
+	repository.Metadata.OriginDelta = &core.WorkspaceSnapshotMetadata{
+		OriginURL:             &origin,
+		ObjectFormat:          "sha1",
+		Notices:               []string{},
+		Head:                  core.SnapshotHead{Kind: core.SnapshotHeadBranch, Name: branch, Commit: head},
+		Refs:                  map[string]string{"refs/heads/main": head},
+		BranchTracking:        map[string]core.BranchTracking{},
+		Stash:                 []core.SnapshotStashEntry{},
+		Worktrees:             []core.SnapshotWorktree{},
+		InitializedSubmodules: []core.SnapshotSubmodule{},
+		IndexGitlinks:         []core.SnapshotGitlink{},
+		Prerequisites:         []string{},
+	}
+}
+
+func snapshotFromVerified(t testing.TB, archive *VerifiedArchive, repository *core.RepositoryManifest) RepositorySnapshot {
+	t.Helper()
+	id := repository.Metadata.ID
+	payload := func(role core.PayloadRole) []byte {
+		t.Helper()
+		data, err := archive.PayloadByRole(&role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.Clone(data)
+	}
+	repositoryRole := func(kind core.PayloadRoleKind) core.PayloadRole {
+		return core.PayloadRole{Kind: kind, RepositoryID: id}
+	}
+	snapshot := RepositorySnapshot{
+		Metadata:        repository.Metadata,
+		CommittedBundle: payload(repositoryRole(core.PayloadRoleGitBundle)),
+		StagedPatch:     payload(repositoryRole(core.PayloadRoleGitStagedPatch)),
+		UnstagedPatch:   payload(repositoryRole(core.PayloadRoleGitUnstagedPatch)),
+		UntrackedTar:    payload(repositoryRole(core.PayloadRoleGitUntrackedTar)),
+	}
+	if repository.Metadata.GitOperation != nil {
+		snapshot.OperationPayloads = &GitOperationPayloads{
+			ConflictedWorktreeTar: payload(repositoryRole(core.PayloadRoleGitConflictedWorktreeTar)),
+			StateTar:              payload(repositoryRole(core.PayloadRoleGitOperationStateTar)),
+		}
+	}
+	for index := range repository.LinkedWorktrees {
+		worktree := &repository.LinkedWorktrees[index]
+		worktreeRole := func(kind core.PayloadRoleKind) core.PayloadRole {
+			return core.PayloadRole{Kind: kind, RepositoryID: id, Worktree: uint32(index)}
+		}
+		snapshot.LinkedWorktrees = append(snapshot.LinkedWorktrees, LinkedWorktreeSnapshot{
+			Metadata:      worktree.Metadata,
+			StagedPatch:   payload(worktreeRole(core.PayloadRoleGitLinkedWorktreeStagedPatch)),
+			UnstagedPatch: payload(worktreeRole(core.PayloadRoleGitLinkedWorktreeUnstagedPatch)),
+			UntrackedTar:  payload(worktreeRole(core.PayloadRoleGitLinkedWorktreeUntrackedTar)),
+		})
+	}
+	return snapshot
+}
+
+func archiveFileSize(t testing.TB, path string) uint64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uint64(info.Size())
+}
+
+func archiveAssertSamePayload(t testing.TB, before, after *VerifiedArchive, role core.PayloadRole) {
+	t.Helper()
+	left, err := before.PayloadByRole(&role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := after.PayloadByRole(&role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(left, right) {
+		t.Fatalf("%s changed", payloadRoleDebug(&role))
+	}
+}
+
+func archiveAssertEmptyUntracked(t testing.TB, archive *VerifiedArchive, role core.PayloadRole) {
+	t.Helper()
+	body, err := archive.PayloadByRole(&role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, emptyTar()) {
+		t.Fatalf("%s was not emptied", payloadRoleDebug(&role))
+	}
+}
+
+func TestPurgeReplacesPrimaryAndLinkedUntrackedFilesAndRestoresWithoutThem(t *testing.T) {
+	directory := t.TempDir()
+	origin := filepath.Join(directory, "origin")
+	initializeRepository(t, origin)
+	commitFile(t, origin, "base.txt", []byte("base\n"), "base")
+	base := gitLine(origin, "rev-parse", "HEAD")
+	source := cloneRepository(t, directory, origin, "source")
+	commitFile(t, source, "first.txt", []byte("first\n"), "first")
+	archiveWriteFile(t, filepath.Join(source, "base.txt"), []byte("stashed tracked\n"))
+	archiveWriteFile(t, filepath.Join(source, "stash-only.txt"), []byte("stashed untracked\n"))
+	git(source, "stash", "push", "-u", "-q", "-m", "holds untracked")
+	archiveWriteFile(t, filepath.Join(source, "staged.txt"), []byte("staged\n"))
+	git(source, "add", "staged.txt")
+	archiveWriteFile(t, filepath.Join(source, "base.txt"), []byte("unstaged edit\n"))
+	archiveWriteFile(t, filepath.Join(source, "scratch.txt"), []byte("scratch\n"))
+	git(source, "worktree", "add", "-q", "-b", "lane", "lane")
+	archiveWriteFile(t, filepath.Join(source, "lane", "lane-note.txt"), []byte("lane\n"))
+	head := gitLine(source, "rev-parse", "HEAD")
+
+	snapshot, err := CollectGitSnapshot(SystemGit{}, source, &GitCollectionSpec{
+		ID:                  "repo",
+		RelativeDestination: "repo",
+		History:             GitHistoryModeCloneFrom(base),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.UntrackedTar) == 0 {
+		t.Fatal("no untracked tar")
+	}
+	if len(snapshot.LinkedWorktrees) != 1 || len(snapshot.LinkedWorktrees[0].UntrackedTar) == 0 {
+		t.Fatalf("linked worktrees = %d", len(snapshot.LinkedWorktrees))
+	}
+	if !slices.ContainsFunc(snapshot.Metadata.StashStack, func(entry core.SavedStashEntry) bool {
+		return strings.Contains(entry.Message, "holds untracked")
+	}) {
+		t.Fatalf("stash stack = %+v", snapshot.Metadata.StashStack)
+	}
+
+	archiveInput := input()
+	archiveInput.Bundle.ID = "repo"
+	archiveInput.Bundle.PrimaryRepository = "repo"
+	archiveInput.Repositories = []RepositorySnapshot{snapshot}
+	sourceArchive := filepath.Join(directory, "legacy.hel.zip")
+	written := archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(sourceArchive, &archiveInput))
+	schema := written.Manifest.SchemaVersion
+	if schema == core.ArchiveSchemaVersionOriginDelta {
+		t.Fatalf("schema = %d", schema)
+	}
+	before := archiveMust[VerifiedArchive](t)(ReadArchiveVerified(sourceArchive))
+	sourceLen := archiveFileSize(t, sourceArchive)
+
+	destination := filepath.Join(directory, "purged.hel.zip")
+	dryMissing := filepath.Join(directory, "no-such-dir", "dry.hel.zip")
+	dry := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(sourceArchive, dryMissing, true))
+	if _, ok := dry.Kind.(ArchiveUntrackedPurgeKindDryRun); !ok {
+		t.Fatalf("kind = %#v", dry.Kind)
+	}
+	if dry.BytesReclaimed == 0 {
+		t.Fatal("a dry run reclaimed nothing")
+	}
+	archiveAssertNotExists(t, filepath.Join(directory, "no-such-dir"))
+	if !slices.ContainsFunc(dry.StashUntrackedNotes, func(note StashUntrackedNote) bool {
+		return note.RepositoryID == "repo" && strings.Contains(note.Message, "holds untracked")
+	}) {
+		t.Fatalf("notes = %+v", dry.StashUntrackedNotes)
+	}
+
+	report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(sourceArchive, destination, false))
+	rewritten, ok := report.Kind.(ArchiveUntrackedPurgeKindRewritten)
+	if !ok {
+		t.Fatalf("expected a rewritten archive, got %#v", report.Kind)
+	}
+	if report.SchemaVersion != schema {
+		t.Fatalf("schema = %d, want %d", report.SchemaVersion, schema)
+	}
+	uncompressed := uncompressedUntrackedExcess(&before.Manifest)
+	if uncompressed <= dry.BytesReclaimed || uncompressed <= report.BytesReclaimed {
+		t.Fatalf("uncompressed %d, dry %d, live %d", uncompressed, dry.BytesReclaimed, report.BytesReclaimed)
+	}
+	if want := saturatingSub(sourceLen, archiveFileSize(t, destination)); report.BytesReclaimed != want {
+		t.Fatalf("reclaimed %d, want %d", report.BytesReclaimed, want)
+	}
+	if !reflect.DeepEqual(report.StashUntrackedNotes, dry.StashUntrackedNotes) {
+		t.Fatalf("notes %+v, dry %+v", report.StashUntrackedNotes, dry.StashUntrackedNotes)
+	}
+	streamed := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(destination))
+	if streamed.ArchiveSha256 != rewritten.ArchiveSha256 || streamed.Manifest.SchemaVersion != schema {
+		t.Fatalf("streamed %s schema %d", streamed.ArchiveSha256, streamed.Manifest.SchemaVersion)
+	}
+	after := archiveMust[VerifiedArchive](t)(ReadArchiveVerified(destination))
+	if after.ArchiveSha256 != rewritten.ArchiveSha256 {
+		t.Fatalf("digest %s, want %s", after.ArchiveSha256, rewritten.ArchiveSha256)
+	}
+	if archiveFileSize(t, destination) >= sourceLen {
+		t.Fatal("the purged archive is not smaller")
+	}
+	for _, role := range []core.PayloadRole{
+		{Kind: core.PayloadRoleGitBundle, RepositoryID: "repo"},
+		{Kind: core.PayloadRoleGitStagedPatch, RepositoryID: "repo"},
+		{Kind: core.PayloadRoleGitUnstagedPatch, RepositoryID: "repo"},
+		{Kind: core.PayloadRoleGitLinkedWorktreeStagedPatch, RepositoryID: "repo", Worktree: 0},
+		{Kind: core.PayloadRoleGitLinkedWorktreeUnstagedPatch, RepositoryID: "repo", Worktree: 0},
+		{Kind: core.PayloadRoleCanonicalSession},
+	} {
+		archiveAssertSamePayload(t, &before, &after, role)
+	}
+	for _, role := range []core.PayloadRole{
+		{Kind: core.PayloadRoleGitUntrackedTar, RepositoryID: "repo"},
+		{Kind: core.PayloadRoleGitLinkedWorktreeUntrackedTar, RepositoryID: "repo", Worktree: 0},
+	} {
+		archiveAssertEmptyUntracked(t, &after, role)
+	}
+
+	restored := snapshotFromVerified(t, &after, &after.Manifest.Repositories[0])
+	destinationRepository := cloneRepository(t, directory, origin, "restored")
+	if err := RestoreGitSnapshot(SystemGit{}, destinationRepository, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitLine(destinationRepository, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD %s, want %s", got, head)
+	}
+	for name, want := range map[string]string{"first.txt": "first\n", "staged.txt": "staged\n", "base.txt": "unstaged edit\n"} {
+		if got := archiveReadFile(t, filepath.Join(destinationRepository, name)); string(got) != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if !bytes.Equal(git(destinationRepository, "diff", "--cached"), git(source, "diff", "--cached")) {
+		t.Fatal("the staged diff changed")
+	}
+	if !bytes.Equal(git(destinationRepository, "diff"), git(source, "diff")) {
+		t.Fatal("the unstaged diff changed")
+	}
+	archiveAssertNotExists(t, filepath.Join(destinationRepository, "scratch.txt"))
+	archiveAssertNotExists(t, filepath.Join(destinationRepository, "lane", "lane-note.txt"))
+	if info, err := os.Stat(filepath.Join(destinationRepository, "lane", ".git")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("lane/.git is not a file: %v", err)
+	}
+}
+
+func TestPurgeDryRunAndAlreadyCleanArchivesDoNotWrite(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source.hel.zip")
+	sourceInput := input()
+	archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(source, &sourceInput))
+	destination := filepath.Join(directory, "dest.hel.zip")
+	dry := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, destination, true))
+	if _, ok := dry.Kind.(ArchiveUntrackedPurgeKindDryRun); !ok {
+		t.Fatalf("kind = %#v", dry.Kind)
+	}
+	if dry.BytesReclaimed == 0 {
+		t.Fatal("a dry run reclaimed nothing")
+	}
+	archiveAssertNotExists(t, destination)
+
+	for _, untracked := range [][]byte{nil, emptyTar()} {
+		clean := input()
+		for index := range clean.Repositories {
+			clean.Repositories[index].UntrackedTar = slices.Clone(untracked)
+		}
+		cleanPath := filepath.Join(directory, fmt.Sprintf("clean-%d.hel.zip", len(untracked)))
+		archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(cleanPath, &clean))
+		cleanDestination := filepath.Join(directory, fmt.Sprintf("clean-%d-out.hel.zip", len(untracked)))
+		report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(cleanPath, cleanDestination, false))
+		if _, ok := report.Kind.(ArchiveUntrackedPurgeKindAlreadyClean); !ok {
+			t.Fatalf("kind = %#v", report.Kind)
+		}
+		if report.BytesReclaimed != 0 {
+			t.Fatalf("reclaimed %d", report.BytesReclaimed)
+		}
+		archiveAssertNotExists(t, cleanDestination)
+	}
+}
+
+func TestPurgeReportsOnDiskBytesForACompressibleUntrackedPayload(t *testing.T) {
+	directory := t.TempDir()
+	archiveInput := input()
+	repetitive := bytes.Repeat([]byte{'a'}, 64*1024)
+	archiveInput.Repositories[0].UntrackedTar = tarWithFile("pad.txt", repetitive, 0o644)
+	archiveInput.Repositories[1].UntrackedTar = nil
+	source := filepath.Join(directory, "compressible.hel.zip")
+	archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(source, &archiveInput))
+	before := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(source))
+	uncompressed := uncompressedUntrackedExcess(&before.Manifest)
+	removed := compressedUntrackedEntries(t, source)
+	if uncompressed <= 60_000 || removed >= uncompressed {
+		t.Fatalf("uncompressed %d, removed %d", uncompressed, removed)
+	}
+
+	dry := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, filepath.Join(directory, "dry.hel.zip"), true))
+	if _, ok := dry.Kind.(ArchiveUntrackedPurgeKindDryRun); !ok {
+		t.Fatalf("kind = %#v", dry.Kind)
+	}
+	if dry.BytesReclaimed == 0 || dry.BytesReclaimed > removed || removed-dry.BytesReclaimed >= 2048 ||
+		dry.BytesReclaimed >= uncompressed {
+		t.Fatalf("dry %d, removed %d, uncompressed %d", dry.BytesReclaimed, removed, uncompressed)
+	}
+	archiveAssertNotExists(t, filepath.Join(directory, "dry.hel.zip"))
+
+	oldLen := archiveFileSize(t, source)
+	destination := filepath.Join(directory, "purged.hel.zip")
+	report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, destination, false))
+	newLen := archiveFileSize(t, destination)
+	if _, ok := report.Kind.(ArchiveUntrackedPurgeKindRewritten); !ok {
+		t.Fatalf("kind = %#v", report.Kind)
+	}
+	if report.BytesReclaimed != saturatingSub(oldLen, newLen) || report.BytesReclaimed == 0 ||
+		report.BytesReclaimed >= uncompressed {
+		t.Fatalf("reclaimed %d, old %d, new %d, uncompressed %d", report.BytesReclaimed, oldLen, newLen, uncompressed)
+	}
+}
+
+func TestPurgeReportsOriginDeltaAndStillRewritesAMixedArchive(t *testing.T) {
+	directory := t.TempDir()
+	full := input()
+	for index := range full.Repositories {
+		originDeltaRepository(&full.Repositories[index])
+	}
+	fullPath := filepath.Join(directory, "origin.hel.zip")
+	archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(fullPath, &full))
+	fullDestination := filepath.Join(directory, "origin-out.hel.zip")
+	report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(fullPath, fullDestination, false))
+	if _, ok := report.Kind.(ArchiveUntrackedPurgeKindAlreadyNewFormat); !ok {
+		t.Fatalf("kind = %#v", report.Kind)
+	}
+	archiveAssertNotExists(t, fullDestination)
+
+	mixed := input()
+	originDeltaRepository(&mixed.Repositories[0])
+	mixedPath := filepath.Join(directory, "mixed.hel.zip")
+	written := archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(mixedPath, &mixed))
+	if written.Manifest.SchemaVersion < core.ArchiveSchemaVersionOriginDelta {
+		t.Fatalf("schema = %d", written.Manifest.SchemaVersion)
+	}
+	mixedDestination := filepath.Join(directory, "mixed-out.hel.zip")
+	purged := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(mixedPath, mixedDestination, false))
+	if _, ok := purged.Kind.(ArchiveUntrackedPurgeKindRewritten); !ok {
+		t.Fatalf("kind = %#v", purged.Kind)
+	}
+	verified := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(mixedDestination))
+	if verified.Manifest.SchemaVersion != written.Manifest.SchemaVersion {
+		t.Fatalf("schema = %d, want %d", verified.Manifest.SchemaVersion, written.Manifest.SchemaVersion)
+	}
+	if verified.Manifest.Repositories[0].Metadata.OriginDelta == nil ||
+		verified.Manifest.Repositories[1].Metadata.OriginDelta != nil {
+		t.Fatal("origin delta metadata moved")
+	}
+	after := archiveMust[VerifiedArchive](t)(ReadArchiveVerified(mixedDestination))
+	archiveAssertEmptyUntracked(t, &after, core.PayloadRole{Kind: core.PayloadRoleGitUntrackedTar, RepositoryID: "worker"})
+}
+
+func TestPurgeKeepsSchema3WhenOnlyTheUntrackedTarWasSharded(t *testing.T) {
+	directory := t.TempDir()
+	archiveInput := input()
+	large := tarWithFile("big.bin", bytes.Repeat([]byte{'x'}, testPartBytes), 0o644)
+	if len(large) <= testPartBytes {
+		t.Fatalf("tar is %d bytes", len(large))
+	}
+	archiveInput.Repositories[0].UntrackedTar = large
+	source := filepath.Join(directory, "sharded.hel.zip")
+	if err := writeArchiveInstalledWithPartSize(source, &archiveInput, testPartBytes); err != nil {
+		t.Fatal(err)
+	}
+	before := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(source))
+	if before.Manifest.SchemaVersion != core.ArchiveSchemaVersionSharded {
+		t.Fatalf("schema = %d", before.Manifest.SchemaVersion)
+	}
+	if !slices.ContainsFunc(before.Manifest.Payloads, func(payload core.PayloadDescriptor) bool {
+		return payload.Role.Kind == core.PayloadRoleGitUntrackedTar && len(payload.Parts) > 1
+	}) {
+		t.Fatal("the untracked tar was not sharded")
+	}
+	destination := filepath.Join(directory, "sharded-purged.hel.zip")
+	oldLen := archiveFileSize(t, source)
+	uncompressed := uncompressedUntrackedExcess(&before.Manifest)
+	removed := compressedUntrackedEntries(t, source)
+	dry := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, filepath.Join(directory, "sharded-dry.hel.zip"), true))
+	if _, ok := dry.Kind.(ArchiveUntrackedPurgeKindDryRun); !ok {
+		t.Fatalf("kind = %#v", dry.Kind)
+	}
+	if dry.BytesReclaimed == 0 || dry.BytesReclaimed > removed || removed-dry.BytesReclaimed >= 2048 ||
+		dry.BytesReclaimed >= uncompressed {
+		t.Fatalf("dry %d, removed %d, uncompressed %d", dry.BytesReclaimed, removed, uncompressed)
+	}
+	report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, destination, false))
+	if _, ok := report.Kind.(ArchiveUntrackedPurgeKindRewritten); !ok {
+		t.Fatalf("kind = %#v", report.Kind)
+	}
+	if report.BytesReclaimed != saturatingSub(oldLen, archiveFileSize(t, destination)) || report.BytesReclaimed == 0 ||
+		report.BytesReclaimed >= uncompressed {
+		t.Fatalf("reclaimed %d, uncompressed %d", report.BytesReclaimed, uncompressed)
+	}
+	after := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(destination))
+	if after.Manifest.SchemaVersion != core.ArchiveSchemaVersionSharded {
+		t.Fatalf("schema = %d", after.Manifest.SchemaVersion)
+	}
+	untrackedRole := core.PayloadRole{Kind: core.PayloadRoleGitUntrackedTar, RepositoryID: "hel"}
+	index := slices.IndexFunc(after.Manifest.Payloads, func(payload core.PayloadDescriptor) bool {
+		return payload.Role == untrackedRole
+	})
+	if index < 0 {
+		t.Fatal("the untracked payload is missing")
+	}
+	untracked := after.Manifest.Payloads[index]
+	if untracked.Size != 1024 || len(untracked.Parts) <= 1 {
+		t.Fatalf("untracked size %d parts %d", untracked.Size, len(untracked.Parts))
+	}
+	read := archiveMust[VerifiedArchive](t)(ReadArchiveVerified(destination))
+	archiveAssertEmptyUntracked(t, &read, untrackedRole)
+}
+
+func TestPurgePreservesOperationStateAndOtherPayloads(t *testing.T) {
+	directory := t.TempDir()
+	archiveInput := input()
+	object := strings.Repeat("a", 40)
+	archiveInput.Repositories[0].Metadata.GitOperation = &core.SavedGitOperation{
+		Unmerged: []core.SavedUnmergedEntry{{
+			Path:   "conflict.txt",
+			Stage:  2,
+			Mode:   "100644",
+			Object: object,
+		}},
+		MissingWorktreePaths: []string{},
+		Objects:              []string{object},
+	}
+	archiveInput.Repositories[0].OperationPayloads = &GitOperationPayloads{
+		ConflictedWorktreeTar: tarWithFile("conflict.txt", []byte("<<<<<<<\n"), 0o644),
+		StateTar:              tarWithFile("MERGE_HEAD", []byte("abc\n"), 0o644),
+	}
+	source := filepath.Join(directory, "operation.hel.zip")
+	archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(source, &archiveInput))
+	before := archiveMust[VerifiedArchive](t)(ReadArchiveVerified(source))
+	destination := filepath.Join(directory, "operation-purged.hel.zip")
+	report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, destination, false))
+	if report.SchemaVersion != before.Manifest.SchemaVersion {
+		t.Fatalf("schema = %d, want %d", report.SchemaVersion, before.Manifest.SchemaVersion)
+	}
+	after := archiveMust[VerifiedArchive](t)(ReadArchiveVerified(destination))
+	if after.Manifest.SchemaVersion != before.Manifest.SchemaVersion {
+		t.Fatalf("schema = %d, want %d", after.Manifest.SchemaVersion, before.Manifest.SchemaVersion)
+	}
+	for _, role := range []core.PayloadRole{
+		{Kind: core.PayloadRoleGitOperationStateTar, RepositoryID: "hel"},
+		{Kind: core.PayloadRoleGitConflictedWorktreeTar, RepositoryID: "hel"},
+		{Kind: core.PayloadRoleGitBundle, RepositoryID: "hel"},
+		{Kind: core.PayloadRoleGitStagedPatch, RepositoryID: "hel"},
+		{Kind: core.PayloadRoleNativeArtifact, RelativePath: "sessions/native-1/rollout.jsonl"},
+	} {
+		archiveAssertSamePayload(t, &before, &after, role)
+	}
+	archiveAssertEmptyUntracked(t, &after, core.PayloadRole{Kind: core.PayloadRoleGitUntrackedTar, RepositoryID: "hel"})
+}
+
+func TestPurgeLeavesAnExistingDestinationArchiveUntouched(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source.hel.zip")
+	sourceInput := input()
+	archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(source, &sourceInput))
+	sourceBytes := archiveReadFile(t, source)
+	destination := filepath.Join(directory, "dest.hel.zip")
+	archiveWriteFile(t, destination, []byte("keep-me"))
+	_, err := PurgeUntrackedFromArchive(source, destination, false)
+	archiveAssertErrorContains(t, err, "existing")
+	if got := archiveReadFile(t, destination); string(got) != "keep-me" {
+		t.Fatalf("destination = %q", got)
+	}
+	if !bytes.Equal(archiveReadFile(t, source), sourceBytes) {
+		t.Fatal("the source archive changed")
+	}
+}
+
+func TestPurgeDetectsUntrackedStashEntriesInAShardedBundleWithoutBufferingBlobs(t *testing.T) {
+	directory := t.TempDir()
+	// Identical bytes zlib-compress to a single shard. A counter does not, so
+	// the bundle crosses several part boundaries while its blob stays large.
+	blob := make([]byte, 200*1024)
+	for index := range blob {
+		blob[index] = byte(index * 17)
+	}
+	bundle, stashCommit := bundleWithUntrackedStash(t, blob)
+	archiveInput := input()
+	archiveInput.Repositories[0].CommittedBundle = bundle
+	archiveInput.Repositories[0].Metadata.StashStack = []core.SavedStashEntry{{
+		Commit:  stashCommit,
+		Message: "holds untracked",
+	}}
+	manifest, payloads, err := prepareArchiveWithPartSize(&archiveInput, testPartBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleRole := core.PayloadRole{Kind: core.PayloadRoleGitBundle, RepositoryID: "hel"}
+	bundleIndex := slices.IndexFunc(payloads, func(payload pendingPayload) bool {
+		return payload.descriptor.Role == bundleRole
+	})
+	if bundleIndex < 0 {
+		t.Fatal("the bundle payload is missing")
+	}
+	data := payloads[bundleIndex].data
+	// Stored bundles are not split by the writer. Cut this one explicitly so
+	// the reader has to walk every shard in order.
+	partBytes := max(len(data)/3, 1)
+	if len(data) <= partBytes {
+		t.Fatalf("bundle is %d bytes", len(data))
+	}
+	path := payloads[bundleIndex].descriptor.Path
+	var parts []core.PayloadPartDescriptor
+	for index, chunk := range slices.Collect(slices.Chunk(data, partBytes)) {
+		parts = append(parts, core.PayloadPartDescriptor{
+			Path:   payloadPartPath(path, index),
+			Sha256: digestBytes(chunk),
+			Size:   uint64(len(chunk)),
+		})
+	}
+	if len(parts) <= 1 {
+		t.Fatalf("parts = %d", len(parts))
+	}
+	payloads[bundleIndex].descriptor.Parts = slices.Clone(parts)
+	for index := range manifest.Payloads {
+		if manifest.Payloads[index].Path == path {
+			manifest.Payloads[index].Parts = parts
+		}
+	}
+
+	source := filepath.Join(directory, "sharded-bundle.hel.zip")
+	temporary, err := os.CreateTemp(directory, ".tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictArchivePermissions(temporary.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeZip(temporary, directory, &manifest, payloads); err != nil {
+		t.Fatal(err)
+	}
+	if err := temporary.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temporary.Name(), source); err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictArchivePermissions(source); err != nil {
+		t.Fatal(err)
+	}
+	verified := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(source))
+	if !slices.ContainsFunc(verified.Manifest.Payloads, func(payload core.PayloadDescriptor) bool {
+		return payload.Role == bundleRole && len(payload.Parts) > 1
+	}) {
+		t.Fatal("the bundle is not sharded")
+	}
+
+	destination := filepath.Join(directory, "sharded-out.hel.zip")
+	resetBundleDiscardStats()
+	report := archiveMust[ArchiveUntrackedPurgeReport](t)(PurgeUntrackedFromArchive(source, destination, true))
+	if _, ok := report.Kind.(ArchiveUntrackedPurgeKindDryRun); !ok {
+		t.Fatalf("kind = %#v", report.Kind)
+	}
+	archiveAssertNotExists(t, destination)
+	if !slices.ContainsFunc(report.StashUntrackedNotes, func(note StashUntrackedNote) bool {
+		return note.RepositoryID == "hel" && strings.Contains(note.Message, "holds untracked")
+	}) {
+		t.Fatalf("notes = %+v", report.StashUntrackedNotes)
+	}
+	peak, total := bundleDiscardStats()
+	if peak == 0 || peak > 8*1024 {
+		t.Fatalf("discard peak %d", peak)
+	}
+	if total < uint64(len(blob)) {
+		t.Fatalf("discarded %d bytes of a %d byte blob", total, len(blob))
+	}
+}
+
+func bundleWithUntrackedStash(t testing.TB, blob []byte) ([]byte, string) {
+	t.Helper()
+	commit := []byte("tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n" +
+		"parent 0000000000000000000000000000000000000001\n" +
+		"parent 0000000000000000000000000000000000000002\n" +
+		"parent 0000000000000000000000000000000000000003\n" +
+		"author T <t@t> 1 +0000\n" +
+		"committer T <t@t> 1 +0000\n" +
+		"\n" +
+		"holds untracked\n")
+	oid := gitObjectID("commit", commit, false)
+	pack := []byte("PACK")
+	pack = binary.BigEndian.AppendUint32(pack, 2)
+	pack = binary.BigEndian.AppendUint32(pack, 2)
+	pack = pushStoredObject(t, pack, 1, commit)
+	pack = pushStoredObject(t, pack, 3, blob)
+	pack = append(pack, make([]byte, 20)...)
+	return append([]byte("# v2 git bundle\n\n"), pack...), oid
+}
+
+func pushStoredObject(t testing.TB, pack []byte, kind byte, body []byte) []byte {
+	t.Helper()
+	size := len(body)
+	first := kind<<4 | byte(size&0x0f)
+	size >>= 4
+	if size > 0 {
+		first |= 0x80
+	}
+	pack = append(pack, first)
+	for size > 0 {
+		b := byte(size & 0x7f)
+		size >>= 7
+		if size > 0 {
+			b |= 0x80
+		}
+		pack = append(pack, b)
+	}
+	var compressed bytes.Buffer
+	encoder := zlib.NewWriter(&compressed)
+	if _, err := encoder.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return append(pack, compressed.Bytes()...)
+}
+
+func TestOlderArchivesWithoutTerminalDetailMetadataStillRestoreFullOutput(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "legacy.hel.zip")
+	legacy := input()
+	output := strings.Repeat("terminal log line\n", 8*1024)
+	legacy.CanonicalSession.Transcript = append(legacy.CanonicalSession.Transcript, core.CanonicalTranscriptItem{
+		StableID:        "terminal:legacy",
+		Position:        3,
+		CreatedAtMs:     104,
+		LastChangedAtMs: 104,
+		Body: core.CanonicalTranscriptBodyTerminalOutput{
+			Record: core.CanonicalTerminalOutput{
+				TerminalID: "legacy",
+				Output:     output,
+				ExitCode:   archiveRef(uint32(1)),
+			},
+		},
+	})
+	archiveMust[VerifiedArchiveMetadata](t)(WriteArchiveAtomic(path, &legacy))
+	reader, entry := archiveZipEntry(t, path, "canonical/session.json")
+	defer reader.Close()
+	opened, err := entry.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(opened)
+	opened.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session struct {
+		Transcript []struct {
+			Body map[string]json.RawMessage `json:"body"`
+		} `json:"transcript"`
+	}
+	if err := json.Unmarshal(raw, &session); err != nil {
+		t.Fatal(err)
+	}
+	oldBody := session.Transcript[2].Body
+	var record struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(oldBody["record"], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Output != output {
+		t.Fatal("the archived output changed")
+	}
+	for _, field := range []string{"output_line_count", "first_error_line", "detail_trimmed"} {
+		if _, present := oldBody[field]; present {
+			t.Fatalf("%s was written", field)
+		}
+	}
+
+	archive := archiveMust[VerifiedArchiveMetadata](t)(VerifyArchiveStreaming(path))
+	archiveAssertSameJSON(t, legacy.CanonicalSession.Transcript[2], archive.CanonicalSession.Transcript[2])
 }

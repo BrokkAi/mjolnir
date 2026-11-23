@@ -836,7 +836,7 @@ func packStagedCheckpoint(spec *CheckpointPackSpec, stagePath, outputPath string
 	eventFrontier := spec.CanonicalSession.EventFrontier
 	eventFrontierDigest := spec.CanonicalSession.EventFrontierDigest
 	archiveStarted := time.Now()
-	sha, err := WriteArchiveHashed(outputPath, &ArchiveInput{
+	sha, archiveManifest, err := WriteArchiveHashedWithManifest(outputPath, &ArchiveInput{
 		Session:          manifest.Session,
 		Target:           manifest.Target,
 		Bundle:           manifest.Bundle,
@@ -859,6 +859,7 @@ func packStagedCheckpoint(spec *CheckpointPackSpec, stagePath, outputPath string
 			ArchiveMs:      archiveMs,
 			TotalMs:        uint64(time.Since(started).Milliseconds()),
 		},
+		Manifest: &archiveManifest,
 	}, nil
 }
 
@@ -926,9 +927,10 @@ func ExportCheckpointWithGit(spec *CheckpointExportSpec, git GitCommandRunner) (
 
 func ExportCheckpointWithNativeState(spec *CheckpointExportSpec, git GitCommandRunner, nativeState NativeCheckpointState) (TargetCheckpoint, error) {
 	started := time.Now()
-	if spec.ProtocolVersion != CheckpointExportProtocolVersion {
+	protocolVersion := CheckpointRepositoryCaptureExportProtocolVersion(spec.Repositories)
+	if spec.ProtocolVersion != protocolVersion {
 		return TargetCheckpoint{}, fmt.Errorf("unsupported checkpoint export protocol version %d; worker supports %d",
-			spec.ProtocolVersion, CheckpointExportProtocolVersion)
+			spec.ProtocolVersion, protocolVersion)
 	}
 	relayRoot, err := ResolveTargetPath(spec.RelayRoot)
 	if err != nil {
@@ -964,7 +966,7 @@ func ExportCheckpointWithNativeState(spec *CheckpointExportSpec, git GitCommandR
 	// A native session that never received a prompt legitimately has no
 	// harness artifacts yet; requiring them would make an unused session, or
 	// one just replaced by `/clear`, impossible to close cleanly (R4-5).
-	prompted := CurrentNativeSessionReceivedPrompt(&spec.CanonicalSession)
+	allowEmptyNative := CurrentNativeSessionIsUnused(&spec.CanonicalSession, &spec.Session.NativeSessionID)
 	nativeStarted := time.Now()
 	nativeArtifacts, err := collectCheckpointNativeArtifacts(
 		&spec.Session,
@@ -972,7 +974,7 @@ func ExportCheckpointWithNativeState(spec *CheckpointExportSpec, git GitCommandR
 		harnessHome,
 		workspaceRoot,
 		spec.ReportDirectories,
-		!prompted,
+		allowEmptyNative,
 		nativeState,
 	)
 	if err != nil {
@@ -1012,11 +1014,15 @@ func ExportCheckpointWithNativeState(spec *CheckpointExportSpec, git GitCommandR
 	}
 	nativeMs := uint64(time.Since(nativeStarted).Milliseconds())
 	repositoriesStarted := time.Now()
-	untrackedFiles := UntrackedFilesInclude
-	if spec.IgnoreNestedRepositories {
-		untrackedFiles = UntrackedFilesIgnoreNestedRepositories
+	if slices.ContainsFunc(spec.Repositories, func(repository CheckpointRepositorySpec) bool {
+		return repository.Capture.Equal(CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureOriginDelta})
+	}) {
+		if err := verifyOriginDeltaQuiescence(relayRoot, workspaceRoot, spec.Repositories, git); err != nil {
+			return TargetCheckpoint{}, err
+		}
 	}
-	repositories, err := collectCheckpointRepositoriesWithPolicy(workspaceRoot, spec.Repositories, git, untrackedFiles)
+	repositories, err := collectCheckpointRepositoriesWithPolicy(workspaceRoot, spec.Repositories, git,
+		&spec.Session.ID, &nativeSnapshot, UntrackedFilesInclude, &spec.Consent)
 	if err != nil {
 		return TargetCheckpoint{}, err
 	}
@@ -1026,7 +1032,7 @@ func ExportCheckpointWithNativeState(spec *CheckpointExportSpec, git GitCommandR
 	// `CheckpointTransfer::execute` checks the controller's copy against this
 	// digest; resume/import performs full structural verification when read.
 	archiveStarted := time.Now()
-	sha, err := WriteArchiveHashedBorrowed(
+	sha, archiveManifest, err := WriteArchiveHashedBorrowedWithManifest(
 		outputPath,
 		&spec.Session,
 		&spec.Target,
@@ -1050,23 +1056,272 @@ func ExportCheckpointWithNativeState(spec *CheckpointExportSpec, git GitCommandR
 			ArchiveMs:      archiveMs,
 			TotalMs:        uint64(time.Since(started).Milliseconds()),
 		},
+		Manifest: &archiveManifest,
 	}, nil
 }
 
 func collectCheckpointRepositories(workspaceRoot string, specifications []CheckpointRepositorySpec, git GitCommandRunner) ([]RepositorySnapshot, error) {
-	return collectCheckpointRepositoriesWithPolicy(workspaceRoot, specifications, git, UntrackedFilesInclude)
+	return collectCheckpointRepositoriesWithPolicy(workspaceRoot, specifications, git, nil, nil, UntrackedFilesInclude,
+		&CaptureConsent{})
+}
+
+func verifyOriginDeltaQuiescence(relayRoot string, workspaceRoot string, repositories []CheckpointRepositorySpec, git GitCommandRunner) error {
+	var originDeltaRepositories []*CheckpointRepositorySpec
+	for index := range repositories {
+		if repositories[index].Capture.Mode == CheckpointRepositoryCaptureOriginDelta {
+			originDeltaRepositories = append(originDeltaRepositories, &repositories[index])
+		}
+	}
+	if len(originDeltaRepositories) == 0 {
+		return errors.New("managed clone suspend requires at least one origin-delta repository")
+	}
+	request, ok, err := core.WorkerSuspendRead[core.SuspendRequest](relayRoot, core.WorkerSuspendRequest)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("managed clone capture has no quiescence request")
+	}
+	receipt, ok, err := core.WorkerSuspendRead[core.SuspendReceipt](relayRoot, core.WorkerSuspendReceipt)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("managed clone capture has no quiescence receipt")
+	}
+	quiesced := false
+	if receipt.Operation == request.Operation && receipt.Error == nil {
+		alive, err := request.Worker.IsAlive()
+		if err != nil {
+			return err
+		}
+		if !alive {
+			launch, err := core.WorkerLaunchConfigRead(core.Join(relayRoot, "launch.json"))
+			if err != nil {
+				return err
+			}
+			quiesced = launch.RunMode == core.WorkerRunModeCheckpointOnly
+		}
+	}
+	if !quiesced {
+		return errors.New("managed clone capture requires a quiesced worker")
+	}
+	quiescedCheckout, err := checkpointCanonicalize(request.Checkout)
+	if err != nil {
+		return err
+	}
+	for _, repository := range originDeltaRepositories {
+		location, err := locateCheckout(git, core.Join(workspaceRoot, repository.RelativeDestination))
+		if err != nil {
+			return err
+		}
+		topLevel, err := checkpointCanonicalize(location.topLevel)
+		if err != nil {
+			return err
+		}
+		if !checkpointPathStartsWith(topLevel, quiescedCheckout) {
+			return errors.New("quiescence receipt belongs to a different checkout")
+		}
+	}
+	return nil
+}
+
+// CheckoutKeepDir is the entire `.mj/keep` directory under a managed
+// checkout, scanned by suspend preflight and snapshot capture before a
+// managed checkout is deleted so current per-session files
+// (`.mj/keep/<session-id>/...`), legacy direct files (`.mj/keep/...`), and
+// sibling subdirectories hidden by `/.mj/keep/` in `.git/info/exclude` are
+// all listed and require discard consent.
+func CheckoutKeepDir(checkout string) string {
+	directory, err := core.SnapshotKeepDir(checkout, nil)
+	if err != nil {
+		panic("checkout_keep_dir has no session_id to reject")
+	}
+	return directory
+}
+
+// SessionKeepDir is the per-session `.mj/keep/<session-id>` directory under
+// a repository checkout, shared by worker launch (`MJ_KEEP_DIR`) and Move
+// transfer / `--skip`.
+func SessionKeepDir(checkout string, sessionID string) (string, error) {
+	return core.SnapshotKeepDir(checkout, &sessionID)
+}
+
+func ManagedCloneSnapshotInput(id string, path string, _ *string, packPath string, originOverride *string) (RepositoryInput, error) {
+	keepDir := CheckoutKeepDir(path)
+	return RepositoryInput{
+		ID:             id,
+		Checkout:       path,
+		Ownership:      CheckoutOwnershipManaged(),
+		OriginOverride: originOverride,
+		PackPath:       packPath,
+		Exclusions:     ExclusionSource{Kind: ExclusionSourceOrigin},
+		KeepDir:        &keepDir,
+	}, nil
+}
+
+// captureOneRepository captures input alone, under consent scoped to its
+// repository, and returns its snapshot. missing is the error text when the
+// capture names no snapshot for it.
+func captureOneRepository(git GitCommandRunner, input RepositoryInput, consent *CaptureConsent, missing string) (WorkspaceSnapshot, error) {
+	sessionConsent := SessionCaptureConsent{Repositories: map[string]CaptureConsent{input.ID: *consent}}
+	captured, err := CaptureSessionSnapshot(git, []RepositoryInput{input}, sessionConsent)
+	if err != nil {
+		return WorkspaceSnapshot{}, err
+	}
+	snapshot, ok := captured.Repositories[input.ID]
+	if !ok {
+		return WorkspaceSnapshot{}, errors.New(missing)
+	}
+	return snapshot, nil
+}
+
+// originDeltaRepositorySnapshot is the archive snapshot of an origin-delta
+// capture: its metadata and pack, and no legacy Git payloads.
+func originDeltaRepositorySnapshot(repository *CheckpointRepositorySpec, location checkoutLocation, origin string, snapshot WorkspaceSnapshot) RepositorySnapshot {
+	metadata := snapshot.Metadata
+	var branch *string
+	if metadata.Head.Kind == core.SnapshotHeadBranch {
+		name := metadata.Head.Name
+		branch = &name
+	}
+	return RepositorySnapshot{
+		Metadata: core.RepositoryMetadata{
+			ID:                   repository.ID,
+			RelativeDestination:  repository.RelativeDestination,
+			CheckoutSubdirectory: location.subdirectory,
+			Origin:               origin,
+			HeadCommit:           metadata.Head.Commit,
+			Branch:               branch,
+			OriginDelta:          &metadata,
+		},
+		OriginDeltaPack: snapshot.Pack,
+	}
+}
+
+func collectOriginDelta(
+	git GitCommandRunner,
+	path string,
+	repository *CheckpointRepositorySpec,
+	sessionID *string,
+	snapshotDirectory string,
+	consent *CaptureConsent,
+) (RepositorySnapshot, error) {
+	location, err := locateCheckout(git, path)
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	input, err := ManagedCloneSnapshotInput(repository.ID, location.topLevel, sessionID,
+		core.Join(snapshotDirectory, repository.ID), repository.OriginOverride)
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	snapshot, err := captureOneRepository(git, input, consent, "origin delta snapshot is missing")
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	if snapshot.Metadata.OriginURL == nil {
+		return RepositorySnapshot{}, errors.New("managed checkout has no origin")
+	}
+	return originDeltaRepositorySnapshot(repository, location, *snapshot.Metadata.OriginURL, snapshot), nil
+}
+
+func RawSnapshotInput(id string, path string, launch *LaunchRecord, originOverride *string, packPath string) RepositoryInput {
+	return RepositoryInput{
+		ID:             id,
+		Checkout:       path,
+		Ownership:      CheckoutOwnershipRaw(launch),
+		OriginOverride: originOverride,
+		PackPath:       packPath,
+		Exclusions:     ExclusionSource{Kind: ExclusionSourceOrigin},
+	}
+}
+
+func collectOriginDeltaRaw(
+	git GitCommandRunner,
+	path string,
+	repository *CheckpointRepositorySpec,
+	sessionID string,
+	snapshotDirectory string,
+	consent *CaptureConsent,
+) (RepositorySnapshot, error) {
+	location, err := locateCheckout(git, path)
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	launch, err := ReadLaunchRecord(git, location.topLevel, sessionID)
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	input := RawSnapshotInput(repository.ID, location.topLevel, launch, repository.OriginOverride,
+		core.Join(snapshotDirectory, repository.ID))
+	snapshot, err := captureOneRepository(git, input, consent, "raw origin delta snapshot is missing")
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	origin := ""
+	if snapshot.Metadata.OriginURL != nil {
+		origin = *snapshot.Metadata.OriginURL
+	}
+	return originDeltaRepositorySnapshot(repository, location, origin, snapshot), nil
+}
+
+func CutoffSnapshotInput(id string, path string, _ *string, excludeCommits []string, packPath string) (RepositoryInput, error) {
+	keepDir := CheckoutKeepDir(path)
+	return RepositoryInput{
+		ID:         id,
+		Checkout:   path,
+		Ownership:  CheckoutOwnershipManaged(),
+		PackPath:   packPath,
+		Exclusions: ExclusionSource{Kind: ExclusionSourceCommits, Commits: excludeCommits},
+		KeepDir:    &keepDir,
+	}, nil
+}
+
+func collectOriginDeltaCutoff(
+	git GitCommandRunner,
+	path string,
+	repository *CheckpointRepositorySpec,
+	sessionID *string,
+	excludeCommits []string,
+	snapshotDirectory string,
+	consent *CaptureConsent,
+) (RepositorySnapshot, error) {
+	location, err := locateCheckout(git, path)
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	input, err := CutoffSnapshotInput(repository.ID, location.topLevel, sessionID, excludeCommits,
+		core.Join(snapshotDirectory, repository.ID))
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	snapshot, err := captureOneRepository(git, input, consent, "history-cutoff origin delta snapshot is missing")
+	if err != nil {
+		return RepositorySnapshot{}, err
+	}
+	return originDeltaRepositorySnapshot(repository, location, "", snapshot), nil
 }
 
 // collectCheckpointRepositoriesWithPolicy collects the repositories in
 // parallel; the result keeps the spec order, which in turn keeps the
 // manifest and ZIP entry order deterministic.
-func collectCheckpointRepositoriesWithPolicy(workspaceRoot string, specifications []CheckpointRepositorySpec, git GitCommandRunner, untrackedFiles UntrackedFiles) ([]RepositorySnapshot, error) {
+func collectCheckpointRepositoriesWithPolicy(
+	workspaceRoot string,
+	specifications []CheckpointRepositorySpec,
+	git GitCommandRunner,
+	sessionID *string,
+	snapshotDirectory *string,
+	untrackedFiles UntrackedFiles,
+	consent *CaptureConsent,
+) ([]RepositorySnapshot, error) {
 	snapshots := make([]RepositorySnapshot, len(specifications))
 	failures := make([]error, len(specifications))
 	var group sync.WaitGroup
 	for index := range specifications {
 		group.Go(func() {
-			snapshots[index], failures[index] = collectCheckpointRepository(workspaceRoot, &specifications[index], git, untrackedFiles)
+			snapshots[index], failures[index] = collectCheckpointRepository(workspaceRoot, &specifications[index], git,
+				sessionID, snapshotDirectory, untrackedFiles, consent)
 		})
 	}
 	group.Wait()
@@ -1080,7 +1335,15 @@ func collectCheckpointRepositoriesWithPolicy(workspaceRoot string, specification
 
 // collectCheckpointRepository is one repository of
 // collectCheckpointRepositoriesWithPolicy.
-func collectCheckpointRepository(workspaceRoot string, repository *CheckpointRepositorySpec, git GitCommandRunner, untrackedFiles UntrackedFiles) (RepositorySnapshot, error) {
+func collectCheckpointRepository(
+	workspaceRoot string,
+	repository *CheckpointRepositorySpec,
+	git GitCommandRunner,
+	sessionID *string,
+	snapshotDirectory *string,
+	untrackedFiles UntrackedFiles,
+	consent *CaptureConsent,
+) (RepositorySnapshot, error) {
 	inRepository := func(err error) error {
 		return fmt.Errorf("repository '%s': %w", repository.ID, err)
 	}
@@ -1091,6 +1354,25 @@ func collectCheckpointRepository(workspaceRoot string, repository *CheckpointRep
 	var history GitHistoryMode
 	var remoteBase *string
 	switch repository.Capture.Mode {
+	case CheckpointRepositoryCaptureOriginDelta:
+		if snapshotDirectory == nil {
+			return RepositorySnapshot{}, errors.New("origin-delta suspend requires a single-shot export")
+		}
+		return collectOriginDelta(git, path, repository, sessionID, *snapshotDirectory, consent)
+	case CheckpointRepositoryCaptureOriginDeltaRaw:
+		if sessionID == nil {
+			return RepositorySnapshot{}, errors.New("raw origin-delta export requires a session id")
+		}
+		if snapshotDirectory == nil {
+			return RepositorySnapshot{}, errors.New("raw origin-delta export requires a single-shot export")
+		}
+		return collectOriginDeltaRaw(git, path, repository, *sessionID, *snapshotDirectory, consent)
+	case CheckpointRepositoryCaptureOriginDeltaCutoff:
+		if snapshotDirectory == nil {
+			return RepositorySnapshot{}, errors.New("history-cutoff origin-delta export requires a single-shot export")
+		}
+		return collectOriginDeltaCutoff(git, path, repository, sessionID, slices.Clone(repository.Capture.ExcludeCommits),
+			*snapshotDirectory, consent)
 	case CheckpointRepositoryCapturePlainDirectory:
 		snapshot, err := CollectPlainDirectorySnapshot(&GitCollectionSpec{
 			ID:                  repository.ID,
