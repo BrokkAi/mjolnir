@@ -879,6 +879,35 @@ impl CommandExecutor for PreflightExecutor {
     }
 }
 
+#[test]
+fn ssh_apple_container_launch_preflight_starts_the_service_after_connectivity() {
+    let template = TargetTemplate::SshAppleContainer {
+        ssh: SshConnection {
+            host: "mac.example.test".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![],
+        },
+        container: container_target("ubuntu:24.04", Default::default()),
+    };
+    let response = |status, stdout: &[u8]| CommandOutput {
+        status,
+        stdout: stdout.to_vec(),
+        stderr: vec![],
+    };
+    let executor = PreflightExecutor {
+        outputs: RefCell::new(vec![
+            response(0, b""),
+            response(1, br#"{"status":"unregistered"}"#),
+            response(0, b""),
+            response(0, br#"{"status":"running"}"#),
+        ]),
+        notices: RefCell::new(vec![]),
+    };
+    preflight_target(&template, &executor, TargetCheck::Launch).unwrap();
+    assert!(executor.outputs.borrow().is_empty());
+}
+
 // Hard-won: d7afd671: the old preflight rejected Podman 4.0 despite root-default sessions no longer needing keep-id.
 #[test]
 fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
@@ -1078,107 +1107,6 @@ impl CommandExecutor for NoDockerExecutor {
     }
 }
 
-// Hard-won: ba563efac06a: launch options reported local Docker ready when no engine was installed
-#[test]
-fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() {
-    assert_eq!(
-        local_engine_readiness("local-docker", &NoDockerExecutor),
-        Some(LocalEngineReadiness::NotInstalled)
-    );
-    assert_eq!(
-        local_engine_readiness("apple-container", &NoDockerExecutor),
-        Some(LocalEngineReadiness::NotReady)
-    );
-    assert_eq!(
-        local_engine_readiness("local-bare", &NoDockerExecutor),
-        None
-    );
-    assert_eq!(
-        local_engine_readiness("ssh-docker", &NoDockerExecutor),
-        None
-    );
-}
-
-/// An executor that records every command and answers `container system
-/// status` as a stopped or a running service would.
-struct RecordingAppleExecutor {
-    status: i32,
-    commands: std::sync::Mutex<Vec<String>>,
-}
-
-impl RecordingAppleExecutor {
-    fn new(status: i32) -> Self {
-        Self {
-            status,
-            commands: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn commands(&self) -> Vec<String> {
-        self.commands.lock().unwrap().clone()
-    }
-}
-
-impl CommandExecutor for RecordingAppleExecutor {
-    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-        mj_core::targets::DeadlinePause::none()
-    }
-
-    fn cancellation_requested_without_deadline(&self) -> bool {
-        self.cancellation_requested()
-    }
-
-    fn execute_without_deadline(
-        &self,
-        command: &mj_core::targets::CommandSpec,
-    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-        self.execute(command)
-    }
-
-    fn execute_with_stdin_without_deadline(
-        &self,
-        command: &mj_core::targets::CommandSpec,
-        input: &mut (dyn std::io::Read + Send),
-    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-        self.execute_with_stdin(command, input)
-    }
-
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.commands.lock().unwrap().push(format!(
-            "{} {}",
-            command.program,
-            command.args.join(" ")
-        ));
-        Ok(CommandOutput {
-            status: self.status,
-            stdout: Vec::new(),
-            stderr: if self.status == 0 {
-                Vec::new()
-            } else {
-                b"service is stopped".to_vec()
-            },
-        })
-    }
-}
-
-// Hard-won: #1357: the launch options readiness probe started a stopped Apple container service
-#[test]
-fn apple_container_readiness_observes_the_service_and_never_starts_it() {
-    let stopped = RecordingAppleExecutor::new(1);
-    assert_eq!(
-        local_engine_readiness("apple-container", &stopped),
-        Some(LocalEngineReadiness::NotReady)
-    );
-    assert_eq!(stopped.commands(), ["container system status"]);
-
-    let running = RecordingAppleExecutor::new(0);
-    assert_eq!(
-        local_engine_readiness("apple-container", &running),
-        Some(LocalEngineReadiness::Ready)
-    );
-    assert_eq!(running.commands(), ["container system status"]);
-}
-
 /// Launch finding R5-3: the session wizard said "local Docker is not ready.
 /// Start Docker or fix the proble…" for an engine that is not installed. Its
 /// check now leads with the words the launch options use.
@@ -1224,9 +1152,5 @@ fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
     assert_eq!(
         launch,
         "Docker is not installed on this host. Install Docker or choose another target, then Retry launch."
-    );
-    assert_eq!(
-        local_engine_readiness("local-docker", &NoDockerExecutor),
-        Some(LocalEngineReadiness::NotInstalled)
     );
 }

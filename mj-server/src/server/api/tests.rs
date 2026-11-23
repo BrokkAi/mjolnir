@@ -7136,6 +7136,27 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
             reason: "Docker is not installed on this host".into(),
         };
         snapshot.targets.push(docker);
+        for (id, kind, availability) in [
+            ("apple", "apple-container", AvailabilityVerdict::Available),
+            (
+                "remote-apple",
+                "ssh-apple-container",
+                AvailabilityVerdict::Available,
+            ),
+            (
+                "broken-apple",
+                "ssh-apple-container",
+                AvailabilityVerdict::Missing {
+                    reason: "Apple container check exited with status 64.".into(),
+                },
+            ),
+        ] {
+            let mut apple = snapshot.targets[0].clone();
+            apple.id = id.into();
+            apple.kind = kind.into();
+            apple.availability = availability;
+            snapshot.targets.push(apple);
+        }
         snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
             id: "local".into(),
             label: "local".into(),
@@ -7179,6 +7200,15 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
         "Start Podman and try again."
     );
     assert!(target("podman").get("runtime_missing").is_none());
+    for id in ["apple", "remote-apple"] {
+        assert_eq!(target(id)["availability"], "ready");
+        assert!(target(id)["unavailable_reason"].is_null());
+    }
+    assert_eq!(target("broken-apple")["availability"], "unavailable");
+    assert_eq!(
+        target("broken-apple")["unavailable_reason"],
+        "Apple container check exited with status 64."
+    );
     assert_eq!(target("raw")["availability"], "unknown");
     // The previous CLI strictly decodes each profile in the stable options
     // response, even when a daemon has probed its availability.
