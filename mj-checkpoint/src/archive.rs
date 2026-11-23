@@ -656,20 +656,23 @@ pub fn verify_repository_bundles_streaming(path: &Path) -> Result<VerifiedReposi
     })
 }
 
-/// Read only the repository bundles from a checkpoint whose complete archive
-/// digest was already persisted after full verification.
+/// Read the manifest and only the legacy Git bundle payloads from a checkpoint
+/// whose complete archive digest was persisted after full verification.
 ///
 /// Resume uses this narrow reader for its source-availability preflight. The
 /// restore path still performs full payload verification before changing any
 /// target state. This deliberately avoids re-hashing the archive or bundle:
 /// Git validates the pack during the preflight, and restore validates every
 /// payload before using it.
-pub fn read_checkpoint_repository_bundles(path: &Path) -> Result<Vec<CheckpointRepositoryBundle>> {
+pub fn read_checkpoint_manifest_and_repository_bundles(
+    path: &Path,
+) -> Result<(ArchiveManifest, Vec<CheckpointRepositoryBundle>)> {
     let mut archive = open_archive(path)?;
     let manifest = read_checkpoint_manifest_from(&mut archive)?;
     let repositories = manifest
         .repositories
         .iter()
+        .filter(|repository| repository.metadata.origin_delta.is_none())
         .map(|repository| {
             let role = PayloadRole::GitBundle {
                 repository_id: repository.metadata.id.clone(),
@@ -691,7 +694,12 @@ pub fn read_checkpoint_repository_bundles(path: &Path) -> Result<Vec<CheckpointR
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(repositories)
+    Ok((manifest, repositories))
+}
+
+pub fn read_checkpoint_repository_bundles(path: &Path) -> Result<Vec<CheckpointRepositoryBundle>> {
+    let (_, bundles) = read_checkpoint_manifest_and_repository_bundles(path)?;
+    Ok(bundles)
 }
 
 /// Read the manifest of an archive that the caller has already verified.
@@ -703,10 +711,11 @@ pub fn read_checkpoint_manifest(path: &Path) -> Result<ArchiveManifest> {
 /// Whether the archive manifest records any `OriginDelta` repository snapshot.
 pub fn checkpoint_archive_uses_origin_delta(path: &Path) -> Result<bool> {
     let manifest = read_checkpoint_manifest(path)?;
-    Ok(manifest
-        .repositories
-        .iter()
-        .any(|repository| repository.metadata.origin_delta.is_some()))
+    Ok(manifest_uses_origin_delta(&manifest))
+}
+
+pub fn manifest_uses_origin_delta(manifest: &ArchiveManifest) -> bool {
+    carries_origin_delta(&manifest.repositories)
 }
 
 /// Read one payload from an archive whose manifest was already verified.
@@ -2209,7 +2218,7 @@ fn carries_origin_delta(repositories: &[RepositoryManifest]) -> bool {
 }
 
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
-    let has_origin_delta = carries_origin_delta(&manifest.repositories);
+    let has_origin_delta = manifest_uses_origin_delta(manifest);
     ensure!(
         if has_origin_delta {
             manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA

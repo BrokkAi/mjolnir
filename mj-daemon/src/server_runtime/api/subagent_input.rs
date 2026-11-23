@@ -7,6 +7,8 @@ const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
 const MIN_SESSION_ID_PREFIX_LENGTH: usize = mj_core::state::SHORT_ID_LEN;
 pub(crate) const QUEUED_UNTIL_STARTUP_NOTE: &str = "Queued until startup ends.";
+pub(crate) const QUEUED_UNTIL_MOVE_NOTE: &str =
+    "Target session is moving; message queued in its mailbox for delivery when the move finishes.";
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 pub(super) enum SubagentInputDelivery {
@@ -74,7 +76,7 @@ impl ApiBackend {
     ) -> Result<crate::server::api::SessionMessageResponse> {
         let requested_target_for_auth = requested_target_id.clone();
         let sender_for_auth = sender_session_id.clone();
-        let (target_session_id, own_child, managed_child, sender_title, target_state) =
+        let (target_session_id, own_child, managed_child, sender_title, target_state, moving) =
             blocking("authorize session message", move || {
             let state = Controller::load()?.state;
             let sender = state.sessions.get(&sender_for_auth).ok_or_else(|| {
@@ -119,20 +121,24 @@ impl ApiBackend {
                     "target session was destroyed and cannot receive messages"
                 ));
             }
+            let moving = !own_child
+                && mj_controller::database::load_move_operation(&target_id)?
+                    .is_some_and(|operation| operation.is_active());
             if !own_child {
-                if target.state == SessionState::Stopped {
+                if target.state == SessionState::Stopped && !moving {
                     anyhow::bail!(mj_core::refusal::Refusal::precondition(
                         "target session is stopped (suspended); resume it before sending a message"
                     ));
                 }
                 if matches!(
                     target.state,
-                    SessionState::Closing
-                        | SessionState::Destroying
+                    SessionState::Destroying
                         | SessionState::StartupCleanup
                         | SessionState::Lost
                         | SessionState::Error
-                ) || (target.state == SessionState::Parked && !managed_child) {
+                ) || (target.state == SessionState::Closing && !moving)
+                    || (target.state == SessionState::Parked && !managed_child)
+                {
                     anyhow::bail!(mj_core::refusal::Refusal::precondition(format!(
                         "target session is {:?} and cannot receive messages",
                         target.state
@@ -145,6 +151,7 @@ impl ApiBackend {
                 managed_child,
                 sender.message_name(),
                 target.state,
+                moving,
             ))
         })
         .await?;
@@ -160,7 +167,9 @@ impl ApiBackend {
                 !self.exports.close_is_requested(&target_session_id),
                 "child session is closing; queued message was not delivered"
             );
-            self.unpark_child(&target_session_id).await?;
+            if !moving {
+                self.unpark_child(&target_session_id).await?;
+            }
         }
 
         let sender = mj_core::mailbox::Sender::Session {
@@ -189,10 +198,15 @@ impl ApiBackend {
             self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
             let mailbox_delivery = self.published_mailbox_delivery(&target_session_id).await;
+            let note = if moving {
+                Some(QUEUED_UNTIL_MOVE_NOTE.to_owned())
+            } else {
+                mailbox_delivery_note(mailbox_delivery.as_ref())
+            };
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
-                note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+                note,
                 mailbox_delivery,
                 turn_id: None,
                 managed_child: false,
@@ -208,6 +222,36 @@ impl ApiBackend {
                 mailbox_delivery: None,
                 note: None,
                 turn_id: Some(ordinal),
+                managed_child: false,
+            });
+        }
+
+        let (sender_id, message_text) = session_message_identity(&event)?;
+        if let Some(response) = self
+            .session_message_startup_receipt(
+                &target_session_id,
+                &command_id,
+                sender_id,
+                message_text,
+            )
+            .await?
+        {
+            return Ok(response);
+        }
+
+        // A session with an active Move may temporarily be Closing, Stopped, or
+        // disconnected while transitioning to its destination worker. Queue the
+        // message durably in its mailbox instead of reporting Closing (#1341).
+        if moving {
+            self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
+                .await?;
+            let mailbox_delivery = self.published_mailbox_delivery(&target_session_id).await;
+            return Ok(crate::server::api::SessionMessageResponse {
+                session_id: target_session_id,
+                via: "mailbox".into(),
+                note: Some(QUEUED_UNTIL_MOVE_NOTE.to_owned()),
+                mailbox_delivery,
+                turn_id: None,
                 managed_child: false,
             });
         }
@@ -359,8 +403,8 @@ impl ApiBackend {
     }
 
     /// Queue `event` when `target` cannot take it yet. `None` means deliver now.
-    /// An existing step for `command_id` is the retry: the first sender, text,
-    /// and timestamp win, and a failed step stays failed.
+    /// Existing startup receipts are checked before routing in
+    /// `deliver_session_message`; this handles the remaining new-step race.
     async fn queue_session_message_until_startup(
         &self,
         target: &str,
@@ -370,12 +414,6 @@ impl ApiBackend {
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<Option<crate::server::api::SessionMessageResponse>> {
         let (sender_id, message_text) = session_message_identity(event)?;
-        if let Some(response) = self
-            .session_message_startup_receipt(target, command_id, sender_id, message_text)
-            .await?
-        {
-            return Ok(Some(response));
-        }
         let eligible = matches!(
             target_state,
             SessionState::Provisioning

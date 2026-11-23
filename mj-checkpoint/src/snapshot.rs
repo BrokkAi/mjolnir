@@ -3963,7 +3963,12 @@ pub fn restore_workspace_snapshot(
             missing.join(", ")
         );
     } else {
-        fetch_prerequisites(runner, destination, &snapshot.prerequisites)?;
+        fetch_prerequisites(runner, destination, &snapshot.prerequisites).with_context(|| {
+            format!(
+                "restore snapshot prerequisites from origin {:?}",
+                snapshot.origin_url.as_deref().unwrap_or_default()
+            )
+        })?;
     }
     for (name, oid) in &snapshot.refs {
         ensure!(
@@ -5924,6 +5929,7 @@ mod tests {
                 let error = format!("{:#}", result.unwrap_err());
                 assert!(
                     error.contains(&boundary)
+                        && error.contains(snapshot.origin_url.as_ref().unwrap())
                         && error.contains("origin may have rewritten history"),
                     "{error}"
                 );

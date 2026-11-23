@@ -628,3 +628,287 @@ fn retrying_partially_started_move_without_queue_preserves_original_choice() {
         channels.shutdown.shutdown().await.unwrap();
     });
 }
+
+// Hard-won: #1639: cross-target Move held daemon upgrade admission across resumable phases.
+#[cfg(unix)]
+#[test]
+fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() {
+    let name = crate::controller::test_support::test_name(
+        module_path!(),
+        "cross_target_move_yields_handoff_admission_during_source_stop_and_transfer",
+    );
+    if !super::test_fixtures::isolated_test_child(&name, "MJ_MOVE_HANDOFF_YIELD_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join("checkout");
+    let source_home = dir.path().join("source-home");
+    let dest_home = dir.path().join("dest-home");
+    for path in [&checkout, &source_home, &dest_home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert(
+        "source".into(),
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, source_home),
+    );
+    config.profiles.insert(
+        "destination".into(),
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, dest_home),
+    );
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+
+    let mut session = crate::controller::test_support::checkpoint_test_session("sess-move-yield");
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    session.state = SessionState::Running;
+    session.last_profile = "source".into();
+    session.target_template_id = "local-bare".into();
+    session.project_directory = Some(checkout);
+    crate::database::save_session(&session).unwrap();
+
+    let mut controller = crate::controller::Controller {
+        config,
+        state: mj_core::state::State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+
+    let mut operation = super::test_fixtures::source_recovery_operation(&session);
+    operation.in_place = false;
+    operation.phase = MovePhase::Capturing;
+    crate::database::save_move_operation(&operation).unwrap();
+
+    struct HandoffObservingExecutor {
+        gate: std::sync::Arc<crate::upgrade::Gate>,
+        work: std::sync::Mutex<Option<crate::upgrade::Work>>,
+        shutdown: std::sync::atomic::AtomicBool,
+        observed_labels: std::sync::Mutex<Vec<Vec<String>>>,
+        close_on_stop_children: bool,
+    }
+
+    impl crate::targets::CommandExecutor for HandoffObservingExecutor {
+        fn execute(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.observed_labels
+                .lock()
+                .unwrap()
+                .push(self.gate.active_labels());
+            anyhow::bail!("stopped in test at {}", command.purpose)
+        }
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.shutdown_interrupted()
+        }
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+        fn begin_resumable_work(&self) -> anyhow::Result<()> {
+            self.work.lock().unwrap().take();
+            Ok(())
+        }
+        fn end_resumable_work(&self, label: &'static str) -> anyhow::Result<()> {
+            match self.gate.enter_after_draining(label) {
+                Ok(work) => {
+                    *self.work.lock().unwrap() = Some(work);
+                    Ok(())
+                }
+                Err(error) => {
+                    self.shutdown
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    Err(error)
+                }
+            }
+        }
+        fn shutdown_interrupted(&self) -> bool {
+            self.shutdown.load(std::sync::atomic::Ordering::Acquire)
+        }
+        fn before_move_source_stop(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
+        {
+            Box::pin(async move {
+                self.observed_labels
+                    .lock()
+                    .unwrap()
+                    .push(self.gate.active_labels());
+                if self.close_on_stop_children {
+                    // Gate must be empty so try_close succeeds immediately.
+                    assert!(
+                        self.gate.try_close(),
+                        "before_move_source_stop still held handoff admission"
+                    );
+                }
+                Ok(())
+            })
+        }
+    }
+
+    let gate = std::sync::Arc::new(crate::upgrade::Gate::default());
+    let work = gate.enter("session lifecycle").unwrap();
+    let executor = HandoffObservingExecutor {
+        gate: gate.clone(),
+        work: std::sync::Mutex::new(Some(work)),
+        shutdown: std::sync::atomic::AtomicBool::new(false),
+        observed_labels: std::sync::Mutex::new(Vec::new()),
+        close_on_stop_children: true,
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        let admission = crate::controller::test_support::session_admission(&session.id);
+
+        // Handoff closes the gate during before_move_source_stop without waiting;
+        // execute_move fails on end_resumable_work, and finish_move_result
+        // preserves the durable Move as "interrupted" instead of Failed.
+        let result = controller
+            .execute_move(
+                &admission,
+                &mut operation,
+                None,
+                &executor,
+                &channels.control,
+                super::MoveSourceRelay::default(),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(executor.shutdown.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            executor.observed_labels.lock().unwrap().as_slice(),
+            &[Vec::<String>::new()]
+        );
+
+        // finish_move_result preserves the durable Move as "interrupted" when
+        // shutdown_interrupted() is set even if the process-global gate is open.
+        let outcome = controller
+            .finish_move_result(&mut operation, result, &executor)
+            .unwrap();
+        assert_eq!(outcome.outcome, "interrupted", "{outcome:?}");
+        let stored = crate::database::load_move_operation(&session.id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.is_active(),
+            "interrupted cross-target Move must remain active for recovery: {stored:?}"
+        );
+
+        // Next daemon's startup recovery resumes the interrupted Capturing Move
+        // by re-entering execute_move (running before_move_source_stop again)
+        // instead of failing and demanding an explicit retry.
+        let gate2 = std::sync::Arc::new(crate::upgrade::Gate::default());
+        let work2 = gate2.enter("session lifecycle").unwrap();
+        let recovery_executor = HandoffObservingExecutor {
+            gate: gate2,
+            work: std::sync::Mutex::new(Some(work2)),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
+            observed_labels: std::sync::Mutex::new(Vec::new()),
+            close_on_stop_children: true,
+        };
+        let recovered = controller
+            .recover_move_managed_controlled(
+                &admission,
+                stored,
+                &recovery_executor,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.outcome, "interrupted", "{recovered:?}");
+        assert_eq!(
+            recovery_executor.observed_labels.lock().unwrap().as_slice(),
+            &[Vec::<String>::new()],
+            "recovery must resume execute_move through before_move_source_stop"
+        );
+
+        // An interrupted Transferring cross-target Move (with Stopped source
+        // and retained snapshot) also resumes transfer on recovery instead of
+        // rolling back to Failed, while a user-cancelled one still rolls back.
+        let mut stopped = session.clone();
+        stopped.state = SessionState::Stopped;
+        stopped.target = None;
+        crate::database::save_session(&stopped).unwrap();
+        controller
+            .state
+            .sessions
+            .insert(stopped.id.clone(), stopped.clone());
+        let mut transferring = super::test_fixtures::source_recovery_operation(&stopped);
+        transferring.in_place = false;
+        transferring.phase = MovePhase::Transferring;
+        transferring.recovery_session = Some(stopped.clone());
+        transferring.source_snapshot = Some(Box::new(mj_core::state::MoveSourceSnapshot {
+            archive_path: dir.path().join("missing-snapshot.hel.zip"),
+            sha256: "a".repeat(64),
+            manifest: None,
+            queued_prompts: Vec::new(),
+            mailbox: None,
+        }));
+        crate::database::save_move_operation(&transferring).unwrap();
+        let gate3 = std::sync::Arc::new(crate::upgrade::Gate::default());
+        let work3 = gate3.enter("session lifecycle").unwrap();
+        let transfer_executor = HandoffObservingExecutor {
+            gate: gate3,
+            work: std::sync::Mutex::new(Some(work3)),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
+            observed_labels: std::sync::Mutex::new(Vec::new()),
+            close_on_stop_children: false,
+        };
+        let resumed_transfer = controller
+            .recover_move_managed_controlled(
+                &admission,
+                transferring.clone(),
+                &transfer_executor,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !resumed_transfer
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("destination restoration was interrupted"),
+            "non-cancelled Transferring recovery must continue into execute_move rather than rolling back: {resumed_transfer:?}"
+        );
+
+        transferring.cancellation_requested = true;
+        crate::database::save_move_operation(&transferring).unwrap();
+        let cancelled_transfer = controller
+            .recover_move_managed_controlled(
+                &admission,
+                transferring,
+                &transfer_executor,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cancelled_transfer.outcome, "cancelled",
+            "{cancelled_transfer:?}"
+        );
+
+        channels.shutdown.shutdown().await.unwrap();
+    });
+}

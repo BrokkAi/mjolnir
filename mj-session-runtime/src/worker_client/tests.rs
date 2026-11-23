@@ -4956,7 +4956,7 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
     for outcome in ["complete", "drop", "disconnect", "legacy_drop"] {
         let legacy = outcome == "legacy_drop";
         let (controller, worker) = tokio::io::duplex(4096);
-        let mut client = duplex_relay_client(controller);
+        let mut client = duplex_relay_client(controller, SESSION_ID);
         if legacy {
             client.protocol_version = mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL - 1;
         }
@@ -5603,37 +5603,11 @@ fn access_denied_reply(directory: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-fn duplex_relay_client(controller: tokio::io::DuplexStream) -> RelayClient {
-    let (output, input) = tokio::io::split(controller);
-    RelayClient {
-        child: None,
-        input: Some(Box::new(input)),
-        output: BufReader::new(Box::new(output)),
-        request_timeout: RELAY_RPC_TIMEOUT,
-        abandoned: None,
-        next_request: 1,
-        connection_nonce: 1,
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        session_id: SESSION_ID.into(),
-        relay_version: "queued-memory-peer".into(),
-        worker_build: None,
-        latest_ordinal: 0,
-        latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
-        subagent_acknowledged: None,
-        subagent_queue: BTreeMap::new(),
-        subagent_publication: None,
-        known_state: None,
-        handshake_complete: true,
-        ssh_session: None,
-        adoption_wait_progress: None,
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn adoption_wait_reports_blockers_without_a_deadline_and_is_cancellable() {
     for cancel in [false, true] {
         let (controller, worker) = tokio::io::duplex(4096);
-        let mut client = duplex_relay_client(controller);
+        let mut client = duplex_relay_client(controller, SESSION_ID);
         let cancelled = tokio_util::sync::CancellationToken::new();
         let cancellation = cancelled.clone();
         let (progress, mut messages) = tokio::sync::watch::channel(None);

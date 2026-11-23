@@ -311,6 +311,10 @@ pub struct DurableRelay {
     journal_generation: u64,
     /// Retry physical prefix cleanup once after reopen, or after a failed GC.
     journal_cleanup_pending: bool,
+    /// A failed rollback left the on-disk append boundary unknown.
+    journal_append_failure: Option<String>,
+    #[cfg(test)]
+    journal_append_fault: Option<journal::JournalAppendFault>,
     pending_live_baselines: Vec<PendingLiveBaseline>,
     pending_native_resumes: Vec<PendingNativeResume>,
     acp_activity: AcpActivityClock,
@@ -1052,6 +1056,9 @@ impl DurableRelay {
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
             journal_cleanup_pending: true,
+            journal_append_failure: None,
+            #[cfg(test)]
+            journal_append_fault: None,
             pending_live_baselines: Vec::new(),
             pending_native_resumes: Vec::new(),
             acp_activity: AcpActivityClock::default(),
@@ -1564,6 +1571,17 @@ impl DurableRelay {
     /// published operational state both read this one field.
     pub fn set_mailbox_delivery_mode(&mut self, mode: mj_core::mailbox::MailboxDeliveryMode) {
         self.mailbox_delivery_mode = Some(mode);
+    }
+
+    pub(crate) fn update_mailbox_delivery_mode(
+        &mut self,
+        mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    ) {
+        self.mailbox_delivery_mode = mode;
+    }
+
+    pub(crate) fn in_place_move_hold_active(&self) -> bool {
+        self.snapshot.in_place_move_hold.is_some()
     }
 
     /// The relay-owned turn boundary shared by command promotion, checkpoint

@@ -908,6 +908,343 @@ fn in_place_move_recovery_at_dispatch_released_only_releases() {
     assert!(relay.operational_state().in_place_move_hold.is_none());
 }
 
+#[test]
+fn in_place_move_checks_active_work_before_staging_and_cancels_when_acknowledged() {
+    if !isolate_in_place_move_dispatch_test(
+        "in_place_move_checks_active_work_before_staging_and_cancels_when_acknowledged",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "seed-active-prompt".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "active-turn-1".into(),
+            command: RelayCommand::Prompt {
+                prompt: mj_core::continuation::prompt_blocks(),
+            },
+        },
+    });
+    assert!(
+        matches!(response.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+        "{response:?}"
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    drop(relay);
+
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.acknowledge_interruption = false;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            let error = fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("active work started after preparation"),
+                "{error:#}"
+            );
+            // Source files on disk were never touched and the store fence cleared.
+            assert_eq!(
+                fs::read_to_string(fixture.worker_root.join("profile/settings.json")).unwrap(),
+                r#"{"profile":"source"}"#
+            );
+            let ownership: serde_json::Value = serde_json::from_slice(
+                &fs::read(fixture.worker_root.join("ownership.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(ownership["profile_id"], IN_PLACE_SOURCE_PROFILE);
+            assert!(operation.in_place_expected_store_id.is_none());
+
+            // Confirming interruption cancels the active turn before staging destination.
+            operation.acknowledge_interruption = true;
+            fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap();
+            channels.shutdown.shutdown().await.unwrap();
+        });
+    assert_eq!(operation.phase, MovePhase::Completed);
+    assert!(operation.in_place_harness_restarted);
+    let settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.worker_root.join("profile/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["profile"], "destination");
+    let ownership: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.worker_root.join("ownership.json")).unwrap())
+            .unwrap();
+    assert_eq!(ownership["profile_id"], IN_PLACE_DESTINATION_PROFILE);
+    let relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    assert!(relay.operational_state().in_place_move_hold.is_none());
+    assert!(relay.operational_state().active_prompt.is_none());
+}
+
+#[test]
+fn in_place_move_restores_source_profile_files_when_worker_refuses_restart() {
+    if !isolate_in_place_move_dispatch_test(
+        "in_place_move_restores_source_profile_files_when_worker_refuses_restart",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let reject_marker = source_relay.join("reject-in-place-restart");
+    fs::write(&reject_marker, b"reject").unwrap();
+
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            let error = fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("cannot restart harness in place"),
+                "{error:#}"
+            );
+            // Source profile files, ownership.json, and session record were restored.
+            assert_eq!(
+                fixture.controller.state.sessions[LATCH_RELAY_SESSION].last_profile,
+                IN_PLACE_SOURCE_PROFILE
+            );
+            let settings: serde_json::Value = serde_json::from_slice(
+                &fs::read(fixture.worker_root.join("profile/settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(settings["profile"], "source");
+            let ownership: serde_json::Value = serde_json::from_slice(
+                &fs::read(fixture.worker_root.join("ownership.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(ownership["profile_id"], IN_PLACE_SOURCE_PROFILE);
+            assert!(
+                operation.in_place_expected_store_id.is_none(),
+                "clearing store fence re-admits credential sync after source restoration"
+            );
+
+            // On a retry where a prior attempt already held the store (e.g. lost
+            // RestartHarnessInPlace reply while the original restart may still be in
+            // flight), a worker refusal MUST NOT overwrite destination files or clear
+            // the credential fence.
+            let live_store_id = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap()
+                .operational_state()
+                .store_id
+                .expect("store_id");
+            operation.in_place_expected_store_id = Some(live_store_id.clone());
+            let retry_err = fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{retry_err:#}").contains("cannot restart harness in place"),
+                "{retry_err:#}"
+            );
+            let settings_after_retry: serde_json::Value = serde_json::from_slice(
+                &fs::read(fixture.worker_root.join("profile/settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                settings_after_retry["profile"], "destination",
+                "retry refusal must leave staged destination files alone in case prior restart is still in flight"
+            );
+            assert_eq!(
+                operation.in_place_expected_store_id.as_deref(),
+                Some(live_store_id.as_str()),
+                "retry refusal must keep credential sync fenced"
+            );
+
+            // Clearing the refusal lets a retry succeed cleanly.
+            fs::remove_file(&reject_marker).unwrap();
+            fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap();
+            channels.shutdown.shutdown().await.unwrap();
+        });
+    assert_eq!(operation.phase, MovePhase::Completed);
+    let settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.worker_root.join("profile/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["profile"], "destination");
+    let relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    assert!(relay.operational_state().in_place_move_hold.is_none());
+}
+
+#[test]
+fn in_place_move_harvests_fresher_codex_login_before_staging_destination() {
+    if !isolate_in_place_move_dispatch_test(
+        "in_place_move_harvests_fresher_codex_login_before_staging_destination",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    let stale_source = serde_json::to_vec(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": "stale-source-access",
+            "refresh_token": "stale-source-refresh",
+            "id_token": "id-source",
+            "account_id": "acct-source"
+        },
+        "last_refresh": "2026-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    let refreshed_source = serde_json::to_vec(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": "fresh-source-access",
+            "refresh_token": "fresh-source-refresh",
+            "id_token": "id-source",
+            "account_id": "acct-source"
+        },
+        "last_refresh": "2026-02-01T00:00:00Z"
+    }))
+    .unwrap();
+    let destination_login = serde_json::to_vec(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": "dest-access",
+            "refresh_token": "dest-refresh",
+            "id_token": "id-dest",
+            "account_id": "acct-dest"
+        },
+        "last_refresh": "2026-03-01T00:00:00Z"
+    }))
+    .unwrap();
+    fs::write(fixture.source_home.join("auth.json"), &stale_source).unwrap();
+    fs::write(
+        fixture.destination_home.join("auth.json"),
+        &destination_login,
+    )
+    .unwrap();
+    fs::write(
+        fixture.worker_root.join("profile/auth.json"),
+        &refreshed_source,
+    )
+    .unwrap();
+
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "session_info_update",
+                "_meta": {
+                    "execution": {"version": 1, "status": "idle"}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap();
+            channels.shutdown.shutdown().await.unwrap();
+        });
+    assert_eq!(operation.phase, MovePhase::Completed);
+    let canonical_source: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.source_home.join("auth.json")).unwrap()).unwrap();
+    assert_eq!(
+        canonical_source["tokens"]["access_token"], "fresh-source-access",
+        "source's fresher staged Codex login must be harvested before destination overwrites it"
+    );
+    let staged_dest: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.worker_root.join("profile/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(staged_dest["tokens"]["access_token"], "dest-access");
+}
+
 fn isolate_in_place_move_dispatch_test(name: &str) -> bool {
     if std::env::var_os("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS").is_some() {
         return true;

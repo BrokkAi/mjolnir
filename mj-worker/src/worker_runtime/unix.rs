@@ -749,10 +749,55 @@ impl Drop for InPlaceHarnessRestartGuard {
     }
 }
 
+/// Worker-wide credential endpoint shared across all active and future proxy
+/// connections. Credential requests hold a read guard across both the
+/// `in_place_move_hold` check and the filesystem operation, while
+/// `HoldInPlaceMoveDispatch` drains in-flight requests and
+/// `RestartHarnessInPlace` swaps the endpoint under the write guard.
+#[derive(Clone)]
+pub(super) struct SharedCredentials(
+    Arc<tokio::sync::RwLock<std::result::Result<CredentialEndpoint, String>>>,
+);
+
+impl SharedCredentials {
+    pub(super) fn new(initial: std::result::Result<CredentialEndpoint, String>) -> Self {
+        Self(Arc::new(tokio::sync::RwLock::new(initial)))
+    }
+
+    pub(super) async fn read(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, std::result::Result<CredentialEndpoint, String>> {
+        self.0.read().await
+    }
+
+    pub(super) async fn drain(&self) {
+        let _guard = self.0.write().await;
+    }
+
+    pub(super) async fn set(&self, updated: std::result::Result<CredentialEndpoint, String>) {
+        *self.0.write().await = updated;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn snapshot(&self) -> std::result::Result<CredentialEndpoint, String> {
+        self.0.read().await.clone()
+    }
+}
+
+fn harness_turn_policy_for(harness: HarnessKind) -> crate::relay::HarnessTurnPolicy {
+    match harness {
+        HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
+        HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
+        HarnessKind::Antigravity => crate::relay::HarnessTurnPolicy::Antigravity,
+        _ => crate::relay::HarnessTurnPolicy::Disabled,
+    }
+}
+
 async fn restart_harness_in_place_response(
     envelope: RelayRequestEnvelope,
     commands: Option<&mpsc::Sender<CommandRequest>>,
     relay: &Arc<RelayCell>,
+    credentials: &SharedCredentials,
     relay_root: &std::path::Path,
 ) -> RelayResponseEnvelope {
     if let Some(body) = mj_core::relay::protocol::relay_protocol_rejection(&envelope) {
@@ -951,6 +996,126 @@ async fn restart_harness_in_place_response(
     prepared
         .environment
         .remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
+    let updated_credentials = super::credential_endpoint(&launch_config);
+    let updated_harness = launch_config.harness;
+    let updated_claude_login_path = (updated_harness == HarnessKind::Claude)
+        .then(|| mj_core::credentials::claude_oauth_login_path(&launch_config.environment))
+        .flatten();
+    let (boundary_mailbox_hook_available, updated_mailbox_delivery_mode) = if let Ok(endpoint) =
+        &updated_credentials
+    {
+        let hook_root = relay_root.to_path_buf();
+        let hook_session_id = launch_config.session_id.clone();
+        let hook_home = endpoint.home.clone();
+        match updated_harness {
+            HarnessKind::Claude => {
+                let available = match tokio::time::timeout(
+                    LOCAL_PREPARATION_STEP_TIMEOUT,
+                    mj_core::runtime::spawn_blocking(move || {
+                        super::subagents::configure_claude_mailbox_hook(
+                            &hook_root,
+                            &hook_session_id,
+                            &hook_home,
+                        )
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(available))) => available,
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = format!("{error:#}"),
+                            "could not verify Claude mailbox hook during in-place harness restart"
+                        );
+                        false
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = %error,
+                            "Claude mailbox hook task failed during in-place harness restart"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            "Claude mailbox hook verification timed out during in-place harness restart"
+                        );
+                        false
+                    }
+                };
+                (available, None)
+            }
+            HarnessKind::Antigravity => {
+                let available = match tokio::time::timeout(
+                    LOCAL_PREPARATION_STEP_TIMEOUT,
+                    mj_core::runtime::spawn_blocking(move || {
+                        super::subagents::configure_antigravity_mailbox_hook(
+                            &hook_root,
+                            &hook_session_id,
+                            &hook_home,
+                        )
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(available))) => available,
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = format!("{error:#}"),
+                            "could not verify Antigravity mailbox hook during in-place harness restart"
+                        );
+                        false
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = %error,
+                            "Antigravity mailbox hook task failed during in-place harness restart"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            "Antigravity mailbox hook verification timed out during in-place harness restart"
+                        );
+                        false
+                    }
+                };
+                let mode = if available {
+                    mj_core::mailbox::MailboxDeliveryMode::ToolBoundary
+                } else {
+                    mj_core::mailbox::MailboxDeliveryMode::TurnBoundary
+                };
+                (available, Some(mode))
+            }
+            HarnessKind::Codex => {
+                let mode = match tokio::time::timeout(
+                    LOCAL_PREPARATION_STEP_TIMEOUT,
+                    mj_core::runtime::spawn_blocking(move || {
+                        mj_core::codex_provider::codex_provider(&hook_home, None)
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(provider))) => {
+                        Some(mj_core::mailbox::MailboxDeliveryMode::for_codex_provider(
+                            provider.as_ref(),
+                        ))
+                    }
+                    _ => None,
+                };
+                (false, mode)
+            }
+            _ => (false, None),
+        }
+    } else {
+        (false, None)
+    };
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
@@ -967,6 +1132,35 @@ async fn restart_harness_in_place_response(
     {
         Ok(()) => match resolution.await {
             Ok(Ok(())) => {
+                // The replacement bridge is now live under the updated launch
+                // config. Refresh the shared credential endpoint and harness
+                // policies immediately so subsequent credential RPCs and relay
+                // state match the live harness.
+                credentials.set(updated_credentials.clone()).await;
+                let login_identity = {
+                    let mut relay = relay.lock().expect("relay state lock poisoned");
+                    relay.set_turn_verdict_harness(updated_harness);
+                    relay.authentication_login_path = updated_claude_login_path;
+                    relay.set_steering_delivery_mode(
+                        updated_harness,
+                        boundary_mailbox_hook_available,
+                    );
+                    relay.update_mailbox_delivery_mode(updated_mailbox_delivery_mode);
+                    relay.set_harness_turn_policy(harness_turn_policy_for(updated_harness));
+                    relay.login_identity.clone()
+                };
+                if let Ok(endpoint) = &updated_credentials {
+                    if let Err(error) =
+                        requests::observe_initial_login(endpoint, &login_identity).await
+                    {
+                        tracing::warn!(
+                            %error,
+                            "could not read staged login after in-place harness restart"
+                        );
+                    }
+                } else {
+                    login_identity.observe_file(None);
+                }
                 if let Err(error) = persisted_launch_config.write(&relay_root.join("launch.json")) {
                     compaction_error(
                         RelayErrorCode::Internal,
@@ -1539,12 +1733,7 @@ pub async fn run_daemon_owned(
     // Worker admission opens before profile preparation finishes. Claude must
     // already be protected from ACP steering during that window.
     durable_relay.set_steering_delivery_mode(config.harness, false);
-    durable_relay.set_harness_turn_policy(match config.harness {
-        HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
-        HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
-        HarnessKind::Antigravity => crate::relay::HarnessTurnPolicy::Antigravity,
-        _ => crate::relay::HarnessTurnPolicy::Disabled,
-    });
+    durable_relay.set_harness_turn_policy(harness_turn_policy_for(config.harness));
     // Both adapters publish their background command lifecycle through AIR.
     durable_relay.set_background_work_policy(match config.harness {
         HarnessKind::Claude | HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::AirTasks,
@@ -1735,12 +1924,13 @@ pub async fn run_daemon_owned(
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
     let subagent_role = config.subagent_mcp_role();
     let has_subagent_tools = subagent_role.is_some();
+    let shared_credentials = SharedCredentials::new(credentials.clone());
     let mut client_task = mj_core::runtime::spawn(accept_worker_clients(
         listener,
         socket_guard,
         relay.clone(),
         dispatch_wake_tx.clone(),
-        credentials.clone(),
+        shared_credentials,
         ConnectionRuntime {
             project_memory,
             cpu: Some(cpu_rx),
@@ -2043,7 +2233,7 @@ async fn accept_worker_clients(
     _socket_guard: SocketGuard,
     relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
-    credentials: std::result::Result<CredentialEndpoint, String>,
+    credentials: SharedCredentials,
     runtime: ConnectionRuntime,
     fatal: mpsc::Sender<anyhow::Error>,
 ) -> Result<()> {
@@ -2064,7 +2254,7 @@ async fn accept_worker_clients(
         let client_runtime = runtime.clone();
         let client_fatal = fatal.clone();
         clients.spawn(async move {
-            if let Err(error) = serve_client_with_memory(
+            if let Err(error) = serve_client_with_shared_credentials(
                 stream,
                 client_relay,
                 client_dispatch_wake,
@@ -3107,6 +3297,25 @@ pub(super) async fn serve_client_with_memory(
     runtime: ConnectionRuntime,
     fatal: mpsc::Sender<anyhow::Error>,
 ) -> Result<()> {
+    serve_client_with_shared_credentials(
+        stream,
+        relay,
+        dispatch_wake,
+        SharedCredentials::new(credentials),
+        runtime,
+        fatal,
+    )
+    .await
+}
+
+pub(super) async fn serve_client_with_shared_credentials(
+    stream: UnixStream,
+    relay: Arc<RelayCell>,
+    dispatch_wake: mpsc::Sender<()>,
+    credentials: SharedCredentials,
+    runtime: ConnectionRuntime,
+    fatal: mpsc::Sender<anyhow::Error>,
+) -> Result<()> {
     let ConnectionRuntime {
         project_memory,
         commands,
@@ -3395,8 +3604,44 @@ pub(super) async fn serve_client_with_memory(
                 let operation = envelope.request.method_name();
                 let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
                 let login_observed = login_installed || matches!(&envelope.request, RelayRequest::CredentialState);
-                let login_identity = relay.observe().expect("relay state lock poisoned").login_identity.clone();
-                let response = credential_response(envelope, &credentials, &relay_root, &login_identity).await;
+                let response = {
+                    // Acquire the read guard before checking `in_place_move_hold`
+                    // and hold it through `credential_response`. Because
+                    // `HoldInPlaceMoveDispatch` sets the hold before draining
+                    // via `credentials.drain().await`, every pre-hold request
+                    // finishes before `InPlaceMoveDispatchHeld` replies, and
+                    // every post-hold request observes the hold and refuses.
+                    let current_credentials = credentials.read().await;
+                    let (move_held, login_identity) = {
+                        let observed = relay.observe().expect("relay state lock poisoned");
+                        (
+                            observed.in_place_move_hold_active(),
+                            observed.login_identity.clone(),
+                        )
+                    };
+                    if move_held {
+                        RelayResponseEnvelope {
+                            request_id: envelope.request_id,
+                            protocol_version: envelope.protocol_version,
+                            body: RelayResponseBody::Error {
+                                error: RelayProtocolError {
+                                    code: RelayErrorCode::InvalidState,
+                                    message: "cannot access credentials while an in-place move dispatch hold is active".into(),
+                                    retryable: true,
+                                    detail: None,
+                                },
+                            },
+                        }
+                    } else {
+                        credential_response(
+                            envelope,
+                            &current_credentials,
+                            &relay_root,
+                            &login_identity,
+                        )
+                        .await
+                    }
+                };
                 if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
                     wake_dispatch(&relay, &dispatch_wake)?;
                 } else if login_observed {
@@ -3636,6 +3881,7 @@ pub(super) async fn serve_client_with_memory(
                         envelope,
                         request_commands.as_ref(),
                         &relay,
+                        &credentials,
                         &relay_root,
                     )
                     .await
@@ -3685,6 +3931,17 @@ pub(super) async fn serve_client_with_memory(
                     return Err(error);
                 }
             };
+            if matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::InPlaceMoveDispatchHeld { .. }
+                }
+            ) {
+                // Drain every credential RPC that acquired a read guard before
+                // the hold was recorded, before telling the controller it may
+                // harvest or overwrite staged profile files.
+                credentials.drain().await;
+            }
             // One relay lock decides who owns the relay-local lifecycle work
             // this request may have queued. Until preparation publishes
             // Started, which `start_bridge` does under this same lock, this
@@ -3809,7 +4066,7 @@ mod preparation_tests {
             guard,
             relay,
             dispatch_wake,
-            Err("fixture has no credentials".into()),
+            SharedCredentials::new(Err("fixture has no credentials".into())),
             ConnectionRuntime {
                 preparation: Some(preparation),
                 preparation_cancel: Some(preparation_cancel),
@@ -4812,6 +5069,113 @@ mod preparation_tests {
     }
 
     #[tokio::test]
+    async fn in_place_move_hold_drains_and_blocks_credential_requests_until_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch = super::super::relay_tests::launch_config(profile.to_str().unwrap());
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
+        let relay = test_relay(temp.path());
+        let store_id = relay.lock().unwrap().operational_state().store_id.unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        let (wake, _wakes) = mpsc::channel(4);
+        let (fatal, _fatal_reports) = mpsc::channel(1);
+        let handler = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+            server,
+            relay,
+            wake,
+            credentials.clone(),
+            ConnectionRuntime::default(),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read);
+
+        // Hold a read guard simulating an in-flight credential request on another
+        // connection. HoldInPlaceMoveDispatch must wait for it to drain before
+        // returning InPlaceMoveDispatchHeld.
+        let in_flight = credentials.read().await;
+        let held = {
+            let hold_fut = request(
+                &mut reader,
+                &mut writer,
+                "hold",
+                RelayRequest::HoldInPlaceMoveDispatch {
+                    operation_id: "move-cred".into(),
+                    expected_store_id: store_id.clone(),
+                },
+            );
+            tokio::pin!(hold_fut);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut hold_fut)
+                    .await
+                    .is_err(),
+                "HoldInPlaceMoveDispatch must wait for in-flight credential requests to finish"
+            );
+            drop(in_flight);
+            hold_fut.await
+        };
+        assert!(matches!(
+            held.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::InPlaceMoveDispatchHeld { .. }
+            }
+        ));
+
+        // While the dispatch hold is active, credential RPCs are refused with retryable InvalidState.
+        let refused = request(
+            &mut reader,
+            &mut writer,
+            "cred-held",
+            RelayRequest::CredentialState,
+        )
+        .await;
+        assert!(matches!(
+            refused.body,
+            RelayResponseBody::Error {
+                error: RelayProtocolError {
+                    code: RelayErrorCode::InvalidState,
+                    retryable: true,
+                    ..
+                }
+            }
+        ));
+
+        // Releasing the dispatch hold re-admits credential RPCs.
+        let released = request(
+            &mut reader,
+            &mut writer,
+            "release",
+            RelayRequest::ReleaseInPlaceMoveDispatch {
+                operation_id: "move-cred".into(),
+                expected_store_id: store_id,
+            },
+        )
+        .await;
+        assert!(matches!(
+            released.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::InPlaceMoveDispatchReleased
+            }
+        ));
+        let allowed = request(
+            &mut reader,
+            &mut writer,
+            "cred-released",
+            RelayRequest::CredentialState,
+        )
+        .await;
+        assert!(matches!(
+            allowed.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::CredentialState { .. }
+            }
+        ));
+        writer.shutdown().await.unwrap();
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
         let _ = mj_harness_install::login_environment::initialize_from_parent();
         let root = tempfile::tempdir().unwrap();
@@ -4831,8 +5195,10 @@ mod preparation_tests {
             .clone()
             .expect("store_id");
 
-        // No hold active -> rejected without touching acp-supervisor.json.
+        // No hold active -> rejected without touching acp-supervisor.json or credentials.
         let launch_config = super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        let initial_credentials = super::super::credential_endpoint(&launch_config);
+        let shared_credentials = SharedCredentials::new(initial_credentials.clone());
         let (commands_tx, mut commands_rx) = mpsc::channel(4);
         let response = restart_harness_in_place_response(
             RelayRequestEnvelope {
@@ -4846,6 +5212,7 @@ mod preparation_tests {
             },
             Some(&commands_tx),
             &relay,
+            &shared_credentials,
             root.path(),
         )
         .await;
@@ -4862,6 +5229,7 @@ mod preparation_tests {
             std::fs::read_to_string(&supervisor_path).unwrap(),
             "original-supervisor-spec"
         );
+        assert_eq!(shared_credentials.snapshot().await, initial_credentials);
         assert!(commands_rx.try_recv().is_err());
 
         // Hold active, but ACP rejects the reload -> still does not overwrite acp-supervisor.json.
@@ -4892,6 +5260,7 @@ mod preparation_tests {
             },
             Some(&commands_tx),
             &relay,
+            &shared_credentials,
             root.path(),
         )
         .await;
@@ -4914,9 +5283,11 @@ mod preparation_tests {
             std::fs::read_to_string(&launch_path).unwrap(),
             "original-launch-json"
         );
-        // When ACP accepts the reload, launch.json IS updated and harness_restarted is marked,
-        // and the reloaded environment merges target_environment + MJ_KEEP_DIR while excluding
-        // disallowed keys and preserving the raw launch.json payload.
+        assert_eq!(shared_credentials.snapshot().await, initial_credentials);
+        // When ACP accepts the reload, launch.json IS updated, harness_restarted is marked,
+        // shared credentials switch to the restarted harness/home, and the reloaded environment
+        // merges target_environment + MJ_KEEP_DIR while excluding disallowed keys and preserving
+        // the raw launch.json payload.
         let (ok_tx, mut ok_rx) = mpsc::channel(4);
         let acceptor = mj_core::runtime::spawn(async move {
             match ok_rx.recv().await {
@@ -4932,8 +5303,21 @@ mod preparation_tests {
                 _ => None,
             }
         });
+        let dest_home = root.path().join("profile");
+        std::fs::create_dir_all(&dest_home).unwrap();
+        let dest_cred_bytes = br#"{"claudeAiOauth":{"accessToken":"reloaded-tok"}}"#;
+        let dest_marker =
+            mj_core::config::harness_authentication_marker(HarnessKind::Claude, &dest_home);
+        std::fs::write(&dest_marker, dest_cred_bytes).unwrap();
         let mut updated_launch =
-            super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+            super::super::relay_tests::launch_config(dest_home.to_str().unwrap());
+        updated_launch.harness = HarnessKind::Claude;
+        updated_launch.harness_home = dest_home.clone();
+        updated_launch.environment.clear();
+        updated_launch.environment.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            dest_home.to_string_lossy().into_owned(),
+        );
         updated_launch.session_id = "session-1".into();
         updated_launch.cwd = root.path().to_path_buf();
         updated_launch.initial_model = Some("reloaded-model".into());
@@ -4950,6 +5334,7 @@ mod preparation_tests {
         updated_launch
             .environment
             .insert("EXCLUDED_SECRET".into(), "must-strip".into());
+        relay.lock().unwrap().set_steering_supported(Some(true));
         let ok_response = restart_harness_in_place_response(
             RelayRequestEnvelope {
                 request_id: "r-restart-ok".into(),
@@ -4962,6 +5347,7 @@ mod preparation_tests {
             },
             Some(&ok_tx),
             &relay,
+            &shared_credentials,
             root.path(),
         )
         .await;
@@ -4976,6 +5362,40 @@ mod preparation_tests {
                 payload: RelayResponsePayload::HarnessRestartedInPlace
             }
         ));
+        let refreshed_endpoint = shared_credentials
+            .snapshot()
+            .await
+            .expect("reloaded credential endpoint");
+        assert_eq!(refreshed_endpoint.harness, HarnessKind::Claude);
+        assert_eq!(refreshed_endpoint.home, dest_home);
+        assert_eq!(refreshed_endpoint.marker, dest_marker);
+        let login_identity = relay.observe().unwrap().login_identity.clone();
+        let cred_state = credential_response(
+            RelayRequestEnvelope {
+                request_id: "r-cred-state".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::CredentialState,
+            },
+            &shared_credentials.snapshot().await,
+            root.path(),
+            &login_identity,
+        )
+        .await;
+        assert!(matches!(
+            cred_state.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::CredentialState { present: true, .. }
+            }
+        ));
+        assert_eq!(
+            relay.lock().unwrap().authentication_login_path.as_deref(),
+            Some(dest_marker.as_path())
+        );
+        assert_eq!(
+            relay.lock().unwrap().operational_state().steering_supported,
+            Some(true),
+            "in-place restart into a private staged Claude home must preserve hook-backed steering"
+        );
         assert_eq!(
             reloaded_env.get("MJ_TARGET_MARKER").map(String::as_str),
             Some("from-target")

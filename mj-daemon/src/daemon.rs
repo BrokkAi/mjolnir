@@ -206,6 +206,7 @@ impl LifecycleControl {
     /// is, and the next daemon finishes it from its durable record.
     fn interrupt(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.shutdown_stop.notify_waiters();
     }
 
     /// Whether daemon shutdown is what stopped the operation's commands, so a
