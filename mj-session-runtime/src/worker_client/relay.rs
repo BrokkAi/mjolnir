@@ -873,6 +873,92 @@ impl RelayClient {
         .context("image caching task failed")?
     }
 
+    pub async fn file_attachment_present(
+        &mut self,
+        reference: &mj_core::attachment::FileAttachmentRef,
+    ) -> Result<bool> {
+        self.require_file_attachment_protocol()?;
+        match self
+            .call(RelayRequest::FileAttachmentPresent {
+                reference: reference.clone(),
+            })
+            .await?
+        {
+            RelayResponsePayload::AttachmentPresent { present } => Ok(present),
+            _ => bail!("unexpected file presence response"),
+        }
+    }
+
+    /// Copy a verified controller blob to this session before admitting its reference.
+    pub async fn ensure_file_attachment(
+        &mut self,
+        reference: &mj_core::attachment::FileAttachmentRef,
+    ) -> Result<()> {
+        if self.file_attachment_present(reference).await? {
+            return Ok(());
+        }
+        let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
+        let reference_copy = reference.clone();
+        let bytes = mj_core::runtime::spawn_blocking(move || store.read_file(&reference_copy))
+            .await
+            .context("file loading task failed")??;
+        match self
+            .call(RelayRequest::InstallFileAttachment {
+                reference: reference.clone(),
+                data: BASE64.encode(bytes),
+            })
+            .await?
+        {
+            RelayResponsePayload::AttachmentInstalled => Ok(()),
+            _ => bail!("unexpected file upload response"),
+        }
+    }
+
+    /// Recover the local copy needed for queue editing and resubmission.
+    pub async fn cache_file_attachment(
+        &mut self,
+        reference: &mj_core::attachment::FileAttachmentRef,
+    ) -> Result<()> {
+        self.require_file_attachment_protocol()?;
+        let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
+        let local = store.clone();
+        let reference_copy = reference.clone();
+        if mj_core::runtime::spawn_blocking(move || local.contains_file(&reference_copy))
+            .await
+            .context("file lookup task failed")??
+        {
+            return Ok(());
+        }
+        let RelayResponsePayload::AttachmentData { data } = self
+            .call(RelayRequest::ReadFileAttachment {
+                reference: reference.clone(),
+            })
+            .await?
+        else {
+            bail!("unexpected file download response")
+        };
+        let reference = reference.clone();
+        mj_core::runtime::spawn_blocking(move || {
+            anyhow::ensure!(
+                data.len() <= mj_core::attachment::MAX_FILE_BYTES.div_ceil(3) * 4,
+                "file download is too large"
+            );
+            store.install_file(&reference, &BASE64.decode(data)?)
+        })
+        .await
+        .context("file caching task failed")?
+    }
+
+    fn require_file_attachment_protocol(&self) -> Result<()> {
+        if self.protocol_version < mj_core::relay::RELAY_FILE_ATTACHMENT_PROTOCOL {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "this session's worker predates file attachments; restart the session to attach files",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub async fn submit(
         &mut self,
         command_id: impl Into<String>,
@@ -880,8 +966,15 @@ impl RelayClient {
     ) -> Result<u64> {
         let command_id = command_id.into();
         if let RelayCommand::Prompt { prompt } = &command {
+            let files = mj_core::attachment::file_references(prompt)?;
+            if !files.is_empty() {
+                self.require_file_attachment_protocol()?;
+            }
             for reference in mj_core::attachment::references(prompt)? {
                 self.ensure_attachment(&reference).await?;
+            }
+            for reference in files {
+                self.ensure_file_attachment(&reference).await?;
             }
         }
         match self

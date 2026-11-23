@@ -18438,3 +18438,67 @@ async fn streaming_operations_require_terminal_auth_and_invalid_login_refuses_be
     shutdown.cancel();
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn startup_prompt_delivers_installed_file_without_image_capability() {
+    const NAME: &str = "startup_prompt_delivers_installed_file_without_image_capability";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    use mj_core::attachment::{AttachmentStore, FileAttachmentRef};
+
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let bytes = b"notes for the worker";
+    let reference = FileAttachmentRef::new(bytes, "notes.txt", "text/plain".into()).unwrap();
+    AttachmentStore::controller("session-1")
+        .unwrap()
+        .install_file(&reference, bytes)
+        .unwrap();
+    let draft = serde_json::json!({
+        "text": "[file #1: notes.txt]",
+        "files": [{"reference": reference}]
+    });
+    TerminalOperations::terminal_queue_startup_prompt(
+        state.clone(),
+        "session-1".into(),
+        StartupPromptRequest {
+            move_operation_id: None,
+            command_id: "file-startup".into(),
+            text: "[file #1: notes.txt]".into(),
+            prompt: vec![reference.content_block()],
+            encoded_draft: format!("{}{draft}", mj_core::draft::CHAT_DRAFT_PREFIX),
+            inherited_draft: None,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit {
+        command_id,
+        command,
+        reply,
+        ..
+    } = request
+    else {
+        panic!("expected startup prompt submission");
+    };
+    assert_eq!(command_id, "file-startup");
+    assert_eq!(
+        command.prompt_blocks().unwrap().as_ref(),
+        &[reference.content_block()]
+    );
+    reply.send(Ok(12)).unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}

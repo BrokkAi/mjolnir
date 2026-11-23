@@ -333,6 +333,9 @@ impl DurableRelay {
             RelayRequest::AttachmentPresent { .. }
             | RelayRequest::InstallAttachment { .. }
             | RelayRequest::ReadAttachment { .. }
+            | RelayRequest::FileAttachmentPresent { .. }
+            | RelayRequest::InstallFileAttachment { .. }
+            | RelayRequest::ReadFileAttachment { .. }
             | RelayRequest::CpuUsage
             | RelayRequest::CredentialState
             | RelayRequest::AwsCredentialsState
