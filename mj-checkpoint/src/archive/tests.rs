@@ -3220,18 +3220,33 @@ fn a_session_diff_includes_submodule_pointer_changes_despite_git_ignore_settings
             "vendor",
         ],
     );
-    git(&root.join("vendor"), &["checkout", "--detach", &first]);
+    let vendor = root.join("vendor");
+    git(&vendor, &["checkout", "--detach", &first]);
     git(&root, &["add", "--", "vendor"]);
     git(&root, &["commit", "-qm", "record initial submodule"]);
     let base = git_line(&root, &["rev-parse", "HEAD"]);
-    git(&root.join("vendor"), &["checkout", "--detach", &second]);
-    git(&root, &["add", "--", "vendor"]);
-    git(&root, &["commit", "-qm", "advance submodule"]);
     let before = object_files(&root);
+    let paths = ["vendor".into()];
 
     for setting in ["diff.ignoreSubmodules", "submodule.vendor.ignore"] {
         git(&root, &["config", setting, "all"]);
+        git(&vendor, &["checkout", "--detach", "--force", &first]);
+        fs::write(vendor.join("source.txt"), b"modified\n").unwrap();
+        fs::write(vendor.join("untracked.txt"), b"untracked\n").unwrap();
 
+        let unchanged = session_diff_details(&SystemGit, &root, Some(&base), None, &[]).unwrap();
+        assert!(unchanged.diff.is_empty(), "{setting}: {unchanged:?}");
+        assert!(
+            unchanged.tracked_files.is_empty(),
+            "{setting}: {unchanged:?}"
+        );
+        let unchanged = session_diff_details(&SystemGit, &root, Some(&base), None, &paths).unwrap();
+        assert!(unchanged.diff.is_empty(), "{setting}: {unchanged:?}");
+        let unchanged = session_diff_patch(&SystemGit, &root, Some(&base), None).unwrap();
+        assert!(unchanged.is_empty(), "{setting}: {unchanged}");
+
+        git(&vendor, &["checkout", "--detach", "--force", &second]);
+        fs::write(vendor.join("source.txt"), b"modified\n").unwrap();
         let summary = session_diff_details(&SystemGit, &root, Some(&base), None, &[]).unwrap();
         assert!(summary.diff.contains("vendor |"), "{setting}: {summary:?}");
         assert_eq!(
@@ -3244,10 +3259,10 @@ fn a_session_diff_includes_submodule_pointer_changes_despite_git_ignore_settings
             }],
             "{setting}"
         );
-        let selected =
-            session_diff_details(&SystemGit, &root, Some(&base), None, &["vendor".into()])
-                .unwrap()
-                .diff;
+        let selected = session_diff_details(&SystemGit, &root, Some(&base), None, &paths)
+            .unwrap()
+            .diff;
+        assert!(!selected.contains("-dirty"), "{setting}: {selected}");
         assert!(
             selected.contains(&format!("-Subproject commit {first}")),
             "{selected}"

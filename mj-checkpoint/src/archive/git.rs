@@ -3655,7 +3655,7 @@ fn session_patch(
             "--no-ext-diff",
             "--no-textconv",
             "--no-color",
-            "--ignore-submodules=none",
+            "--ignore-submodules=dirty",
             base,
             "--",
         ]
@@ -3696,7 +3696,7 @@ fn summarize_session_diff(
                 "--no-ext-diff",
                 "--no-textconv",
                 "--no-color",
-                "--ignore-submodules=none",
+                "--ignore-submodules=dirty",
                 "--no-renames",
                 &result.base,
                 "--",
