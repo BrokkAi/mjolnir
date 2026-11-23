@@ -3490,7 +3490,7 @@ mod tests {
             "{one}"
         );
         assert!(
-            one.contains("delegate the resulting edits, test-fixture repairs, and merge conflicts once\nthey go beyond a few calls. Prefer resuming the child that already owns that\nslice via `send_message`"),
+            one.contains("delegate any resulting edits, test-fixture repairs, and merge conflicts that\nfit your configured children once they go beyond a few calls. Where a child\nalready owns that slice and matches its scope, prefer resuming it via\n`send_message`"),
             "{one}"
         );
         for text in ["task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"] {
