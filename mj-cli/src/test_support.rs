@@ -12,6 +12,14 @@
 /// in the child, which should run the test body. `test_path` is the full test
 /// path as `--exact` matches it.
 pub(crate) fn rerun_in_isolated_child(child_var: &str, test_path: &str) -> bool {
+    rerun_in_isolated_child_with(child_var, test_path, |_, _| {})
+}
+
+pub(crate) fn rerun_in_isolated_child_with(
+    child_var: &str,
+    test_path: &str,
+    configure: impl FnOnce(&mut std::process::Command, &std::path::Path),
+) -> bool {
     if std::env::var_os(child_var).is_some() {
         return false;
     }
@@ -24,6 +32,7 @@ pub(crate) fn rerun_in_isolated_child(child_var: &str, test_path: &str) -> bool 
         .env(child_var, "1")
         .env("MJ_DATA_DIR", directory.path())
         .env("MJ_CONFIG_DIR", directory.path());
+    configure(&mut command, directory.path());
     let output =
         mj_core::subprocess::run_with_input(&mut command, &[]).expect("run the isolated child");
     assert!(

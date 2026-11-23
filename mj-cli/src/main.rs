@@ -321,8 +321,8 @@ enum DaemonCommand {
     },
     /// Show daemon PID, version, start time, and client count.
     Status,
-    /// Gracefully stop the daemon. Detached workers keep running unless
-    /// `--suspend-sessions` suspends them first.
+    /// Stop the daemon. A graceful stop leaves detached workers running
+    /// unless `--suspend-sessions` suspends them first.
     Stop(DaemonStopArgs),
     /// Gracefully replace the daemon with this Mjolnir build.
     Restart,
@@ -337,6 +337,10 @@ enum AfkCommand {
 
 #[derive(Debug, Args)]
 struct DaemonStopArgs {
+    /// Stop an unresponsive or still-starting daemon, including workers in
+    /// its container, or clear an unreachable legacy container record.
+    #[arg(long)]
+    force: bool,
     /// Suspend every active session first, saving a recovery copy of each,
     /// then stop the daemon. A session that does not suspend keeps the
     /// daemon running and is named.
@@ -2554,7 +2558,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             )?;
             if stop.suspend_sessions {
                 let stopped = suspend_all_sessions(stop.discard_untracked).await?;
-                daemon::stop_instance().await?;
+                daemon::stop_instance(stop.force).await?;
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
                     1 => println!("Mjolnir daemon stopped after stopping its active session."),
@@ -2562,8 +2566,12 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 return Ok(());
             }
-            if !daemon::stop_instance().await? {
+            if !daemon::stop_instance(stop.force).await? {
                 println!("Mjolnir daemon is already stopped.");
+                return Ok(());
+            }
+            if stop.force {
+                println!("Mjolnir daemon stopped.");
                 return Ok(());
             }
             println!(
