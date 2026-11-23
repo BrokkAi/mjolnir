@@ -1309,7 +1309,7 @@ class BifrostGoldTests(unittest.TestCase):
         self.assertEqual(report["candidate_sources"], ["engine", "terra_enumerator", "bifrost", "census"])
         self.assertEqual(report["documented"]["metrics"]["recall"], 0.5)
         self.assertEqual(report["documented"]["bifrost"], {
-            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0, "total_rows": 2,
+            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0, "timeout_queries": 0, "total_rows": 2,
             "gold_rows_found": 2, "gold_rows_outside_engine": 1, "precision": 1.0, "recall": 1.0,
             "binary_sha256": ["1" * 64], "build_identity": ["abc123"],
         })
@@ -1349,6 +1349,10 @@ if "--query-file" in args:
     assert "--workspace-scaled-limits" in args
     if "trigger-error" in qtext:
         print(json.dumps({{"isError": True, "error": "simulated failure"}}))
+        sys.exit(0)
+    if "trigger-timeout" in qtext:
+        import time as _time
+        _time.sleep(5)
         sys.exit(0)
     print(json.dumps({{"isError": False, "structuredContent": {{"truncated": False, "results": [
         {{"result_type": "declaration", "path": "src/lib.rs", "fq_name": "p.caller", "start_line": 2, "end_line": 2}}
@@ -1401,6 +1405,21 @@ for line in sys.stdin:
                 runner.query("mjolnir", c1, bad_q)
             bad_key = fidelity_live.sha(fidelity_live.canonical(["documented", "mjolnir", c1, bad_q]).encode())
             self.assertFalse((root / "checkpoints" / bad_key / "bifrost/completed.json").exists())
+
+            # Query timeout terminates cleanly, checkpoints timed_out=True/complete=False, and resumes without re-running.
+            slow_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-timeout"))))'
+            timed_runner = bifrost_gold.BifrostRunner(
+                fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
+                memory_cap_gib=None, use_systemd_cap=False, query_timeout_s=0.3,
+            )
+            timed = timed_runner.query("mjolnir", c1, slow_q)
+            self.assertTrue(timed["timed_out"])
+            self.assertFalse(timed["complete"])
+            self.assertEqual(timed["rows"], [])
+            self.assertFalse((root / "work/checkouts/mjolnir" / bifrost_gold.QUERY_FILENAME).exists())
+            count_after_timeout = len(invocations.read_text().splitlines())
+            self.assertEqual(timed_runner.query("mjolnir", c1, slow_q), timed)
+            self.assertEqual(len(invocations.read_text().splitlines()), count_after_timeout)
 
     def test_concurrent_run_sample_enforces_commit_repo_bounds_and_resumes_cleanly(self):
         import threading

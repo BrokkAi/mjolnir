@@ -484,6 +484,7 @@ def gate_report(manifest_hash, served, queries, records, seed):
             "queries_ran": len(bifrost_records),
             "complete_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("complete")),
             "truncated_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("truncated")),
+            "timeout_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("timed_out")),
             "total_rows": sum(len(row["bifrost_answer"].get("rows", ())) for row in bifrost_records),
             "gold_rows_found": b_tp,
             "gold_rows_outside_engine": b_outside_eng,
