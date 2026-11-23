@@ -50,8 +50,23 @@ func debugSurface(surface *SurfaceFrame) string {
 	return fmt.Sprintf("Some(%#v)", *surface)
 }
 
+// pinLocalZoneToUTC makes time.Local UTC for the rest of one test. Event
+// headers render in the local zone (chrono::Local in Rust), and goldens
+// recorded with epoch-relative timestamps were recorded in UTC, where Rust CI
+// runs. time.Local is process-wide, so a test that calls this must not call
+// t.Parallel.
+func pinLocalZoneToUTC(t *testing.T) {
+	t.Helper()
+	saved := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = saved })
+}
+
 // Hard-won: 0d4b1c9a1: submissions and rebuilds overrode deliberate reader navigation.
 func TestGoldenTranscriptNavigation(t *testing.T) {
+	// The transcript items below carry timestamps near the epoch, so their
+	// "You · 00:00" headers read 00:00 only in UTC.
+	pinLocalZoneToUTC(t)
 	var output strings.Builder
 
 	chat := numberedChat(40)
