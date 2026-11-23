@@ -9,9 +9,17 @@
 package targets
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
@@ -63,27 +71,107 @@ func PrepareTailscaleTLS(root string, executor core.CommandExecutor) (*Tailscale
 }
 
 func prepareTailscaleTLSWithBinary(root string, binary string, executor core.CommandExecutor) (*TailscaleTLS, error) {
-	panic("unported: mj-targets/src/tailscale.rs prepare_tailscale_tls_with_binary")
+	identity, err := discoverWithBinary(binary, executor)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(root, 0o777); err != nil {
+		return nil, fmt.Errorf("create web viewer TLS directory %s: %w", root, err)
+	}
+	tls := &TailscaleTLS{
+		tailscale: identity,
+		certPath:  filepath.Join(root, certFile),
+		keyPath:   filepath.Join(root, keyFile),
+	}
+	if err := tls.Renew(executor); err != nil {
+		return nil, err
+	}
+	return tls, nil
 }
 
 func discoverWithBinary(binary string, executor core.CommandExecutor) (tailscale, error) {
-	panic("unported: mj-targets/src/tailscale.rs discover_with_binary")
+	command := core.NewCommandSpec(binary, []string{"status", "--json"}).
+		WithPurpose("inspect local Tailscale status")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return tailscale{}, err
+	}
+	if output.Status != 0 {
+		return tailscale{}, fmt.Errorf("`tailscale status` failed: %s", strings.TrimSpace(lossyText(output.Stderr)))
+	}
+	var status tailscaleStatus
+	if err := json.Unmarshal(output.Stdout, &status); err != nil {
+		return tailscale{}, fmt.Errorf("parse `tailscale status --json` output: %w", err)
+	}
+	domain, err := certDomain(&status)
+	if err != nil {
+		return tailscale{}, err
+	}
+	return tailscale{binary: binary, certDomain: domain}, nil
 }
 
 func mintCertificate(identity *tailscale, certPath string, keyPath string, executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/tailscale.rs mint_certificate")
+	parent := filepath.Dir(certPath)
+	if err := os.MkdirAll(parent, 0o777); err != nil {
+		return fmt.Errorf("create web viewer TLS directory %s: %w", parent, err)
+	}
+	suffix, err := temporarySuffix()
+	if err != nil {
+		return err
+	}
+	stagedCert := filepath.Join(parent, fmt.Sprintf(".%s.%s.tmp", certFile, suffix))
+	stagedKey := filepath.Join(parent, fmt.Sprintf(".%s.%s.tmp", keyFile, suffix))
+	defer removeStagedFile(stagedKey)
+	defer removeStagedFile(stagedCert)
+	command := core.NewCommandSpec(identity.binary, []string{
+		"cert", "--cert-file", stagedCert, "--key-file", stagedKey, identity.certDomain,
+	}).WithPurpose("obtain the web viewer Tailscale certificate")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	if output.Status != 0 {
+		return fmt.Errorf("`tailscale cert %s` failed: %s", identity.certDomain, strings.TrimSpace(lossyText(output.Stderr)))
+	}
+	cert, err := os.ReadFile(stagedCert)
+	if err != nil {
+		return fmt.Errorf("read issued certificate %s: %w", stagedCert, err)
+	}
+	key, err := os.ReadFile(stagedKey)
+	if err != nil {
+		return fmt.Errorf("read issued private key %s: %w", stagedKey, err)
+	}
+	if err := validatePEM(cert, key); err != nil {
+		return err
+	}
+	if err := core.AtomicWrite(certPath, cert); err != nil {
+		return err
+	}
+	return core.AtomicWrite(keyPath, key)
 }
 
 func temporarySuffix() (string, error) {
-	panic("unported: mj-targets/src/tailscale.rs temporary_suffix")
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate temporary certificate filename: %w", err)
+	}
+	return fmt.Sprintf("%d.%016x", os.Getpid(), binary.LittleEndian.Uint64(random[:])), nil
 }
 
 func validatePEM(cert []byte, key []byte) error {
-	panic("unported: mj-targets/src/tailscale.rs validate_pem")
+	if !bytes.Contains(cert, []byte("-----BEGIN CERTIFICATE-----")) {
+		return errors.New("tailscale returned a certificate file without a PEM certificate")
+	}
+	if !bytes.Contains(key, []byte("PRIVATE KEY-----")) {
+		return errors.New("tailscale returned a key file without a PEM private key")
+	}
+	return nil
 }
 
 func removeStagedFile(path string) {
-	panic("unported: mj-targets/src/tailscale.rs remove_staged_file")
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("could not remove staged Tailscale certificate file", "path", path, "error", err)
+	}
 }
 
 func findBinary() (string, bool) {
@@ -122,5 +210,13 @@ func (s *tailscaleStatus) UnmarshalJSON(data []byte) error {
 }
 
 func certDomain(status *tailscaleStatus) (string, error) {
-	panic("unported: mj-targets/src/tailscale.rs cert_domain")
+	if status.BackendState != "Running" {
+		return "", fmt.Errorf("tailscale is not running (state: %s); run `tailscale up` first", status.BackendState)
+	}
+	if len(status.CertDomains) > 0 {
+		if domain := strings.TrimRight(status.CertDomains[0], "."); domain != "" {
+			return domain, nil
+		}
+	}
+	return "", errors.New("this tailnet has no HTTPS certificate domains; enable MagicDNS and HTTPS Certificates under the DNS tab at https://login.tailscale.com/admin/dns, then run `mj daemon restart`")
 }

@@ -13,7 +13,10 @@ package targets
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"sync/atomic"
+	"syscall"
 )
 
 type signalAction int
@@ -95,7 +98,30 @@ func (c *Coordinator) Token() context.Context {
 }
 
 func (c *Coordinator) receivedSignal(signal int) {
-	panic("unported: mj-targets/src/termination.rs Coordinator::received_signal")
+	if c.login {
+		c.cancel()
+		return
+	}
+	unix := runtime.GOOS != "windows"
+	if unix && signal == int(syscall.SIGINT) && suppressedInterrupts.Load() > 0 {
+		return
+	}
+	if !unix && signal == 0 && suppressedInterrupts.Load() > 0 {
+		return
+	}
+	// SIGHUP means the controlling terminal is gone. A graceful cancel cannot
+	// work then: the UI may never observe the token on the dead tty and the
+	// process survives as a headless CPU spinner. Exit immediately; detached
+	// workers are unaffected and child proxies exit on EOF.
+	if unix && signal == int(syscall.SIGHUP) {
+		os.Exit(exitCode(signal))
+	}
+	switch nextSignalAction(c.signalsSeen) {
+	case signalActionGraceful:
+		c.cancel()
+	case signalActionForce:
+		os.Exit(exitCode(signal))
+	}
 }
 
 func (c *Coordinator) FinishLogin() {

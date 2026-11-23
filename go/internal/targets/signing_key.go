@@ -8,7 +8,11 @@ package targets
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -46,13 +50,54 @@ func CookieKeyPath() string {
 // all end with the key the first of them wrote. The key file itself is
 // replaced atomically, so the unlocked read below never sees a partial key.
 func LoadOrCreateCookieKey(path string) ([]byte, error) {
-	panic("unported: mj-targets/src/signing_key.rs load_or_create_cookie_key")
+	if key, err := os.ReadFile(path); err == nil && len(key) >= CookieKeyBytes {
+		return key, nil
+	}
+	creating, err := lockCookieKey(path)
+	if err != nil {
+		return nil, err
+	}
+	defer creating.Drop()
+	key, err := os.ReadFile(path)
+	switch {
+	case err == nil && len(key) >= CookieKeyBytes:
+		return key, nil
+	case err == nil:
+		slog.Warn(fmt.Sprintf("phone cookie key is shorter than %d bytes; generating a new key signs every phone out", CookieKeyBytes),
+			"path", path, "bytes", len(key))
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		slog.Warn(fmt.Sprintf("could not read the phone cookie key (%v); generating a new key signs every phone out", err),
+			"path", path)
+	}
+	generated, err := GenerateCookieKey()
+	if err != nil {
+		return nil, err
+	}
+	if err := core.AtomicWrite(path, generated[:]); err != nil {
+		return nil, fmt.Errorf("persist Mjolnir phone cookie key %s: %w", path, err)
+	}
+	return generated[:], nil
 }
 
 // lockCookieKey is the lock that makes one caller the creator of the key at
 // path.
 func lockCookieKey(path string) (*core.FileLock, error) {
-	panic("unported: mj-targets/src/signing_key.rs lock_cookie_key")
+	lockPath := path + ".lock"
+	if parent := filepath.Dir(lockPath); parent != "" && parent != "." {
+		if err := os.MkdirAll(parent, 0o777); err != nil {
+			return nil, fmt.Errorf("create phone cookie key directory %s: %w", parent, err)
+		}
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open phone cookie key lock %s: %w", lockPath, err)
+	}
+	if err := libLockFile(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock phone cookie key %s: %w", path, err)
+	}
+	return core.NewFileLock(file), nil
 }
 
 func GenerateCookieKey() ([CookieKeyBytes]byte, error) {

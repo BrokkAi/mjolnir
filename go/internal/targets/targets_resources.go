@@ -3,6 +3,12 @@
 package targets
 
 import (
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
@@ -73,7 +79,14 @@ var ec2StoragePaths = [5]string{
 // One SSH command per host and poll: storage rides on the capacity probe
 // rather than adding round trips.
 func SSHHostCapacityCommand(ssh *core.SshTarget, storagePaths []string) core.CommandSpec {
-	panic("unported: mj-targets/src/targets/resources.rs ssh_host_capacity_command")
+	storage := core.StorageProbeScript
+	// The storage loop reads the paths from the arguments; the resource
+	// scripts read an optional /proc override from `$1`, so clear them first.
+	script := fmt.Sprintf("set -eu\n%s\nset --\ncase $(uname -s) in\nDarwin)\n%s\n;;\nLinux)\n%s\n;;\n*) echo 'unsupported host operating system for capacity sampling' >&2; exit 1;;\nesac",
+		storage, darwinHostResourceUsageScript, hostResourceUsageScript)
+	words := []string{"sh", "-c", script, "mj-capacity"}
+	words = append(words, storagePaths...)
+	return core.SSHCommand(core.SshTrafficClassControl, ssh, words).WithPurpose("sample deployment host capacity")
 }
 
 // SSHNitroHostCapacityCommand is SSHHostCapacityCommand for a host that runs
@@ -88,7 +101,15 @@ func SSHHostCapacityCommand(ssh *core.SshTarget, storagePaths []string) core.Com
 // Only an absent engine is optional: an installed engine that cannot report
 // fails the sample, rather than passing physical memory off as the pool.
 func SSHNitroHostCapacityCommand(ssh *core.SshTarget, storagePaths []string) core.CommandSpec {
-	panic("unported: mj-targets/src/targets/resources.rs ssh_nitro_host_capacity_command")
+	command := SSHHostCapacityCommand(ssh, storagePaths)
+	engine := core.EngineShellWords(core.MicrovmEngine)
+	if len(command.Args) == 0 {
+		panic("an SSH command ends with the remote command line")
+	}
+	last := len(command.Args) - 1
+	command.Args[last] = fmt.Sprintf(`%s && if [ -e "$HOME/%s" ]; then info=$(%s info --format json) || exit 1; printf 'microvm.info=%%s\n' "$(printf '%%s' "$info" | tr -d '\n')"; fi`,
+		command.Args[last], core.MicrovmEngineWorker, engine)
+	return command
 }
 
 // vm_stat reports pages, whose size differs between Intel and Apple silicon.
@@ -123,7 +144,16 @@ printf 'logical.cores=%s\n' "$cores"
 `
 
 func AWSAllocatedCapacityCommand(locator *core.TargetsTargetLocator, sessionID string) (core.CommandSpec, error) {
-	panic("unported: mj-targets/src/targets/resources.rs aws_allocated_capacity_command")
+	if locator.Kind != core.TargetsTargetLocatorAwsEc2 {
+		return core.CommandSpec{}, errors.New("AWS allocated-capacity probes require an EC2 locator")
+	}
+	args := []string{
+		"sh", "-c",
+		awsAllocatedCapacityScript + "\n" + core.StorageProbeScript,
+		"sh", locator.Workspace,
+	}
+	args = append(args, ec2StoragePaths[:]...)
+	return core.CommandOnLocator(core.SshTrafficClassControl, locator, sessionID, args, "sample EC2 allocated capacity")
 }
 
 // StorageSamples is the storage lines of a probe's output, as one sample for
@@ -141,33 +171,163 @@ func StorageSamples(output []byte, host string) []core.HostStorageSample {
 // local targets. Unix runs core.StorageProbeScript through executor; Windows
 // has no POSIX shell, so it asks its volume APIs.
 func MeasureLocalStorage(paths []string, executor core.CommandExecutor) (*string, []core.FilesystemSpace, error) {
-	panic("unported: mj-targets/src/targets/resources.rs measure_local_storage")
+	return measureLocalStorage(paths, executor)
+}
+
+// measureUnixStorage runs core.StorageProbeScript over paths through
+// executor (Rust's Unix branch of measure_local_storage).
+func measureUnixStorage(paths []string, executor core.CommandExecutor) (*string, []core.FilesystemSpace, error) {
+	probe := core.NewCommandSpec("sh", []string{"-c", core.StorageProbeScript, "mj-storage"}).
+		WithPurpose("measure local free space")
+	probe.Args = append(probe.Args, paths...)
+	output, err := executor.Execute(&probe)
+	if err != nil {
+		return nil, nil, err
+	}
+	if output.Status != 0 {
+		return nil, nil, fmt.Errorf("%s failed with status %d: %s", probe.Purpose, output.Status, strings.TrimSpace(lossyText(output.Stderr)))
+	}
+	home, filesystems := core.ParseStorageLines(output.Stdout)
+	return home, filesystems, nil
 }
 
 func ParseHostCapacity(output []byte, host string) (core.DeploymentCapacityUsage, error) {
-	panic("unported: mj-targets/src/targets/resources.rs parse_host_capacity")
+	values := parseKeyValues(output)
+	total, err := parseRequiredU64(values, "memory.max")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	used, err := parseRequiredU64(values, "memory.current")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	info, memoryPool := values["microvm.info"]
+	var physicalMemory *core.HostMemoryUsage
+	if memoryPool {
+		physicalMemory = &core.HostMemoryUsage{UsedBytes: used, TotalBytes: total}
+		if used, total, err = nitroPoolMemory(info); err != nil {
+			return core.DeploymentCapacityUsage{}, err
+		}
+	}
+	var instanceType *string
+	if value, ok := values["ec2.instance_type"]; ok && value != "" {
+		instanceType = &value
+	}
+	cpuText, err := requiredValue(values, "cpu.percent")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	cpu, err := parsePercent(cpuText)
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	cores, err := parseRequiredU64(values, "logical.cores")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	return core.DeploymentCapacityUsage{
+		EC2InstanceType:  instanceType,
+		PhysicalMemory:   physicalMemory,
+		MemoryPool:       memoryPool,
+		CPUPercent:       &cpu,
+		MemoryUsedBytes:  used,
+		MemoryTotalBytes: total,
+		LogicalCores:     cores,
+		Storage:          StorageSamples(output, host),
+	}, nil
 }
 
 func ParseAWSAllocatedCapacity(output []byte, host string) (core.DeploymentCapacityUsage, error) {
-	panic("unported: mj-targets/src/targets/resources.rs parse_aws_allocated_capacity")
+	values := parseKeyValues(output)
+	memoryTotal, err := parseRequiredU64(values, "memory.total")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	cores, err := parseRequiredU64(values, "logical.cores")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	disk, err := parseRequiredU64(values, "disk.total")
+	if err != nil {
+		return core.DeploymentCapacityUsage{}, err
+	}
+	return core.DeploymentCapacityUsage{
+		MemoryTotalBytes: memoryTotal,
+		LogicalCores:     cores,
+		DiskTotalBytes:   &disk,
+		Storage:          StorageSamples(output, host),
+	}, nil
 }
 
 func parseKeyValues(output []byte) map[string]string {
-	panic("unported: mj-targets/src/targets/resources.rs parse_key_values")
+	values := map[string]string{}
+	for _, line := range libLines(lossyText(output)) {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			values[key] = strings.TrimSpace(value)
+		}
+	}
+	return values
 }
 
 func requiredValue(values map[string]string, key string) (string, error) {
-	panic("unported: mj-targets/src/targets/resources.rs required_value")
+	value, ok := values[key]
+	if !ok {
+		return "", fmt.Errorf("capacity probe did not expose %s", key)
+	}
+	return value, nil
 }
 
 func parseRequiredU64(values map[string]string, key string) (uint64, error) {
-	panic("unported: mj-targets/src/targets/resources.rs parse_required_u64")
+	text, err := requiredValue(values, key)
+	if err != nil {
+		return 0, err
+	}
+	value, err := libParseU64(text)
+	if err != nil {
+		return 0, fmt.Errorf("capacity probe reported invalid %s: %w", key, err)
+	}
+	return value, nil
 }
 
 func parsePercent(value string) (uint8, error) {
-	panic("unported: mj-targets/src/targets/resources.rs parse_percent")
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return 0, fmt.Errorf("invalid percentage %s: invalid float literal", core.RustDebugString(value))
+	}
+	if math.IsInf(parsed, 0) || math.IsNaN(parsed) {
+		// Rust formats the parsed float here: inf, -inf or NaN.
+		text := "NaN"
+		switch {
+		case math.IsInf(parsed, 1):
+			text = "inf"
+		case math.IsInf(parsed, -1):
+			text = "-inf"
+		}
+		return 0, fmt.Errorf("invalid percentage %s", text)
+	}
+	return uint8(min(max(math.Round(parsed), 0), 100)), nil
 }
 
 func ValidateResourceAllocation(targetKind core.ResourceAllocationKind, allocation core.SessionResourceAllocation) error {
-	panic("unported: mj-targets/src/targets/resources.rs validate_resource_allocation")
+	if allocation != nil {
+		if err := allocation.Validate(); err != nil {
+			return err
+		}
+	}
+	switch allocation.(type) {
+	case nil:
+		return nil
+	case core.SessionResourceAllocationContainer:
+		if targetKind == core.ResourceAllocationKindContainer {
+			return nil
+		}
+	case core.SessionResourceAllocationAwsEc2:
+		if targetKind == core.ResourceAllocationKindAwsEc2 {
+			return nil
+		}
+	}
+	if targetKind == core.ResourceAllocationKindFixed {
+		return errors.New(core.BareTargetFixedResources)
+	}
+	return errors.New("resource allocation does not match the selected target kind")
 }

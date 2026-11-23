@@ -16,12 +16,21 @@ package targets
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -52,7 +61,48 @@ type scopedKey struct {
 
 // encode is the key's identity as a map key: equal keys encode equally.
 func (k *scopedKey) encode() string {
-	panic("unported: mj-targets/src/aws_assume_role.rs ScopedKey Ord")
+	encoded, err := json.Marshal(struct {
+		SessionID   string             `json:"session_id"`
+		Role        core.AwsRoleConfig `json:"role"`
+		Environment map[string]string  `json:"environment"`
+	}{k.sessionID, k.role, k.environment})
+	if err != nil {
+		panic(fmt.Sprintf("encode an AWS credential cache key: %v", err))
+	}
+	return string(encoded)
+}
+
+// newScopedKey is the key of a request for this session and source, owning
+// copies of the role and environment.
+func newScopedKey(sessionID string, role *core.AwsRoleConfig, environment map[string]string) scopedKey {
+	owned := *role
+	owned.SessionPolicyARNs = slices.Clone(role.SessionPolicyARNs)
+	return scopedKey{sessionID: sessionID, role: owned, environment: maps.Clone(environment)}
+}
+
+// takeCell is the cell for key, created when missing, counted as held by the
+// caller until it calls releaseCell (Rust: cloning the Arc out of the map).
+func (s *ScopedAwsCredentials) takeCell(key scopedKey, create bool) *scopedCell {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	encoded := key.encode()
+	cell := s.entries[encoded]
+	if cell == nil {
+		if !create {
+			return nil
+		}
+		cell = &scopedCell{key: key}
+		s.entries[encoded] = cell
+	}
+	cell.holders++
+	return cell
+}
+
+// releaseCell is the end of a takeCell hold (Rust: dropping the Arc).
+func (s *ScopedAwsCredentials) releaseCell(cell *scopedCell) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cell.holders--
 }
 
 // scopedCell is one key's entry. mu is held while minting into it; holders
@@ -104,7 +154,24 @@ func (s *ScopedAwsCredentials) SweepExpired() {
 // scopedPeek reads the entry cached for this session and source, when there
 // is one and nobody is minting into it (Rust: ScopedAwsCredentials::peek).
 func scopedPeek[T any](s *ScopedAwsCredentials, sessionID string, source *core.AwsCredentialSource, read func(entry *scopedEntry, now time.Time) (T, bool)) (T, bool) {
-	panic("unported: mj-targets/src/aws_assume_role.rs ScopedAwsCredentials::peek")
+	var zero T
+	if source.Role == nil {
+		return zero, false
+	}
+	now := s.now()
+	cell := s.takeCell(newScopedKey(sessionID, source.Role, source.Environment), false)
+	if cell == nil {
+		return zero, false
+	}
+	defer s.releaseCell(cell)
+	if !cell.mu.TryLock() {
+		return zero, false
+	}
+	defer cell.mu.Unlock()
+	if cell.entry == nil {
+		return zero, false
+	}
+	return read(cell.entry, now)
 }
 
 // RenewIn is how long until the credentials cached for this session and
@@ -132,7 +199,17 @@ func (s *ScopedAwsCredentials) RemainingValidity(sessionID string, source *core.
 // been refused, or lost from the worker. Blocking, like CredentialsFor: it
 // waits for a mint in progress for the key.
 func (s *ScopedAwsCredentials) Forget(sessionID string, source *core.AwsCredentialSource) {
-	panic("unported: mj-targets/src/aws_assume_role.rs ScopedAwsCredentials::forget")
+	if source.Role == nil {
+		return
+	}
+	cell := s.takeCell(newScopedKey(sessionID, source.Role, source.Environment), false)
+	if cell == nil {
+		return
+	}
+	defer s.releaseCell(cell)
+	cell.mu.Lock()
+	cell.entry = nil
+	cell.mu.Unlock()
 }
 
 // Holds reports whether the cache holds credentials for the session.
@@ -170,7 +247,50 @@ func scopedAwsCredentialsWithClock(now clock) *ScopedAwsCredentials {
 // expired. The session keeps what it has installed, and the caller reports
 // the failure; nothing widens the scope.
 func (s *ScopedAwsCredentials) CredentialsFor(sessionID string, source *core.AwsCredentialSource, executor core.CommandExecutor) (core.AwsCredentials, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs ScopedAwsCredentials::credentials_for")
+	role := source.Role
+	if role == nil {
+		return core.AwsCredentials{}, errors.New("no AWS role is configured for this profile")
+	}
+	hostProfile := selectedProfile(source)
+	now := s.now()
+	cell := s.takeCell(newScopedKey(sessionID, role, source.Environment), true)
+	defer s.releaseCell(cell)
+	cell.mu.Lock()
+	defer cell.mu.Unlock()
+	if cell.entry != nil && cell.entry.freshAt(now) {
+		return cell.entry.credentials, nil
+	}
+	name := SessionName(sessionID)
+	command := AssumeRoleCommand(role, hostProfile, name, source.Environment)
+	// Only the call to AWS (and reading its answer) is the role's to
+	// explain: its advice, including the unscoped fallback, does not apply
+	// to a failure of the controller's own signing key.
+	issued, err := mint(&command, hostProfile, executor)
+	if err == nil {
+		// Recorded beside the secret on the worker, so what Mjolnir issued
+		// for this session's role is recognisable later.
+		var sourceIdentity *string
+		if role.SourceIdentity {
+			sourceIdentity = &name
+		}
+		issued, err = issued.IssuedFor(role.RoleARN, name, role.SessionPolicyFingerprint(), sourceIdentity)
+	}
+	if err != nil {
+		return core.AwsCredentials{}, fmt.Errorf("Could not assume AWS role %s for this session. The controller's AWS login (profile %s) must be allowed to assume it: give that login sts:AssumeRole on the role, and name it in the role's trust policy: %w",
+			role.RoleARN, hostProfile, err)
+	}
+	// ...and authenticated with a key the session cannot compute.
+	minted, err := issued.SignScope(SignScope)
+	if err != nil {
+		return core.AwsCredentials{}, fmt.Errorf("could not sign the session's AWS scope record with the controller's signing key: %w", err)
+	}
+	mintedAt := s.now()
+	millis, ok := minted.ExpiresAtEpochMillis()
+	if !ok || millis < 0 {
+		return core.AwsCredentials{}, errors.New("AWS returned credentials without an expiration")
+	}
+	cell.entry = &scopedEntry{credentials: minted, mintedAt: mintedAt, expiresAt: time.UnixMilli(millis)}
+	return minted, nil
 }
 
 // sweep drops entries whose credentials have expired, and empty cells nobody
@@ -179,7 +299,19 @@ func (s *ScopedAwsCredentials) CredentialsFor(sessionID string, source *core.Aws
 // a cell the map no longer knows. The map lock is held, so nobody can newly
 // take a cell while this counts them.
 func sweep(entries map[string]*scopedCell, now time.Time) {
-	panic("unported: mj-targets/src/aws_assume_role.rs sweep")
+	for encoded, cell := range entries {
+		if cell.holders > 0 {
+			continue
+		}
+		if !cell.mu.TryLock() {
+			continue
+		}
+		live := cell.entry != nil && cell.entry.expiresAt.After(now)
+		cell.mu.Unlock()
+		if !live {
+			delete(entries, encoded)
+		}
+	}
 }
 
 func selectedProfile(source *core.AwsCredentialSource) string {
@@ -214,7 +346,21 @@ var scopeKeyStore scopeKeyCell
 var fixtureScopeKeyStore scopeKeyCell
 
 func scopeKeyCache() (*scopeKeyCell, bool, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs scope_key_cache")
+	fixture := cfgTest || core.TestFixturesEnabled()
+	if !fixture {
+		return &scopeKeyStore, false, nil
+	}
+	if SigningKeyUnavailable.Load() {
+		return nil, true, errors.New("the signing key is unreadable (test)")
+	}
+	return &fixtureScopeKeyStore, true, nil
+}
+
+// cached is the key the cell holds, or nil before it is loaded.
+func (c *scopeKeyCell) cached() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.key
 }
 
 // scopeKey is blocking: it reads (or creates) the signing key on first use.
@@ -227,14 +373,56 @@ func scopeKey() ([]byte, error) {
 }
 
 func loadScopeKey(cache *scopeKeyCell, fixture bool) ([]byte, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs load_scope_key")
+	if key := cache.cached(); key != nil {
+		return key, nil
+	}
+	var root []byte
+	if fixture {
+		root = []byte("test signing key, not a secret")
+	} else {
+		key, err := LoadOrCreateCookieKey(CookieKeyPath())
+		if err != nil {
+			return nil, fmt.Errorf("read the controller's signing key: %w", err)
+		}
+		root = key
+	}
+	derive := hmac.New(sha256.New, root)
+	derive.Write([]byte("mjolnir aws credential scope key v1"))
+	derived := derive.Sum(nil)
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.key == nil {
+		cache.key = derived
+	}
+	return cache.key, nil
 }
 
 // scopeKeyWithoutBlocking is the key for code that must not block: the
 // first use is loaded on another goroutine, every later one is a read of the
 // kept key.
 func scopeKeyWithoutBlocking(ctx context.Context) ([]byte, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs scope_key_without_blocking")
+	cache, fixture, err := scopeKeyCache()
+	if err != nil {
+		return nil, err
+	}
+	if key := cache.cached(); key != nil {
+		return key, nil
+	}
+	type loaded struct {
+		key []byte
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		key, err := loadScopeKey(cache, fixture)
+		done <- loaded{key, err}
+	}()
+	select {
+	case result := <-done:
+		return result.key, result.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("signing key load task stopped: %w", ctx.Err())
+	}
 }
 
 // SigningKeyUnavailable lets a test make the signing key unreadable (Rust: a
@@ -242,7 +430,9 @@ func scopeKeyWithoutBlocking(ctx context.Context) ([]byte, error) {
 var SigningKeyUnavailable atomic.Bool
 
 func scopeMAC(key []byte, scope *core.AwsCredentialScope, secretFingerprint string) hash.Hash {
-	panic("unported: mj-targets/src/aws_assume_role.rs scope_mac")
+	mac := hmac.New(sha256.New, key)
+	mac.Write(scope.SignedPayload(secretFingerprint))
+	return mac
 }
 
 // SignScope is the tag for a scope record describing the secret with this
@@ -262,7 +452,25 @@ func SignScope(scope *core.AwsCredentialScope, secretFingerprint string) (string
 // unknown (the signing key could not be read), which is not the same as
 // "not authentic": callers must not act on it as if the record were forged.
 func ScopeIsAuthentic(ctx context.Context, scope *core.AwsCredentialScope, secretFingerprint string) (bool, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs scope_is_authentic")
+	key, err := scopeKeyWithoutBlocking(ctx)
+	if err != nil {
+		return false, err
+	}
+	// Each pair of characters is one byte, as Rust's u8::from_str_radix reads
+	// it (an optional leading '+'); an odd last character is ignored.
+	tag := make([]byte, 0, len(scope.Tag)/2)
+	for index := 0; index < len(scope.Tag)/2; index++ {
+		digits := scope.Tag[index*2 : index*2+2]
+		if len(digits) > 1 && digits[0] == '+' {
+			digits = digits[1:]
+		}
+		value, err := strconv.ParseUint(digits, 16, 8)
+		if err != nil {
+			return false, nil
+		}
+		tag = append(tag, byte(value))
+	}
+	return hmac.Equal(scopeMAC(key, scope, secretFingerprint).Sum(nil), tag), nil
 }
 
 // stsDefaultDuration is what AWS documents as the default `DurationSeconds`
@@ -310,11 +518,48 @@ func SessionName(sessionID string) string {
 // AssumeRoleCommand is `aws sts assume-role` for one session, run with the
 // host's own login.
 func AssumeRoleCommand(role *core.AwsRoleConfig, hostProfile string, sessionName string, environment map[string]string) core.CommandSpec {
-	panic("unported: mj-targets/src/aws_assume_role.rs assume_role_command")
+	args := []string{
+		"sts", "assume-role",
+		"--role-arn", role.RoleARN,
+		"--role-session-name", sessionName,
+	}
+	if policy, ok := role.EffectiveSessionPolicy(); ok {
+		args = append(args, "--policy", policy)
+	}
+	if len(role.SessionPolicyARNs) > 0 {
+		args = append(args, "--policy-arns")
+		for _, arn := range role.SessionPolicyARNs {
+			args = append(args, "arn="+arn)
+		}
+	}
+	if role.DurationSeconds != nil {
+		args = append(args, "--duration-seconds", strconv.FormatUint(uint64(*role.DurationSeconds), 10))
+	}
+	if role.SourceIdentity {
+		args = append(args, "--source-identity", sessionName)
+	}
+	args = append(args, "--output", "json", "--profile", hostProfile)
+	command := core.NewCommandSpec("aws", args).WithPurpose("assume the profile's AWS role for a session")
+	// The output holds the new secret keys, and a failing credential helper
+	// can print secrets to either stream.
+	command.SensitiveOutput = true
+	command.Env = maps.Clone(environment)
+	if command.Env == nil {
+		command.Env = map[string]string{}
+	}
+	command.Env["AWS_CLI_AUTO_PROMPT"] = "off"
+	return command
 }
 
 func mint(command *core.CommandSpec, hostProfile string, executor core.CommandExecutor) (core.AwsCredentials, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs mint")
+	output, err := executor.Execute(command)
+	if err != nil {
+		return core.AwsCredentials{}, fmt.Errorf("the AWS CLI could not run; install AWS CLI v2 on the controller host: %w", err)
+	}
+	if output.Status != 0 {
+		return core.AwsCredentials{}, errors.New(assumeRoleFailure(output.Stderr, output.Status))
+	}
+	return core.AwsCredentialsFromAssumeRole(hostProfile, output.Stdout)
 }
 
 // assumeRoleFailure is what to tell the person about a failed call. The
@@ -326,7 +571,41 @@ func mint(command *core.CommandSpec, hostProfile string, executor core.CommandEx
 // The free-text message is dropped. A client-side range check prints no
 // operation, only `An error occurred (ParamValidation): ...`.
 func assumeRoleFailure(stderr []byte, status int) string {
-	panic("unported: mj-targets/src/aws_assume_role.rs assume_role_failure")
+	identifier := func(text string) bool {
+		if text == "" {
+			return false
+		}
+		for i := 0; i < len(text); i++ {
+			b := text[i]
+			if !('a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' || b == '.') {
+				return false
+			}
+		}
+		return true
+	}
+	for _, line := range libLines(lossyText(stderr)) {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "aws: [ERROR]: ")
+		after, ok := strings.CutPrefix(line, "An error occurred (")
+		if !ok {
+			continue
+		}
+		code, rest, ok := strings.Cut(after, ")")
+		if !ok || !identifier(code) {
+			continue
+		}
+		operation, hasOperation := "", false
+		if calling, ok := strings.CutPrefix(strings.TrimLeftFunc(rest, unicode.IsSpace), "when calling the "); ok {
+			if named, _, ok := strings.Cut(calling, " operation"); ok && identifier(named) {
+				operation, hasOperation = named, true
+			}
+		}
+		if hasOperation && operation != "AssumeRole" {
+			return fmt.Sprintf("AWS refused AssumeRole: %s (operation %s)", code, operation)
+		}
+		return "AWS refused AssumeRole: " + code
+	}
+	return fmt.Sprintf("the AWS CLI exited with status %d (its output is not shown)", status)
 }
 
 // Probe is one real `AssumeRole`, for `mj doctor`: the same command a
@@ -336,7 +615,17 @@ func assumeRoleFailure(stderr []byte, status int) string {
 // policy may allow only that shape and a doctor probe must not be refused
 // for looking different.
 func Probe(source *core.AwsCredentialSource, executor core.CommandExecutor) (core.AwsCredentials, error) {
-	panic("unported: mj-targets/src/aws_assume_role.rs probe")
+	role := source.Role
+	if role == nil {
+		return core.AwsCredentials{}, errors.New("no AWS role is configured for this profile")
+	}
+	hostProfile := selectedProfile(source)
+	sessionID, err := core.NewSessionID()
+	if err != nil {
+		return core.AwsCredentials{}, err
+	}
+	command := AssumeRoleCommand(role, hostProfile, SessionName(sessionID), source.Environment)
+	return mint(&command, hostProfile, executor)
 }
 
 // Obtain is the unscoped export for a profile without a role, the scoped
@@ -356,11 +645,11 @@ func Obtain(sessionID string, source *core.AwsCredentialSource, executor core.Co
 // TestFixturesAssumeRole is a recorded successful `aws sts assume-role`
 // reply.
 //
-//go:embed testdata/fixtures/aws-sts-assume-role.json
+//go:embed testdata/tests/fixtures/aws-sts-assume-role.json
 var TestFixturesAssumeRole string
 
 // TestFixturesAccessDenied is a recorded AccessDenied error from
 // `aws sts assume-role`.
 //
-//go:embed testdata/fixtures/aws-sts-assume-role-access-denied.txt
+//go:embed testdata/tests/fixtures/aws-sts-assume-role-access-denied.txt
 var TestFixturesAccessDenied string

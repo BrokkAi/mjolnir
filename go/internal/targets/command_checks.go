@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os/exec"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -39,14 +40,29 @@ func CheckOutput(command *core.CommandSpec, output core.CommandOutput) (core.Com
 }
 
 func CommandErrorDetail(stderr []byte) string {
-	panic("unported: mj-targets/src/command_checks.rs command_error_detail")
+	reported := strings.TrimSpace(lossyText(stderr))
+	detail := reported
+	if index := strings.LastIndex(reported, "\nCaused by:\n"); index >= 0 {
+		detail = reported[index+len("\nCaused by:\n"):]
+	}
+	detail = strings.TrimPrefix(detail, "Error: ")
+	lines := libLines(detail)
+	for i, line := range lines {
+		lines[i] = strings.TrimPrefix(line, "    ")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // InstalledDigestMatches reports whether the digest command prints for an
 // installed file equals expected. A command that fails, or prints nothing,
 // does not match.
 func InstalledDigestMatches(executor core.CommandExecutor, command *core.CommandSpec, expected string) bool {
-	panic("unported: mj-targets/src/command_checks.rs installed_digest_matches")
+	output, err := executor.Execute(command)
+	if err != nil || output.Status != 0 {
+		return false
+	}
+	fields := strings.Fields(lossyText(output.Stdout))
+	return len(fields) > 0 && libEqualFoldASCII(fields[0], expected)
 }
 
 // IsMissingCommand reports whether a command failed because its program is

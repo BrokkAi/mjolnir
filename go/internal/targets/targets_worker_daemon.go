@@ -5,7 +5,9 @@ package targets
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -49,7 +51,26 @@ const WorkerControlUnstagedStatus = 78
 // from it, so whenNoBinary answers for it. The contract the subcommands keep
 // is in `mj-worker/src/worker_stop.rs`.
 func installedWorkerScript(workerRoot string, subcommand string, args string, whenNoBinary string) ControlScript {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs installed_worker_script")
+	root := core.PosixQuote(workerRoot)
+	return newControlScript(workerRoot, fmt.Sprintf(`hel_root=%[1]s
+if [ -e "$hel_root/hel" ]; then
+    hel_bin=
+    for hel_candidate in "$hel_root/hel" "$hel_root"/%[2]s*; do
+        if [ -f "$hel_candidate" ] && [ -x "$hel_candidate" ] \
+            && "$hel_candidate" worker %[3]s --help >/dev/null 2>&1; then
+            hel_bin=$hel_candidate
+            break
+        fi
+    done
+    if [ -z "$hel_bin" ]; then
+        echo "no worker in $hel_root serves 'worker %[3]s'" >&2
+        exit %[4]d
+    fi
+    "$hel_bin" worker %[3]s%[5]s --root "$hel_root" || exit $?
+else
+    %[6]s
+fi
+`, root, ControlWorkerName, subcommand, WorkerControlUnstagedStatus, args, whenNoBinary))
 }
 
 // ControlWorkerStager installs the control worker into a worker root. The
@@ -71,7 +92,39 @@ func RunStagedControlCommand(
 	sessionID string,
 	command *core.CommandSpec,
 ) (core.CommandOutput, error) {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs run_staged_control_command")
+	first, err := caller.Execute(command)
+	if err != nil {
+		return core.CommandOutput{}, err
+	}
+	if first.Status != WorkerControlUnstagedStatus {
+		return first, nil
+	}
+	root, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return core.CommandOutput{}, err
+	}
+	// Publishing a build waits behind other uploads of it and can take
+	// minutes. A resumable operation does not hold daemon admission for that:
+	// a handoff cancels the wait and the next daemon starts it again.
+	yielded := caller.YieldAdmissionIfResumable()
+	staged := stager.StageControlWorker(caller, locator, sessionID, root)
+	if yielded && !caller.CancellationRequested() {
+		if err := caller.EndResumableWork("control worker install"); err != nil {
+			return core.CommandOutput{}, err
+		}
+	}
+	if staged != nil {
+		return core.CommandOutput{}, staged
+	}
+	second, err := caller.Execute(command)
+	if err != nil {
+		return core.CommandOutput{}, err
+	}
+	if second.Status == WorkerControlUnstagedStatus {
+		return core.CommandOutput{}, fmt.Errorf("the control worker staged in %s does not serve %s: %s",
+			root, command.Purpose, strings.TrimSpace(lossyText(second.Stderr)))
+	}
+	return second, nil
 }
 
 // ControlScript is a shell script that carries the root whose control worker
@@ -145,7 +198,7 @@ func NewWorkerControlPlan(description string, commands []ControlCommand, locator
 	var root *string
 	for _, command := range commands {
 		if command.root != nil {
-			if root != nil && *root != *command.root {
+			if root != nil && !libSamePath(*root, *command.root) {
 				return WorkerControlPlan{}, errors.New("a control plan cannot stage different worker roots")
 			}
 			root = command.root
@@ -177,7 +230,36 @@ func (p *WorkerControlPlan) StagesControlWorker() bool {
 // nothing in the root to serve its subcommand (status 78) has the control
 // worker staged and is rerun once (RunStagedControlCommand).
 func (p *WorkerControlPlan) Execute(executor core.CommandExecutor, stager ControlWorkerStager) ([]core.CommandOutput, error) {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs WorkerControlPlan::execute")
+	outputs := make([]core.CommandOutput, 0, len(p.commands))
+	for i := range p.commands {
+		command := &p.commands[i]
+		var output core.CommandOutput
+		if control := p.control; control != nil {
+			root, err := core.WorkerRoot(&control.locator, control.sessionID)
+			if err != nil {
+				return nil, err
+			}
+			if !libSamePath(root, control.root) {
+				return nil, errors.New("control script root differs from the staging target")
+			}
+			output, err = RunStagedControlCommand(executor, stager, &control.locator, control.sessionID, command)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			var err error
+			output, err = executor.Execute(command)
+			if err != nil {
+				return nil, err
+			}
+		}
+		checked, err := core.CheckedCommandOutput(command, output)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, checked)
+	}
+	return outputs, nil
 }
 
 // CommandsWithoutStaging is the commands of a plan that does not run the
@@ -198,7 +280,41 @@ func (p *WorkerControlPlan) Scripts() []core.CommandSpec {
 
 // Equal compares plans by value, as Rust's derived PartialEq does.
 func (p *WorkerControlPlan) Equal(other *WorkerControlPlan) bool {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs WorkerControlPlan PartialEq")
+	if p.description != other.description || len(p.commands) != len(other.commands) {
+		return false
+	}
+	for i := range p.commands {
+		if !workerControlCommandEqual(p.commands[i], other.commands[i]) {
+			return false
+		}
+	}
+	switch {
+	case p.control == nil || other.control == nil:
+		return p.control == nil && other.control == nil
+	}
+	return p.control.sessionID == other.control.sessionID &&
+		libSamePath(p.control.root, other.control.root) &&
+		reflect.DeepEqual(p.control.locator, other.control.locator)
+}
+
+// workerControlCommandEqual is Rust's derived PartialEq for CommandSpec: an empty
+// argument list or environment equals an absent one, and observers compare
+// by identity.
+func workerControlCommandEqual(left, right core.CommandSpec) bool {
+	normalize := func(command *core.CommandSpec) {
+		if len(command.Args) == 0 {
+			command.Args = nil
+		}
+		if len(command.Env) == 0 {
+			command.Env = nil
+		}
+		if len(command.EnvRemove) == 0 {
+			command.EnvRemove = nil
+		}
+	}
+	normalize(&left)
+	normalize(&right)
+	return reflect.DeepEqual(left, right)
 }
 
 // WorkerControlPlanFromCommandSpec is a plan of one command that runs no
@@ -258,13 +374,57 @@ func KillWorkerDaemonScript(workerRoot string) ControlScript {
 // staged home while the worker files are installed beside it, and it must
 // land in a directory of the session's own, not in the profile home.
 func ClearRelayStatePlan(locator *core.TargetsTargetLocator, sessionID string) (*WorkerControlPlan, error) {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs clear_relay_state_plan")
+	if err := core.VerifyLocator(locator, sessionID); err != nil {
+		return nil, err
+	}
+	sessionWorkerRoot, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	stagedHome := core.PosixQuote(sessionWorkerRoot + "/profile")
+	script := StopWorkerDaemonScript(sessionWorkerRoot).MapScript(func(stop string) string {
+		return fmt.Sprintf("%s\nrm -rf -- %s %s\nif [ -L %s ]; then rm -f -- %s; fi\n",
+			stop,
+			core.PosixQuote(sessionWorkerRoot+"/"+core.RelayStateFile),
+			core.PosixQuote(sessionWorkerRoot+"/"+core.RelayJournalDir),
+			stagedHome, stagedHome)
+	})
+	var command ControlCommand
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalBare:
+		command = script.IntoCommand(func(script string) core.CommandSpec {
+			return core.NewCommandSpec("sh", []string{"-c", script}).
+				WithPurpose("stop a leaked local Mjolnir worker and clear its relay state")
+		})
+	case core.TargetsTargetLocatorSshBare:
+		command = script.IntoCommand(func(script string) core.CommandSpec {
+			return core.SSHCommand(core.SshTrafficClassControl, locator.SSH, []string{"sh", "-c", script}).
+				WithPurpose("stop a leaked remote Mjolnir worker and clear its relay state")
+		})
+	default:
+		return nil, nil
+	}
+	plan, err := NewWorkerControlPlan("clear a leaked worker's relay state", []ControlCommand{command}, locator, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &plan, nil
 }
 
 // StopWorkerPlan stops the session's worker with the staged control worker.
 // The plan stages it first when it runs.
 func StopWorkerPlan(locator *core.TargetsTargetLocator, sessionID string, purpose string) (WorkerControlPlan, error) {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs stop_worker_plan")
+	root, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return WorkerControlPlan{}, err
+	}
+	script := StopWorkerDaemonScript(root)
+	return NewWorkerControlPlan(purpose, []ControlCommand{
+		script.IntoCommand(func(script string) core.CommandSpec {
+			return core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"sh", "-c", script}).
+				WithPurpose(purpose)
+		}),
+	}, locator, sessionID)
 }
 
 // InPlaceWorkerResetPlan is everything an in-place harness replacement must
@@ -291,5 +451,44 @@ func RetainedNativeWorkerResetPlan(locator *core.TargetsTargetLocator, sessionID
 }
 
 func workerResetPlan(locator *core.TargetsTargetLocator, sessionID string, previousProfileRoot *string) (WorkerControlPlan, error) {
-	panic("unported: mj-targets/src/targets/worker_daemon.rs worker_reset_plan")
+	if err := core.VerifyLocator(locator, sessionID); err != nil {
+		return WorkerControlPlan{}, err
+	}
+	sessionWorkerRoot, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return WorkerControlPlan{}, err
+	}
+	// A root that is a link left for a session an earlier release started
+	// (`controller::local_profile_homes`) is unlinked, never followed: the
+	// path carries no trailing slash, so `rm` removes the link itself.
+	script := StopWorkerDaemonScript(sessionWorkerRoot).MapScript(func(stop string) string {
+		var script strings.Builder
+		fmt.Fprintf(&script, "%s\nrm -rf -- %s %s\n",
+			stop,
+			core.PosixQuote(sessionWorkerRoot+"/"+core.RelayStateFile),
+			core.PosixQuote(sessionWorkerRoot+"/"+core.RelayJournalDir))
+		metadata := []string{"launch.json", "ownership.json"}
+		if previousProfileRoot != nil {
+			metadata = append([]string{"hel"}, metadata...)
+		} else {
+			metadata = append(metadata, core.NativeSessionIdentityFile, core.RestoredRelaySeedFile)
+		}
+		quoted := make([]string, len(metadata))
+		for i, name := range metadata {
+			quoted[i] = core.PosixQuote(sessionWorkerRoot + "/" + name)
+		}
+		fmt.Fprintf(&script, "rm -f -- %s\n", strings.Join(quoted, " "))
+		if previousProfileRoot != nil {
+			fmt.Fprintf(&script, "rm -rf -- %s\nmkdir -p -- %s\n",
+				core.PosixQuote(strings.TrimRight(*previousProfileRoot, "/")),
+				core.PosixQuote(sessionWorkerRoot))
+		}
+		return script.String()
+	})
+	command := script.IntoCommand(func(script string) core.CommandSpec {
+		return core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"sh", "-c", script}).
+			WithPurpose("reset the worker root for an in-place harness replacement").
+			WithStage(core.ProvisionStage{Kind: core.ProvisionStageSyncing})
+	})
+	return NewWorkerControlPlan("reset the worker root", []ControlCommand{command}, locator, sessionID)
 }

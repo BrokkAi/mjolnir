@@ -15,7 +15,10 @@ package targets
 import (
 	_ "embed"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -72,7 +75,24 @@ func TargetJoin(root string, relative string) string {
 // bundle images for this platform. An unknown platform (nil) can only
 // resolve the base image.
 func EffectiveTargetImages(config *core.Config, targetID string, platform *string) []string {
-	panic("unported: mj-targets/src/targets.rs effective_target_images")
+	target, ok := config.Targets[targetID]
+	if !ok {
+		return nil
+	}
+	container := target.Container()
+	if container == nil {
+		return nil
+	}
+	images := []string{container.Image}
+	if platform != nil {
+		// Rust's BTreeMap visits bundles in order.
+		for _, bundleID := range slices.Sorted(maps.Keys(config.Bundles)) {
+			if image, ok := config.SessionImage(&bundleID, targetID, *platform); ok && !slices.Contains(images, image) {
+				images = append(images, image)
+			}
+		}
+	}
+	return images
 }
 
 type ImageRefreshPlan struct {
@@ -91,7 +111,42 @@ type ImageRefreshPlan struct {
 // targets when using the keep set to reconcile its image store (Rust:
 // image_refresh_plan).
 func ImageRefreshPlanFor(config *core.Config, targetIDs []string, nativePlatform *string) ImageRefreshPlan {
-	panic("unported: mj-targets/src/targets.rs image_refresh_plan")
+	plan := ImageRefreshPlan{KeepImages: map[string]struct{}{}}
+	for _, targetID := range targetIDs {
+		target, ok := config.Targets[targetID]
+		if !ok {
+			continue
+		}
+		host, container, ok := core.TargetTemplateImageHost(target)
+		if !ok {
+			continue
+		}
+		platform := container.Platform
+		if platform == nil {
+			platform = nativePlatform
+		}
+		if container.BuildCache != nil && container.BuildCache.MaxTotalSize != nil {
+			budget := *container.BuildCache.MaxTotalSize
+			plan.MbxCacheBudget = &budget
+		}
+		for _, image := range EffectiveTargetImages(config, targetID, platform) {
+			plan.KeepImages[image] = struct{}{}
+			refresh, ok := core.ImageRefreshFor(host, image, platform, container.PullPolicy)
+			if !ok {
+				continue
+			}
+			index := slices.IndexFunc(plan.Pulls, func(entry core.ImageRefresh) bool {
+				return reflect.DeepEqual(entry.Host, refresh.Host) && entry.Image == refresh.Image &&
+					reflect.DeepEqual(entry.Platform, refresh.Platform)
+			})
+			if index >= 0 {
+				plan.Pulls[index].When = max(plan.Pulls[index].When, refresh.When)
+			} else {
+				plan.Pulls = append(plan.Pulls, refresh)
+			}
+		}
+	}
+	return plan
 }
 
 // UnwrappedRemoteLine is the command an SSH remote line runs, without the

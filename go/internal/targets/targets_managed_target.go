@@ -6,6 +6,12 @@
 package targets
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"strings"
+
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
@@ -29,5 +35,27 @@ func ManagedTargetCommand(class core.SshTrafficClass, target core.ManagedWorktre
 }
 
 func PathExistsOnManagedTarget(executor core.CommandExecutor, target core.ManagedWorktreeTarget, path string) (bool, error) {
-	panic("unported: mj-targets/src/targets/managed_target.rs path_exists_on_managed_target")
+	if _, remote := target.(core.ManagedWorktreeTargetSsh); !remote {
+		_, err := os.Stat(path)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, fs.ErrNotExist):
+			return false, nil
+		}
+		return false, fmt.Errorf("check managed project path %s: %w", path, err)
+	}
+	command := ManagedTargetCommand(core.SshTrafficClassControl, target, "test", []string{"-e", path}).
+		WithPurpose("check managed worktree path")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return false, err
+	}
+	switch output.Status {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	}
+	return false, fmt.Errorf("check managed worktree path failed with status %d: %s", output.Status, strings.TrimSpace(lossyText(output.Stderr)))
 }

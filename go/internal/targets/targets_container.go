@@ -3,8 +3,11 @@
 package targets
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -23,7 +26,129 @@ type ContainerStorage struct {
 // container: whether it carries the managed /tmp volume, and the effective
 // access of each recorded attachment.
 func InspectContainerStorage(locator *core.TargetsTargetLocator, attachments []core.AdditionalMount, executor core.CommandExecutor) (ContainerStorage, error) {
-	panic("unported: mj-targets/src/targets/container.rs inspect_container_storage")
+	// The engine's full `container inspect` JSON carries the mounts too, so a
+	// sandbox is read from that instead of a `--format` template.
+	if locator.Kind == core.TargetsTargetLocatorSshNitro {
+		// The session may still record attachments the user chose; a launch
+		// dropped them (with a notice), so the sandbox has none to verify.
+		command := nitroInspectCommand(locator.SSH, locator.ContainerID)
+		output, err := executor.Execute(&command)
+		if err != nil {
+			return ContainerStorage{}, err
+		}
+		if output.Status != 0 {
+			return ContainerStorage{}, fmt.Errorf("inspect session container storage failed: %s", lossyText(output.Stderr))
+		}
+		var inspected []struct {
+			Mounts []containerInspectedMount `json:"Mounts"`
+		}
+		if err := json.Unmarshal(output.Stdout, &inspected); err != nil {
+			return ContainerStorage{}, fmt.Errorf("decode session container inspection: %w", err)
+		}
+		for _, sandbox := range inspected {
+			if err := requireMountDestinations(sandbox.Mounts, false); err != nil {
+				return ContainerStorage{}, fmt.Errorf("decode session container inspection: %w", err)
+			}
+		}
+		if len(inspected) != 1 {
+			return ContainerStorage{}, fmt.Errorf("container inspection returned %d sandboxes instead of one", len(inspected))
+		}
+		return ContainerStorage{
+			ManagedTemporaryVolume: hasManagedTemporaryVolume(inspected[0].Mounts, locator.ContainerID),
+			Attachments:            []core.AdditionalMount{},
+		}, nil
+	}
+	var engine string
+	var ssh *core.SshTarget
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalPodman:
+		engine = "podman"
+	case core.TargetsTargetLocatorLocalDocker:
+		engine = "docker"
+	case core.TargetsTargetLocatorSshPodman:
+		engine, ssh = "podman", locator.SSH
+	case core.TargetsTargetLocatorSshDocker:
+		engine, ssh = "docker", locator.SSH
+	default:
+		storage := ContainerStorage{Attachments: []core.AdditionalMount{}}
+		if containerEngine, ok := locator.ContainerEngine(); ok && containerEngine == "container" {
+			for _, mount := range attachments {
+				mount.Access = mount.Access.WithoutOverlay()
+				storage.Attachments = append(storage.Attachments, mount)
+			}
+		}
+		return storage, nil
+	}
+	container := locator.ContainerID
+	command := core.NewCommandSpec(engine, []string{"container", "inspect", "--format", "{{json .Mounts}}", container}).
+		WithPurpose("inspect session container storage")
+	if ssh != nil {
+		command = commandOverSSH(core.SshTrafficClassControl, command, ssh)
+	}
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return ContainerStorage{}, err
+	}
+	if output.Status != 0 {
+		return ContainerStorage{}, fmt.Errorf("inspect session container storage failed: %s", lossyText(output.Stderr))
+	}
+	var mounts []containerInspectedMount
+	if err := json.Unmarshal(output.Stdout, &mounts); err != nil {
+		return ContainerStorage{}, fmt.Errorf("decode session container mounts: %w", err)
+	}
+	if err := requireMountDestinations(mounts, true); err != nil {
+		return ContainerStorage{}, fmt.Errorf("decode session container mounts: %w", err)
+	}
+	effective := make([]core.AdditionalMount, 0, len(attachments))
+	for _, attachment := range attachments {
+		index := slices.IndexFunc(mounts, func(mount containerInspectedMount) bool {
+			return libSamePath(*mount.Destination, attachment.Destination)
+		})
+		if index < 0 {
+			return ContainerStorage{}, fmt.Errorf("external attachment %s is missing from container %s", attachment.Destination, container)
+		}
+		// The engine owns the effective permissions: provisioning can
+		// downgrade a requested overlay without changing the saved choice.
+		if !*mounts[index].Writable {
+			attachment.Access = core.MountAccessRo
+		}
+		effective = append(effective, attachment)
+	}
+	return ContainerStorage{
+		ManagedTemporaryVolume: hasManagedTemporaryVolume(mounts, container),
+		Attachments:            effective,
+	}, nil
+}
+
+// containerInspectedMount is one mount an engine reports for a container, in its
+// PascalCase JSON.
+type containerInspectedMount struct {
+	Name        string  `json:"Name"`
+	Destination *string `json:"Destination"`
+	Writable    *bool   `json:"RW"`
+}
+
+// requireMountDestinations fails as serde does for a mount without the
+// fields it requires: Destination always, RW when the engine's mount
+// listing is read.
+func requireMountDestinations(mounts []containerInspectedMount, writable bool) error {
+	for _, mount := range mounts {
+		if mount.Destination == nil {
+			return errors.New("missing field `Destination`")
+		}
+		if writable && mount.Writable == nil {
+			return errors.New("missing field `RW`")
+		}
+	}
+	return nil
+}
+
+// hasManagedTemporaryVolume reports whether the container's /tmp is the
+// managed temporary volume Mjolnir created for it.
+func hasManagedTemporaryVolume(mounts []containerInspectedMount, container string) bool {
+	return slices.ContainsFunc(mounts, func(mount containerInspectedMount) bool {
+		return libSamePath(*mount.Destination, "/tmp") && mount.Name == ContainerTemporaryVolumeName(container)
+	})
 }
 
 // Podman exec leaves `--user` unset, so each container's stored configured
@@ -91,7 +216,10 @@ func containerLaunchScript(engine string, script string) string {
 // empty when an attachment already mounts /tmp (compared as paths, by
 // component).
 func temporaryVolumeArgument(name string, mounts []core.AdditionalMount) string {
-	panic("unported: mj-targets/src/targets/container.rs temporary_volume_argument")
+	if slices.ContainsFunc(mounts, func(mount core.AdditionalMount) bool { return libSamePath(mount.Destination, "/tmp") }) {
+		return ""
+	}
+	return ContainerTemporaryVolumeName(name)
 }
 
 // containerCapabilities is shared by provisioning and replacements on
@@ -180,7 +308,41 @@ start_container "$@"
 `
 
 func podmanHostHelperRunScript(helper []string) string {
-	panic("unported: mj-targets/src/targets/container.rs podman_host_helper_run_script")
+	joined := core.JoinRemoteCommand(helper)
+	return strings.ReplaceAll(`set -eu
+session=$1
+container=$2
+resource=$3
+temporary_volume=$4
+shift 4
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$status" -ne 0 ]; then
+        if remove_failed_container; then
+            remove_temporary_volume || echo "Podman temporary storage cleanup failed for session $session" >&2
+            {helper} destroy "$resource" >/dev/null || echo "Podman workspace cleanup failed for session $session" >&2
+        else
+            echo "Podman container cleanup failed; retained storage for session $session" >&2
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+prepare_temporary_volume
+state=$({helper} status "$resource")
+case $state in
+    absent) {helper} create "$resource" ;;
+    present) ;;
+    *) echo "workspace helper returned invalid status $state for $resource" >&2; exit 1 ;;
+esac
+[ "$({helper} status "$resource")" = present ] || {
+    echo "workspace helper did not create $resource" >&2
+    exit 1
+}
+start_container "$@"
+`, "{helper}", joined)
 }
 
 func podmanContainerRun(
@@ -191,7 +353,67 @@ func podmanContainerRun(
 	ssh *core.SshTarget,
 	workspaceRoot string,
 ) (core.CommandSpec, error) {
-	panic("unported: mj-targets/src/targets/container.rs podman_container_run")
+	workspace, err := core.PodmanWorkspaceLocatorNamed(template, name)
+	if err != nil {
+		return core.CommandSpec{}, err
+	}
+	runArgs, err := containerRunArgs("podman", template, name, sessionID, additionalMounts, &workspace, workspaceRoot, true)
+	if err != nil {
+		return core.CommandSpec{}, err
+	}
+	var wrapped []string
+	switch workspace.EffectiveKind() {
+	case core.TargetsPodmanWorkspaceLocatorHostPath:
+		wrapped = []string{
+			"sh",
+			"-c",
+			containerLaunchScript("podman", podmanHostHelperRunScript(workspace.Helper)),
+			"mj-podman-run",
+			sessionID,
+			name,
+			workspace.Resource,
+			temporaryVolumeArgument(name, additionalMounts),
+			"podman",
+		}
+	default:
+		volume := ""
+		if workspace.EffectiveKind() == core.TargetsPodmanWorkspaceLocatorVolume {
+			volume = workspace.Name
+		}
+		wrapped = []string{
+			"sh",
+			"-c",
+			containerLaunchScript("podman", podmanVolumeRunScript),
+			"mj-podman-run",
+			sessionID,
+			name,
+			volume,
+			temporaryVolumeArgument(name, additionalMounts),
+			"podman",
+		}
+	}
+	wrapped = append(wrapped, runArgs...)
+	var command core.CommandSpec
+	if ssh != nil {
+		command = core.SSHCommandOwned(core.SshTrafficClassControl, ssh, wrapped)
+	} else {
+		command = core.NewCommandSpec(wrapped[0], wrapped[1:])
+	}
+	layer := workspace.EffectiveKind() == core.TargetsPodmanWorkspaceLocatorContainerLayer
+	var purpose string
+	switch {
+	case layer && ssh != nil:
+		purpose = "start remote Podman container"
+	case layer:
+		purpose = "start session container"
+	case ssh != nil:
+		purpose = "start remote Podman container with isolated workspace storage"
+	default:
+		purpose = "start Podman container with isolated workspace storage"
+	}
+	return command.WithPurpose(purpose).
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning}).
+		WithCreatesTarget(), nil
 }
 
 const dockerOverlayRunScript = `set -eu
@@ -326,7 +548,38 @@ func dockerContainerRun(
 	additionalMounts []core.AdditionalMount,
 	workspaceRoot string,
 ) (core.CommandSpec, error) {
-	panic("unported: mj-targets/src/targets/container.rs docker_container_run")
+	runArgs, err := containerRunArgs("docker", template, name, sessionID, additionalMounts, nil, workspaceRoot, true)
+	if err != nil {
+		return core.CommandSpec{}, err
+	}
+	args := []string{
+		"-c",
+		containerLaunchScript("docker", dockerOverlayRunScript),
+		"hel-docker-run",
+		sessionID,
+		name,
+		template.Image,
+		dockerPullPolicy(template),
+		temporaryVolumeArgument(name, additionalMounts),
+	}
+	overlaid := false
+	for ordinal, mount := range additionalMounts {
+		if mount.Access != core.MountAccessCow {
+			continue
+		}
+		overlaid = true
+		args = append(args, strconv.Itoa(ordinal), mount.Source, dockerOverlayVolumeName(name, ordinal))
+	}
+	args = append(args, "--", "docker")
+	args = append(args, runArgs...)
+	purpose := "start session container"
+	if overlaid {
+		purpose = "start Docker session container with isolated attachments"
+	}
+	return core.NewCommandSpec("sh", args).
+		WithPurpose(purpose).
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning}).
+		WithCreatesTarget(), nil
 }
 
 // podmanPullArgument is Podman's `--pull` flag for this template, or false
@@ -403,11 +656,131 @@ func containerRunArgs(
 	workspaceRoot string,
 	initializeWorkspace bool,
 ) ([]string, error) {
-	panic("unported: mj-targets/src/targets/container.rs container_run_args")
+	if err := core.ValidateAdditionalMounts(additionalMounts); err != nil {
+		return nil, err
+	}
+	args := []string{"run"}
+	switch engine {
+	case "podman":
+		if pull, ok := podmanPullArgument(template); ok {
+			args = append(args, pull)
+		}
+		// PID 1 is `sleep infinity`, which reaps nothing, so every exec that
+		// outlives its parent leaves a zombie behind. Apple's `container`
+		// engine is left alone: its support for `--init` and `--stop-signal`
+		// is unverified, and its PID 1 is `sleep` itself, which the kernel
+		// shields from signals sent from inside the container.
+		args = append(args, "--init", "--stop-signal", "KILL")
+	case "docker":
+		args = append(args, "--pull="+dockerPullPolicy(template), "--init", "--stop-signal", "KILL")
+	}
+	args = append(args, containerPidsLimitArgs(engine, template)...)
+	args = append(args, "--detach", "--name", name)
+	args = append(args, managedResourceIdentityArgs(managedResourceKindContainer, sessionID)...)
+	args = append(args, template.ExtraRunArgs...)
+	for _, capability := range containerCapabilities(engine) {
+		args = append(args, "--cap-add="+capability)
+	}
+	if engine == "podman" {
+		// Rootless Podman maps container uid 0 to the host user. Keeping the
+		// image user's uid mapping would force Podman to chown every image
+		// layer on storage drivers that cannot shift ids. Keep these after
+		// custom args so the session identity and HOME remain deliberate.
+		args = append(args, "--user", "0:0", "--env", "HOME=/home/hel")
+		for _, option := range containerSecurityOpts(engine) {
+			args = append(args, "--security-opt", option)
+		}
+	}
+	if temporaryVolume := temporaryVolumeArgument(name, additionalMounts); temporaryVolume != "" {
+		switch engine {
+		// No `nocopy`: Podman passes it to the OCI runtime as bind-mount
+		// data, which runc rejects. The volume is new, so copy-up is
+		// harmless, and `start_container` resets /tmp ownership and mode.
+		case "podman":
+			args = append(args, "--volume", temporaryVolume+":/tmp:rw")
+		case "docker":
+			args = append(args, "--mount", "type=volume,source="+temporaryVolume+",target=/tmp,volume-nocopy")
+		}
+	}
+	if engine == "podman" {
+		workspace := core.TargetsPodmanWorkspaceLocator{Kind: core.TargetsPodmanWorkspaceLocatorContainerLayer}
+		if podmanWorkspace != nil {
+			workspace = *podmanWorkspace
+		}
+		switch workspace.EffectiveKind() {
+		case core.TargetsPodmanWorkspaceLocatorVolume:
+			// `:U` chowns the volume to container root, which maps to the
+			// host user in rootless Podman's default namespace.
+			suffix := ""
+			if initializeWorkspace {
+				suffix = ",U"
+			}
+			args = append(args, "--volume", fmt.Sprintf("%s:%s:rw%s", workspace.Name, workspaceRoot, suffix))
+		case core.TargetsPodmanWorkspaceLocatorHostPath:
+			// The host directory belongs to the host user, which rootless
+			// Podman's default namespace maps to container uid 0.
+			args = append(args, "--volume", fmt.Sprintf("%s:%s:rw", workspace.Path, workspaceRoot))
+		}
+	}
+	for ordinal, mount := range additionalMounts {
+		source, destination := mount.Source, mount.Destination
+		switch engine {
+		case "podman":
+			var mode string
+			switch mount.Access {
+			case core.MountAccessRo:
+				mode = "ro"
+			case core.MountAccessCow:
+				mode = "O"
+			default:
+				mode = "rw"
+			}
+			args = append(args, "--volume", fmt.Sprintf("%s:%s:%s", source, destination, mode))
+		case "docker":
+			if mount.Access == core.MountAccessCow {
+				source = dockerOverlayVolumeName(name, ordinal)
+			}
+			suffix := ""
+			if mount.Access == core.MountAccessRo {
+				suffix = ":ro"
+			}
+			args = append(args, "--volume", fmt.Sprintf("%s:%s%s", source, destination, suffix))
+		case "container":
+			// Apple's runtime has no copy-on-write overlay, so those mounts
+			// stay read-only rather than silently writing through.
+			if mount.Access == core.MountAccessRw {
+				args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,target=%s", source, destination))
+			} else {
+				args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,target=%s,readonly", source, destination))
+			}
+		default:
+			return nil, fmt.Errorf("additional mounts are unsupported for container engine %s", core.RustDebugString(engine))
+		}
+	}
+	args = append(args, template.Image)
+	if engine == "podman" || engine == "docker" {
+		args = append(args, "sh", "-c", keepaliveScript)
+	} else {
+		args = append(args, "sleep", "infinity")
+	}
+	return args, nil
 }
 
 func appleImagePrepareCommands(template *core.TargetsContainerTemplate) []core.CommandSpec {
-	panic("unported: mj-targets/src/targets/container.rs apple_image_prepare_commands")
+	var command core.CommandSpec
+	switch template.PullPolicy.Resolve(template.Image) {
+	case core.ImagePullPolicyAlways, core.ImagePullPolicyNewer:
+		command = core.NewCommandSpec("container", []string{"image", "pull", template.Image}).
+			WithPurpose("refresh container image " + template.Image)
+	case core.ImagePullPolicyNever:
+		command = core.NewCommandSpec("container", []string{"image", "inspect", template.Image}).
+			WithPurpose("find pinned container image " + template.Image)
+	case core.ImagePullPolicyMissing:
+		return nil
+	default:
+		panic("auto pull policy must resolve")
+	}
+	return []core.CommandSpec{command.WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning})}
 }
 
 // commandOverSSH moves a command to the remote host without losing its input

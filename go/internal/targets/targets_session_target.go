@@ -24,7 +24,19 @@ func RecordedBackendLocator(
 	runtime *core.TargetRuntimeSettings,
 	config *core.Config,
 ) (core.TargetsTargetLocator, error) {
-	panic("unported: mj-targets/src/targets/session_target.rs recorded_backend_locator")
+	var settings *core.TargetRuntimeSettings
+	if runtime != nil || core.LocatorNeedsConnection(locator) {
+		resolved, err := core.TargetRuntimeSettingsFor(sessionID, targetTemplateID, locator, runtime, config)
+		if err != nil {
+			return core.TargetsTargetLocator{}, err
+		}
+		settings = resolved
+	}
+	return core.TargetsTargetLocatorFromRecordedTarget(core.RecordedTarget{
+		Locator:   locator,
+		Runtime:   settings,
+		SessionID: sessionID,
+	})
 }
 
 // WorkspaceRoot is the directory the session's repositories are checked out

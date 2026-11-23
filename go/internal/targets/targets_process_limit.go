@@ -14,6 +14,9 @@
 package targets
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -39,7 +42,15 @@ var processExhaustionMarkers = [5]string{
 // ShowsProcessExhaustion reports whether an error's chain shows that its
 // target could not create another process or thread.
 func ShowsProcessExhaustion(err error) bool {
-	panic("unported: mj-targets/src/targets/process_limit.rs shows_process_exhaustion")
+	// A Go error's text includes every cause it wraps, which is the chain
+	// Rust walks one cause at a time.
+	text := libASCIILower(err.Error())
+	for _, marker := range processExhaustionMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // PidsUsage is the pid counts of a container's cgroup: `pids.current`, and
@@ -74,11 +85,42 @@ func IsContainer(locator *core.TargetsTargetLocator) bool {
 // ReadPidsUsage reads the pid counts of the container locator names, from
 // inside it.
 func ReadPidsUsage(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string) (PidsUsage, error) {
-	panic("unported: mj-targets/src/targets/process_limit.rs read_pids_usage")
+	command, err := core.CommandOnLocator(core.SshTrafficClassControl, locator, sessionID,
+		[]string{"sh", "-c", pidsUsageScript}, "read the container's pid counts")
+	if err != nil {
+		return PidsUsage{}, err
+	}
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return PidsUsage{}, err
+	}
+	if output.Status != 0 {
+		return PidsUsage{}, fmt.Errorf("reading the pid counts failed: %s", strings.TrimSpace(lossyText(output.Stderr)))
+	}
+	return parsePidsUsage(lossyText(output.Stdout))
 }
 
 func parsePidsUsage(text string) (PidsUsage, error) {
-	panic("unported: mj-targets/src/targets/process_limit.rs parse_pids_usage")
+	fields := strings.Fields(text)
+	if len(fields) < 1 {
+		return PidsUsage{}, errors.New("no pids.current value")
+	}
+	current, err := libParseU64(fields[0])
+	if err != nil {
+		return PidsUsage{}, fmt.Errorf("pids.current is not a number: %w", err)
+	}
+	if len(fields) < 2 {
+		return PidsUsage{}, errors.New("no pids.max value")
+	}
+	usage := PidsUsage{Current: current}
+	if fields[1] != "max" {
+		limit, err := libParseU64(fields[1])
+		if err != nil {
+			return PidsUsage{}, fmt.Errorf("pids.max is not a number: %w", err)
+		}
+		usage.Max = &limit
+	}
+	return usage, nil
 }
 
 // ProcessExhaustionMessage is the message a parent model reads when a
@@ -87,5 +129,21 @@ func parsePidsUsage(text string) (PidsUsage, error) {
 // both are nil for a target that is not one (Rust: usage None). The original
 // error follows, so nothing it said is lost.
 func ProcessExhaustionMessage(usage *PidsUsage, usageErr error, err error) string {
-	panic("unported: mj-targets/src/targets/process_limit.rs process_exhaustion_message")
+	place, counts := "the target machine", ""
+	switch {
+	case usage != nil:
+		place = "the parent's container"
+		if usage.Max != nil {
+			counts = fmt.Sprintf(" (pids.current %d of pids.max %d)", usage.Current, *usage.Max)
+		} else {
+			counts = fmt.Sprintf(" (pids.current %d, with no pids.max limit)", usage.Current)
+		}
+	case usageErr != nil:
+		place = "the parent's container"
+		counts = " (its pids.current and pids.max could not be read, which is what happens when " +
+			"it is completely full)"
+	}
+	return fmt.Sprintf("%s ran out of process slots%s, so the sub-agent's harness could not "+
+		"start. Every live sub-agent holds hundreds of threads there. Close sub-agents you "+
+		"no longer need, then try again. The original error was: %v", place, counts, err)
 }

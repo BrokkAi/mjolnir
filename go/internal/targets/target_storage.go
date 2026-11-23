@@ -22,6 +22,10 @@
 package targets
 
 import (
+	"log/slog"
+	"maps"
+	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -52,7 +56,30 @@ type hostEntry struct {
 }
 
 func (e *hostEntry) view(host string) core.TargetStorageView {
-	panic("unported: mj-targets/src/target_storage.rs HostEntry::view")
+	var home *string
+	if e.home != nil {
+		copied := *e.home
+		home = &copied
+	}
+	var sampledAt *uint64
+	if e.sampledAt != nil {
+		copied := *e.sampledAt
+		sampledAt = &copied
+	}
+	var unattributed *string
+	if e.unattributed != nil {
+		detail := e.unattributed.detail
+		unattributed = &detail
+	}
+	return core.TargetStorageViewEvaluate(host, home, e.filesystems, sampledAt,
+		func(space *core.FilesystemSpace) *string {
+			failure, ok := e.noSpace[space.Mount]
+			if !ok {
+				return nil
+			}
+			detail := failure.detail
+			return &detail
+		}, unattributed)
 }
 
 func (e *hostEntry) superseded(at uint64) bool {
@@ -155,7 +182,71 @@ func AttachRefresh(refresh chan<- struct{}) {
 // RecordSamples installs a measurement. It replaces each sampled host's
 // filesystems, and supersedes the full-disk failures it was taken after.
 func RecordSamples(samples []core.HostStorageSample, sampledAt uint64) {
-	panic("unported: mj-targets/src/target_storage.rs record_samples")
+	if len(samples) == 0 {
+		return
+	}
+	b := currentBoard()
+	changed := false
+	func() {
+		b.hostsMu.Lock()
+		defer b.hostsMu.Unlock()
+		for i := range samples {
+			sample := &samples[i]
+			entry := b.entry(sample.Host)
+			before := entry.view(sample.Host)
+			if sample.Home != nil {
+				home := *sample.Home
+				entry.home = &home
+			}
+			entry.filesystems = storageCloneFilesystems(sample.Filesystems)
+			at := sampledAt
+			entry.sampledAt = &at
+			hold := func(at uint64) bool { return sampledAt < saturatingAdd(at, noSpaceHoldSeconds) }
+			for mount, failure := range entry.noSpace {
+				if !hold(failure.at) {
+					delete(entry.noSpace, mount)
+				}
+			}
+			if entry.unattributed != nil && !hold(entry.unattributed.at) {
+				entry.unattributed = nil
+			}
+			after := entry.view(sample.Host)
+			if !reflect.DeepEqual(before.Filesystems, after.Filesystems) ||
+				!reflect.DeepEqual(before.UnattributedNoSpace, after.UnattributedNoSpace) {
+				changed = true
+			}
+		}
+		b.publicationMu.Lock()
+		b.publication = nil
+		b.publicationMu.Unlock()
+	}()
+	if changed {
+		b.changed()
+	}
+}
+
+// entry is host's entry, created empty when the board has not heard of it.
+// The caller holds hostsMu.
+func (b *board) entry(host string) *hostEntry {
+	entry, ok := b.hosts[host]
+	if !ok {
+		entry = &hostEntry{noSpace: map[string]noSpaceFailure{}}
+		b.hosts[host] = entry
+	}
+	return entry
+}
+
+// storageCloneFilesystems is an owned copy of a measurement's filesystems.
+func storageCloneFilesystems(filesystems []core.FilesystemSpace) []core.FilesystemSpace {
+	if filesystems == nil {
+		return nil
+	}
+	cloned := make([]core.FilesystemSpace, len(filesystems))
+	for i, space := range filesystems {
+		space.Paths = slices.Clone(space.Paths)
+		cloned[i] = space
+	}
+	return cloned
 }
 
 // ObserveNoSpace: a write on host failed because a disk is full. The
@@ -187,7 +278,44 @@ func ObserveNoSpaceAt(host string, path *string, detail string, at uint64) {
 // is held until a later measurement. When none of them is placed, the whole
 // host is.
 func ObserveNoSpaceOn(host string, paths []string, detail string, at uint64) {
-	panic("unported: mj-targets/src/target_storage.rs observe_no_space_on")
+	b := currentBoard()
+	superseded, changed := func() (bool, bool) {
+		b.hostsMu.Lock()
+		defer b.hostsMu.Unlock()
+		entry := b.entry(host)
+		if entry.superseded(at) {
+			return true, false
+		}
+		before := entry.view(host)
+		mounts := map[string]struct{}{}
+		for _, path := range paths {
+			if filesystem := before.FilesystemFor(path); filesystem != nil {
+				mounts[filesystem.Mount] = struct{}{}
+			}
+		}
+		if len(mounts) == 0 {
+			entry.unattributed = &noSpaceFailure{at: at, detail: detail}
+		}
+		for mount := range mounts {
+			entry.noSpace[mount] = noSpaceFailure{at: at, detail: detail}
+		}
+		changed := !reflect.DeepEqual(before, entry.view(host))
+		if changed {
+			b.publicationMu.Lock()
+			b.publication = nil
+			b.publicationMu.Unlock()
+		}
+		return false, changed
+	}()
+	if superseded {
+		slog.Debug("a later measurement supersedes this full-disk failure", "host", host, "detail", detail)
+		return
+	}
+	slog.Warn("a write failed because the target's disk is full", "host", host, "paths", paths, "detail", detail)
+	if changed {
+		b.changed()
+	}
+	b.requestRefresh()
 }
 
 // View is what the board says about host, if it has heard anything.
@@ -210,7 +338,22 @@ func Views() []core.TargetStorageView {
 // ViewsSnapshot: readers share the board's publication until a measurement
 // or disk failure changes it. Both replacement and reads hold the host lock.
 func ViewsSnapshot() core.SharedSnapshot[[]core.TargetStorageView] {
-	panic("unported: mj-targets/src/target_storage.rs views_snapshot")
+	b := currentBoard()
+	b.hostsMu.Lock()
+	defer b.hostsMu.Unlock()
+	b.publicationMu.Lock()
+	defer b.publicationMu.Unlock()
+	if b.publication == nil {
+		// Rust's BTreeMap iterates hosts in order.
+		hosts := slices.Sorted(maps.Keys(b.hosts))
+		views := make([]core.TargetStorageView, 0, len(hosts))
+		for _, host := range hosts {
+			views = append(views, b.hosts[host].view(host))
+		}
+		publication := core.NewSharedSnapshot(views)
+		b.publication = &publication
+	}
+	return *b.publication
 }
 
 // Subscribe is the board's generation, which changes whenever a
@@ -270,7 +413,35 @@ func EnsureRoom(locator *core.TargetsTargetLocator, path string, bytes uint64, w
 // home. The size is measured only when a filesystem the write lands on is
 // known, so an unmeasured target costs nothing.
 func EnsureRoomFor(locator *core.TargetsTargetLocator, paths []string, bytes func() (uint64, error), what string) error {
-	panic("unported: mj-targets/src/target_storage.rs ensure_room_for")
+	host := StorageHost(locator)
+	view, ok := View(host)
+	if !ok {
+		return nil
+	}
+	var landing []string
+	for _, path := range paths {
+		onHost, ok := hostPath(locator, path)
+		if !ok {
+			continue
+		}
+		if view.FilesystemFor(onHost) != nil || view.UnattributedNoSpace != nil {
+			landing = append(landing, onHost)
+		}
+	}
+	if len(landing) == 0 {
+		return nil
+	}
+	size, err := bytes()
+	if err != nil {
+		return err
+	}
+	for _, path := range landing {
+		if refusal, refused := view.RefuseWrite(path, size, what); refused {
+			slog.Warn("refused a write to a full filesystem: "+refusal, "host", host, "path", path, "bytes", size, "what", what)
+			return core.RefusalPrecondition(refusal).WithCode(StorageFullCode)
+		}
+	}
+	return nil
 }
 
 // HarnessCachePath is where the worker installs managed harnesses on a
@@ -324,7 +495,20 @@ func WorkerRestartProblem(locator core.TargetLocator, sessionID string, workspac
 // while one of its own filesystems is full. Use the same captured board as
 // the host rows.
 func SessionProblemIn(storage []core.TargetStorageView, session *core.SessionRecord) (string, bool) {
-	panic("unported: mj-targets/src/target_storage.rs session_problem_in")
+	if session.Target == nil {
+		return "", false
+	}
+	var projectDirectory *string
+	if directory, ok := session.RecordCheckout().ProjectDirectory(); ok {
+		projectDirectory = &directory
+	}
+	paths := core.SessionStoragePathsOf(session.Target, session.ID, projectDirectory)
+	for i := range storage {
+		if storage[i].Host == paths.Host {
+			return storage[i].ProblemFor(paths.All())
+		}
+	}
+	return "", false
 }
 
 // TestStorageSample is one host with `/` holding the worker roots and
