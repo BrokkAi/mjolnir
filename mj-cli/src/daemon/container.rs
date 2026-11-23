@@ -49,8 +49,8 @@ pub(super) struct ContainerLaunch {
     pub(super) container_id: String,
     pub(super) container_name: String,
     pub(super) metadata: DaemonMetadata,
-    pub(super) api_address: std::net::SocketAddr,
-    pub(super) api_token: String,
+    pub(super) api_address: Option<std::net::SocketAddr>,
+    pub(super) api_token: Option<String>,
 }
 
 /// Where the configuration puts the daemon on this computer, decided once for
@@ -98,38 +98,57 @@ pub(super) async fn launch(
     let program = spec.program();
     remove_idle_predecessors(program, spec).await?;
     ensure_running(program, spec).await?;
+    let mut container_id = launch_container_id(spec).await?;
+    let mut api_port = published_port_optional(program, &spec.name, CONTAINER_API_PORT).await?;
+    if api_port.is_none() {
+        if processes_in(program, &container_id)
+            .await?
+            .is_some_and(|count| count > 1)
+        {
+            tracing::info!(container = %spec.name, "kept existing container ports to preserve active workers");
+        } else {
+            let removed = engine(program, ["rm", "--force", &container_id], QUERY_TIMEOUT).await?;
+            if !removed.status.success() {
+                return Err(failure(program, "remove idle daemon container", &removed));
+            }
+            ensure_running(program, spec).await?;
+            container_id = launch_container_id(spec).await?;
+            api_port = Some(published_port(program, &spec.name, CONTAINER_API_PORT).await?);
+        }
+    }
     let port = published_port(program, &spec.name, CONTAINER_PORT).await?;
-    let api_port = published_port(program, &spec.name, CONTAINER_API_PORT).await?;
-    let container_id = resolve_container_id(spec.runtime(), &spec.name)
-        .await?
-        .with_context(|| format!("daemon container {} disappeared before launch", spec.name))?;
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let api_address = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
+    let api_address = api_port.map(|port| std::net::SocketAddr::from(([127, 0, 0, 1], port)));
     let prior = prior_unpublished.filter(|prior| {
         prior.runtime == spec.runtime()
             && prior.container_id == container_id
             && prior.address == address
     });
-    let (token, api_token) = if let Some(prior) = prior {
-        // Both execs may reach the store lock. Either winner must accept the published tokens.
-        let token = prior
-            .api_token
-            .as_ref()
-            .filter(|token| prior.api_address == Some(api_address) && !token.is_empty());
-        let api_token = match token {
-            Some(token) => token.clone(),
-            None => {
-                super::remove_container_api_endpoint(prior)?;
-                super::random_token()?
-            }
-        };
-        (prior.token.clone(), api_token)
+    let token = if let Some(prior) = prior {
+        // A delayed exec and its retry need the same credentials.
+        prior.token.clone()
     } else {
         if let Some(prior) = prior_unpublished {
             super::clear_container_owner(prior)?;
         }
-        (super::random_token()?, super::random_token()?)
+        super::random_token()?
     };
+    let prior_api_token = prior
+        .filter(|prior| prior.api_address == api_address)
+        .and_then(|prior| prior.api_token.as_ref())
+        .filter(|token| !token.is_empty());
+    if let Some(prior) = prior
+        && (api_address.is_none() || prior_api_token.is_none())
+    {
+        super::remove_container_api_endpoint(prior)?;
+    }
+    let api_token = api_address
+        .map(|_| {
+            prior_api_token
+                .cloned()
+                .map_or_else(super::random_token, Ok)
+        })
+        .transpose()?;
     let metadata = daemon_metadata(spec, address, token);
     write_container_owner(&ContainerDaemonRecord {
         schema: CONTAINER_OWNER_SCHEMA,
@@ -140,10 +159,17 @@ pub(super) async fn launch(
         address: metadata.address,
         token: metadata.token.clone(),
         started_at: metadata.started_at.clone(),
-        api_address: Some(api_address),
-        api_token: Some(api_token.clone()),
+        api_address,
+        api_token: api_token.clone(),
     })?;
-    exec_daemon(program, spec, &container_id, &metadata.token, &api_token).await?;
+    exec_daemon(
+        program,
+        spec,
+        &container_id,
+        &metadata.token,
+        api_token.as_deref(),
+    )
+    .await?;
     Ok(ContainerLaunch {
         runtime: spec.runtime(),
         container_id,
@@ -152,6 +178,12 @@ pub(super) async fn launch(
         api_address,
         api_token,
     })
+}
+
+async fn launch_container_id(spec: &ContainerSpec) -> Result<String> {
+    resolve_id_by_name(spec.program(), &spec.name)
+        .await?
+        .with_context(|| format!("daemon container {} disappeared before launch", spec.name))
 }
 
 fn daemon_metadata(
@@ -603,11 +635,11 @@ impl ContainerSpec {
             volume,
             mounts,
         };
-        spec.name = spec.name_with_api_port(CONTAINER_API_PORT);
+        spec.name = spec.container_name();
         Ok(spec)
     }
 
-    fn name_with_api_port(&self, api_port: u16) -> String {
+    fn container_name(&self) -> String {
         let mut digest = sha2::Sha256::new();
         digest.update(self.engine.engine().unwrap_or("host"));
         digest.update([0]);
@@ -618,7 +650,6 @@ impl ContainerSpec {
             digest.update([1]);
             digest.update(mount.as_os_str().as_encoded_bytes());
         }
-        digest.update(api_port.to_be_bytes());
         let digest = mj_core::hex::lower_hex(digest.finalize());
         format!("mj-daemon-{}-{}", self.instance, &digest[..12])
     }
@@ -653,27 +684,40 @@ impl ContainerSpec {
 /// The container engine's published loopback port for the daemon's fixed
 /// inside port.
 async fn published_port(program: &str, name: &str, container_port: u16) -> Result<u16> {
-    let output = engine(
-        program,
-        ["port", name, &format!("{container_port}/tcp")],
-        QUERY_TIMEOUT,
-    )
-    .await?;
+    published_port_optional(program, name, container_port)
+        .await?
+        .with_context(|| {
+            format!("{program} reported no mapping for {name} port {container_port}/tcp")
+        })
+}
+
+async fn published_port_optional(
+    program: &str,
+    name: &str,
+    container_port: u16,
+) -> Result<Option<u16>> {
+    // Listing all mappings distinguishes an absent mapping from engine errors.
+    let output = engine(program, ["port", name], QUERY_TIMEOUT).await?;
     if !output.status.success() {
         return Err(failure(
             program,
-            &format!("read the published port of {name}"),
+            &format!("read the published ports of {name}"),
             &output,
         ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    // Docker and Podman both answer `127.0.0.1:<port>`; an IPv6 host is
-    // bracketed, so the last colon still separates the port.
-    let port = text
-        .lines()
-        .find_map(|line| line.trim().rsplit(':').next()?.parse::<u16>().ok())
-        .with_context(|| format!("{program} reported no loopback port for {name}: {text:?}"))?;
-    Ok(port)
+    let mapping = format!("{container_port}/tcp -> ");
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(&mapping))
+        .map(|destination| {
+            let address: std::net::SocketAddr = destination.trim().parse().with_context(|| {
+                format!(
+                    "{program} reported an invalid published address for {name}: {destination:?}"
+                )
+            })?;
+            Ok(address.port())
+        })
+        .transpose()
 }
 
 fn short_digest(bytes: &[u8]) -> String {
@@ -815,12 +859,12 @@ async fn exec_daemon(
     spec: &ContainerSpec,
     id: &str,
     token: &str,
-    api_token: &str,
+    api_token: Option<&str>,
 ) -> Result<()> {
     let script = format!(
         "exec {IMAGE_EXECUTABLE} daemon-wait-exit --exit-dir {VOLUME_MOUNT}/data/daemon-exits -- {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1"
     );
-    let args: Vec<OsString> = vec![
+    let mut args: Vec<OsString> = vec![
         "exec".into(),
         "--detach".into(),
         format!("--workdir={VOLUME_MOUNT}").into(),
@@ -831,8 +875,16 @@ async fn exec_daemon(
         // The token is copied from this process's environment; `--env=NAME`
         // keeps its value out of the engine's argument list.
         "--env=MJ_DAEMON_TOKEN".into(),
-        format!("--env=MJ_DAEMON_API_LISTEN=0.0.0.0:{CONTAINER_API_PORT}").into(),
-        "--env=MJ_DAEMON_API_TOKEN".into(),
+    ];
+    let mut env = vec![("MJ_DAEMON_TOKEN", token)];
+    if let Some(api_token) = api_token {
+        args.extend([
+            format!("--env=MJ_DAEMON_API_LISTEN=0.0.0.0:{CONTAINER_API_PORT}").into(),
+            "--env=MJ_DAEMON_API_TOKEN".into(),
+        ]);
+        env.push(("MJ_DAEMON_API_TOKEN", api_token));
+    }
+    args.extend([
         format!("--env=MJ_DAEMON_CONTAINER={}", spec.name).into(),
         format!("--env=MJ_DAEMON_CONTAINER_RUNTIME={program}").into(),
         "--env=MJ_DAEMON_LOG=/var/lib/mjolnir/daemon.log".into(),
@@ -840,17 +892,8 @@ async fn exec_daemon(
         "sh".into(),
         "-c".into(),
         script.into(),
-    ];
-    let output = engine_with_env(
-        program,
-        args,
-        &[
-            ("MJ_DAEMON_TOKEN", token),
-            ("MJ_DAEMON_API_TOKEN", api_token),
-        ],
-        QUERY_TIMEOUT,
-    )
-    .await?;
+    ]);
+    let output = engine_with_env(program, args, &env, QUERY_TIMEOUT).await?;
     if !output.status.success() {
         return Err(failure(
             program,
@@ -977,10 +1020,8 @@ mod tests {
     #[test]
     fn a_daemon_container_shares_nothing_but_its_volume() {
         let spec = spec(vec![PathBuf::from("/srv/project")]);
-        assert_ne!(
-            spec.name_with_api_port(CONTAINER_API_PORT),
-            spec.name_with_api_port(8789)
-        );
+        // This name must also identify a container created before HTTP publication.
+        assert_eq!(spec.container_name(), "mj-daemon-instance-961f67edb6f6");
         let args = spec
             .run_command()
             .into_iter()

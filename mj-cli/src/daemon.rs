@@ -415,13 +415,16 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
             if let Some(container) = &launched.container
                 && let Some(identity) = identity
             {
-                write_api_endpoint(&ApiEndpointMetadata {
-                    address: container.api_address,
-                    token: container.api_token.clone(),
-                    pid: 0,
-                    instance_id: identity.instance_id,
-                    protocol_version: container.metadata.protocol_version,
-                })?;
+                if let (Some(address), Some(token)) = (container.api_address, &container.api_token)
+                {
+                    write_api_endpoint(&ApiEndpointMetadata {
+                        address,
+                        token: token.clone(),
+                        pid: 0,
+                        instance_id: identity.instance_id,
+                        protocol_version: container.metadata.protocol_version,
+                    })?;
+                }
                 write_launcher_metadata(&container.metadata)?;
             }
             tracing::info!(
@@ -2711,6 +2714,8 @@ mod tests {
                     r#"
 printf '%s\n' "$*" >> "$MJ_DATA_DIR/engine.calls"
 state=$(cat "$MJ_DATA_DIR/engine.state")
+id=test-container-id
+[ ! -e "$MJ_DATA_DIR/engine.recreated" ] || id=recreated-container-id
 case "$1" in
   image) printf 'test-image|%s\n' "$MJ_TEST_IMAGE_REVISION" ;;
   ps)
@@ -2721,43 +2726,65 @@ case "$1" in
     case "$*" in
       *--format={{.Names}}*) if [ "$state" = "inspect-error" ]; then echo predecessor; fi ;;
       *id=old-container-id*) ;;
-      *id=test-container-id*) echo test-container-id ;;
+      *id="$id"*) echo "$id" ;;
       *'name=^/?'*)
         # Podman matches names without a leading slash; require `^/?` so a
         # Docker-only `^/` filter fails the suite.
         filter=$(printf '%s\n' "$*" | sed -n 's/.*name=\^\/?\([^$]*\)\$.*/\1/p' | sed 's/\[\.\]/./g')
         [ -n "$filter" ] || exit 64
-        printf 'test-container-id\t%s\n' "$filter" ;;
+        if [ "$state" != removed ]; then printf '%s\t%s\n' "$id" "$filter"; fi ;;
       *) exit 64 ;;
     esac ;;
   inspect)
-    [ "$2 $3" = "--format={{.State.Running}} test-container-id" ] || exit 64
+    [ "$2 $3" = "--format={{.State.Running}} $id" ] || exit 64
     case "$state" in
       inspect-error) echo 'No such container (simulated engine failure)' >&2; exit 125 ;;
       stopped) echo false ;;
       *) echo true ;;
     esac ;;
   top)
-    [ "$2 $3" = 'test-container-id args' ] || exit 64
-    printf 'COMMAND\nsleep infinity\n'
-    case "$state" in
-      daemon) echo '/opt/mjolnir/mj daemon-run' ;;
-      *) printf 'hel worker\ncodex app-server\n' ;;
+    [ "$2" = "$id" ] || exit 64
+    case "$3" in
+      args)
+        printf 'COMMAND\nsleep infinity\n'
+        case "$state" in
+          daemon) echo '/opt/mjolnir/mj daemon-run' ;;
+          legacy-idle) ;;
+          *) printf 'hel worker\ncodex app-server\n' ;;
+        esac ;;
+      pid)
+        printf 'PID\n1\n'
+        [ "$state" = legacy-idle ] || printf '2\n3\n' ;;
+      *) exit 64 ;;
     esac ;;
   start)
     [ "$2" = 'test-container-id' ] || exit 64
     echo worker > "$MJ_DATA_DIR/engine.state" ;;
   port)
-    case "$3" in
-      8787/tcp) cat "$MJ_DATA_DIR/engine.endpoint" ;;
-      8788/tcp)
+    [ -z "$3" ] || exit 64
+    printf '8787/tcp -> %s\n' "$(cat "$MJ_DATA_DIR/engine.endpoint")"
+    case "$state" in
+      legacy-idle|legacy-workers) ;;
+      *)
+        api=127.0.0.1:8788
         if [ -e "$MJ_DATA_DIR/engine.api-endpoint" ]; then
-          cat "$MJ_DATA_DIR/engine.api-endpoint"
-        else
-          echo 127.0.0.1:8788
-        fi ;;
-      *) exit 64 ;;
+          api=$(cat "$MJ_DATA_DIR/engine.api-endpoint")
+        fi
+        printf '8788/tcp -> %s\n' "$api" ;;
     esac ;;
+  rm)
+    [ "$2 $3 $state" = '--force test-container-id legacy-idle' ] || exit 64
+    echo removed > "$MJ_DATA_DIR/engine.state" ;;
+  volume)
+    [ "$2 $state" = 'create removed' ] || exit 64 ;;
+  run)
+    [ "$state" = removed ] || exit 64
+    case "$*" in
+      *--publish=127.0.0.1::8787*--publish=127.0.0.1::8788*) ;;
+      *) exit 64 ;;
+    esac
+    touch "$MJ_DATA_DIR/engine.recreated"
+    echo idle > "$MJ_DATA_DIR/engine.state" ;;
   exec)
     [ "$2" = '--detach' ] || exit 64
     [ -s "$MJ_DATA_DIR/daemon-container.json" ] || exit 65
@@ -2845,6 +2872,76 @@ esac
             assert!(matches!(request.action, DaemonAction::Identity));
             answer(&mut stream, request, Ok(DaemonReply::Identity(identity))).await;
             stream
+        }
+
+        #[tokio::test]
+        async fn single_port_container_is_recreated_only_when_idle() {
+            if fake_podman(
+                "MJ_TEST_SINGLE_PORT_CONTAINER",
+                "daemon::tests::container_tests::single_port_container_is_recreated_only_when_idle",
+            ) {
+                return;
+            }
+            for (state, idle) in [("legacy-workers", false), ("legacy-idle", true)] {
+                engine_state(state);
+                fs::write(data_dir().join("engine.calls"), "").unwrap();
+                let spec = configure_container().await;
+                let (listener, _) = fake_daemon(0).await;
+                set_endpoint(&listener);
+                let identity = DaemonIdentity {
+                    instance_id: state.into(),
+                    build_version: this_build().published(),
+                    placement: DaemonPlacement::Container {
+                        name: spec.name,
+                        runtime: Some(RUNTIME),
+                    },
+                };
+                let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+                    .await
+                    .unwrap();
+                let (opened, _stream) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(
+                        connect_or_start_holding(&startup),
+                        serve_container_readiness(&listener, identity),
+                    )
+                })
+                .await
+                .unwrap();
+                opened.unwrap();
+                let metadata = read_metadata_any().unwrap();
+                let owner = read_container_owner().unwrap().unwrap();
+                assert!(owner.matches(&metadata));
+                let calls = calls();
+                assert!(calls.contains("top test-container-id pid"));
+                assert_eq!(calls.contains("rm --force test-container-id"), idle);
+                assert!(!calls.contains("stop test-container-id"));
+                assert_eq!(
+                    owner.container_id,
+                    if idle {
+                        "recreated-container-id"
+                    } else {
+                        CONTAINER_ID
+                    }
+                );
+                assert_eq!(
+                    calls.contains("--env=MJ_DAEMON_API_LISTEN=0.0.0.0:8788"),
+                    idle
+                );
+                assert_eq!(calls.contains("--env=MJ_DAEMON_API_TOKEN"), idle);
+                if idle {
+                    let endpoint = read_api_endpoint().unwrap().unwrap();
+                    assert_eq!(endpoint.instance_id, state);
+                    assert_eq!(owner.api_address, Some(endpoint.address));
+                    assert_eq!(owner.api_token, Some(endpoint.token));
+                    assert!(calls.contains("recreated-container-id sh -c"));
+                } else {
+                    assert!(owner.api_address.is_none());
+                    assert!(owner.api_token.is_none());
+                    assert!(read_api_endpoint().unwrap().is_none());
+                    assert!(calls.contains("test-container-id sh -c"));
+                }
+                clear_exited_daemon(&metadata).unwrap();
+            }
         }
 
         // Hard-won: #1458: stale container metadata prevented relaunch after the daemon exited.
@@ -3138,8 +3235,8 @@ esac
             assert_eq!(published.build_version, "999.0.0");
             let endpoint = read_api_endpoint().unwrap().unwrap();
             assert_eq!(endpoint.instance_id, "adopted");
-            assert_eq!(endpoint.address, launch.api_address);
-            assert_eq!(endpoint.token, launch.api_token);
+            assert_eq!(Some(endpoint.address), launch.api_address);
+            assert_eq!(Some(endpoint.token), launch.api_token);
             assert_eq!(
                 calls()
                     .lines()

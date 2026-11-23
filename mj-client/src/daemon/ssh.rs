@@ -2,6 +2,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::DaemonConfig;
 use mj_core::targets::daemon_login_command;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::http::{HttpProof, MAX_PROOF_RESPONSE_BYTES, proof_nonce, verify_http_api_proof};
 
 use super::DaemonEndpoint;
 use crate::build_identity::{BuildIdentity, this_build};
@@ -202,7 +207,7 @@ pub async fn open(
 ) -> Result<SshLease> {
     tokio::pin!(cancel);
     tokio::select! {
-        result = open_with_port(placement, remote_instance, intent, select_port) => result,
+        result = open_with_ports(placement, remote_instance, intent, select_ports) => result,
         () = &mut cancel => bail!("SSH daemon connection cancelled"),
     }
 }
@@ -222,20 +227,49 @@ fn forward_destination(address: std::net::SocketAddr) -> String {
     }
 }
 
-fn select_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-    Ok(listener.local_addr()?.port())
+fn select_ports(need_api: bool) -> Result<(u16, Option<u16>)> {
+    let control = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let api = need_api
+        .then(|| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+        .transpose()?;
+    // Keep both listeners alive until both ports have been selected.
+    let api_port = api
+        .as_ref()
+        .map(|listener| listener.local_addr().map(|addr| addr.port()))
+        .transpose()?;
+    Ok((control.local_addr()?.port(), api_port))
 }
 
-async fn open_with_port(
+async fn distinct_ports(
+    need_api: bool,
+    select: &mut impl FnMut(bool) -> Result<(u16, Option<u16>)>,
+) -> Result<(u16, Option<u16>)> {
+    loop {
+        let (control, api) = select(need_api)?;
+        if api != Some(control) {
+            return Ok((control, api));
+        }
+        // Back off as in the readiness loop so a failing selector cannot spin.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn open_with_ports(
     placement: &DaemonConfig,
     remote_instance: Option<&str>,
     intent: DiscoveryIntent,
-    mut port: impl FnMut() -> Result<u16>,
+    mut select: impl FnMut(bool) -> Result<(u16, Option<u16>)>,
 ) -> Result<SshLease> {
     let mut endpoint = discover(placement, remote_instance, intent).await?;
     loop {
-        let local_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port()?));
+        let remote_api = endpoint.api_address.zip(
+            endpoint
+                .api_token
+                .as_deref()
+                .filter(|token| !token.is_empty()),
+        );
+        let (control_port, api_port) = distinct_ports(remote_api.is_some(), &mut select).await?;
+        let local_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, control_port));
         let mut command = tokio::process::Command::new("ssh");
         #[cfg(windows)]
         let client_log = redirect_client_log(&mut command, &placement.ssh_args)?;
@@ -261,25 +295,13 @@ async fn open_with_port(
             local_addr.port(),
             forward_destination(endpoint.control_address)
         ));
-        let local_api_addr = if let Some(remote_api) = endpoint.api_address
-            && endpoint
-                .api_token
-                .as_deref()
-                .is_some_and(|token| !token.is_empty())
-        {
-            let api_port = port()?;
-            anyhow::ensure!(
-                api_port != local_addr.port(),
-                "SSH control and HTTP forwards need distinct local ports"
-            );
+        let local_api_addr = if let Some((address, _)) = remote_api {
+            let api_port = api_port.context("SSH port selector omitted the HTTP port")?;
             command.arg("-L").arg(format!(
                 "127.0.0.1:{api_port}:{}",
-                forward_destination(remote_api)
+                forward_destination(address)
             ));
-            Some(std::net::SocketAddr::from((
-                std::net::Ipv4Addr::LOCALHOST,
-                api_port,
-            )))
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, api_port)))
         } else {
             None
         };
@@ -295,8 +317,8 @@ async fn open_with_port(
             #[cfg(windows)]
             client_log,
         };
-        // Readiness sends no token: `prove_listener` sends only a nonce and
-        // checks the daemon's HMAC over it. There is no deadline. A silent
+        // Each forward proves possession of its token without the client
+        // sending it. There is no deadline. A silent
         // listener that is not ssh ends when ssh exits on its failed bind
         // (the select below), and a slow link only makes the proof slower.
         let ready = async {
@@ -304,7 +326,17 @@ async fn open_with_port(
             const MAX_PROBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
             let mut delay = std::time::Duration::from_millis(100);
             loop {
-                match prove_listener(local_addr, &endpoint.token).await {
+                let proof = async {
+                    if !prove_listener(local_addr, &endpoint.token).await? {
+                        return Ok(false);
+                    }
+                    if let Some((api_addr, (_, api_token))) = local_api_addr.zip(remote_api) {
+                        return prove_http_listener(api_addr, api_token).await;
+                    }
+                    Ok(true)
+                }
+                .await;
+                match proof {
                     Ok(true) => return Ok::<_, anyhow::Error>(None),
                     // Nothing listens yet: ssh is still connecting.
                     Err(ref error)
@@ -364,6 +396,39 @@ async fn prove_listener(address: std::net::SocketAddr, token: &str) -> Result<bo
     prove_stream(&mut stream, token).await
 }
 
+async fn prove_http_listener(address: SocketAddr, token: &str) -> Result<bool> {
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    let nonce = proof_nonce()?;
+    let request = format!(
+        "GET /api/v1/prove?nonce={nonce} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    stream
+        .take((MAX_PROOF_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut response)
+        .await?;
+    if response.len() > MAX_PROOF_RESPONSE_BYTES {
+        return Ok(false);
+    }
+    let Ok(response) = std::str::from_utf8(&response) else {
+        return Ok(false);
+    };
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return Ok(false);
+    };
+    let mut status = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1")) || status.next() != Some("200") {
+        return Ok(false);
+    }
+    Ok(serde_json::from_str::<HttpProof>(body)
+        .is_ok_and(|proof| verify_http_api_proof(token, &nonce, &proof.mac)))
+}
+
 /// Ask the peer on `stream` to prove it holds `token`, sending only a nonce.
 /// Every SSH-placement connection runs this before its first token-bearing
 /// request: a proof covers only the TCP connection that carried it.
@@ -393,6 +458,101 @@ pub(super) async fn prove_stream(stream: &mut tokio::net::TcpStream, token: &str
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn ssh_port_selection_retries_collision_and_reserves_distinct_ports() {
+        let mut attempts = 0;
+        let (control, api) = super::distinct_ports(true, &mut |need_api| {
+            assert!(need_api);
+            attempts += 1;
+            if attempts == 1 {
+                return Ok((12345, Some(12345)));
+            }
+            super::select_ports(need_api)
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_ne!(control, api.unwrap());
+        assert!(super::select_ports(false).unwrap().1.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_proof_never_sends_bearer_and_rejects_an_imposter() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        const TOKEN: &str = "proof-test-secret";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let server = async {
+            for (status, valid_mac) in [
+                ("401 Unauthorized", false),
+                ("200 OK", false),
+                ("200 OK", true),
+            ]
+            .into_iter()
+            .cycle()
+            .take(6)
+            {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                let nonce = line
+                    .strip_prefix("GET /api/v1/prove?nonce=")
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                assert!(crate::http::is_valid_proof_nonce(&nonce));
+                loop {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    assert!(!line.to_ascii_lowercase().starts_with("authorization:"));
+                    assert!(!line.contains(TOKEN));
+                }
+                let key = if valid_mac { TOKEN } else { "wrong secret" };
+                let mac = crate::http::http_api_proof_hex(key, &nonce);
+                let body = serde_json::json!({ "mac": mac }).to_string();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        };
+
+        let client = async {
+            for expected in [false, false, true] {
+                assert_eq!(
+                    super::prove_http_listener(address, TOKEN).await.unwrap(),
+                    expected
+                );
+            }
+            for expected in [false, false, true] {
+                assert_eq!(
+                    crate::http::prove_http_endpoint(&http, &base_url, TOKEN)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+            }
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(server, client);
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn remote_endpoint_json_works_with_old_and_new_discovery_clients() {
         let old = serde_json::json!({
@@ -588,16 +748,17 @@ mod tests {
         let occupied_port = occupied.local_addr().unwrap().port();
         occupied.set_nonblocking(true).unwrap();
         let mut first = true;
-        let mut second = super::open_with_port(
+        let mut second = super::open_with_ports(
             &placement,
             Some("ssh-discovery-e2e"),
             super::DiscoveryIntent::Existing,
-            || {
+            |need_api| {
+                let (control, api) = super::select_ports(need_api)?;
                 if first {
                     first = false;
-                    Ok(occupied_port)
+                    Ok((occupied_port, api))
                 } else {
-                    super::select_port()
+                    Ok((control, api))
                 }
             },
         )

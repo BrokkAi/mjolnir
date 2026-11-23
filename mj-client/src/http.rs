@@ -1,10 +1,80 @@
 //! Typed access to the daemon's direct HTTP API.
 use crate::daemon::{DaemonClient, ssh::SshLease};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::Sha256;
 use std::sync::Arc;
+
+pub(crate) const MAX_PROOF_RESPONSE_BYTES: usize = 8 * 1024;
+
+#[derive(Deserialize)]
+pub(crate) struct HttpProof {
+    pub(crate) mac: String,
+}
+
+pub fn is_valid_proof_nonce(nonce: &str) -> bool {
+    (32..=128).contains(&nonce.len()) && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn proof_nonce() -> Result<String> {
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random)
+        .map_err(|error| anyhow::anyhow!("generate HTTP proof nonce: {error}"))?;
+    Ok(mj_core::hex::lower_hex(random))
+}
+
+fn proof_mac(token: &str, nonce: &str) -> Hmac<Sha256> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(b"mjolnir-http-api-identity-v1\0");
+    mac.update(nonce.as_bytes());
+    mac
+}
+
+pub fn http_api_proof_hex(token: &str, nonce: &str) -> String {
+    mj_core::hex::lower_hex(proof_mac(token, nonce).finalize().into_bytes())
+}
+
+pub fn verify_http_api_proof(token: &str, nonce: &str, mac_hex: &str) -> bool {
+    if mac_hex.len() != 64 || !mac_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&mac_hex[index * 2..index * 2 + 2], 16)
+            .expect("checked ASCII hexadecimal");
+    }
+    proof_mac(token, nonce).verify_slice(&bytes).is_ok()
+}
+
+/// Challenge a forward using a client without default authorization headers.
+pub async fn prove_http_endpoint(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<bool> {
+    let nonce = proof_nonce()?;
+    let url = format!(
+        "{}/api/v1/prove?nonce={nonce}",
+        base_url.trim_end_matches('/')
+    );
+    let mut response = http.get(url).send().await?;
+    if response.status() != StatusCode::OK {
+        return Ok(false);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_PROOF_RESPONSE_BYTES {
+            return Ok(false);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice::<HttpProof>(&body)
+        .is_ok_and(|proof| verify_http_api_proof(token, &nonce, &proof.mac)))
+}
 
 pub struct HttpDaemonClient {
     base_url: String,
@@ -96,7 +166,14 @@ impl HttpDaemonClient {
         let mut http = Self::new(base_url, token)?;
         http.shares_client_filesystem = client.shares_client_filesystem(&identity);
         http.instance_id = Some(identity.instance_id);
-        http._ssh_lease = client.ssh_lease();
+        let lease = client.ssh_lease();
+        if lease.is_some() {
+            ensure!(
+                prove_http_endpoint(&http.http, &http.base_url, &http.token).await?,
+                "The SSH HTTP forward could not prove the daemon's identity"
+            );
+        }
+        http._ssh_lease = lease;
         Ok(http)
     }
 
