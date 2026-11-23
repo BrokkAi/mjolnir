@@ -1991,6 +1991,192 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
 }
 
 #[test]
+fn legacy_checkpoint_streams_large_repository_and_linked_worktree_payloads() {
+    use crate::archive::{RepositoryPayload, StagedPayload, write_archive_atomic_with_payloads};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let origin = temp.path().join("origin.git");
+    git(
+        &repository,
+        &["clone", "--bare", ".", origin.to_str().unwrap()],
+    );
+    git(
+        &repository,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
+
+    // Incompressible binary data keeps both the bundle and binary patch
+    // streams larger than a pipe buffer, including after Git compresses them.
+    const SIZE: usize = 2 * 1024 * 1024;
+    let mut seed = 1588_u64;
+    let mut data = || {
+        (0..SIZE)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect::<Vec<_>>()
+    };
+    let committed = data();
+    fs::write(repository.join("binary"), &committed).unwrap();
+    git(&repository, &["add", "binary"]);
+    git(&repository, &["commit", "-m", "binary history"]);
+
+    let linked = repository.join("linked");
+    git(&repository, &["worktree", "add", "--detach", "linked"]);
+    let mut dirty = Vec::new();
+    for worktree in [&repository, &linked] {
+        let staged = data();
+        let unstaged = data();
+        let untracked = data();
+        fs::write(worktree.join("binary"), &staged).unwrap();
+        git(worktree, &["add", "binary"]);
+        fs::write(worktree.join("binary"), &unstaged).unwrap();
+        fs::write(worktree.join("untracked"), &untracked).unwrap();
+        dirty.push((staged, unstaged, untracked));
+    }
+
+    let stage_path = spec.relay_root.join("checkpoint-stage-stream");
+    let captured = capture_checkpoint(
+        &CheckpointCaptureSpec {
+            protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            session: spec.session.clone(),
+            target: spec.target.clone(),
+            bundle: spec.bundle.clone(),
+            relay_root: spec.relay_root.clone(),
+            harness_home: spec.harness_home.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            repositories: spec.repositories.clone(),
+            report_directories: None,
+            allow_empty_native: false,
+            stage_path: stage_path.clone(),
+            refresh_existing: false,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let staged_manifest: CheckpointStageManifest =
+        serde_json::from_reader(File::open(stage_path.join(CHECKPOINT_STAGE_MANIFEST)).unwrap())
+            .unwrap();
+    let repositories =
+        read_sealed_checkpoint_repositories(&stage_path, staged_manifest.repositories).unwrap();
+    let snapshot = &repositories[0];
+    let worktree = &snapshot.linked_worktrees[0];
+    let payload_bytes: u64 = [
+        &snapshot.committed_bundle,
+        &snapshot.staged_patch,
+        &snapshot.unstaged_patch,
+        &snapshot.untracked_tar,
+        &worktree.staged_patch,
+        &worktree.unstaged_patch,
+        &worktree.untracked_tar,
+    ]
+    .into_iter()
+    .map(|payload| {
+        let StagedPayload::File(path) = payload else {
+            panic!("repository payload was buffered in memory");
+        };
+        assert!(path.starts_with(&stage_path));
+        let size = payload.size().unwrap();
+        assert!(
+            size >= SIZE as u64,
+            "{} contains only {size} bytes",
+            path.display()
+        );
+        size
+    })
+    .sum();
+    assert_eq!(captured.repository_bytes, payload_bytes);
+
+    let atomic_path = spec.relay_root.join("atomic.hel.zip");
+    let atomic = write_archive_atomic_with_payloads(
+        &atomic_path,
+        &ArchiveInput {
+            session: staged_manifest.session,
+            target: staged_manifest.target,
+            bundle: staged_manifest.bundle,
+            canonical_session: spec.canonical_session.clone(),
+            native_artifacts: staged_manifest
+                .native_artifacts
+                .into_iter()
+                .map(|artifact| NativeArtifact {
+                    relative_path: artifact.relative_path,
+                    data: mj_core::archive::NativeArtifactData::File(
+                        stage_path.join(artifact.body_path),
+                    ),
+                    mode: artifact.mode,
+                })
+                .collect(),
+            repositories,
+        },
+    )
+    .unwrap();
+    pack_checkpoint(&CheckpointPackSpec {
+        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        relay_root: spec.relay_root.clone(),
+        stage_path: stage_path.clone(),
+        canonical_session: spec.canonical_session,
+        output_path: spec.output_path.clone(),
+    })
+    .unwrap();
+    assert!(!stage_path.exists());
+    let verified = verify_archive_streaming(&spec.output_path).unwrap();
+    assert_eq!(verified.manifest, atomic.manifest);
+
+    let restored_root = temp.path().join("restored");
+    fs::create_dir(&restored_root).unwrap();
+    git(&restored_root, &["clone", origin.to_str().unwrap(), "app"]);
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path,
+            workspace_root: restored_root.clone(),
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: temp.path().join("restored-home"),
+            restore_repositories: true,
+            restore_native: false,
+            queue_policy: QueueRestorePolicy::Discard,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    for (worktree, (staged, unstaged, untracked)) in ["app", "app/linked"].into_iter().zip(dirty) {
+        let path = restored_root.join(worktree);
+        let read_git = |revision: &str| {
+            let output = SystemGit
+                .run(
+                    &path,
+                    &GitCommand {
+                        arguments: vec!["show".into(), revision.into()],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(output.status, 0);
+            output.stdout
+        };
+        assert!(
+            read_git("HEAD:binary") == committed,
+            "{worktree} commit changed"
+        );
+        assert!(read_git(":binary") == staged, "{worktree} index changed");
+        assert!(
+            fs::read(path.join("binary")).unwrap() == unstaged,
+            "{worktree} edit changed"
+        );
+        assert!(
+            fs::read(path.join("untracked")).unwrap() == untracked,
+            "{worktree} untracked file changed"
+        );
+    }
+}
+
+#[test]
 fn prestage_catch_up_recaptures_native_history_that_changed_before_the_barrier() {
     let temp = tempfile::tempdir().unwrap();
     let (export_spec, _) = fixture(temp.path());
@@ -3590,15 +3776,19 @@ fn remote_workspace_capture_uses_immutable_marker_base_after_origin_moves() {
     );
 
     spec.repositories[0].capture = CheckpointRepositoryCapture::RemoteWorkspace;
-    let repositories =
-        collect_checkpoint_repositories(&spec.workspace_root, &spec.repositories, &SystemGit)
-            .unwrap();
+    let repositories = collect_checkpoint_repositories(
+        &spec.workspace_root,
+        &spec.repositories,
+        &SystemGit,
+        temp.path(),
+    )
+    .unwrap();
     let snapshot = &repositories[0];
     assert!(snapshot.metadata.remote_workspace);
     assert_eq!(snapshot.metadata.base_commit, base);
     assert_eq!(snapshot.metadata.head_commit, head);
     assert_eq!(snapshot.metadata.push_urls, vec![push_url.to_owned()]);
-    assert!(!snapshot.committed_bundle.is_empty());
+    assert!(crate::archive::RepositoryPayload::size(&snapshot.committed_bundle).unwrap() > 0);
 }
 
 #[test]
