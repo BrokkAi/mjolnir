@@ -164,6 +164,8 @@ async fn fill_workspace_management_drafts(
             .map(|draft| WorkspaceDraftEntry {
                 id: draft.id,
                 session_id: draft.session_id,
+                session_title: draft.session_title,
+                preview: draft.preview,
                 source: draft.source,
                 saved_at: draft.saved_at,
                 owner_pid: draft.owner_pid,
@@ -207,18 +209,17 @@ pub(crate) fn spawn_workspace_management_load(
             let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
                 generation,
                 result: Ok(WorkspaceManagementResult {
-                    entries: entries.clone(),
+                    entries: Some(entries.clone()),
                     select_workspace: None,
                     deleted_workspace_id: None,
                     details_pending: true,
+                    ..Default::default()
                 }),
             });
             fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
             Ok(WorkspaceManagementResult {
-                entries,
-                select_workspace: None,
-                deleted_workspace_id: None,
-                details_pending: false,
+                entries: Some(entries),
+                ..Default::default()
             })
         },
     )
@@ -286,10 +287,9 @@ pub(crate) fn spawn_workspace_create(
             let mut daemon = daemon::connect_or_start().await?;
             let workspace = daemon.create_workspace(name).await?;
             Ok(WorkspaceManagementResult {
-                entries: load_workspace_management_entries(&mut daemon).await?,
+                entries: Some(load_workspace_management_entries(&mut daemon).await?),
                 select_workspace: Some(workspace.id),
-                deleted_workspace_id: None,
-                details_pending: false,
+                ..Default::default()
             })
         },
     )
@@ -311,10 +311,9 @@ pub(crate) fn spawn_workspace_rename(
             let mut daemon = daemon::connect_or_start().await?;
             daemon.rename_workspace(workspace_id, name).await?;
             Ok(WorkspaceManagementResult {
-                entries: load_workspace_management_entries(&mut daemon).await?,
+                entries: Some(load_workspace_management_entries(&mut daemon).await?),
                 select_workspace: None,
-                deleted_workspace_id: None,
-                details_pending: false,
+                ..Default::default()
             })
         },
     )
@@ -370,6 +369,7 @@ pub(crate) fn spawn_workspace_draft_recovery(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
+    let recovery_updates = updates.clone();
     spawn_workspace_management_operation(
         generation,
         "recovering workspace draft",
@@ -377,12 +377,57 @@ pub(crate) fn spawn_workspace_draft_recovery(
         Some(tracker),
         async move {
             let mut daemon = daemon::connect_or_start().await?;
-            daemon.recover_draft(draft_id).await?;
+            let (session_id, text) = daemon.recover_draft(draft_id.clone()).await?;
+            let _ = recovery_updates.send(DashboardIoUpdate::WorkspaceManagement {
+                generation,
+                result: Ok(WorkspaceManagementResult {
+                    recovered_draft: Some((draft_id, session_id, text)),
+                    ..Default::default()
+                }),
+            });
             Ok(WorkspaceManagementResult {
-                entries: load_workspace_management_entries(&mut daemon).await?,
+                entries: Some(load_workspace_management_entries(&mut daemon).await?),
                 select_workspace: None,
-                deleted_workspace_id: None,
-                details_pending: false,
+                ..Default::default()
+            })
+        },
+    )
+}
+
+pub(crate) fn spawn_workspace_draft_discard(
+    generation: u64,
+    workspace_id: String,
+    draft_id: Option<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    let discard_updates = updates.clone();
+    spawn_workspace_management_operation(
+        generation,
+        "discarding workspace drafts",
+        updates,
+        Some(tracker),
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            let single = draft_id.is_some();
+            let count = daemon.discard_drafts(workspace_id, draft_id).await?;
+            let message = if single {
+                "Draft discarded.".into()
+            } else if count == 1 {
+                "Discarded 1 draft.".into()
+            } else {
+                format!("Discarded {count} drafts.")
+            };
+            let _ = discard_updates.send(DashboardIoUpdate::WorkspaceManagement {
+                generation,
+                result: Ok(WorkspaceManagementResult {
+                    draft_notice: Some(message),
+                    ..Default::default()
+                }),
+            });
+            Ok(WorkspaceManagementResult {
+                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                ..Default::default()
             })
         },
     )

@@ -1,3 +1,4 @@
+use super::test_fixtures::set_session_draft_input_at;
 use super::test_fixtures::{event_digest, materialized_session};
 use super::*;
 use mj_core::config::HarnessKind;
@@ -4450,7 +4451,7 @@ fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
     );
 
     let draft_workspace = create_workspace_at(&database, "Drafts").unwrap();
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &draft_workspace.id,
         None,
@@ -4495,7 +4496,7 @@ fn close_workspace_drops_drafts_and_preserves_stopped_histories() {
         "remember this prompt",
     )
     .unwrap();
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &workspace.id,
         None,
@@ -4553,7 +4554,7 @@ fn close_workspace_refuses_remaining_active_sessions() {
     active.workspace_id = workspace.id.clone();
     active.state = SessionState::Running;
     save_session_to(&database, &active).unwrap();
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &workspace.id,
         None,
@@ -4782,10 +4783,13 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
             assert_eq!(drafts[0].source, "tui-client-a");
             assert_eq!(drafts[0].owner_pid, Some(1234));
             // Explicit recovery is still supported after retiring the seed.
-            recover_detached_draft_at(&database, &drafts[0].id).unwrap();
-            assert_eq!(
-                load_state_from(&database).unwrap().sessions[&record.id].draft_input,
-                current
+            let recovered = recover_detached_draft_at(&database, &drafts[0].id).unwrap();
+            assert_eq!(recovered.session_id, record.id);
+            assert_eq!(recovered.text, current);
+            assert!(
+                load_state_from(&database).unwrap().sessions[&record.id]
+                    .draft_input
+                    .is_empty()
             );
         }
     }
@@ -5045,14 +5049,16 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
     let draft_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
         .id
         .clone();
-    recover_detached_draft_at(&database, &draft_id).unwrap();
+    let recovered = recover_detached_draft_at(&database, &draft_id).unwrap();
+    assert_eq!(recovered.session_id, record.id);
+    assert_eq!(recovered.text, "seed");
 
-    // Lost ACK retry after recovery must not compare-clear the recovered seed.
+    // A retry or identical newer save must leave the recovered source hidden.
     save(1, "seed").unwrap();
     save(2, "seed").unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id].draft_input,
-        "seed"
+        ""
     );
     assert!(
         list_detached_drafts_at(&database, &workspace.id)
@@ -5062,7 +5068,7 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
     save(3, "new unsent edit").unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id].draft_input,
-        "seed"
+        ""
     );
     let visible = list_detached_drafts_at(&database, &workspace.id).unwrap();
     assert_eq!(visible.len(), 1);
@@ -5079,7 +5085,7 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
     record.workspace_id = workspace.id.clone();
     save_session_to(&database, &record).unwrap();
 
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &workspace.id,
         Some("session-1"),
@@ -5088,7 +5094,7 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
         "first unfinished thought",
     )
     .unwrap();
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &workspace.id,
         Some("session-1"),
@@ -6893,7 +6899,7 @@ fn workspace_close_discards_all_drafts_but_retains_resumable_history() {
     record.workspace_id = workspace.id.clone();
     record.draft_input = "unsent legacy input".into();
     save_session_to(&database, &record).unwrap();
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &workspace.id,
         Some(&record.id),
@@ -6936,7 +6942,7 @@ fn workspace_close_refuses_new_active_sessions_without_discarding_drafts() {
     record.state = SessionState::Provisioning;
     record.draft_input = "keep me".into();
     save_session_to(&database, &record).unwrap();
-    save_detached_draft_at(
+    seed_legacy_detached_draft(
         &database,
         &workspace.id,
         None,
@@ -9658,4 +9664,110 @@ fn load_tool_call_detail_joins_spilled_referenced_standalone_terminal() {
     assert_eq!(terminal_outputs[0].terminal_id, "term-1");
     assert_eq!(terminal_outputs[0].output.text(), full_terminal_output);
     assert_eq!(terminal_outputs[0].exit_code, Some(0));
+}
+
+fn seed_legacy_detached_draft(
+    path: &Path,
+    workspace_id: &str,
+    session_id: Option<&str>,
+    source: &str,
+    owner_pid: Option<u32>,
+    text: &str,
+) -> Result<Option<String>> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let connection = open(path)?;
+    let id = new_workspace_id()?;
+    let saved_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    connection.execute(
+        "INSERT INTO detached_drafts(
+             draft_id, workspace_id, session_id, source, owner_pid, saved_at, text
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            workspace_id,
+            session_id,
+            source,
+            owner_pid,
+            saved_at,
+            text
+        ],
+    )?;
+    Ok(Some(id))
+}
+
+#[test]
+fn detached_draft_discard_retires_revisioned_rows_and_deletes_legacy_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let workspace = create_workspace_at(&path, "Drafts").unwrap();
+    let other = create_workspace_at(&path, "Other").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id.clone_from(&workspace.id);
+    save_session_to(&path, &record).unwrap();
+    let mut conn = open(&path).unwrap();
+    let save = |conn: &mut Connection, revision, text: &str| {
+        save_terminal_draft_in(
+            conn,
+            &record.id,
+            "terminal",
+            42,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: None,
+            },
+        )
+        .unwrap();
+    };
+    save(&mut conn, 4, "revisioned");
+    let id = list_detached_drafts_at(&path, &workspace.id).unwrap()[0]
+        .id
+        .clone();
+    assert!(discard_detached_drafts_at(&path, &other.id, Some(&id)).is_err());
+    assert_eq!(
+        discard_detached_drafts_at(&path, &workspace.id, Some(&id)).unwrap(),
+        1
+    );
+    assert!(discard_detached_drafts_at(&path, &workspace.id, Some(&id)).is_err());
+    save(&mut conn, 3, "stale");
+    let watermark = conn
+        .query_row(
+            "SELECT revision, recovered_at IS NOT NULL FROM detached_drafts WHERE draft_id = ?1",
+            [&id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(watermark, (4, true));
+    assert!(
+        list_detached_drafts_at(&path, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+
+    save(&mut conn, 5, "new edit");
+    let legacy = seed_legacy_detached_draft(&path, &workspace.id, None, "legacy", None, "copy")
+        .unwrap()
+        .unwrap();
+    seed_legacy_detached_draft(&path, &other.id, None, "legacy", None, "keep").unwrap();
+    assert_eq!(
+        discard_detached_drafts_at(&path, &workspace.id, None).unwrap(),
+        2
+    );
+    assert!(
+        list_detached_drafts_at(&path, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(list_detached_drafts_at(&path, &other.id).unwrap().len(), 1);
+    assert!(
+        !conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM detached_drafts WHERE draft_id = ?1)",
+                [&legacy],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
 }

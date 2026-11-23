@@ -477,8 +477,11 @@ pub(crate) struct ActiveLifecycleOperation {
     pub(crate) notice_name: String,
 }
 
+#[derive(Default)]
 pub(crate) struct WorkspaceManagementResult {
-    pub(crate) entries: Vec<WorkspaceManagementEntry>,
+    pub(crate) entries: Option<Vec<WorkspaceManagementEntry>>,
+    pub(crate) recovered_draft: Option<(String, String, String)>,
+    pub(crate) draft_notice: Option<String>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
     /// The entries carry the workspace list ahead of their drafts: the dialog
@@ -727,10 +730,10 @@ impl DashboardContext {
                     .unwrap_or(generation);
                 let deleted = result.is_ok();
                 let result = result.map(|()| WorkspaceManagementResult {
-                    entries: self.dashboard.workspace_entries_without(&workspace_id),
+                    entries: Some(self.dashboard.workspace_entries_without(&workspace_id)),
                     select_workspace: None,
                     deleted_workspace_id: Some(workspace_id),
-                    details_pending: false,
+                    ..Default::default()
                 });
                 self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
                     generation,
@@ -756,7 +759,18 @@ impl DashboardContext {
                         select_workspace,
                         deleted_workspace_id,
                         details_pending,
+                        recovered_draft,
+                        draft_notice,
                     } = result;
+                    if let Some((draft_id, session_id, text)) = recovered_draft {
+                        self.apply_workspace_draft_recovery(generation, draft_id, session_id, text);
+                    }
+                    if let Some(message) = draft_notice {
+                        self.dashboard.workspace_draft_notice(generation, message);
+                    }
+                    let Some(entries) = entries else {
+                        return;
+                    };
                     // The runtime feed alone owns tab names, layouts and the
                     // active tab. A deletion owns only the composers, because
                     // the feed also hides an empty default it cannot tell

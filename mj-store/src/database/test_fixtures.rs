@@ -321,3 +321,24 @@ pub fn worker_test_run_blocking<T>(
         crate::worker_lifecycle::run_blocking(id, reason, executor, work)
     })
 }
+
+/// Simulate a newer edit to the legacy seed before exercising a compare-clear.
+pub fn seed_session_draft_input(session_id: &str, draft: &str) -> anyhow::Result<()> {
+    let session_id = session_id.to_owned();
+    let draft = draft.to_owned();
+    submit_database_write("seed_session_draft_input", move |_| {
+        set_session_draft_input_at(&database_path(), &session_id, &draft)
+    })
+}
+
+pub(super) fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &str) -> Result<()> {
+    let mut connection = super::open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let updated = tx.execute(
+        "UPDATE sessions SET draft_input = ?2 WHERE session_id = ?1",
+        rusqlite::params![session_id, draft],
+    )?;
+    anyhow::ensure!(updated == 1, "unknown session {session_id}");
+    tx.commit()?;
+    Ok(())
+}

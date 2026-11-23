@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells};
 use crate::{DashboardAction, DashboardState, Mode};
@@ -25,9 +25,30 @@ use crate::{DashboardAction, DashboardState, Mode};
 pub struct WorkspaceDraftEntry {
     pub id: String,
     pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub preview: String,
     pub source: String,
     pub saved_at: String,
     pub owner_pid: Option<u32>,
+}
+
+impl WorkspaceDraftEntry {
+    fn session_label(&self) -> &str {
+        self.session_title
+            .as_deref()
+            .or(self.session_id.as_deref())
+            .unwrap_or("unattached")
+    }
+
+    fn compact_time(&self) -> String {
+        chrono::DateTime::parse_from_rfc3339(&self.saved_at)
+            .map(|time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%b %-d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| self.saved_at.clone())
+    }
 }
 
 /// The workspace and its detached drafts returned by the controller's
@@ -78,6 +99,8 @@ pub(crate) enum WorkspaceControl {
     Name,
     Create,
     Recover,
+    Discard,
+    DiscardAll,
     Cancel,
     Back,
 }
@@ -89,6 +112,8 @@ pub(crate) enum WorkspaceMutation {
     Create,
     Rename,
     Recover,
+    Discard,
+    DiscardAll,
 }
 
 /// State for the workspace manager. It only stores a snapshot and drafts; all
@@ -126,7 +151,7 @@ impl WorkspaceManager {
         form.set_dismissal_enabled(self.busy.is_none_or(|operation| {
             matches!(
                 operation,
-                WorkspaceMutation::Load | WorkspaceMutation::Close
+                WorkspaceMutation::Load | WorkspaceMutation::Close | WorkspaceMutation::Recover
             )
         }));
         form.set_action_role(Cancel, mj_chat::components::ActionRole::Cancel);
@@ -314,17 +339,31 @@ impl WorkspaceManager {
                 (Cancel, "Cancel", dismiss),
                 (ConfirmClose, "Delete workspace", ready),
             ],
-            WorkspaceManagerView::Drafts { .. } => vec![
-                (Back, "Back", dismiss),
-                (
-                    Recover,
-                    "Recover",
-                    ready
-                        && self
-                            .viewed_entry()
-                            .is_some_and(|entry| !entry.drafts.is_empty()),
-                ),
-            ],
+            WorkspaceManagerView::Drafts { .. } => {
+                let drafts = self
+                    .viewed_entry()
+                    .map_or(&[][..], |entry| entry.drafts.as_slice());
+                let mut actions = vec![
+                    (
+                        Back,
+                        "Back",
+                        dismiss || self.busy == Some(WorkspaceMutation::Recover),
+                    ),
+                    (
+                        Recover,
+                        "Recover",
+                        ready
+                            && drafts
+                                .get(self.selected_draft)
+                                .is_some_and(|draft| draft.session_id.is_some()),
+                    ),
+                    (Discard, "Discard", ready && !drafts.is_empty()),
+                ];
+                if drafts.len() > 1 {
+                    actions.push((DiscardAll, "Discard all", ready));
+                }
+                actions
+            }
         }
     }
 
@@ -722,7 +761,12 @@ impl DashboardState {
                             .selected_entry()
                             .and_then(|entry| entry.drafts.iter().position(|draft| draft.id == id))
                     })
-                    .unwrap_or(0);
+                    .unwrap_or_else(|| {
+                        let count = manager
+                            .selected_entry()
+                            .map_or(0, |entry| entry.drafts.len());
+                        manager.selected_draft.min(count.saturating_sub(1))
+                    });
                 if manager
                     .view_workspace_id()
                     .is_some_and(|id| !manager.entries.iter().any(|entry| entry.workspace.id == id))
@@ -738,11 +782,6 @@ impl DashboardState {
                     )
                 ) {
                     manager.view = WorkspaceManagerView::List;
-                }
-                if matches!(previous_busy, Some(WorkspaceMutation::Recover)) {
-                    manager.success = Some("Draft recovered.".into());
-                } else {
-                    manager.success = None;
                 }
                 manager.loading = false;
                 manager.busy = None;
@@ -799,6 +838,16 @@ impl DashboardState {
         }
     }
 
+    pub fn workspace_draft_notice(&mut self, generation: u64, message: String) {
+        if let Mode::WorkspaceManager(manager) = &mut self.mode
+            && manager.generation == generation
+        {
+            manager.success = Some(message);
+        } else {
+            self.set_notice(message);
+        }
+    }
+
     pub(crate) fn handle_workspace_manager_event(&mut self, event: Event) -> DashboardAction {
         let Mode::WorkspaceManager(manager) = &mut self.mode else {
             return DashboardAction::None;
@@ -811,6 +860,9 @@ impl DashboardState {
                 self.set_notice(
                     "Deleting workspace in the background; reopen Delete workspace to cancel.",
                 );
+            }
+            Some(Interaction::Cancel) if manager.busy == Some(WorkspaceMutation::Recover) => {
+                self.cancel_modal();
             }
             Some(Interaction::Cancel) => {
                 let locked = manager
@@ -938,6 +990,12 @@ impl DashboardState {
                 WorkspaceControl::DraftList | WorkspaceControl::Recover => {
                     return self.workspace_manager_mutation(WorkspaceMutation::Recover);
                 }
+                WorkspaceControl::Discard => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::Discard);
+                }
+                WorkspaceControl::DiscardAll => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::DiscardAll);
+                }
                 WorkspaceControl::Cancel => {
                     if !manager.leaves_to_dashboard()
                         && matches!(manager.view, WorkspaceManagerView::Close { .. })
@@ -1005,9 +1063,32 @@ impl DashboardState {
                     manager.error = Some("This workspace has no detached drafts.".into());
                     return DashboardAction::None;
                 };
+                if draft.session_id.is_none() {
+                    manager.error = Some("This draft has no associated session.".into());
+                    return DashboardAction::None;
+                }
                 DashboardAction::RecoverWorkspaceDraft {
                     generation,
                     draft_id: draft.id.clone(),
+                    session_id: draft.session_id.clone(),
+                }
+            }
+            WorkspaceMutation::Discard | WorkspaceMutation::DiscardAll => {
+                let Some(entry) = manager.viewed_entry() else {
+                    return DashboardAction::None;
+                };
+                let draft_id = if mutation == WorkspaceMutation::Discard {
+                    let Some(draft) = entry.drafts.get(manager.selected_draft) else {
+                        return DashboardAction::None;
+                    };
+                    Some(draft.id.clone())
+                } else {
+                    None
+                };
+                DashboardAction::DiscardWorkspaceDrafts {
+                    generation,
+                    workspace_id: entry.workspace.id.clone(),
+                    draft_id,
                 }
             }
             WorkspaceMutation::Load => return DashboardAction::None,
@@ -1493,8 +1574,13 @@ pub(crate) fn render_workspace_manager(
             WorkspaceManagerView::Close { .. } => {
                 "Confirm deleting the workspace · Esc cancels".into()
             }
+            WorkspaceManagerView::Drafts { .. }
+                if dialog.busy == Some(WorkspaceMutation::Recover) =>
+            {
+                "Recovering draft · Esc closes this dialog".into()
+            }
             WorkspaceManagerView::Drafts { .. } => {
-                "Enter recovers the selected draft · Esc returns to the list".into()
+                "Select a draft to recover or discard · Esc returns to the list".into()
             }
         }
     };
@@ -1514,7 +1600,10 @@ pub(crate) fn render_workspace_manager(
     // so the body gives up exactly the width that column needs.
     let columns = form.split_actions(rows[1], &dialog.actions());
     let dismiss_enabled = dialog.busy.is_none_or(|mutation| {
-        matches!(mutation, WorkspaceMutation::Load | WorkspaceMutation::Close)
+        matches!(
+            mutation,
+            WorkspaceMutation::Load | WorkspaceMutation::Close | WorkspaceMutation::Recover
+        )
     });
     let title_line = dismissible_modal_title(
         &mut form,
@@ -1689,26 +1778,30 @@ fn render_manager_drafts(
     form: &mut Dialog<WorkspaceControl>,
 ) {
     let ColumnSplit { body, actions } = columns;
-    let drafts = dialog
+    let entries = dialog
         .viewed_entry()
-        .map(|entry| {
-            entry
-                .drafts
-                .iter()
-                .map(|draft| {
-                    Line::from(format!(
-                        "{}  · {}{}",
-                        draft.source,
-                        draft.saved_at,
-                        draft
-                            .session_id
-                            .as_deref()
-                            .map_or(String::new(), |id| format!("  · {id}")),
-                    ))
-                })
-                .collect::<Vec<_>>()
+        .map_or(&[][..], |entry| entry.drafts.as_slice());
+    let preview = if body.height >= 7 { 4 } else { 0 };
+    let list = Rect {
+        height: body.height - preview,
+        ..body
+    };
+    let drafts = entries
+        .iter()
+        .map(|draft| {
+            let row = format!(
+                "{} · {} · {}",
+                draft.session_label(),
+                draft.compact_time(),
+                draft.preview
+            );
+            Line::from(truncate_to_cells(
+                &row,
+                usize::from(list.width.saturating_sub(2)),
+                Truncate::PLAIN,
+            ))
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>();
     if drafts.is_empty() {
         frame.render_widget(Paragraph::new("No detached drafts."), body);
         form.register(
@@ -1723,11 +1816,32 @@ fn render_manager_drafts(
     } else {
         ChoiceList::render(
             frame,
-            body,
+            list,
             &drafts,
             dialog.selected_draft,
             form,
             WorkspaceControl::DraftList,
+        );
+    }
+    if preview > 0
+        && let Some(draft) = entries.get(dialog.selected_draft)
+    {
+        let area = Rect {
+            y: body.y + list.height,
+            height: preview,
+            ..body
+        };
+        let source = match draft.owner_pid {
+            Some(pid) => format!("{} (PID {pid})", draft.source),
+            None => draft.source.clone(),
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(format!("{} · {source}", draft.session_label())),
+                Line::from(draft.preview.as_str()),
+            ])
+            .wrap(Wrap { trim: true }),
+            area,
         );
     }
     Dialog::render_actions_stacked(frame, actions, &dialog.actions(), form, ColumnAlign::Right);

@@ -34,6 +34,48 @@ pub(super) fn capture_editor_draft(
     }
 }
 
+pub(super) fn local_composer_draft(
+    cache: &ComposerDraftCache,
+    dashboard: &DashboardState,
+    chats: &BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    inherited: &str,
+) -> String {
+    dashboard
+        .standby_prompt_draft(session_id)
+        .or_else(|| chats.get(session_id).map(|chat| chat.draft()))
+        .unwrap_or_else(|| {
+            cache
+                .get(session_id)
+                .map_or(inherited, |draft| &draft.text)
+                .to_owned()
+        })
+}
+
+pub(super) fn install_workspace_draft(
+    cache: &mut ComposerDraftCache,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    inherited: &str,
+    text: &str,
+) -> Result<()> {
+    let current = local_composer_draft(cache, dashboard, chats, session_id, inherited);
+    let final_text = if current.is_empty() || current == text {
+        text.to_owned()
+    } else {
+        mj_core::draft::merge_drafts(&current, text)?
+    };
+    if let Some(chat) = chats.get_mut(session_id) {
+        chat.set_draft(final_text.clone());
+    }
+    if dashboard.has_standby_composer(session_id) {
+        dashboard.seed_standby_prompt(session_id, final_text.clone());
+    }
+    cache.capture(session_id, final_text, inherited);
+    Ok(())
+}
+
 /// Keep ordering within a session while independent sessions dispatch
 /// concurrently. Attached and detached producers use this same bridge owner.
 pub(super) fn chat_daemon_requests(
@@ -98,6 +140,90 @@ pub(super) fn chat_daemon_requests(
 }
 
 impl DashboardContext {
+    pub(super) fn workspace_draft_recovery_error(&self, session_id: &str) -> Option<String> {
+        let inherited = self
+            .chat_session_record(session_id)
+            .map_or("", |session| &session.draft_input);
+        let current = local_composer_draft(
+            &self.composer_drafts,
+            &self.dashboard,
+            &self.chats,
+            session_id,
+            inherited,
+        );
+        (!current.is_empty()).then(|| {
+            format!(
+                "Session {} already has unsent text in its composer. Send or clear it first.",
+                self.session_notice_name(session_id)
+            )
+        })
+    }
+
+    pub(super) fn apply_workspace_draft_recovery(
+        &mut self,
+        generation: u64,
+        draft_id: String,
+        session_id: String,
+        text: String,
+    ) {
+        let inherited = self
+            .chat_session_record(&session_id)
+            .map_or_else(String::new, |session| session.draft_input.clone());
+        let name = self.session_notice_name(&session_id);
+        match install_workspace_draft(
+            &mut self.composer_drafts,
+            &mut self.dashboard,
+            &mut self.chats,
+            &session_id,
+            &inherited,
+            &text,
+        ) {
+            Ok(()) => {
+                self.flush_composer_draft(&session_id, true);
+                self.dashboard
+                    .workspace_draft_notice(generation, format!("Recovered draft into {name}."));
+            }
+            Err(error) => {
+                let source = format!("Unmerged recovery ({draft_id})");
+                let reason = format!("{error:#}");
+                io::spawn_critical_async(
+                    self.critical_operations.clone(),
+                    format!("keeping unmerged draft for {name}"),
+                    self.dashboard_io_tx.clone(),
+                    io::SAVE_ACK_TIMEOUT,
+                    async move {
+                        let mut daemon = crate::daemon::connect_or_start().await?;
+                        daemon
+                            .persist_terminal_draft(
+                                source,
+                                session_id,
+                                std::process::id(),
+                                1,
+                                DetachedSessionDraft {
+                                    text,
+                                    inherited_input: None,
+                                },
+                            )
+                            .await
+                    },
+                    move |result| {
+                        DashboardIoUpdate::WorkspaceManagement {
+                        generation,
+                        result: result.map(|()| io::WorkspaceManagementResult {
+                            draft_notice: Some(format!(
+                                "Kept the newer composer for {name}. The recovered draft is in Workspaces → Drafts ({reason})."
+                            )),
+                            ..Default::default()
+                        }).map_err(|error| format!(
+                            "Could not keep the unmerged draft for {name}: {error} ({reason})"
+                        )),
+                    }
+                    },
+                );
+            }
+        }
+    }
+
     pub(crate) fn chat_daemon_requests(
         &mut self,
         session_id: &str,
