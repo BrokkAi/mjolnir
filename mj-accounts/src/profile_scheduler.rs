@@ -607,16 +607,21 @@ impl SubscriptionPricing {
         self.p_eff.unwrap_or(200.0)
     }
 
-    fn priced_capacity(&self, estimate_usd: f64, prior_scale: f64) -> Option<f64> {
+    fn priced_capacity(&self, estimate_usd: f64, prior_usd: f64, prior_scale: f64) -> Option<f64> {
         if let Some(budget) =
             effective_weekly_budget_usd(self.weekly_budget, self.budget_price(), self.plan_price)
             && estimate_usd > 0.0
         {
             Some(budget / estimate_usd)
         } else {
-            self.p_eff
-                .zip(self.tp200)
-                .map(|(price, tp200)| (tp200 * (price / 200.0)) / (prior_scale * WEEKS_PER_MONTH))
+            self.p_eff.zip(self.tp200).map(|(price, tp200)| {
+                let cold_weekly = (tp200 * (price / 200.0)) / (prior_scale * WEEKS_PER_MONTH);
+                if estimate_usd > 0.0 && prior_usd > 0.0 {
+                    cold_weekly * (prior_usd / estimate_usd)
+                } else {
+                    cold_weekly
+                }
+            })
         }
     }
 }
@@ -707,16 +712,14 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     let pool_items: Vec<_> = pool_items
         .into_iter()
         .map(|(item, lookup, bench, obs)| {
-            let estimate_usd = shrink_cell_cost_usd(
-                obs.as_ref(),
-                cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd),
-            );
+            let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
+            let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
             let subscription = match &item.as_ref().quota {
                 CandidateQuota::Subscription {
                     monthly_price_usd, ..
                 } => {
                     let pricing = SubscriptionPricing::new(*monthly_price_usd, lookup.as_ref());
-                    let capacity = pricing.priced_capacity(estimate_usd, prior_scale);
+                    let capacity = pricing.priced_capacity(estimate_usd, prior_usd, prior_scale);
                     Some((pricing, capacity))
                 }
                 _ => None,
@@ -1402,7 +1405,7 @@ mod tests {
             (3.0 * scale * benchmarks[0] + 141.0) / 103.0,
             (3.0 * scale * benchmarks[1] + 1600.0) / 103.0,
         ];
-        let score = |candidates, telemetry: &QuotaTelemetrySnapshot| {
+        let score = |candidates, telemetry: &QuotaTelemetrySnapshot, power_ranking| {
             prepare_scored_pools(
                 candidates,
                 &SchedulingContext {
@@ -1412,12 +1415,12 @@ mod tests {
                     ranking_anchor: None,
                     prefer: &[],
                     telemetry,
-                    power_ranking: ranking,
+                    power_ranking,
                     now_seconds: now,
                 },
             )
         };
-        let scores = score(candidates.clone(), &telemetry);
+        let scores = score(candidates.clone(), &telemetry, ranking);
         for (cand, estimate) in candidates.iter().zip(expected) {
             let weight = scores
                 .iter()
@@ -1425,6 +1428,40 @@ mod tests {
                 .unwrap()
                 .weight;
             assert!((weight - lookup(cand).weekly_budget_usd.unwrap() / estimate).abs() < 1e-6);
+        }
+
+        // Exercise subscriptions with a ranked task count and no weekly USD
+        // budget. Both observed cells move away from their calibrated priors.
+        let mut ranking_without_budgets = ranking.clone();
+        for entry in &mut ranking_without_budgets.entries {
+            entry.weekly_budget_usd = None;
+        }
+        let fallback_scores = score(candidates.clone(), &telemetry, &ranking_without_budgets);
+        let fallback_lookups: Vec<_> = candidates
+            .iter()
+            .map(|cand| {
+                ranking_without_budgets
+                    .lookup(&cand.model, cand.effort.as_deref(), cand.harness)
+                    .unwrap()
+            })
+            .collect();
+        let api_benchmarks: Vec<_> = fallback_lookups
+            .iter()
+            .map(|lookup| 200.0 / lookup.tasks_per_200_api.unwrap())
+            .collect();
+        let fallback_scale = (1.41 + 16.0) / (api_benchmarks[0] + api_benchmarks[1]);
+        for (i, observed_mean) in [1.41, 16.0].into_iter().enumerate() {
+            let prior = fallback_scale * api_benchmarks[i];
+            let estimate = (3.0 * prior + 100.0 * observed_mean) / 103.0;
+            let cold_weekly =
+                fallback_lookups[i].tasks_per_200_sub.unwrap() / (fallback_scale * WEEKS_PER_MONTH);
+            let weight = fallback_scores
+                .iter()
+                .find(|s| s.item.profile_id == candidates[i].profile_id)
+                .unwrap()
+                .weight;
+            assert!((weight / cold_weekly - prior / estimate).abs() < 1e-6);
+            assert_eq!(weight > cold_weekly, i == 0);
         }
 
         let mut candidates = candidates;
@@ -1469,7 +1506,7 @@ mod tests {
                 },
             );
             assert_eq!(
-                score(candidates.clone(), &telemetry)
+                score(candidates.clone(), &telemetry, ranking)
                     .iter()
                     .find(|s| s.item.profile_id == "kimi")
                     .unwrap()
@@ -1501,7 +1538,7 @@ mod tests {
                 },
             );
             assert_eq!(
-                score(candidates.clone(), &telemetry)
+                score(candidates.clone(), &telemetry, ranking)
                     .iter()
                     .find(|s| s.item.profile_id == "sol")
                     .unwrap()

@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::event_outcome::{ApiTurnOutcome, TurnResultKind};
 #[cfg(test)]
 use mj_core::usage::ProviderCost;
 use mj_core::usage::{TokenUsage, UsageScope, pricing};
@@ -591,11 +592,11 @@ fn cell_cost_observations(
         "WITH categorized AS MATERIALIZED (
             SELECT DISTINCT session_id FROM session_turn_selections WHERE category IS NOT NULL
          )
-         SELECT s.session_id FROM categorized c
-         JOIN sessions s ON s.session_id = c.session_id
+         SELECT c.session_id FROM categorized c
+         LEFT JOIN sessions s ON s.session_id = c.session_id
          JOIN session_contexts sc ON sc.session_id = c.session_id
-         WHERE s.state IN ('stopped', 'error', 'lost')
-         ORDER BY sc.created_at DESC, s.session_id DESC",
+         WHERE s.session_id IS NULL OR s.state IN ('stopped', 'error', 'lost')
+         ORDER BY sc.created_at DESC, c.session_id DESC",
     )?;
     let mut selections = connection.prepare(
         "SELECT category, model, effort FROM session_turn_selections WHERE session_id = ?1",
@@ -603,7 +604,7 @@ fn cell_cost_observations(
     let mut turns =
         connection.prepare("SELECT body FROM session_turn_usage WHERE session_id = ?1")?;
     let mut results = BTreeMap::<CellCostKey, CellCostObservation>::new();
-    for session_id in sessions.query_map([], |row| row.get::<_, String>(0))? {
+    'sessions: for session_id in sessions.query_map([], |row| row.get::<_, String>(0))? {
         let session_id = session_id?;
         let mut categories = BTreeSet::new();
         let mut models = BTreeSet::new();
@@ -653,13 +654,20 @@ fn cell_cost_observations(
 
         let mut session_ticks: Option<u64> = None;
         for body in turns.query_map([&session_id], |row| row.get::<_, String>(0))? {
-            if let Ok(outcome) =
-                serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body?)
-                && let Some(usage) = outcome.usage.as_ref()
-                && let Ok(Some(ticks)) = turn_cost_ticks(usage, Some(&model))
-            {
-                session_ticks = Some(session_ticks.unwrap_or(0).saturating_add(ticks));
-            }
+            let Ok(outcome) = serde_json::from_str::<ApiTurnOutcome>(&body?) else {
+                continue 'sessions;
+            };
+            let Some(usage) = outcome.usage.as_ref() else {
+                if outcome.outcome.kind == TurnResultKind::Completed {
+                    continue 'sessions;
+                }
+                // A quota interruption can have no usage of its own.
+                continue;
+            };
+            let Ok(Some(ticks)) = turn_cost_ticks(usage, Some(&model)) else {
+                continue 'sessions;
+            };
+            session_ticks = Some(session_ticks.unwrap_or(0).saturating_add(ticks));
         }
         if let Some(ticks) = session_ticks {
             let session_usd = ticks as f64 / mj_core::usage::USD_TICKS_PER_DOLLAR as f64;
@@ -823,9 +831,7 @@ fn category_burn_observations(
             let mut session_ticks: u64 = 0;
             let mut has_cost = false;
             for (body, model) in turns {
-                let Ok(outcome) =
-                    serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body)
-                else {
+                let Ok(outcome) = serde_json::from_str::<ApiTurnOutcome>(&body) else {
                     continue;
                 };
                 if let Some(usage) = outcome.usage.as_ref()
@@ -1482,6 +1488,7 @@ mod tests {
         let sol = "gpt-6.2-sol";
         let cases = [
             ("minority", "lost", "reviewer", None, None, 0, false),
+            ("destroyed", "stopped", "reviewer", None, None, 4, false),
             ("older", "stopped", "subtle", Some("high"), None, 9, false),
             ("partial", "error", "subtle", Some("high"), None, 9, true),
             (
@@ -1511,6 +1518,33 @@ mod tests {
                 9,
                 false,
             ),
+            (
+                "last-request",
+                "stopped",
+                "subtle",
+                Some("high"),
+                None,
+                9,
+                false,
+            ),
+            (
+                "missing-usage",
+                "stopped",
+                "subtle",
+                Some("high"),
+                None,
+                9,
+                false,
+            ),
+            (
+                "invalid-outcome",
+                "stopped",
+                "subtle",
+                Some("high"),
+                None,
+                9,
+                false,
+            ),
             ("running", "running", "subtle", Some("high"), None, 9, false),
         ];
         for (i, (id, state, category, effort, followup, dollars, partial)) in
@@ -1536,28 +1570,55 @@ mod tests {
                     params![id, model, effort],
                 )?;
             }
-            for (ordinal, command, scope) in [(1, "turn", "turn"), (2, "last", "last_request")] {
-                let cost = mj_core::usage::ProviderTurnCost::from_usd_ticks(
-                    dollars * mj_core::usage::USD_TICKS_PER_DOLLAR,
-                    partial,
-                );
-                let body = serde_json::json!({
-                    "command_id": command,
-                    "completed_ordinal": ordinal,
-                    "completed_at_ms": 600_000,
-                    "outcome": {"kind": "completed", "stop_reason": "EndTurn"},
-                    "usage": {
-                        "scope": scope, "total_tokens": 500_000, "input_tokens": 500_000,
-                        "output_tokens": 0, "provider_details": {"cost": cost}
+            let cost = mj_core::usage::ProviderTurnCost::from_usd_ticks(
+                dollars * mj_core::usage::USD_TICKS_PER_DOLLAR,
+                partial,
+            );
+            let usage = serde_json::json!({
+                "scope": "turn", "total_tokens": 500_000, "input_tokens": 500_000,
+                "output_tokens": 0, "provider_details": {"cost": cost}
+            });
+            let body = serde_json::json!({
+                "command_id": "turn",
+                "completed_ordinal": 1,
+                "completed_at_ms": 600_000,
+                "outcome": {"kind": "completed", "stop_reason": "EndTurn"},
+                "usage": usage
+            });
+            conn.execute(
+                "INSERT INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body)
+                 VALUES (?1, 'turn', 1, 0, ?2)", params![id, body.to_string()],
+            )?;
+
+            let second_body = match id {
+                "partial" | "last-request" | "missing-usage" => {
+                    let mut body = body;
+                    body["command_id"] = serde_json::json!("last");
+                    body["completed_ordinal"] = serde_json::json!(2);
+                    if id == "last-request" {
+                        body["usage"]["scope"] = serde_json::json!("last_request");
+                    } else {
+                        body["usage"] = serde_json::Value::Null;
+                        if id == "partial" {
+                            body["outcome"] = serde_json::json!({
+                                "kind": "failed", "reason": "quota_limit"
+                            });
+                        }
                     }
-                });
+                    Some(body.to_string())
+                }
+                "invalid-outcome" => Some("{}".into()),
+                _ => None,
+            };
+            if let Some(body) = second_body {
                 conn.execute(
                     "INSERT INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body)
-                     VALUES (?1, ?2, ?3, 0, ?4)", params![id, command, ordinal, body.to_string()],
+                     VALUES (?1, 'last', 2, 0, ?2)", params![id, body],
                 )?;
             }
         }
         drop(conn);
+        super::super::sessions::delete_session_from(&path, "destroyed")?;
 
         assert_eq!(
             load_cell_cost_observations_from(&path, 2)?,
@@ -1580,8 +1641,8 @@ mod tests {
                         effort: None
                     },
                     CellCostObservation {
-                        total_api_usd: 0.0,
-                        sample_count: 1
+                        total_api_usd: 4.0,
+                        sample_count: 2
                     }
                 ),
             ])
