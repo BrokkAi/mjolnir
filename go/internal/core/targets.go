@@ -2117,7 +2117,7 @@ func spawnTargetChild(process *exec.Cmd, stdin bool) (child *targetChild, input,
 	process.Stdout = stdoutWrite
 	process.Stderr = stderrWrite
 	childEnds = append(childEnds, stdoutWrite, stderrWrite)
-	if err := process.Start(); err != nil {
+	if err := SpawnChild(process); err != nil {
 		return fail(err)
 	}
 	// The child holds its own copies now; the parent's would keep the pipes

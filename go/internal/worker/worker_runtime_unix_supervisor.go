@@ -340,7 +340,7 @@ func runACPSupervisorWithStreams(ctx context.Context, spec AcpSupervisorSpec, pa
 		return fmt.Errorf("launch supervised ACP bridge %s: %w", spec.Command, err)
 	}
 	command.Stdin, command.Stdout = stdinRead, stdoutWrite
-	err = core.SpawnAsyncChild(command)
+	err = core.SpawnChild(command)
 	_ = stdinRead.Close()
 	_ = stdoutWrite.Close()
 	if err != nil {

@@ -231,21 +231,6 @@ var daemonConfigKeys = map[string]bool{
 	"remote_command": true, "image": true, "mounts": true,
 }
 
-// RemoteInstance is the instance the remote `mj` runs as: the configured
-// one, else the client's own. Nil is the remote's unnamed instance. It must
-// not become `--instance default`, which selects `instances/default`, a
-// different store from the one a plain `mj` on that machine uses.
-func (d DaemonConfig) RemoteInstance() *string {
-	if d.Instance != nil {
-		instance := *d.Instance
-		return &instance
-	}
-	if instance, ok := InstanceName(); ok {
-		return &instance
-	}
-	return nil
-}
-
 // RemoteCommandOrDefault is Rust's DaemonConfig::remote_command (renamed: the
 // field has that name in Go).
 func (d DaemonConfig) RemoteCommandOrDefault() string {

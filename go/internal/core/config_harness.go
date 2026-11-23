@@ -1451,18 +1451,6 @@ func (k HarnessKind) NativeSessionDirs() []string {
 // with a log line.
 func (k HarnessKind) MCPServersNeedAdvertisedHTTP() bool { return k == HarnessKindMuse }
 
-// ExtraManagedEntrypoint is an executable a managed install must create
-// beside its pinned entrypoint, relative to the install root.
-func (k HarnessKind) ExtraManagedEntrypoint() (string, bool) {
-	switch k {
-	case HarnessKindGrok:
-		return "bin/agent", true
-	case HarnessKindClaude:
-		return "node_modules/.bin/claude", true
-	}
-	return "", false
-}
-
 // BridgeArgs is the harness-specific arguments that start its ACP stdio
 // server.
 func (k HarnessKind) BridgeArgs(policy ExecutionPolicy) []string {
@@ -1614,60 +1602,6 @@ func QuotaProviderOrdinal(p QuotaProvider) int {
 		return 7
 	}
 	return 8
-}
-
-// quotaProviderUnitNames is each unit variant's serde name, by ordinal.
-var quotaProviderUnitNames = []string{"Anthropic", "OpenAI", "Google", "XAI", "Moonshot", "DeepSeek", "Zai", "Meta"}
-
-// QuotaProvider serializes externally tagged, as serde derives it: a unit
-// variant as its name, Other as {"Other":"<name>"}.
-func (p QuotaProviderAnthropic) MarshalJSON() ([]byte, error) { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderOpenAI) MarshalJSON() ([]byte, error)    { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderGoogle) MarshalJSON() ([]byte, error)    { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderXAI) MarshalJSON() ([]byte, error)       { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderMoonshot) MarshalJSON() ([]byte, error)  { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderDeepSeek) MarshalJSON() ([]byte, error)  { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderZai) MarshalJSON() ([]byte, error)       { return quotaProviderUnitJSON(p) }
-func (p QuotaProviderMeta) MarshalJSON() ([]byte, error)      { return quotaProviderUnitJSON(p) }
-
-func (p QuotaProviderOther) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]string{"Other": p.Value})
-}
-
-func quotaProviderUnitJSON(p QuotaProvider) ([]byte, error) {
-	return json.Marshal(quotaProviderUnitNames[QuotaProviderOrdinal(p)])
-}
-
-// UnmarshalQuotaProviderJSON decodes serde's externally tagged QuotaProvider.
-func UnmarshalQuotaProviderJSON(data []byte) (QuotaProvider, error) {
-	var name string
-	if err := json.Unmarshal(data, &name); err == nil {
-		units := []QuotaProvider{QuotaProviderAnthropic{}, QuotaProviderOpenAI{}, QuotaProviderGoogle{},
-			QuotaProviderXAI{}, QuotaProviderMoonshot{}, QuotaProviderDeepSeek{}, QuotaProviderZai{}, QuotaProviderMeta{}}
-		for i, unit := range quotaProviderUnitNames {
-			if unit == name {
-				return units[i], nil
-			}
-		}
-		if name == "Other" {
-			return nil, errors.New("invalid type: unit variant, expected newtype variant")
-		}
-		return nil, fmt.Errorf("unknown variant `%s`, expected one of `Anthropic`, `OpenAI`, `Google`, `XAI`, `Moonshot`, `DeepSeek`, `Zai`, `Meta`, `Other`", name)
-	}
-	var other struct {
-		Other *string `json:"Other"`
-	}
-	var members map[string]json.RawMessage
-	if err := json.Unmarshal(data, &members); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(data, &other); err != nil {
-		return nil, err
-	}
-	if len(members) != 1 || other.Other == nil {
-		return nil, errors.New("invalid type: map, expected a QuotaProvider variant")
-	}
-	return QuotaProviderOther{Value: *other.Other}, nil
 }
 
 func quotaProviderFromEndpoint(id string, endpoint *string) QuotaProvider {

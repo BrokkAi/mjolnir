@@ -1177,7 +1177,7 @@ func TestRestartHarnessInPlaceDoesNotOverwriteSupervisorSpecWhenRejected(t *test
 			RequestID:       id,
 			ProtocolVersion: core.RelayProtocolVersion,
 			Request: core.RelayRequestRestartHarnessInPlace{
-				OperationID: "move-op-1", ExpectedStoreID: storeID, LaunchConfig: &config,
+				OperationID: "move-op-1", ExpectedStoreID: storeID, LaunchConfig: config,
 			},
 		}, commands, relay, shared, root)
 	}

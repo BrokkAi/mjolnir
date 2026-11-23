@@ -95,8 +95,8 @@ func newSnapRepoWithFormat(t *testing.T, format string) *snapRepo {
 
 func anyConsent() CaptureConsent {
 	return CaptureConsent{
-		Untracked:  UntrackedConsent{Kind: core.UntrackedConsentAny},
-		Operations: OperationConsent{Kind: core.OperationConsentAny},
+		Untracked:  UntrackedConsent{Kind: core.ConsentAny},
+		Operations: OperationConsent{Kind: core.ConsentAny},
 	}
 }
 
@@ -336,7 +336,7 @@ func assertProjectedState(t *testing.T, source snapState, restored snapState, la
 		maps.DeleteFunc(source.refs, func(name, oid string) bool {
 			head := false
 			for _, tree := range source.checkouts {
-				if !tree.head.Detached && tree.head.Name == name {
+				if tree.head.Kind != core.SnapshotHeadDetached && tree.head.Name == name {
 					head = true
 				}
 			}
@@ -425,7 +425,7 @@ func TestSeededGitRoundTripAfterSourceDeletionAndRawImmutability(t *testing.T) {
 		invariant := rawState(r.checkout, paths)
 		var snapshot WorkspaceSnapshot
 		if raw || overrideOrigin != nil {
-			untracked := UntrackedConsent{Kind: core.UntrackedConsentAny}
+			untracked := UntrackedConsent{Kind: core.ConsentAny}
 			if raw {
 				untracked = UntrackedConsent{}
 			}
@@ -543,11 +543,11 @@ func newHostGit(path string, name string) hostGit {
 
 func scopedItemPath(root string, checkout CheckoutKey, path string) UntrackedItem {
 	identity := snapMust(FileIdentityOf(snapMust(os.Lstat(filepath.Join(root, path)))))
-	return core.UntrackedItemPath{Checkout: checkout, Path: path, Identity: identity}
+	return core.UntrackedItem{Kind: core.UntrackedItemPath, Checkout: checkout, Path: path, Identity: identity}
 }
 
 func itemStash(commit string, message string) UntrackedItem {
-	return core.UntrackedItemStash{Checkout: core.DefaultCheckoutKey(), Commit: commit, Message: message}
+	return core.UntrackedItem{Kind: core.UntrackedItemStash, Checkout: core.DefaultCheckoutKey(), Commit: commit, Message: message}
 }
 
 // Hard-won: ffd652c27: reflog expiration hid the still-applicable root stash ref.
@@ -657,7 +657,7 @@ func TestStashUntrackedParentRequiresConsentAndNeverRestores(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	snapshot := snapMust(CaptureWorkspaceSnapshot(fileGit{}, r.checkout, ownership, filepath.Join(r.temp, "snapshot.pack"), CaptureConsent{
-		Untracked: UntrackedConsent{Kind: core.UntrackedConsentShown, Items: []UntrackedItem{itemStash(original[0].Commit, original[0].Message)}},
+		Untracked: UntrackedConsent{Kind: core.ConsentShown, Shown: []UntrackedItem{itemStash(original[0].Commit, original[0].Message)}},
 	}, nil))
 	packInfo := snapMust(os.Stat(*snapshot.Pack))
 	if *estimate.TotalBytes != uint64(packInfo.Size()) {
@@ -753,10 +753,10 @@ func TestSessionConsentChecksAllRepositoriesBeforeAbortingAny(t *testing.T) {
 			PackPath:  filepath.Join(entry.repo.temp, "snapshot.pack"),
 		})
 	}
-	shownA := UntrackedConsent{Kind: core.UntrackedConsentShown, Items: []UntrackedItem{scopedItemPath(a.checkout, repositoryKey("a"), "notes.txt")}}
+	shownA := UntrackedConsent{Kind: core.ConsentShown, Shown: []UntrackedItem{scopedItemPath(a.checkout, repositoryKey("a"), "notes.txt")}}
 	consent := SessionCaptureConsent{Repositories: map[string]CaptureConsent{
-		"a": {Untracked: shownA, Operations: OperationConsent{Kind: core.OperationConsentAny}},
-		"b": {Untracked: shownA, Operations: OperationConsent{Kind: core.OperationConsentAny}},
+		"a": {Untracked: shownA, Operations: OperationConsent{Kind: core.ConsentAny}},
+		"b": {Untracked: shownA, Operations: OperationConsent{Kind: core.ConsentAny}},
 	}}
 	_, err := CaptureSessionSnapshot(fileGit{}, repositories, consent)
 	items, ok := refusedAs[SnapshotRefusedUntracked](err)
@@ -930,7 +930,7 @@ func TestReviewEighthSymbolicHeadPreservesUnicodeWhitespace(t *testing.T) {
 	snapGit(root.checkout, "checkout", "-b", name)
 	root.commit("distinct branch with Unicode whitespace\n")
 	snapshot := root.capture(CheckoutOwnershipManaged())
-	if want := core.NewSnapshotHeadBranch("refs/heads/"+name, snapGit(root.checkout, "rev-parse", "HEAD")); snapshot.Metadata.Head != want {
+	if want := (SnapshotHead{Kind: core.SnapshotHeadBranch, Name: "refs/heads/" + name, Commit: snapGit(root.checkout, "rev-parse", "HEAD")}); snapshot.Metadata.Head != want {
 		t.Fatalf("head %+v != %+v", snapshot.Metadata.Head, want)
 	}
 	restored := root.restore(snapshot)
@@ -1060,7 +1060,7 @@ func TestReviewTwelfthShownFileSizeChangesRefuseEvenWithPreservedMtime(t *testin
 		inventory := snapMust(WorkspaceInventoryOf(fileGit{}, root.checkout, CheckoutOwnershipManaged()))
 		var shown []UntrackedItem
 		for _, entry := range inventory.Untracked {
-			shown = append(shown, core.UntrackedItemPath{Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
+			shown = append(shown, core.UntrackedItem{Kind: core.UntrackedItemPath, Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
 		}
 		before := snapMust(os.Stat(path))
 		snapMustDo(os.Truncate(path, before.Size()+123))
@@ -1069,7 +1069,7 @@ func TestReviewTwelfthShownFileSizeChangesRefuseEvenWithPreservedMtime(t *testin
 			t.Fatal("modification time changed")
 		}
 		_, err := CaptureWorkspaceSnapshot(fileGit{}, root.checkout, CheckoutOwnershipManaged(), filepath.Join(root.temp, "refused.pack"), CaptureConsent{
-			Untracked: UntrackedConsent{Kind: core.UntrackedConsentShown, Items: shown},
+			Untracked: UntrackedConsent{Kind: core.ConsentShown, Shown: shown},
 		}, nil)
 		if _, ok := refusedAs[SnapshotRefusedUntracked](err); !ok {
 			t.Fatalf("nested %v: %v", nested, err)
@@ -2124,14 +2124,14 @@ func TestConsentStalenessRefusesNewUntrackedOrKeepDirFileAfterCleanPreflight(t *
 	// or adding a keep-dir file after preflight refuses because the file
 	// identity / keep-dir changed.
 	inventory2 := snapMust(SessionInventory(fileGit{}, inputs))
-	shownItem := core.UntrackedItemPath{
+	shownItem := core.UntrackedItem{Kind: core.UntrackedItemPath,
 		Checkout: inventory2["workspace"].Checkout,
 		Path:     inventory2["workspace"].Untracked[0].Path,
 		Identity: inventory2["workspace"].Untracked[0].Identity,
 	}
 	snapMustDo(os.WriteFile(filepath.Join(r.checkout, "late-scratch.txt"), []byte("different content and size!\n"), 0o644))
 	staleConsent := SessionCaptureConsent{Repositories: map[string]CaptureConsent{
-		"workspace": {Untracked: UntrackedConsent{Kind: core.UntrackedConsentShown, Items: []UntrackedItem{shownItem}}},
+		"workspace": {Untracked: UntrackedConsent{Kind: core.ConsentShown, Shown: []UntrackedItem{shownItem}}},
 	}}
 	_, err = CaptureSessionSnapshot(fileGit{}, inputs, staleConsent)
 	if _, ok := refusedAs[SnapshotRefusedUntracked](err); !ok {
@@ -2161,7 +2161,7 @@ func TestConsentStalenessRefusesNewUntrackedOrKeepDirFileAfterCleanPreflight(t *
 	// manifest can report what was omitted after preflight.
 	snapMustDo(os.WriteFile(filepath.Join(r.checkout, "late-scratch.txt"), []byte("new scratch\n"), 0o644))
 	consent := SessionCaptureConsent{Repositories: map[string]CaptureConsent{
-		"workspace": {Untracked: UntrackedConsent{Kind: core.UntrackedConsentAny}},
+		"workspace": {Untracked: UntrackedConsent{Kind: core.ConsentAny}},
 	}}
 	snapshot := snapMust(CaptureSessionSnapshot(fileGit{}, inputs, consent))
 	index := slices.IndexFunc(snapshot.Repositories["workspace"].Metadata.Notices, func(notice string) bool {

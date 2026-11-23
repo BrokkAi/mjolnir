@@ -957,8 +957,8 @@ func TestUnavailableLifecycleObservationDistinguishesDisconnectFromOperationFail
 		client := daemonTestConnect(t, metadata)
 		_, err := client.StartSessionLifecycle(ctx, SessionLifecycleRequestSuspend{
 			SessionID:           "observed-session",
-			DiscardUntracked:    core.UntrackedConsent{Kind: core.UntrackedConsentAny},
-			AbortOperations:     core.OperationConsent{Kind: core.OperationConsentNone},
+			DiscardUntracked:    core.UntrackedConsent{Kind: core.ConsentAny},
+			AbortOperations:     core.OperationConsent{Kind: core.ConsentNone},
 			WithoutCheckpoint:   false,
 			ConfirmNoCheckpoint: false,
 		})

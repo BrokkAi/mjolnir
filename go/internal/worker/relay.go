@@ -1689,7 +1689,7 @@ func (r *DurableRelay) ActivityFacts() core.ActivityFacts {
 		ToolsInFlight:              r.foregroundTools.Snapshot(),
 		BackgroundStartedAtMs:      backgroundStartedAtMs,
 		BackgroundCommands:         backgroundCount,
-		AntigravityTaskStartedAtMs: core.OldestAntigravityTaskStart(backgroundCommands),
+		AntigravityTaskStartedAtMs: core.BackgroundCommandOldestAntigravityTaskStart(backgroundCommands),
 		ActiveUserShells:           len(r.snapshot.ActiveUserShells),
 		ActiveAgentTerminals:       len(r.activeAgentTerminals),
 		GoalActive:                 r.snapshot.Goal.Active(),

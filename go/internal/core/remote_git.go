@@ -1018,6 +1018,18 @@ func (u URL) WithoutCredentials() (URL, bool) {
 	return URL{parsed: &redacted}, true
 }
 
+// WithoutPassword is the URL after `set_password(None)`. ok is false where
+// the url crate refuses it: a URL without a host, with an empty host, or
+// with the file scheme.
+func (u URL) WithoutPassword() (URL, bool) {
+	if !u.parsed.hasHost || u.parsed.host == "" || u.parsed.scheme == "file" {
+		return URL{}, false
+	}
+	redacted := *u.parsed
+	redacted.password = nil
+	return URL{parsed: &redacted}, true
+}
+
 // String is `Url::to_string`.
 func (u URL) String() string { return u.parsed.String() }
 

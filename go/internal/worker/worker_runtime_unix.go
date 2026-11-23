@@ -433,12 +433,13 @@ func buildACPSetup(setup acpPreparationSetup) (*preparedAcpSetup, error) {
 	var subagentSocket *SubagentMcpSocket
 	if setup.subagentRole != nil {
 		subagentSocket = &SubagentMcpSocket{
-			Path:                filepath.Join(root, SubagentSocket),
-			Role:                *setup.subagentRole,
-			Oracle:              config.Oracle,
-			SubtleSubagents:     config.SubtleSubagents,
-			ReviewTools:         reviewTools,
-			ProfileRegistration: setup.profileRegistration,
+			Path:                 filepath.Join(root, SubagentSocket),
+			Role:                 *setup.subagentRole,
+			Oracle:               config.Oracle,
+			OrchestratorsEnabled: config.OrchestratorsEnabled,
+			SubtleSubagents:      config.SubtleSubagents,
+			ReviewTools:          reviewTools,
+			ProfileRegistration:  setup.profileRegistration,
 		}
 	}
 	terminalOwner := weak.Make(relay)
@@ -614,7 +615,7 @@ func startBridge(ctx context.Context, cancel context.CancelFunc, setup *prepared
 		// The runtime owns the receiving side: once it stops, a sender sees
 		// the closed channel, as when Rust drops the receiver.
 		defer commands.closeReceiver()
-		return RunWithShutdown(acpContext, setup.acpSpec, setup.commandsRx, setup.eventsTx)
+		return runWithGuardian(acpContext, setup.acpSpec, setup.commandsRx, setup.eventsTx, relay.guardian)
 	})
 	var kimiTasks *KimiTaskMonitor
 	if kimiTaskHome != nil {
@@ -3664,8 +3665,8 @@ func restartHarnessInPlaceResponse(ctx context.Context, envelope core.RelayReque
 		return answer(compactionError(core.RelayErrorCodeInvalidState,
 			"session is closed; no ACP runtime can restart the harness in place"))
 	}
-	launchConfig := *request.LaunchConfig
-	persistedLaunchConfig := *request.LaunchConfig
+	launchConfig := request.LaunchConfig
+	persistedLaunchConfig := request.LaunchConfig
 	// Apply the same target_environment merge, policy enforcement,
 	// staged-home env, and $MJ_KEEP_DIR setup as initial startup
 	// (RunDaemonOwned / PrepareManagedHarness) so managed harness discovery

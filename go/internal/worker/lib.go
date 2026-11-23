@@ -103,7 +103,7 @@ func startWithOutputPipes(command *exec.Cmd) (stdout, stderr *os.File, err error
 	}
 	command.Stdout = stdoutWrite
 	command.Stderr = stderrWrite
-	err = core.SpawnAsyncChild(command)
+	err = core.SpawnChild(command)
 	// The child holds its own copies of the write ends; ours would keep the
 	// pipes open after it and its descendants exit.
 	stdoutWrite.Close()

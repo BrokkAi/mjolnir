@@ -2,14 +2,14 @@
 # a crate after its commit still have to be ported: see
 # go/scripts/rust-changes.sh and "Keeping up with Rust" in
 # .agents/plans/go-port.md. Update a line only after porting the changes.
-mj-core 8d8e2db10a8602307d2cbabff3adfcfa258f0939
-mj-transcript 8dfd3756a4e0532186bba9adf38054d6eba3190a
-mj-checkpoint 8dfd3756a4e0532186bba9adf38054d6eba3190a
-mj-review 8dfd3756a4e0532186bba9adf38054d6eba3190a
-mj-build-id 8dfd3756a4e0532186bba9adf38054d6eba3190a
-mj-client 4273087e6464a9dd6e90baba0a662afabaa58579
+mj-core 3dde0c11b5832be0a9d810662216d82f9d7e9696
+mj-transcript 3dde0c11b5832be0a9d810662216d82f9d7e9696
+mj-checkpoint 3dde0c11b5832be0a9d810662216d82f9d7e9696
+mj-review 3dde0c11b5832be0a9d810662216d82f9d7e9696
+mj-build-id 3dde0c11b5832be0a9d810662216d82f9d7e9696
+mj-client 3dde0c11b5832be0a9d810662216d82f9d7e9696
 mj-worker 4273087e6464a9dd6e90baba0a662afabaa58579
 # These crates were ported while their files were still in mj-core and
 # mj-worker; rust-changes.sh follows them from those paths.
-mj-harness-install 8d8e2db10a8602307d2cbabff3adfcfa258f0939
+mj-harness-install 3dde0c11b5832be0a9d810662216d82f9d7e9696
 mj-microvm 3dde0c11b5832be0a9d810662216d82f9d7e9696

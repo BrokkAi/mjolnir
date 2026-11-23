@@ -252,8 +252,8 @@ func CheckKeepDirConsent(checkout CheckoutKey, keepDir string, consent Untracked
 		if moveKeep != nil && moveKeep.Carries(keepDir, entry.Path) {
 			continue
 		}
-		item := core.UntrackedItemKeepDirFile{Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity}
-		if !consent.Covers(item) {
+		item := core.UntrackedItem{Kind: core.UntrackedItemKeepDirFile, Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity}
+		if !consent.Covers(&item) {
 			uncovered = append(uncovered, item)
 		}
 	}
@@ -476,7 +476,8 @@ func DecodeSnapshotRefused(data []byte) (SnapshotRefused, error) {
 	}
 	switch kind {
 	case "untracked":
-		items, err := core.DecodeUntrackedItems(detail)
+		var items []UntrackedItem
+		err := json.Unmarshal(detail, &items)
 		return SnapshotRefusedUntracked(items), err
 	case "operation_in_progress":
 		var operation ShownOperation
@@ -634,7 +635,7 @@ func (r SnapshotRefusedUntracked) Error() string {
 	var text strings.Builder
 	fmt.Fprintf(&text, "%d untracked items require discard consent:", len(r))
 	for _, item := range r {
-		switch item := item.(type) {
+		switch item.Kind {
 		case core.UntrackedItemPath:
 			fmt.Fprintf(&text, " %s:%s:%s", item.Checkout.RepositoryID, item.Checkout.CheckoutPath, item.Path)
 		case core.UntrackedItemNestedRepository:
@@ -1220,13 +1221,13 @@ func readHead(runner GitCommandRunner, checkout string) (SnapshotHead, error) {
 		if err != nil {
 			return SnapshotHead{}, err
 		}
-		return core.NewSnapshotHeadBranch(name, commit), nil
+		return SnapshotHead{Kind: core.SnapshotHeadBranch, Name: name, Commit: commit}, nil
 	case 1:
 		commit, err := gitText(runner, checkout, []string{"rev-parse", "HEAD"})
 		if err != nil {
 			return SnapshotHead{}, err
 		}
-		return core.NewSnapshotHeadDetached(commit), nil
+		return SnapshotHead{Kind: core.SnapshotHeadDetached, Commit: commit}, nil
 	}
 	return SnapshotHead{}, gitFailure("read symbolic HEAD", &symbolic)
 }
@@ -1791,8 +1792,8 @@ func checkStashConsent(runner GitCommandRunner, checkout string, stash []Snapsho
 			return err
 		}
 		if untracked {
-			item := core.UntrackedItemStash{Checkout: key, Commit: entry.Commit, Message: entry.Message}
-			if !consent.Covers(item) {
+			item := core.UntrackedItem{Kind: core.UntrackedItemStash, Checkout: key, Commit: entry.Commit, Message: entry.Message}
+			if !consent.Covers(&item) {
 				missing = append(missing, item)
 			}
 		}
@@ -1835,11 +1836,11 @@ func PinWorkspaceCut(runner GitCommandRunner, checkout string, _ CheckoutOwnersh
 		if err != nil {
 			return SnapshotHead{}, err
 		}
-		if !head.Detached {
+		if head.Kind != core.SnapshotHeadDetached {
 			if value, ok := refs[head.Name]; ok {
 				head.Commit = value
 			} else {
-				head = core.NewSnapshotHeadDetached(head.Commit)
+				head = SnapshotHead{Kind: core.SnapshotHeadDetached, Commit: head.Commit}
 			}
 		}
 		return head, nil
@@ -1884,13 +1885,13 @@ func checkUnconditionalBlockers(inventory *WorkspaceInventory) (consentInputs, e
 	var inputs consentInputs
 	for _, tree := range inventoryTrees(inventory) {
 		for _, entry := range tree.Untracked {
-			inputs.untracked = append(inputs.untracked, core.UntrackedItemPath{Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
+			inputs.untracked = append(inputs.untracked, core.UntrackedItem{Kind: core.UntrackedItemPath, Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
 		}
 		for _, entry := range tree.NestedRepositories {
-			inputs.untracked = append(inputs.untracked, core.UntrackedItemNestedRepository{Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
+			inputs.untracked = append(inputs.untracked, core.UntrackedItem{Kind: core.UntrackedItemNestedRepository, Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
 		}
 		for _, entry := range tree.UntrackedStashes {
-			inputs.untracked = append(inputs.untracked, core.UntrackedItemStash{Checkout: entry.Checkout, Commit: entry.Value.Commit, Message: entry.Value.Message})
+			inputs.untracked = append(inputs.untracked, core.UntrackedItem{Kind: core.UntrackedItemStash, Checkout: entry.Checkout, Commit: entry.Value.Commit, Message: entry.Value.Message})
 		}
 		if tree.Operation != nil {
 			inputs.operations = append(inputs.operations, *tree.Operation)
@@ -1980,7 +1981,7 @@ func checkConsentInputs(raw bool, inputs consentInputs, consent CaptureConsent) 
 	}
 	var untracked []UntrackedItem
 	for _, entry := range inputs.untracked {
-		if !consent.Untracked.Covers(entry) {
+		if !consent.Untracked.Covers(&entry) {
 			untracked = append(untracked, entry)
 		}
 	}
@@ -1988,7 +1989,7 @@ func checkConsentInputs(raw bool, inputs consentInputs, consent CaptureConsent) 
 		return SnapshotRefusedUntracked(untracked)
 	}
 	for _, operation := range inputs.operations {
-		if !consent.Operations.Covers(operation) {
+		if !consent.Operations.Covers(&operation) {
 			return SnapshotRefusedOperationInProgress(operation)
 		}
 	}
@@ -2370,7 +2371,7 @@ func branchTracking(runner GitCommandRunner, checkout string, refs map[string]st
 		if !ok {
 			continue
 		}
-		isHead := func(head SnapshotHead) bool { return !head.Detached && head.Name == reference }
+		isHead := func(head SnapshotHead) bool { return head.Kind != core.SnapshotHeadDetached && head.Name == reference }
 		path := ""
 		if !isHead(cut.Head) {
 			for _, tree := range cut.Worktrees {
@@ -2410,7 +2411,7 @@ func selectedRefs(runner GitCommandRunner, checkout string, cut PinnedWorkspaceC
 	}
 	branches := map[string]bool{}
 	for _, head := range append([]SnapshotHead{cut.Head}, worktreeHeads(cut)...) {
-		if !head.Detached {
+		if head.Kind != core.SnapshotHeadDetached {
 			branches[head.Name] = true
 		}
 	}
@@ -3175,7 +3176,7 @@ func capturePreparedWorkspace(runner GitCommandRunner, repository RepositoryInpu
 		return WorkspaceSnapshot{}, err
 	}
 	notices := slices.Clone(inventory.Notices)
-	if !inventory.Raw && consent.Untracked.Kind == core.UntrackedConsentAny {
+	if !inventory.Raw && consent.Untracked.Kind == core.ConsentAny {
 		inputs, err := checkUnconditionalBlockers(&inventory)
 		if err != nil {
 			return WorkspaceSnapshot{}, err
@@ -3187,7 +3188,7 @@ func capturePreparedWorkspace(runner GitCommandRunner, repository RepositoryInpu
 				return WorkspaceSnapshot{}, err
 			}
 			for _, entry := range entries {
-				dropped = append(dropped, core.UntrackedItemKeepDirFile{Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
+				dropped = append(dropped, core.UntrackedItem{Kind: core.UntrackedItemKeepDirFile, Checkout: entry.Checkout, Path: entry.Path, Identity: entry.Identity})
 			}
 		}
 		if len(dropped) > 0 {
@@ -3360,7 +3361,7 @@ func headForWorkingState(runner GitCommandRunner, checkout string, head Snapshot
 			return SnapshotHead{}, err
 		}
 		if parent != head.Commit {
-			return core.NewSnapshotHeadDetached(parent), nil
+			return SnapshotHead{Kind: core.SnapshotHeadDetached, Commit: parent}, nil
 		}
 	}
 	return head, nil
@@ -4424,7 +4425,7 @@ func checkoutHead(runner GitCommandRunner, destination string, head SnapshotHead
 	if err := requireObject(runner, destination, "HEAD", oid); err != nil {
 		return err
 	}
-	if !head.Detached {
+	if head.Kind != core.SnapshotHeadDetached {
 		if !strings.HasPrefix(head.Name, "refs/heads/") {
 			return errors.New("saved HEAD is not a branch")
 		}

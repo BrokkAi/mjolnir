@@ -50,7 +50,7 @@ func InstallSuspendSignal(root string) (*SuspendSignal, error) {
 		signal.Stop(signals)
 		return nil, errors.New("read this worker's process identity")
 	}
-	worker := core.WorkerIdentity{PID: pid, Start: entry.start}
+	worker := core.WorkerIdentity{Pid: pid, Start: entry.start}
 	if err := core.WorkerSuspendWrite(root, core.WorkerSuspendCapability, worker); err != nil {
 		signal.Stop(signals)
 		return nil, err
@@ -99,7 +99,7 @@ func RequestSuspend(root string, operation string, checkout string, childSession
 	if !found {
 		return errors.New("this worker does not support managed checkout quiescence")
 	}
-	worker, found, err := processTableLookup(identity.PID)
+	worker, found, err := processTableLookup(identity.Pid)
 	if err != nil {
 		return err
 	}
@@ -195,11 +195,11 @@ func terminateSessionProcesses(root string, sessionID string, request *core.Susp
 		}
 		slices.Sort(survivors)
 		if !slices.Equal(waitingFor, survivors) {
-			progress := core.SuspendProgress{Operation: request.Operation, RemainingPIDs: survivors}
+			progress := core.SuspendProgress{Operation: request.Operation, RemainingPids: survivors}
 			if err := core.WorkerSuspendWrite(root, core.WorkerSuspendProgress, progress); err != nil {
 				return err
 			}
-			waitingFor = progress.RemainingPIDs
+			waitingFor = progress.RemainingPids
 		}
 		time.Sleep(workerStopPollInterval)
 	}
