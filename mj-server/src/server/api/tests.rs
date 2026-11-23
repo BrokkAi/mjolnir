@@ -21,6 +21,25 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+#[tokio::test]
+async fn import_acknowledgement_keeps_admission_with_its_response_bytes() {
+    let gate = Arc::new(mj_store::upgrade::Gate::default());
+    let admission = gate.enter_unless_draining("import registration").unwrap();
+    let response = terminal_operations::import_acknowledgement(admission);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!gate.try_close());
+
+    let mut body = response.into_body();
+    let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(body.frame().await.is_none());
+    drop(body);
+    assert_eq!(&bytes[..], b"{}");
+    assert!(!gate.try_close());
+
+    drop(bytes);
+    assert!(gate.try_close());
+}
+
 // Hard-won: c6ac3b7aa: new sync requests extended an already draining handoff.
 #[tokio::test]
 async fn wiki_sync_request_is_refused_during_handoff_drain() {

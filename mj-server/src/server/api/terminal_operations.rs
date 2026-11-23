@@ -539,13 +539,19 @@ async fn run_detached<T: Send + 'static>(
 async fn import_session(
     State(state): State<ServerState>,
     body: Body,
-) -> Result<StatusCode, ApiFailure> {
+) -> Result<Response, ApiFailure> {
     let backend = dashboard_backend(&state)?;
     let prepared = tokio::select! {
         result = imports::prepare(body) => result?,
         _ = state.shutdown.cancelled() => return Err(ApiFailure::shutdown(&state)),
     };
-    run_admitted_mutation(&state, "import registration", async move {
+    let admission = state
+        .upgrade_gate
+        .enter_unless_draining("import registration")
+        .map_err(|_| ApiFailure::handoff())?;
+    let registration = admission.clone();
+    run_detached("import registration", async move {
+        let _registration = registration;
         mj_core::runtime::spawn_blocking(move || prepared.register())
             .await
             .context("import registration task panicked")??;
@@ -553,7 +559,32 @@ async fn import_session(
         Ok(())
     })
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(import_acknowledgement(admission))
+}
+
+pub(super) fn import_acknowledgement(admission: mj_core::upgrade::Work) -> Response {
+    struct ImportAcknowledgement {
+        _admission: mj_core::upgrade::Work,
+    }
+
+    impl AsRef<[u8]> for ImportAcknowledgement {
+        fn as_ref(&self) -> &[u8] {
+            b"{}"
+        }
+    }
+
+    // Hyper drops a 204 body before flushing its headers. On the loopback TCP
+    // listener, the nonempty Bytes stay in Hyper's vectored write queue until
+    // they are written or the connection is dropped.
+    let body = Bytes::from_owner(ImportAcknowledgement {
+        _admission: admission,
+    });
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "application/json")],
+        Body::from(body),
+    )
+        .into_response()
 }
 
 mod imports;

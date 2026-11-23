@@ -671,6 +671,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_wait_distinguishes_shutdown_from_creation_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&listener, None);
+        let server = async {
+            for (status, body) in [
+                (UNAVAILABLE, r#"{"error":"the server is shutting down"}"#),
+                (
+                    "500 Internal Server Error",
+                    r#"{"error":"checkout failed"}"#,
+                ),
+            ] {
+                let (stream, line, _, _) = read_request(&listener).await;
+                assert_eq!(line, "POST /api/v1/sessions/session-1/create/wait HTTP/1.1");
+                respond(stream, status, body).await;
+            }
+        };
+        let requests = async {
+            let shutdown = client
+                .wait_create_session("session-1".into())
+                .await
+                .unwrap_err();
+            assert!(shutdown.is::<DaemonTransportLost>());
+            let failed = client
+                .wait_create_session("session-1".into())
+                .await
+                .unwrap_err();
+            assert!(failed.is::<DaemonRefusal>());
+            assert_eq!(failed.to_string(), "checkout failed");
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn attachment_renewal_and_detach_return_without_reconnecting_during_handoff() {
         let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (client, reconnects) = reconnecting_client(&initial, None);

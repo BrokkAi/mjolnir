@@ -392,7 +392,10 @@ impl HttpDaemonClient {
                     {
                         endpoint = self.refresh_endpoint(&endpoint).await?;
                     }
-                    response => return response.map(|_| ()),
+                    response => {
+                        response?.bytes().await?;
+                        return Ok(());
+                    }
                 }
             }
         };
@@ -406,7 +409,7 @@ impl HttpDaemonClient {
 
 fn terminal_wait_error(error: anyhow::Error) -> anyhow::Error {
     if let Some(failure) = error.downcast_ref::<HttpApiError>() {
-        if failure.is_handoff() {
+        if failure.status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return error.context(crate::daemon::DaemonTransportLost);
         }
         return crate::daemon::DaemonRefusal(failure.message.clone()).into();
