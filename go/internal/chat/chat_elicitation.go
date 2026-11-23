@@ -1440,9 +1440,18 @@ func (d *elicitationDialog) messagePageStep() int {
 
 func (d *elicitationDialog) scrollMessage(delta int) {
 	current := d.view.messageScroll
-	next := max(current+delta, 0)
-	if delta > 0 {
-		next = min(current+delta, d.view.messageMaxScroll)
+	maximum := d.view.messageMaxScroll
+	// Rust saturates in both directions: current.saturating_sub(|delta|)
+	// upward, and current.saturating_add(delta).min(maximum) downward. A
+	// non-negative current plus a negative delta cannot overflow; a positive
+	// delta is compared against the remaining room instead of added.
+	var next int
+	if delta < 0 {
+		next = max(current+delta, 0)
+	} else if delta > maximum-current {
+		next = maximum
+	} else {
+		next = current + delta
 	}
 	if next == current {
 		return
