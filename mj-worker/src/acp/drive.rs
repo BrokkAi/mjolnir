@@ -551,9 +551,14 @@ where
                     }
                     let native_child = permission_native_agents.lock().expect("native agent router poisoned")
                         .is_child(&request.session_id.to_string());
-                    // Claude still needs consent without plan text. In that case
-                    // the normal permission card presents its policy-filtered modes.
-                    let plan_review = if let Some(plan) = plan_permission && !native_child {
+                    // Claude still needs consent when plan text is absent or its policy
+                    // mode is unavailable without ContinueInBypass. In those cases the
+                    // normal permission card presents its policy-filtered modes so lower
+                    // modes stay selectable.
+                    let plan_review = if let Some(plan) = plan_permission
+                        && !native_child
+                        && plan.can_implement(&request, permission_enforcement)
+                    {
                         let value = serde_json::to_value(&request)
                             .map_err(|_| agent_client_protocol::Error::internal_error())?;
                         (plan == PlanPermission::Codex || permission_plan_text(&value).is_some())

@@ -220,6 +220,20 @@ pub(super) enum PlanPermission {
 }
 
 impl PlanPermission {
+    pub(super) fn can_implement(
+        self,
+        request: &RequestPermissionRequest,
+        enforcement: Option<ExecutionEnforcement>,
+    ) -> bool {
+        match self {
+            Self::Codex => true,
+            Self::Claude => {
+                claude_policy_plan_option(request, enforcement).is_some()
+                    || claude_policy_mode(enforcement) == "bypassPermissions"
+            }
+        }
+    }
+
     pub(super) fn recognize(
         request: &RequestPermissionRequest,
         harness: HarnessKind,

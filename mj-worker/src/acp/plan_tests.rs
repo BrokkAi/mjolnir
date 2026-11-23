@@ -1276,27 +1276,45 @@ async fn dropping_bridge_connection_discards_a_pending_implementation() {
 }
 
 #[tokio::test]
-async fn guardian_without_auto_reports_failure_instead_of_selecting_manual_mode() {
+async fn guardian_without_auto_uses_a_permitted_manual_mode() {
     let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
-    let (prompt, _, answer) = probe
-        .approve(
-            "Plan",
-            &["exit-plan-default", "exit-plan-clear-auto", "reject"],
-        )
-        .await;
-    assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
-    loop {
-        if let RuntimeEvent::Warning { message } = probe.event().await
-            && message.contains("required auto")
-        {
-            break;
-        }
-    }
+    let params = permission(
+        "Plan",
+        &["exit-plan-default", "exit-plan-clear-auto", "reject"],
+    );
     probe
-        .result(&prompt, json!({"stopReason": "end_turn"}))
+        .send(json!({
+            "jsonrpc": "2.0", "id": "exit-plan-default", "method": "session/request_permission",
+            "params": params
+        }))
         .await;
-    probe.finished().await;
-    probe.no_message().await;
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = probe.event().await {
+            break request;
+        }
+    };
+    let ElicitationFieldKind::SingleSelect { options, .. } = &request.fields[0].kind else {
+        panic!("the permission approval is a select")
+    };
+    let selected = options[0].value.clone();
+    let (resolved, response) = oneshot::channel();
+    probe
+        .commands
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String(selected.clone()),
+                )]),
+            },
+            resolved,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let answer = probe.message().await;
+    assert_eq!(answer["result"]["outcome"]["optionId"], selected);
     probe.close().await;
 }
 
@@ -2172,6 +2190,72 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
         assert_eq!(answer["result"]["outcome"]["optionId"], yes);
         probe.close().await;
     }
+}
+
+#[tokio::test]
+async fn claude_plan_without_auto_mode_uses_policy_filtered_permission_form() {
+    let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    let (mut params, _) = bridge_plan_request(HarnessKind::Claude).unwrap();
+    params["toolCall"]["rawInput"]["plan"] = json!("Ship the feature");
+    let available = params["options"].as_array().unwrap().clone();
+    params["options"] = [
+        json!({"optionId": "exit-plan-bypass", "name": "Yes, bypass permissions", "kind": "allow_always"}),
+        json!({"optionId": "exit-plan-accept-edits", "name": "Yes, accept edits", "kind": "allow_once"}),
+        json!({"optionId": "exit-plan-default", "name": "Yes, default mode", "kind": "allow_once"}),
+        available.iter().find(|option| option["optionId"] == "reject").unwrap().clone(),
+    ].into();
+    probe
+        .send(json!({
+            "jsonrpc": "2.0", "id": "exit-plan-lower-mode", "method": "session/request_permission",
+            "params": params
+        }))
+        .await;
+    let request = loop {
+        match probe.event().await {
+            RuntimeEvent::ElicitationRequested { request } => break request,
+            RuntimeEvent::Warning { message } => {
+                panic!("plan permission must not warn: {message}")
+            }
+            _ => {}
+        }
+    };
+    assert!(request.tool_permission.is_some());
+    assert!(!request.id.starts_with("plan-review-"));
+    let ElicitationFieldKind::SingleSelect { options, .. } = &request.fields[0].kind else {
+        panic!("the permission approval is a select")
+    };
+    let option_ids = options
+        .iter()
+        .map(|option| option.value.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        option_ids,
+        ["exit-plan-accept-edits", "exit-plan-default", "reject"]
+    );
+
+    let (resolved, response) = oneshot::channel();
+    probe
+        .commands
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String("exit-plan-accept-edits".into()),
+                )]),
+            },
+            resolved,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "exit-plan-lower-mode");
+    assert_eq!(
+        answer["result"]["outcome"]["optionId"],
+        "exit-plan-accept-edits"
+    );
+    probe.close().await;
 }
 
 /// Exercise the actual ACP callbacks, including the harness-specific plan
