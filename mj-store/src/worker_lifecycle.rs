@@ -163,6 +163,14 @@ impl WorkerPermit {
             admission.session_id() == session_id,
             "worker admission belongs to another session: {session_id}"
         );
+        // Work that shares the session (upgrade preparation) may not touch the
+        // worker; the gate owns which kinds those are.
+        if let SessionAdmission::Background(attempt) = &admission {
+            ensure!(
+                attempt.may_act_on_worker(),
+                "work sharing the session cannot mutate the worker of {session_id}"
+            );
+        }
         if let Some(owner) = current(session_id) {
             return Ok(owner);
         }

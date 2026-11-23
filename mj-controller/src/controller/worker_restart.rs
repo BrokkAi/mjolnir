@@ -281,6 +281,20 @@ impl Controller {
             .context("prepare the current managed harness before replacing the worker")?;
         let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &worker)
             .context("stage the current worker while the old worker remains available")?;
+        // Preparation shared the session with other background work. The swap
+        // shares it with nothing: widen this admission, waiting for that work
+        // to finish rather than cancelling it, unless a lifecycle operation or
+        // a daemon handoff takes the session first. The wait is for a slot, so
+        // it does not count against the upgrade's deadline.
+        if let crate::recovery_gate::SessionAdmission::Background(attempt) = admission
+            && attempt.work() == crate::recovery_gate::BackgroundWork::WorkerPreparation
+        {
+            let _slot_wait = executor.pause_deadline();
+            if let Err(refusal) = attempt.widen_for_swap().await {
+                tracing::debug!(session_id, holders = ?refusal.holders, "worker upgrade swap deferred");
+                return Ok(WorkerUpgradeOutcome::Deferred);
+            }
+        }
         let owner = crate::worker_lifecycle::WorkerPermit::acquire(session_id, admission)?;
         owner
             .scope(async {
@@ -317,8 +331,14 @@ impl Controller {
                 else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
-                if !lease.verify_for_upgrade().await? {
+                let Some(reserved) = lease.reserved_snapshot().await? else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
+                };
+                // Relay recovery may run beside preparation and restart the
+                // worker onto this build; replacing it again would only reload
+                // its native session.
+                if worker_runs_installed_build(reserved.worker_build.as_deref(), &installed) {
+                    return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
                 }
                 // The accepted swap records its target before touching a process. Once
                 // detached startup succeeds, the next daemon can resume observation.
