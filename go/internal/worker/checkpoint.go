@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
@@ -116,7 +118,109 @@ func SuspendPreflightFromSpecFile(path string) (core.WorkerSuspendPreflightResul
 // progress, blockers and `.mj/keep/` entries, and, for a dry run, the Git
 // delta a suspend would transfer (or why it cannot be estimated).
 func RunSuspendPreflight(spec *core.WorkerSuspendPreflightSpec, git checkpoint.GitCommandRunner) (core.WorkerSuspendPreflightResult, error) {
-	panic("unported: mj-worker/src/checkpoint.rs run_suspend_preflight")
+	var result core.WorkerSuspendPreflightResult
+	var gitDeltaTotal *uint64
+	if spec.DryRun {
+		gitDeltaTotal = new(uint64)
+	}
+	var gitDeltaUnavailable *string
+
+	for _, repo := range spec.Repositories {
+		var input checkpoint.RepositoryInput
+		var err error
+		switch {
+		case repo.Raw:
+			input = checkpoint.RawSnapshotInput(repo.ID, repo.Path, nil, nil, "")
+		case repo.ExcludeCommits != nil:
+			input, err = checkpoint.CutoffSnapshotInput(repo.ID, repo.Path, &spec.SessionID, slices.Clone(*repo.ExcludeCommits), "")
+		default:
+			input, err = checkpoint.ManagedCloneSnapshotInput(repo.ID, repo.Path, &spec.SessionID, "", repo.OriginOverride)
+		}
+		if err != nil {
+			return core.WorkerSuspendPreflightResult{}, err
+		}
+		input.KeepDir = repo.KeepDir
+
+		inventories, err := checkpoint.SessionInventory(git, []checkpoint.RepositoryInput{input})
+		if err != nil {
+			return core.WorkerSuspendPreflightResult{}, err
+		}
+		inventory, ok := inventories[input.ID]
+		if !ok {
+			return core.WorkerSuspendPreflightResult{}, errors.New("session inventory returned no repository")
+		}
+
+		if input.KeepDir != nil {
+			entries, size, err := checkpoint.ScanKeepDir(inventory.Checkout, *input.KeepDir)
+			if err != nil {
+				return core.WorkerSuspendPreflightResult{}, err
+			}
+			result.KeepDirEntries = append(result.KeepDirEntries, entries...)
+			result.KeepDirBytes = checkpointSaturatingAdd(result.KeepDirBytes, size)
+		}
+
+		if spec.DryRun && gitDeltaUnavailable == nil {
+			if inventory.Operation != nil {
+				gitDeltaTotal = nil
+				reason := fmt.Sprintf("Git size estimate unavailable during %s", inventory.Operation.Kind)
+				gitDeltaUnavailable = &reason
+			} else if estimate, err := checkpoint.EstimateRepositoryDelta(git, input); err != nil {
+				gitDeltaTotal = nil
+				// anyhow's `{err}`: the outermost message only.
+				reason := "Git size estimate unavailable: " + acpErrorChain(err)[0]
+				gitDeltaUnavailable = &reason
+			} else if gitDeltaTotal != nil && estimate.TotalBytes != nil {
+				total := checkpointSaturatingAdd(*gitDeltaTotal, *estimate.TotalBytes)
+				gitDeltaTotal = &total
+			} else {
+				gitDeltaTotal = nil
+			}
+		}
+
+		result.Untracked = append(result.Untracked, inventory.Untracked...)
+		result.NestedRepositories = append(result.NestedRepositories, inventory.NestedRepositories...)
+		for _, stash := range inventory.UntrackedStashes {
+			result.UntrackedStashes = append(result.UntrackedStashes, core.SuspendUntrackedStash{
+				Checkout: stash.Checkout,
+				Commit:   stash.Value.Commit,
+				Message:  stash.Value.Message,
+			})
+		}
+		if inventory.Operation != nil {
+			result.Operations = append(result.Operations, *inventory.Operation)
+		}
+		result.Raw = result.Raw || inventory.Raw
+		for _, blocker := range inventory.Blockers {
+			paths := make([]string, 0, len(blocker.Paths))
+			for _, path := range blocker.Paths {
+				paths = append(paths, path.Value)
+			}
+			result.Blockers = append(result.Blockers, core.SuspendBlocker{
+				Kind:   checkpoint.SnapshotRefusedDebug(blocker.Kind),
+				Paths:  paths,
+				Remedy: blocker.Remedy,
+			})
+		}
+	}
+
+	if spec.DryRun {
+		result.DryRun = &core.DryRunEstimate{
+			GitDeltaBytes:             gitDeltaTotal,
+			GitDeltaUnavailableReason: gitDeltaUnavailable,
+			SessionStateBytes:         nil,
+			KeepDirBytes:              result.KeepDirBytes,
+			TransferRoute:             nil,
+		}
+	}
+	return result, nil
+}
+
+// checkpointSaturatingAdd is u64::saturating_add.
+func checkpointSaturatingAdd(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
 }
 
 func CaptureFromSpecReader(reader io.Reader) (checkpoint.CapturedCheckpoint, error) {
