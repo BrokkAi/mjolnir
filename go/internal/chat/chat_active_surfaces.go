@@ -135,5 +135,19 @@ func (c *ActiveChat) FooterCommandAreas() []FooterCommandArea {
 // AutoscrollSelection scrolls the surface a drag is holding against one of
 // its edges. direction is negative for up and positive for down.
 func (c *ActiveChat) AutoscrollSelection(surface SurfaceId, direction int) {
-	panic("unported: mj-chat/src/chat/active/surfaces.rs AutoscrollSelection")
+	rows := mouseScrollRows
+	switch surface.(type) {
+	case SurfaceIdTranscript:
+		if direction < 0 {
+			c.scrollHistoryUp(mouseScrollRows)
+		} else {
+			c.scrollHistoryDown(mouseScrollRows)
+		}
+	case SurfaceIdElicitationMessage:
+		if direction < 0 {
+			c.scrollElicitationMessage(-rows)
+		} else {
+			c.scrollElicitationMessage(rows)
+		}
+	}
 }

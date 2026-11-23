@@ -58,6 +58,25 @@ func (r *ElicitationRequest) UnmarshalJSON(data []byte) error {
 	return transcriptStrictDecode(data, (*plain)(r), true)
 }
 
+// Equal is Rust's derived PartialEq. Requests compare by their serde form,
+// which carries every field and nests the field kinds as serde writes
+// them; an absent field list equals an empty one, as an empty Vec does.
+func (r *ElicitationRequest) Equal(other *ElicitationRequest) bool {
+	encode := func(request *ElicitationRequest) []byte {
+		normalized := *request
+		if normalized.Fields == nil {
+			normalized.Fields = []ElicitationField{}
+		}
+		encoded, err := json.Marshal(normalized)
+		if err != nil {
+			return nil
+		}
+		return encoded
+	}
+	left, right := encode(r), encode(other)
+	return left != nil && right != nil && string(left) == string(right)
+}
+
 // ToolPermissionForm is what a tool permission form offers beyond the
 // request's own options.
 type ToolPermissionForm struct {

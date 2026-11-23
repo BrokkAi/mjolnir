@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 
 	"github.com/BrokkAi/acp-go/schema"
+	"github.com/BrokkAi/acp-go/schema/unstable"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -195,6 +198,12 @@ type ElicitationIdentity struct {
 	request      core.ElicitationRequest
 	reviewer     bool
 	reviewerRole *string
+}
+
+// equal is Rust's derived PartialEq.
+func (i ElicitationIdentity) equal(other ElicitationIdentity) bool {
+	return i.reviewer == other.reviewer && optionalStringEqual(i.reviewerRole, other.reviewerRole) &&
+		i.request.Equal(&other.request)
 }
 
 func (d *ChatElicitationDraft) identity() ElicitationIdentity {
@@ -943,7 +952,79 @@ type ChatState struct {
 // NewChatState is ChatState::new: the view of snapshot after replaying
 // events.
 func NewChatState(snapshot *core.WorkerSnapshot, events []core.SequencedEvent) *ChatState {
-	panic("unported: mj-chat/src/chat.rs NewChatState")
+	configuration := decodedConfiguration(snapshot.Config)
+	goalState, err := core.GoalStateFromConfiguration(configuration)
+	if err != nil {
+		slog.Warn("invalid projected goal state", "error", err)
+		goalState = core.GoalState{}
+	}
+	promptInFlight := snapshot.ActivePrompt != nil
+	state := &ChatState{
+		sessionID:                snapshot.SessionID,
+		phase:                    snapshot.Phase,
+		scheduledDiffstats:       map[diffstatKey]struct{}{},
+		composerRuntime:          defaultComposerRuntime(),
+		nextImageNumber:          1,
+		pendingAttachmentMarkers: map[uint64]uint64{},
+		pendingQueueRemovals:     map[string]struct{}{},
+		pendingQueueImages:       map[string][]PromptImage{},
+		claimedAgentTerminals:    map[string]int64{},
+		reviewConfig:             core.ReviewConfig{},
+		goalState:                goalState,
+		goalPromptActive:         snapshot.ActivePrompt != nil && promptInvokesCommand(snapshot.ActivePrompt.Text, "goal"),
+		acpSurface:               core.AcpSessionSurfaceFromConfiguration(configuration),
+		commandChoices:           builtinCommandChoices(),
+		anchor:                   TranscriptAnchorBottom{},
+		revealLatestAgentOnDraw:  true,
+		renderMode:               client.TranscriptRenderModeRich,
+		toolDisplay:              DefaultToolDisplay(),
+		renderCache:              defaultTranscriptRenderCache(),
+		transcriptScrollbar:      defaultTranscriptScrollbarState(),
+		expandedToolCalls:        map[uint64]struct{}{},
+		expandedMailboxEvents:    map[MailboxDisclosureId]struct{}{},
+		notices:                  NewNotices(),
+		feedback:                 NewNotices(),
+		operationFeedback:        map[string]string{},
+		voiceForm:                voiceForm(),
+		taskDialogForm:           NewForm[BackgroundTaskControl](),
+		pendingBackgroundStops:   map[string]struct{}{},
+		promptContentWidth:       1,
+		spinnerStyle:             core.DefaultSpinnerStyle(),
+		activityReachable:        true,
+		promptInFlight:           promptInFlight,
+		sessionActivity:          client.SessionActivity{PromptInFlight: promptInFlight},
+		turnControlDialog:        turnControlDialog(),
+		frameSurfaces:            NewFrameSurfaces(),
+	}
+	state.ApplyEvents(events)
+	// Bootstrap replays the full canonical log for transcript projection,
+	// while the snapshot is authoritative for the queue at that frontier.
+	state.queuedPrompts = make([]QueuedPrompt, 0, len(snapshot.QueuedPrompts))
+	for _, prompt := range snapshot.QueuedPrompts {
+		state.queuedPrompts = append(state.queuedPrompts, QueuedPrompt{
+			id:     prompt.ID,
+			text:   prompt.Text,
+			kind:   core.QueuedCommandKindPrompt{},
+			images: []PromptImage{},
+		})
+	}
+	state.latestSeq = max(state.latestSeq, snapshot.LatestSeq)
+	return state
+}
+
+// decodedConfiguration is a worker snapshot's configuration as the decoded
+// JSON values the projected-configuration readers take. A value that does
+// not decode is dropped, as it could not have come from serde.
+func decodedConfiguration(config map[string]json.RawMessage) map[string]any {
+	configuration := make(map[string]any, len(config))
+	for key, raw := range config {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			continue
+		}
+		configuration[key] = value
+	}
+	return configuration
 }
 
 // ChatStateStandby is the real composer for a session that is not attached
@@ -956,7 +1037,22 @@ func NewChatState(snapshot *core.WorkerSnapshot, events []core.SequencedEvent) *
 // stays off for the same reason. The draft survives until the host carries it
 // into the attached chat.
 func ChatStateStandby(sessionID string, config *core.Config, header SessionHeaderIdentity, notices Notices) *ChatState {
-	panic("unported: mj-chat/src/chat.rs ChatStateStandby")
+	snapshot := core.WorkerSnapshotSummary(sessionID, core.WorkerPhaseIdle, 0)
+	state := NewChatState(&snapshot, nil)
+	state.notices = notices
+	state.standby = true
+	state.BindComposerSession(&sessionID)
+	state.SetSubagentCount(header.SubagentCount)
+	state.SetReviewerCounts(header.Reviewers)
+	state.SetHeaderSummary(header.Target, header.Profile, header.Title)
+	if header.HarnessKind != nil {
+		state.SetHarnessKind(*header.HarnessKind)
+	}
+	state.SetReviewConfig(config.Review)
+	state.SetSpinnerStyle(config.Spinner)
+	state.SetDetailedActivityClocks(config.Advanced.DetailedActivityClocks)
+	state.SetToolDisplay(ToolDisplayFromConfig(&config.Advanced))
+	return state
 }
 
 // SetDraft replaces the draft with draft, cursor at the end. An empty draft
@@ -1019,7 +1115,25 @@ func ChatStateFromMaterializedTail(session *core.MaterializedSession, configOpti
 }
 
 func chatStateFromMaterializedWithPrefix(session *core.MaterializedSession, configOptions []schema.SessionConfigOption, availableCommands []schema.AvailableCommand, unconvertedPrefix int) *ChatState {
-	panic("unported: mj-chat/src/chat.rs chatStateFromMaterializedWithPrefix")
+	snapshot := core.WorkerSnapshotSummary(session.SessionID, materializedPhase(session.Execution), session.AppliedEventOrdinal)
+	state := NewChatState(&snapshot, nil)
+	state.latestSeq = math.MaxUint64
+	state.unconvertedPrefix = unconvertedPrefix
+	state.ApplyMaterialized(session, configOptions, availableCommands)
+	return state
+}
+
+// materializedPhase is the worker phase a materialized execution state shows.
+func materializedPhase(execution core.MaterializedExecutionState) core.WorkerPhase {
+	switch execution.(type) {
+	case core.MaterializedExecutionStateRunning:
+		return core.WorkerPhaseRunning
+	case core.MaterializedExecutionStateClosing:
+		return core.WorkerPhaseClosing
+	case core.MaterializedExecutionStateClosed:
+		return core.WorkerPhaseClosed
+	}
+	return core.WorkerPhaseIdle
 }
 
 func (s *ChatState) ApplyMaterialized(session *core.MaterializedSession, configOptions []schema.SessionConfigOption, availableCommands []schema.AvailableCommand) {
@@ -1031,7 +1145,162 @@ func (s *ChatState) ApplyMaterialized(session *core.MaterializedSession, configO
 }
 
 func (s *ChatState) applyMaterializedWithGoal(session *core.MaterializedSession, configOptions []schema.SessionConfigOption, availableCommands []schema.AvailableCommand, goal *core.GoalState) {
-	panic("unported: mj-chat/src/chat.rs applyMaterializedWithGoal")
+	switchedSession := s.sessionID != session.SessionID
+	if switchedSession {
+		s.AdoptSessionID(session.SessionID)
+	}
+	s.goalState = *goal
+	started := time.Now()
+	s.reconcileSubmissions(session)
+	s.reconcileNotices(session)
+	rebuildProjection := switchedSession ||
+		session.AppliedEventOrdinal != s.latestSeq ||
+		!elicitationRequestsEqual(session.PendingElicitations, s.pendingElicitations)
+	if phase := materializedPhase(session.Execution); s.phase != phase {
+		s.phase = phase
+	}
+	turnStartedAt := turnStartedAtEpochSeconds(session.Execution)
+	if !optionalUint64Equal(s.turnStartedAtEpochSeconds, turnStartedAt) {
+		s.turnStartedAtEpochSeconds = turnStartedAt
+	}
+	s.latestSeq = session.AppliedEventOrdinal
+	s.syncElicitation(session.PendingElicitations)
+	if rebuildProjection {
+		// Entries can move when the canonical window slides or history is
+		// rewritten. Preserve identity, including a deferred restoration.
+		// Bottom needs no remapping and keeps its pending opening reveal.
+		var position *TranscriptPosition
+		if _, bottom := s.anchor.(TranscriptAnchorBottom); !bottom {
+			saved := s.TranscriptPosition()
+			position = &saved
+		}
+		// While a prefix conversion is in flight the entries stand for the
+		// tail only, so the rebuild has to line up with the same tail.
+		// Compaction can shrink the transcript under the recorded prefix;
+		// reseat it on the current tail rather than rebuilding the whole
+		// history here. The pending prefix then fails its alignment check
+		// and is rebuilt off the loop.
+		if s.unconvertedPrefix > len(session.Transcript) {
+			s.unconvertedPrefix = max(len(session.Transcript)-client.TailSeedItems, 0)
+			s.entries = nil
+			s.invalidateRenderCache()
+		}
+		previous := s.entries
+		s.entries = nil
+		s.entries = client.MaterializedChatEntriesReusing(session, s.unconvertedPrefix, previous)
+		if s.hasInlineSubmissions() {
+			s.syncInlineSubmissions()
+		}
+		s.refreshExpandedToolDetails()
+		// Reusing entry rows is safe only after the collapse topology is
+		// recomputed. A tool can become completed without changing the
+		// transcript length, joining or splitting a collapsed streak.
+		s.invalidateRenderCache()
+		if position != nil {
+			s.RestoreTranscriptPosition(*position)
+		}
+		// Re-read the seam from the projection that produced this tail, so
+		// a prefix converted against replaced history is refused.
+		s.prefixSeam = nil
+		if index := s.unconvertedPrefix - 1; index >= 0 && index < len(session.Transcript) {
+			s.prefixSeam = session.Transcript[index]
+		}
+		if s.unconvertedPrefix < len(session.Transcript) {
+			for _, item := range session.Transcript[s.unconvertedPrefix:] {
+				request, ok := toolDiffstatRequestFromItem(item)
+				if !ok {
+					continue
+				}
+				key := diffstatKey{toolCallID: request.toolCallID, revision: request.revision}
+				if _, scheduled := s.scheduledDiffstats[key]; scheduled {
+					continue
+				}
+				s.scheduledDiffstats[key] = struct{}{}
+				s.pendingDiffstats = append(s.pendingDiffstats, request)
+			}
+		}
+	}
+	// Queue persistence can reach the materialized view independently of
+	// transcript projection. Keep the small queue authoritative even when
+	// the transcript frontier has not moved and its expensive rebuild is
+	// correctly skipped.
+	projectedQueueIDs := make(map[string]struct{}, len(session.QueuedPrompts))
+	for _, prompt := range session.QueuedPrompts {
+		projectedQueueIDs[prompt.CommandID] = struct{}{}
+	}
+	for id := range s.pendingQueueRemovals {
+		if _, projected := projectedQueueIDs[id]; !projected {
+			delete(s.pendingQueueRemovals, id)
+		}
+	}
+	for id := range s.pendingQueueImages {
+		if _, projected := projectedQueueIDs[id]; !projected {
+			delete(s.pendingQueueImages, id)
+		}
+	}
+	queuedPrompts := make([]QueuedPrompt, 0, len(session.QueuedPrompts))
+	for _, prompt := range session.QueuedPrompts {
+		if _, removing := s.pendingQueueRemovals[prompt.CommandID]; removing {
+			continue
+		}
+		payload, attachmentsUnsupported := materializedContentPrompt(prompt.Content)
+		kind := prompt.Kind
+		if kind == nil {
+			kind = core.QueuedCommandKindPrompt{}
+		}
+		queuedPrompts = append(queuedPrompts, QueuedPrompt{
+			id:                     prompt.CommandID,
+			text:                   payload.Text,
+			kind:                   kind,
+			images:                 payload.Images,
+			attachmentsUnsupported: attachmentsUnsupported,
+		})
+	}
+	if !queuedPromptsEqual(s.queuedPrompts, queuedPrompts) {
+		s.queuedPrompts = queuedPrompts
+	}
+	slog.Debug("terminal projection applied",
+		"target", "mj_chat::latency",
+		"ordinal", session.AppliedEventOrdinal,
+		"elapsed_ms", float64(time.Since(started).Microseconds())/1000)
+	s.setConfigOptions(configOptions)
+	s.acpSurface.ApplyProjectedConfiguration(session.Configuration.Values)
+	s.acpSurface.SetAgentCommands(slices.Clone(availableCommands))
+	s.rebuildCommandChoices()
+}
+
+// elicitationRequestsEqual compares two lists of requests as Rust's derived
+// PartialEq does.
+func elicitationRequestsEqual(left, right []core.ElicitationRequest) bool {
+	return slices.EqualFunc(left, right, func(a, b core.ElicitationRequest) bool { return a.Equal(&b) })
+}
+
+// containsElicitationRequest is Vec::contains for requests.
+func containsElicitationRequest(requests []core.ElicitationRequest, request *core.ElicitationRequest) bool {
+	return slices.ContainsFunc(requests, func(candidate core.ElicitationRequest) bool { return candidate.Equal(request) })
+}
+
+func optionalUint64Equal(left, right *uint64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func optionalStringEqual(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+// queuedPromptsEqual is Rust's derived PartialEq over the queue.
+func queuedPromptsEqual(left, right []QueuedPrompt) bool {
+	return slices.EqualFunc(left, right, func(a, b QueuedPrompt) bool {
+		return a.id == b.id && a.text == b.text && a.kind == b.kind &&
+			a.attachmentsUnsupported == b.attachmentsUnsupported &&
+			slices.EqualFunc(a.images, b.images, func(x, y PromptImage) bool { return x.Equal(&y) })
+	})
 }
 
 func (s *ChatState) takeDiffstatRequests(maximum int) []ToolDiffstatRequest {
@@ -1055,18 +1324,80 @@ func (s *ChatState) queueDiffstatRequests(requests []ToolDiffstatRequest) {
 // applyDiffstats records the diff summary computed for one tool call
 // revision, or reports why it could not be computed (err non-nil).
 func (s *ChatState) applyDiffstats(toolCallID string, revision uint64, diffstats []string, err error) {
-	panic("unported: mj-chat/src/chat.rs applyDiffstats")
+	key := diffstatKey{toolCallID: toolCallID, revision: revision}
+	var entry *core.ChatEntry
+	for index := len(s.entries) - 1; index >= 0; index-- {
+		candidate := &s.entries[index]
+		if candidate.ToolCallID != nil && *candidate.ToolCallID == toolCallID && candidate.Revision == revision {
+			entry = candidate
+			break
+		}
+	}
+	if entry == nil {
+		delete(s.scheduledDiffstats, key)
+		return
+	}
+	if err == nil {
+		entry.ToolDiffstats = diffstats
+		s.invalidateRenderCache()
+		return
+	}
+	delete(s.scheduledDiffstats, key)
+	slog.Warn("could not calculate a tool diff summary",
+		"tool_call_id", toolCallID, "revision", revision, "error", err)
+	s.SetNotice(fmt.Sprintf("Could not calculate diff summary: %v", err))
 }
 
 func (s *ChatState) syncElicitation(pending []core.ElicitationRequest) {
-	panic("unported: mj-chat/src/chat.rs syncElicitation")
+	if !elicitationRequestsEqual(s.pendingElicitations, pending) {
+		s.pendingElicitations = slices.Clone(pending)
+	}
+	// A reviewer's form is not in the primary's pending list, so the
+	// primary's projection must not take it down.
+	if s.elicitationIsReviewers {
+		return
+	}
+	if s.elicitation != nil {
+		if containsElicitationRequest(pending, s.elicitation.request()) {
+			return
+		}
+		// An answer or cancellation removed the request. Drop the local
+		// form immediately so no later relay snapshot can resurrect it.
+		s.elicitation = nil
+	}
+	var next *elicitationDialog
+	if len(pending) > 0 {
+		next = newElicitationDialog(pending[0])
+	}
+	if (next != nil) != (s.elicitation != nil) {
+		s.elicitation = next
+	}
 }
 
 // reconcileReviewerElicitation reconciles the reviewer form against the
 // sidecar's latest pending requests. The primary projection intentionally
 // cannot do this because reviewer requests are kept in a different stream.
 func (s *ChatState) reconcileReviewerElicitation(pending []ReviewerPendingElicitation) {
-	panic("unported: mj-chat/src/chat.rs reconcileReviewerElicitation")
+	if !s.reviewerElicitationOpen() {
+		return
+	}
+	matches := false
+	if s.elicitation != nil {
+		for _, candidate := range pending {
+			if optionalStringEqual(candidate.Role, s.elicitationRole) && candidate.Request.Equal(s.elicitation.request()) {
+				matches = true
+				break
+			}
+		}
+	}
+	if !matches {
+		s.elicitation = nil
+		s.elicitationIsReviewers = false
+		s.elicitationRole = nil
+		if len(s.pendingElicitations) > 0 {
+			s.elicitation = newElicitationDialog(s.pendingElicitations[0])
+		}
+	}
 }
 
 // showReviewRoleElicitation puts the reviewer's form on screen, remembering
@@ -1107,7 +1438,18 @@ func (s *ChatState) elicitationSource() (bool, *string) {
 }
 
 func (s *ChatState) pendingReviewerMatches(draft *ChatElicitationDraft) bool {
-	panic("unported: mj-chat/src/chat.rs pendingReviewerMatches")
+	if !draft.reviewer {
+		return false
+	}
+	role, hasRole := draft.ReviewerRole()
+	for index := range s.turnReviews {
+		for _, pending := range s.turnReviews[index].pendingElicitations() {
+			if hasRole && role == pending.Role && pending.Request.Equal(draft.request()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ElicitationDrafts is the form recovery snapshots owned by this composer,
@@ -1138,15 +1480,59 @@ func (s *ChatState) elicitationDraft() *ChatElicitationDraft {
 // projection; this prevents a late attach or an externally answered form from
 // reviving a stale draft.
 func (s *ChatState) restoreElicitationDraft(draft ChatElicitationDraft) bool {
-	panic("unported: mj-chat/src/chat.rs restoreElicitationDraft")
+	if s.elicitation == nil {
+		return false
+	}
+	request := *s.elicitation.request()
+	reviewer, role := s.elicitationSource()
+	if reviewer != draft.reviewer || !optionalStringEqual(role, draft.reviewerRole) {
+		return false
+	}
+	dialog := elicitationDialogFromDraft(request, draft.form)
+	if dialog == nil {
+		return false
+	}
+	s.elicitation = dialog
+	s.elicitationIsReviewers = draft.reviewer
+	s.elicitationRole = draft.reviewerRole
+	return true
 }
 
 func (s *ChatState) restoreFailedReviewerElicitation(draft ChatElicitationDraft, err string) bool {
-	panic("unported: mj-chat/src/chat.rs restoreFailedReviewerElicitation")
+	if !s.pendingReviewerMatches(&draft) {
+		return true
+	}
+	current := s.elicitationIdentity()
+	matches := current != nil && current.equal(draft.identity())
+	if s.elicitation != nil && !matches {
+		// Another form owns focus. Keep the whole result with its draft,
+		// rather than losing it or replacing the visible question.
+		parked := draft
+		s.deferredFormResults = append(s.deferredFormResults, chatRemoteResultReviewerAnswer{
+			Draft: &parked,
+			Err:   errors.New(err),
+		})
+		return false
+	}
+	if s.elicitation == nil {
+		s.showReviewRoleElicitation(draft.reviewerRole, *draft.request())
+	}
+	s.restoreElicitationDraft(draft)
+	if s.elicitation != nil {
+		s.elicitation.setResponseError("Answer was not sent: " + err)
+	}
+	return true
 }
 
 func (s *ChatState) restoreFailedElicitation(request core.ElicitationRequest, err string) {
-	panic("unported: mj-chat/src/chat.rs restoreFailedElicitation")
+	if !containsElicitationRequest(s.pendingElicitations, &request) {
+		return
+	}
+	s.restoreElicitation(request)
+	if reviewer, role := s.elicitationSource(); !reviewer && role == nil &&
+		s.elicitation != nil && s.elicitation.request().Equal(&request) {
+		s.elicitation.setResponseError(err)
+	}
 }
 
 func (s *ChatState) restoreElicitation(request core.ElicitationRequest) {
@@ -1158,7 +1544,19 @@ func (s *ChatState) restoreElicitation(request core.ElicitationRequest) {
 // boundedEntries is the tail of the entries bounded for the dashboard. Only
 // tests use this.
 func (s *ChatState) boundedEntries(maximumEntries, maximumBytes int) []core.ChatEntry {
-	panic("unported: mj-chat/src/chat.rs boundedEntries")
+	start := max(len(s.entries)-maximumEntries, 0)
+	entries := make([]core.ChatEntry, 0, len(s.entries)-start)
+	for _, entry := range s.entries[start:] {
+		entries = append(entries, entry.BoundedForDashboard())
+	}
+	for len(entries) > 1 {
+		body, err := json.Marshal(entries)
+		if err != nil || len(body) <= maximumBytes {
+			break
+		}
+		entries = entries[1:]
+	}
+	return entries
 }
 
 func planControlErrorMessage(err core.PlanControlError) string {
@@ -1193,8 +1591,34 @@ func isCompactionArtifact(payload json.RawMessage) bool {
 
 // normalizeKey folds raw control characters and uppercase letters into the
 // key and modifiers the bindings match on.
+//
+// Only character keys are folded. Bubble Tea gives Tab, Enter, Escape and
+// Backspace the control codes crossterm reports as their own KeyCodes, so
+// those are not characters here.
 func normalizeKey(code rune, modifiers tea.KeyMod) (rune, tea.KeyMod) {
-	panic("unported: mj-chat/src/chat.rs normalizeKey")
+	if !keyCodeIsCharacter(code) {
+		return code, modifiers
+	}
+	if modifiers == 0 && code >= 1 && code <= 26 {
+		return code - 1 + 'a', modifiers | tea.ModCtrl
+	}
+	if code >= 'A' && code <= 'Z' {
+		modifiers |= tea.ModShift
+		if modifiers&(tea.ModCtrl|tea.ModAlt|tea.ModSuper) != 0 {
+			return code - 'A' + 'a', modifiers
+		}
+	}
+	return code, modifiers
+}
+
+// keyCodeIsCharacter is whether a Bubble Tea key code is crossterm's
+// KeyCode::Char rather than a named key.
+func keyCodeIsCharacter(code rune) bool {
+	switch code {
+	case tea.KeyTab, tea.KeyEnter, tea.KeyEscape, tea.KeyBackspace:
+		return false
+	}
+	return code >= 0 && code < tea.KeyExtended
 }
 
 func queuedPromptPreview(prompt string) string {
@@ -1207,11 +1631,61 @@ func queuedPromptPreview(prompt string) string {
 }
 
 func materializedContentPrompt(content []any) (PromptPayload, bool) {
-	panic("unported: mj-chat/src/chat.rs materializedContentPrompt")
+	payload := PromptPayloadText("")
+	unsupported := false
+	for _, value := range content {
+		var block unstable.ContentBlock
+		encoded, err := json.Marshal(value)
+		if err == nil {
+			err = json.Unmarshal(encoded, &block)
+		}
+		switch {
+		case err == nil && block.Image != nil:
+			var image ClipboardImage
+			reference, referenceErr := core.ImageReference(block.Image)
+			switch {
+			case referenceErr != nil:
+				err = referenceErr
+			case reference != nil:
+				image, err = ClipboardImageFromReference(*reference)
+			default:
+				image, err = ClipboardImageFromBase64(block.Image.Data, block.Image.MimeType)
+			}
+			if err != nil {
+				unsupported = true
+				continue
+			}
+			number := uint64(len(payload.Images)) + 1
+			insertImage(&payload.Text, &payload.Images, len(payload.Text), number, image)
+		case err == nil && block.Text != nil:
+			payload.Text += block.Text.Text
+		default:
+			if text, ok := value.(string); ok {
+				payload.Text += text
+			} else {
+				unsupported = true
+			}
+		}
+	}
+	return payload, unsupported
 }
 
 func promptContentBlocks(text string, images []PromptImage) []any {
-	panic("unported: mj-chat/src/chat.rs promptContentBlocks")
+	payload := PromptPayload{Text: text, Images: slices.Clone(images)}
+	blocks := payload.ContentBlocks()
+	values := make([]any, 0, len(blocks))
+	for _, block := range blocks {
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			panic(fmt.Sprintf("ACP content serializes: %v", err))
+		}
+		var value any
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			panic(fmt.Sprintf("ACP content serializes: %v", err))
+		}
+		values = append(values, value)
+	}
+	return values
 }
 
 // NoticeMinimumDisplay is how long a notice is guaranteed on screen before an
@@ -1257,7 +1731,31 @@ type NoticeSlot struct {
 }
 
 func (s *NoticeSlot) write(notice *Notice) {
-	panic("unported: mj-chat/src/chat.rs NoticeSlot.write")
+	if notice != nil && (len(s.history) == 0 || s.history[len(s.history)-1].Text != notice.text) {
+		s.history = append(s.history, NoticeRecord{
+			Text:    notice.text,
+			At:      notice.setAt,
+			Failure: notice.protected,
+		})
+		if excess := len(s.history) - NoticeHistory; excess > 0 {
+			s.history = slices.Delete(s.history, 0, excess)
+		}
+	}
+	if notice == nil {
+		s.stackedFailures = 0
+	}
+	var currentText, nextText *string
+	if s.notice != nil {
+		currentText = &s.notice.text
+	}
+	if notice != nil {
+		nextText = &notice.text
+	}
+	displayedTextChanged := !optionalStringEqual(currentText, nextText)
+	s.notice = notice
+	if displayedTextChanged {
+		s.generation++
+	}
 }
 
 // Notices is the one-line notifications bar shared by every view. Copies
@@ -1298,7 +1796,25 @@ func (n Notices) Set(notice string) {
 // replace before it has been readable for NoticeMinimumDisplay. A newer
 // failure still replaces it immediately.
 func (n Notices) SetFailure(notice string) {
-	panic("unported: mj-chat/src/chat.rs Notices.SetFailure")
+	text := core.SanitizeTerminalText(notice)
+	slot, unlock := n.lock()
+	defer unlock()
+	// A failure landing on a failure the person has not had time to read:
+	// keep the newest visible and say how many there were.
+	stacking := slot.notice != nil && slot.notice.protected &&
+		time.Since(slot.notice.setAt) < NoticeMinimumDisplay && slot.notice.text != text
+	if stacking {
+		slot.stackedFailures = max(slot.stackedFailures, 1) + 1
+	} else {
+		slot.stackedFailures = 1
+	}
+	stacked := slot.stackedFailures
+	slot.write(&Notice{text: text, setAt: time.Now(), protected: true})
+	if stacked > 1 && slot.notice != nil {
+		// The log keeps the plain text; only the bar carries the count.
+		slot.notice.text = fmt.Sprintf("%d failures · latest: %s", stacked, text)
+		slot.generation++
+	}
 }
 
 // History is the notices seen so far, newest first, for the log overlay.
@@ -1375,7 +1891,24 @@ func (n Notices) Current() (string, bool) {
 // owner reports recovery (nil). Transient notices remain available after
 // recovery and in the notice log.
 func (n Notices) SetPersistentFailure(err *string) {
-	panic("unported: mj-chat/src/chat.rs Notices.SetPersistentFailure")
+	var failure *string
+	if err != nil {
+		text := core.SanitizeTerminalText(*err)
+		failure = &text
+	}
+	slot, unlock := n.lock()
+	defer unlock()
+	if optionalStringEqual(slot.persistentFailure, failure) {
+		return
+	}
+	if failure != nil {
+		slot.history = append(slot.history, NoticeRecord{Text: *failure, At: time.Now(), Failure: true})
+		if excess := len(slot.history) - NoticeHistory; excess > 0 {
+			slot.history = slices.Delete(slot.history, 0, excess)
+		}
+	}
+	slot.persistentFailure = failure
+	slot.generation++
 }
 
 // Generation counts displayed-text changes to the shared slot. A renderer
