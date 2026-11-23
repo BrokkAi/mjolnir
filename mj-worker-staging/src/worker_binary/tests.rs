@@ -5824,15 +5824,17 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             (".data/opencode/log/opencode.log", false),
             (".data/opencode/repos/native", false),
         ],
-        // dsh-acp keeps only its sessions, written atomically through a
-        // temporary file beside each record.
         HarnessKind::Antigravity => &[
             ("antigravity-cli/antigravity-oauth-token", true),
+            ("antigravity-cli/settings.json", true),
+            ("config/projects/default-cli-project.json", true),
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),
             ("antigravity-cli/conversations/old.db", false),
             ("settings.json", false),
         ],
+        // dsh-acp keeps only its sessions, written atomically through a
+        // temporary file beside each record.
         HarnessKind::Dsh => &[
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),

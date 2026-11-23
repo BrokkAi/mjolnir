@@ -460,6 +460,36 @@ fn stub_runtime_bridge(root: &Path) -> PathBuf {
     path
 }
 
+#[tokio::test]
+async fn harness_launch_records_the_profile_temp_dir_relative_to_its_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    let workspace = temp.path().join("workspace");
+    let relative = format!(
+        "harness-temp-{} ",
+        temp.path().file_name().unwrap().to_str().unwrap()
+    );
+    let expected = workspace.join(&relative);
+    std::fs::create_dir_all(&expected).unwrap();
+    let login = mj_harness_install::login_environment::resolve()
+        .await
+        .unwrap();
+    assert_ne!(login.get("TMPDIR"), Some(&relative));
+
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.cwd = workspace;
+    config.bridge_command = stub_runtime_bridge(temp.path());
+    config.harness_runtime = mj_core::worker_launch::HarnessRuntimePolicy::Image;
+    config.environment.insert("TMPDIR".into(), relative);
+    expect_daemon_launch_failure(&root, config).await;
+
+    assert!(expected.is_absolute());
+    assert_eq!(
+        std::fs::read(root.join("session-temp-dir")).unwrap(),
+        expected.to_str().unwrap().as_bytes()
+    );
+}
+
 fn git_repository(temp: &tempfile::TempDir) -> PathBuf {
     let repository = temp.path().join("repository");
     std::fs::create_dir(&repository).unwrap();
