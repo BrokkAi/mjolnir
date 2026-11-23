@@ -186,34 +186,20 @@ impl RuntimeState {
         if !startup_worker_stopped(child_session_id).await? {
             match self
                 .stop_idle_subagent(child_session_id.to_owned(), Some(cause.to_owned()))
-                .await
+                .await?
             {
-                Ok(ParkOutcome::Parked) => {}
-                Ok(ParkOutcome::Busy) => {
+                ParkOutcome::Parked => {}
+                ParkOutcome::Busy => {
                     tracing::info!(
                         session_id = child_session_id,
                         "child worker took work before startup rejection settled"
                     );
                     return Ok(false);
                 }
-                Ok(ParkOutcome::NotRunning) if is_reviewer => {
-                    tracing::warn!(
-                        session_id = child_session_id,
-                        "rejected reviewer worker was not running during startup cleanup"
-                    );
-                }
-                Ok(ParkOutcome::NotRunning) => ensure!(
+                ParkOutcome::NotRunning => ensure!(
                     startup_worker_stopped(child_session_id).await?,
                     "child worker termination is still unconfirmed"
                 ),
-                Err(error) if is_reviewer => {
-                    tracing::warn!(
-                        session_id = child_session_id,
-                        error = format!("{error:#}"),
-                        "could not stop rejected reviewer worker"
-                    );
-                }
-                Err(error) => return Err(error),
             }
         }
 

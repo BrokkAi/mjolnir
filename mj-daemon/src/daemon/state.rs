@@ -2142,8 +2142,6 @@ impl RuntimeState {
 
     pub(super) fn report_reviewer_startup_rejection(&self, session_id: &str, reason: &str) {
         if self.is_reviewer_child(session_id) {
-            // A rejected initial command ends the role even when worker
-            // cleanup had to stop short (for example, a disconnected worker).
             self.review_host().child_ended(
                 session_id.to_owned(),
                 format!("the reviewer's startup failed: {reason}"),

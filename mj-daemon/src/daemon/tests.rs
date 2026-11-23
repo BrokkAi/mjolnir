@@ -7341,7 +7341,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let workspace = mj_controller::database::create_workspace("Reviewer create failure").unwrap();
     let parent = runtime_test_session("review-parent", &workspace.id, SessionState::Running);
-    let child = runtime_test_session(
+    let mut child = runtime_test_session(
         "review-child",
         &workspace.id,
         if create_failed {
@@ -7488,6 +7488,18 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         })
         .unwrap();
         state.start_persisted_startup_delivery(configure, &CancellationToken::new());
+        // While the reviewer worker is disconnected and not confirmed stopped,
+        // startup rejection stays pending instead of settling the open review.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            mj_controller::database::finished_review(&parent.id, Some(review_id))
+                .unwrap()
+                .is_none(),
+            "disconnected reviewer must not settle its review before worker exit is confirmed"
+        );
+        child.state = SessionState::Error;
+        child.last_error = Some("provider refused the selected model".into());
+        mj_controller::database::save_session(&child).unwrap();
     }
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
