@@ -1701,8 +1701,9 @@ pub async fn run_daemon_owned(
         super::record_startup_step(&root, STEP);
         // Only a directory that is gone or is not a directory is permanent.
         // Other errors, such as ESTALE or EIO from a network filesystem, can
-        // clear up, so they fail this start without the typed kind and the
-        // wake stays retryable.
+        // clear up. They exit with an ordinary error and no startup-failure
+        // marker, because every reader of that marker (unpark and recovery)
+        // takes it to mean that starting again would only repeat the failure.
         let problem = match std::fs::metadata(&config.cwd) {
             Ok(metadata) if metadata.is_dir() => None,
             Ok(_) => Some(("path is not a directory".to_owned(), true)),
@@ -1720,9 +1721,12 @@ pub async fn run_daemon_owned(
                 config.cwd.display()
             );
             super::record_startup_failure(&root, STEP, &message);
+            if !permanent {
+                return Err(anyhow::anyhow!(message));
+            }
             return Err(mj_core::relay::WorkerHarnessStartupFailure {
                 message,
-                kind: permanent.then_some(
+                kind: Some(
                     mj_core::relay::WorkerHarnessStartupFailureKind::WorkingDirectoryUnavailable,
                 ),
             }
