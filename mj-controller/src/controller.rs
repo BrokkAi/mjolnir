@@ -118,7 +118,6 @@ pub use mj_client::daemon::GitIdentity;
 pub use mj_session_runtime::host_git_config::{
     controller_git_identity, set_controller_git_identity,
 };
-pub use provisioning::CreateKind;
 pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
@@ -166,6 +165,23 @@ pub struct ControllerStoreGuard {
     _file: mj_core::file_lock::FileLock,
 }
 
+#[derive(Debug)]
+pub struct StoreAlreadyOwnedError {
+    pub data_dir: PathBuf,
+}
+
+impl std::fmt::Display for StoreAlreadyOwnedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "another Mjolnir controller is already using {}; stop it before starting this command",
+            self.data_dir.display()
+        )
+    }
+}
+
+impl std::error::Error for StoreAlreadyOwnedError {}
+
 impl ControllerStoreGuard {
     pub fn acquire() -> Result<Self> {
         let directory = data_dir();
@@ -173,12 +189,13 @@ impl ControllerStoreGuard {
     }
 
     fn acquire_at(directory: &Path) -> Result<Self> {
-        Self::try_acquire_at(directory)?.with_context(|| {
-            format!(
-                "another Mjolnir controller is already using {}; stop it before starting this command",
-                directory.display()
-            )
-        })
+        let Some(guard) = Self::try_acquire_at(directory)? else {
+            return Err(StoreAlreadyOwnedError {
+                data_dir: directory.to_path_buf(),
+            }
+            .into());
+        };
+        Ok(guard)
     }
 
     /// Probe exclusivity without treating an owner that is still exiting as an error.
@@ -1271,6 +1288,7 @@ impl Controller {
                     .insert(profile_id.to_owned(), record.supervisors);
             }
         }
+        self.state.environment_owners.insert(id.clone(), id.clone());
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {
             self.state.remember_container_size(&host, size);

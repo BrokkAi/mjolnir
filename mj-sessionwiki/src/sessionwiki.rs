@@ -2608,6 +2608,7 @@ fn archive_space_over(
     let state = mj_core::state::State {
         sessions: sessions.clone(),
         subagents: subagents.clone(),
+        environment_owners: sessions.keys().map(|id| (id.clone(), id.clone())).collect(),
         ..mj_core::state::State::default()
     };
     archive_space_over_state(sessions_root, &state, now, older_than_days)
@@ -3311,9 +3312,13 @@ mod tests {
     }
 
     fn state_with_record(session_id: &str, record: SessionRecord) -> State {
-        let mut state = State::default();
-        state.sessions.insert(session_id.to_owned(), record);
-        state
+        State {
+            sessions: [(session_id.to_owned(), record)].into_iter().collect(),
+            environment_owners: [(session_id.to_owned(), session_id.to_owned())]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        }
     }
 
     fn record_template() -> SessionRecord {
@@ -4118,6 +4123,7 @@ mod tests {
 
     fn child(child_session_id: &str, parent_session_id: &str) -> mj_core::subagent::SubagentRecord {
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child_session_id.into(),
@@ -4142,18 +4148,23 @@ mod tests {
         children: Vec<mj_core::subagent::SubagentRecord>,
     ) -> Vec<String> {
         let now = parse_time("2026-09-10T00:00:00Z").unwrap();
-        sessions_ready_to_archive(
-            &sessions
-                .into_iter()
-                .map(|record| (record.id.clone(), record))
-                .collect(),
-            &children
-                .into_iter()
-                .map(|child| (child.child_session_id.clone(), child.into()))
-                .collect(),
-            now,
-            3,
-        )
+        let mut state = State::default();
+        for record in sessions {
+            state
+                .environment_owners
+                .insert(record.id.clone(), record.id.clone());
+            state.sessions.insert(record.id.clone(), record);
+        }
+        for child in children {
+            state.environment_owners.insert(
+                child.child_session_id.clone(),
+                child.parent_session_id.clone(),
+            );
+            state
+                .subagents
+                .insert(child.child_session_id.clone(), child.into());
+        }
+        sessions_ready_to_archive_from_state(&state, now, 3)
     }
 
     #[test]
@@ -4622,6 +4633,7 @@ mod tests {
         state.subagents.insert(
             mj_child_id.to_owned(),
             mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: mj_child_id.to_owned(),

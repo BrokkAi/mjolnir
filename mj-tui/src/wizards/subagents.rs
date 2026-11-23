@@ -215,6 +215,7 @@ impl SubagentDraft {
                 DelegationMode::Native => SubagentPolicy::Native,
                 DelegationMode::Mjolnir => self.last_mjolnir_policy.as_deref().cloned().unwrap_or(
                     SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: None,
                     },
@@ -318,6 +319,7 @@ impl SubagentDraft {
             .or(remembered)
             .cloned()
             .unwrap_or(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             });

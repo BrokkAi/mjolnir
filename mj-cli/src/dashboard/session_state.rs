@@ -508,6 +508,7 @@ impl DashboardContext {
             .values()
             .filter(|session| {
                 session.state.is_active()
+                    && self.controller.state.owns_environment(&session.id) == Some(true)
                     && self
                         .controller
                         .state

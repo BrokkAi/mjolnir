@@ -341,6 +341,7 @@ impl RuntimeState {
                     revision: self.revisions.current(),
                     records,
                     subagents: controller.state.subagents.clone(),
+                    environment_owners: controller.state.environment_owners.clone(),
                     sessions: owner.sessions.clone(),
                     transcripts: owner.transcripts.clone(),
                     session_cpu: self.session_manager.session_cpu.borrow().clone(),
@@ -1270,6 +1271,8 @@ mod tests {
         let mut live = RuntimeProjection::default();
         live.records
             .insert("session".into(), record("session", SessionState::Running));
+        live.environment_owners
+            .insert("session".into(), "session".into());
         history.publish(live.clone()).unwrap();
         let first = history.browser_views(None);
         assert_eq!(first.cursor, history.cursor());

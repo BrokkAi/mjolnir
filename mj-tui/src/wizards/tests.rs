@@ -5671,10 +5671,12 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
             [
                 SubagentPolicy::Native,
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: Some(Box::new(mj_core::config::SubagentChoice {
                         model: "gpt-6-luna".into(),
                         effort: Some("max".into()),
@@ -5776,6 +5778,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         session.project_directory = Some("/work/project".into());
         session.target_template_id = "local".into();
         session.subagents = Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         });
@@ -5819,6 +5822,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             }
@@ -5853,6 +5857,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         assert_eq!(
             dashboard.state.sessions["session-1"].subagents,
             Some(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             }),
@@ -6318,6 +6323,7 @@ fn golden_create_delegation_availability_and_submission() {
             wizard.subagents.policy,
             if configured {
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }
@@ -6385,6 +6391,7 @@ fn golden_create_delegation_availability_and_submission() {
     // starts on a remembered Mjolnir only when it is configured, and on None
     // otherwise, and submits what it shows.
     let mjolnir = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -6527,6 +6534,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.state.last_subagent_policies.insert(
         "codex-1".into(),
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(SubagentChoice {
                 model: "codex-model".into(),
                 effort: None,
@@ -6537,6 +6545,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.state.last_subagent_policies.insert(
         "claude-1".into(),
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(SubagentChoice {
                 model: "grok-model".into(),
                 effort: None,
@@ -6559,6 +6568,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         (
             supported,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(SubagentChoice {
                     model: "codex-model".into(),
                     effort: None,
@@ -6570,6 +6580,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         (
             supported,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(SubagentChoice {
                     model: "codex-model".into(),
                     effort: None,
@@ -6607,6 +6618,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(SubagentChoice {
                 model: "codex-model".into(),
                 effort: None,
@@ -6643,6 +6655,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6653,6 +6666,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6675,6 +6689,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         wizard.subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6698,6 +6713,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6705,6 +6721,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.create_selection(),
         Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         })
@@ -6724,6 +6741,7 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
     // Mjolnir delegation with no sub-agent model configured, and an oracle
     // with no oracle model: the copy cannot keep either.
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });

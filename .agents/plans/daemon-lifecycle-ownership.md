@@ -12,7 +12,7 @@ Today, Mjolnir's daemon launcher and client layer conflates "this endpoint did n
 2. When a container daemon dies and leaves a `pid: 0` `daemon.json` behind (#1458), `recorded_daemon_is_gone` refuses `pid: 0` unconditionally, blocking automatic upgrades and new commands until the user manually intervenes.
 3. When a daemon dies uncleanly without panicking (#1644), the successor daemon can only guess from leftover metadata and log modification times, with no exit code, terminating signal, or core-dump flag recorded.
 
-After completing this plan, the daemon launch and discovery code is measurably simpler than before and provides three observable guarantees: observational RPCs never silently loop across upgrades or pretend silence means death; a dead or in-flight container daemon is decided by its actual engine's process list (`ps` + `top`) without requiring any image-side probe or killing live workers inside the container; and any non-zero or signaled daemon exit writes its raw OS exit status keyed by PID so the next daemon reports exactly why the predecessor vanished.
+Observational RPCs return control to their caller during upgrades. The engine’s process list (`ps` and `top`) determines container daemon liveness while workers keep running. A detached waiter records the OS status of each abnormal daemon exit it observes so a successor can report it.
 
 ## Progress
 
@@ -20,9 +20,11 @@ After completing this plan, the daemon launch and discovery code is measurably s
 - [x] (2026-11-23 02:21Z) Claimed `#1658`, `#1568`, `#1458`, and `#1644` with `agent-in-progress` and drafted this ExecPlan.
 - [x] (2026-11-23 02:40Z) Reviewed ExecPlan with MJ Advisor (`91233b0efdd193066e7b4eeb46c8db10`) and reshaped Milestones 1, 2, and 3 to fix three M2 flaws and cut unnecessary machinery.
 - [x] (2026-11-23 03:01Z) Milestone 1 (#1568 Phase 1): Single-exchange `request_single` for attachment, concurrent readiness/notice driving, abort-on-drop `UpgradeBlockers`, straight-line two-phase handoff, `pid == 0` placement fix, and store-guard-backed corrupt `daemon.json` recovery.
-- [ ] Milestone 2 (#1458 + #1568 Phase 2): Engine `ps`+`top` container liveness owner, container launch record (`daemon-container.json`), pre-launch adoption gate, legacy `pid: 0` `mj daemon stop --force` recovery, and deletion of `wait_until_answering`, `wait_for_endpoint_down`, and the 3-second absence `Ping`.
-- [ ] Milestone 3 (#1644): Minimal detached one-child exit waiter (`mj daemon-wait-exit`) wrapping outside `systemd-run --scope`, PID-keyed non-zero/signaled exit records, and `previous_daemon.rs` reporting.
-- [ ] Final validation, code review (`request_review`) and push per milestone, and close `#1568`, `#1458`, `#1644`, and `#1658`.
+- [x] (2026-11-23 03:44Z) Milestone 2 (#1458 + #1568 Phase 2): Engine `ps`+`top` container liveness owner, container launch record (`daemon-container.json`), pre-launch adoption gate, legacy `pid: 0` `mj daemon stop --force` recovery, and deletion of `wait_until_answering`, `wait_for_endpoint_down`, and the 3-second absence `Ping`.
+- [x] (2026-11-23 04:18Z) Milestones 1 & 2 reviewed, pushed to `origin/master` (`3187539ca`, `d348d8bfd`), and `#1568` & `#1458` closed.
+- [x] (2026-11-23 04:29Z) Milestone 3 (#1644): Minimal detached one-child exit waiter (`mj daemon-wait-exit`) wrapping outside `systemd-run --scope`, PID-keyed non-zero/signaled exit records, and `previous_daemon.rs` reporting.
+- [x] (2026-11-23 04:41Z) Final dev-profile validation for Milestone 3 (including Windows console-isolation flags in `wait_exit.rs`).
+- [ ] Milestone 3 review (`request_review`), push to `origin/master`, and closure of `#1644` and `#1658`.
 
 ## Surprises & Discoveries
 
@@ -53,9 +55,11 @@ After completing this plan, the daemon launch and discovery code is measurably s
 - Observation: Inside this session container, neither a Docker daemon socket nor a Podman daemon socket is mounted (`docker info` and `podman-remote info` fail). Real-engine acceptance requires a host with Podman/Docker, while unit/integration tests here verify recorded Docker and Podman `ps`/`top` outputs plus fake-engine scripts.
   Evidence: Checked `docker info` and `podman-remote info` on 2026-11-23.
 
+- Observation: Unix preserves ignored signal dispositions across exec. The waiter restores the default dispositions for SIGINT, SIGTERM, and SIGHUP in its child so the daemon retains its own signal handling.
+
 ## Decision Log
 
-- Decision: Use engine `ps --all --no-trunc --filter id=<id>` + `inspect --format={{.State.Running}}` + `top <id>` (`-o args` on Docker, `args` on Podman, matching `argv[1] == "daemon-run"` or the pre-`exec` launch shell) as the single liveness owner for container daemons.
+- Decision: Use engine `ps --all --no-trunc --filter id=<id>` + `inspect --format={{.State.Running}}` + `top <id>` (`-o args` on Docker, `args` on Podman, matching `mj daemon-run`, the upcoming `mj daemon-wait-exit`, or the pre-`exec` image launch shell) as the single liveness owner for container daemons.
   Rationale: Works on every existing older container image (fixing Flaw F1), sees an `exec`'d daemon from its first instant (eliminating launch tickets), preserves sleeping-container workers, and is the same authority `remove_idle_predecessors` already trusts. Because `mj daemon-run` opens `controller.lock` close-on-exec, the absence of a `daemon-run` process in the container proves the volume store guard is free.
   Date/Author: 2026-11-23 / Coordinator (incorporating MJ Advisor review)
 
@@ -63,9 +67,13 @@ After completing this plan, the daemon launch and discovery code is measurably s
   Rationale: Fixes Flaws F2 and F3 so a subsequent launcher can adopt an unpublished in-flight container daemon instead of stranding it or launching over it. Cuts `probe-store-lock`, launch tickets (`MJ_DAEMON_REQUIRE_TICKET`, `ticket_armed`), `MJ_DAEMON_GENERATION` / `instance_id` coupling, `published`, `token_sha256`, `OwnerPlacement::Host`, and `volume`/`image` fields.
   Date/Author: 2026-11-23 / Coordinator (incorporating MJ Advisor review)
 
-- Decision: Record as an explicit residual (do not build machinery for it here): if a launcher dies mid-`engine exec`, the engine could finish starting that `daemon-run` process after the next client's `top` check sees no process.
-  Rationale: The volume's `ControllerStoreGuard` still prevents two writers; the outcome is a visible launch failure, not data corruption. Closing that window structurally would mean letting the container daemon choose its own token and reading it from the volume's `daemon.json` (`process.rs:841`), which is separate work outside this epic.
-  Date/Author: 2026-11-23 / Coordinator (per MJ Advisor review)
+- Decision: Keep the unpublished owner record when a startup process probe reports exit. Reuse its token if the retry targets the same engine, full container ID, and published loopback address. Clear the record when the retry switches targets, when `mj daemon stop` observes that the container itself is stopped or absent, or when `mj daemon stop --force` stops the container.
+  Rationale: A detached engine exec can reach the store after the launcher's death and after the next client's process check while the container still runs. The volume store guard admits one daemon, and sharing the token lets the client authenticate to whichever exec wins.
+  Date/Author: 2026-11-23 / Milestone 2 review
+
+- Decision: Require a readable container owner record before requesting stop or handoff from a legacy container with a published endpoint. Allow explicit force recovery to clear an unreadable record after an unreachable legacy endpoint has been checked, or when there is no published endpoint.
+  Rationale: Stop and handoff need the recorded engine and ID to verify release. A failed ownership query leaves the daemon and its credentials available. A damaged record can be cleared after the operator verifies that there is no container daemon.
+  Date/Author: 2026-11-23 / Milestone 2 review
 
 - Decision: Delete `wait_until_answering`, `wait_for_endpoint_down`, and unconditionally delete the 3-second `Ping` in `recorded_daemon_is_gone`.
   Rationale: One authoritative ownership check per placement (`ControllerStoreGuard` + PID check on host; `daemon-container.json` + engine `ps`/`top` on container) replaces three redundant and contradictory RPC liveness loops.
@@ -93,7 +101,15 @@ Milestone 1 passed all dev-profile checks: 14 client daemon tests (`brokk-mj-cli
 
 Startup polls one readiness exchange at a time while the notice, deadline, and process checks run independently. Handoff admission retries `PrepareUpgrade` only before acceptance while concurrently watching for owner replacement or exit (surviving teardown socket drops before the store guard releases), and never re-asks after post-ack release expiry. Lock and handoff notices pre-warm `UpgradeBlockers` 1s before `START_NOTICE_DELAY` in an abort-on-drop background task so responsive daemons name blockers on the very first notice while hung daemons emit generic notices on time without stalling lock acquisition or handoff.
 
-Milestones 2 and 3 remain pending.
+Milestone 2 records the engine and full container ID before starting `mj daemon-run`. A later client can adopt that process and publish `daemon.json` after readiness. Startup, accepted stop, and handoff all check the recorded process through the engine. A stopped or absent daemon can be replaced while workers keep running in the container. Engine failures and unreachable legacy records produce a visible error. The legacy error explains when to use `mj daemon stop --force`.
+
+Dev-profile verification passed 15 client daemon tests, 38 CLI daemon tests, and 23 startup integration tests. Clippy, rustfmt, and `git diff --check` passed, and the removed polling helpers have no remaining references. The live Podman test is opt-in and was skipped because this environment has no engine socket. Fake Podman commands on an isolated `PATH` exercised the real subprocess path, and Docker and Podman process-list fixtures covered the daemon matcher.
+
+Milestone 2 review follow-up passed 15 client daemon tests, 41 CLI daemon tests, and 23 startup integration tests. New fake-engine regressions cover the original exec winning a same-target retry, owner seeding failure before an RPC mutation, and explicit recovery from a corrupt owner record. The live Podman test remains opt-in.
+
+Milestone 3 records abnormal daemon exits for host and container launches. The waiter publishes the exit record before it exits. Startup correlates records with the predecessor’s metadata when present, preserves its diagnostic logs, and removes the records after reporting. A successor that starts before the waiter publishes can only report the evidence already on disk. A later start consumes the exit record. Host reboot inference still covers exits that left metadata without an exit record.
+
+Linux dev-profile verification passed 2 exit record tests, 6 previous-daemon tests, 27 startup integration tests, and 43 CLI daemon tests. Clippy, rustfmt, and `git diff --check` passed. The startup suite exercised SIGKILL, clean stop, a lost store lock, and signal handling in the waiter. The CLI suite exercised the Docker and Podman process-list matcher. The live Podman test was ignored and the live systemd startup test skipped because their sockets were unavailable. A shell standing in for the scope launcher verified that the waiter rewrites the executable reference to its own live inode.
 
 ## Context and Orientation
 
@@ -137,22 +153,22 @@ Execute in three sequential milestones, committing, reviewing (`request_review`)
    - Implement `probe_container_daemon(runtime: DaemonRuntime, container_id: &str) -> ContainerDaemonStatus` returning `ContainerDaemonStatus::{Running, Exited, Unknown(String)}`:
      - Run `<engine> ps --all --no-trunc --filter id=<container_id> --format {{.ID}}`. Non-zero exit or spawn error returns `Unknown(reason)` (never parsing engine error strings). Exit 0 with no matching ID line returns `Exited` (container definitively absent).
      - Run `<engine> inspect --format={{.State.Running}} <container_id>`. Non-zero exit returns `Unknown(reason)`. Output `"false"` returns `Exited` (container definitively stopped). Output anything other than `"true"` returns `Unknown(reason)`.
-     - Run `<engine> top <container_id> -o args` (Docker) or `<engine> top <container_id> args` (Podman). Non-zero exit returns `Unknown(reason)`. Parse lines after the header: a pure helper `top_output_has_daemon_run(stdout: &str) -> bool` checks whether any line has `argv[1] == "daemon-run"` (matching e.g. `/usr/local/bin/mj daemon-run` or `mj daemon-run` while ignoring `mj daemon-wait-exit -- ...` and all worker/placeholder processes) OR is the transient pre-exec launch shell (`argv[0] == "sh"` and `argv[1] == "-c"` containing `daemon-run` and not `daemon-wait-exit`). Match returns `Running`; no match returns `Exited`.
+     - Run `<engine> top <container_id> -o args` (Docker) or `<engine> top <container_id> args` (Podman). Non-zero exit returns `Unknown(reason)`. Parse lines after the header: a pure helper `top_output_has_daemon_run(stdout: &str) -> bool` looks for `mj daemon-run`, the Milestone 3 `mj daemon-wait-exit` wrapper, or the corresponding transient `sh -c` launch command targeting `/opt/mjolnir/mj`. Match returns `Running`; no match returns `Exited`.
    - Fix `processes_in` (`container.rs:588-618`, used by `remove_idle_predecessors`) to use the same safe `ps` + `inspect` distinction so inspect errors fail closed (`Err`) instead of returning `Ok(None)` and risking `rm --force` on a container with live workers.
-   - Expose `resolve_container_id(runtime: DaemonRuntime, name: &str) -> Result<Option<String>>` using `ps --all --no-trunc --filter name=^/<name>$` / `inspect --format={{.Id}}` after `ensure_running` (and when seeding a legacy record from authenticated `Identity`).
+   - Expose `resolve_container_id(runtime: DaemonRuntime, name: &str) -> Result<Option<String>>` using `ps --all --no-trunc --filter name=^/<name>$ --format {{.ID}}` after `ensure_running` (and when seeding a legacy record from authenticated `Identity`).
    - Update `container::launch` (`container.rs:94-108`): after `ensure_running` and `published_port`, resolve `container_id`, build `ContainerDaemonRecord`, atomically write `daemon-container.json` under `DaemonStartGuard` **before** calling `exec_daemon`, call `exec_daemon`, and return `ContainerLaunch { runtime, container_id, container_name, metadata }` directly. **Delete `wait_until_answering`** (`container.rs:128-162`)!
    - Reuse `probe_container_daemon` in `LaunchedDaemon::is_alive` (`mj-cli/src/daemon.rs:1410-1417`), treating `Running` or `Unknown` as alive (never false `Exited` on an inspect error!) and only `Exited` as dead.
 3. **Single release authority and pre-launch adoption gate (`mj-cli/src/daemon.rs`):**
    - Introduce `DaemonRelease::{StillOwned, Exited, Replaced, Unknown(String)}` and one `probe_daemon_release(metadata: &DaemonMetadata) -> Result<DaemonRelease>`:
      - If `daemon.json` now parses with a different `(address, token)`, return `Replaced`.
      - If `metadata.pid == 0` (container daemon): read `daemon-container.json` (unreadable or unbound to `(metadata.address, metadata.token)` means "no record" → `Unknown`, never `Exited`). If bound, call `probe_container_daemon(record.runtime, &record.container_id)` and map `Running -> StillOwned`, `Exited -> Exited`, `Unknown(reason) -> Unknown(reason)`.
-     - If `metadata.pid > 0` (host daemon): check host `ControllerStoreGuard::try_acquire()`: if held → `StillOwned`; if free, check `daemon_still_runs(pid)` (returning `Unknown` on probe error rather than `unwrap_or(false)`): running → `StillOwned`, gone → `Exited`.
+     - If `metadata.pid > 0` (host daemon): check host `ControllerStoreGuard::try_acquire()`: if held → `StillOwned`; if free, check `host_pid_is_daemon(pid)`. A live daemon yields `StillOwned`, a gone or reused PID yields `Exited`, and an inaccessible command line yields `Unknown`.
    - **Delete** the 3-second `Ping` at the end of `recorded_daemon_is_gone` (`daemon.rs:996-1003`) unconditionally.
    - **Delete** `wait_for_endpoint_down` (`daemon.rs:1829-1853`) and replace both post-ack handoff wait and `wait_after_accepted_stop` with a single `wait_for_daemon_release(metadata, timeout)` powered by `probe_daemon_release` (removing `daemon.json` only if it still matches `(address, token)` and removing `daemon-container.json` only if it matches `(address, token)`).
-   - **Seed legacy running containers:** When `decide_existing_daemon` or `hand_off_daemon` gets an authenticated `Identity` with `DaemonPlacement::Container { name, runtime: Some(rt) }` and no matching `daemon-container.json` exists yet, resolve `container_id` and write `daemon-container.json` under `DaemonStartGuard` so the subsequent handoff release wait uses `probe_container_daemon` seamlessly.
+   - **Seed legacy running containers:** When an authenticated `Identity` names a container and engine for a `pid: 0` record, resolve the full container ID and write a matching `daemon-container.json` under `DaemonStartGuard` before asking for stop or handoff. Shared discovery passes the placement to the lock holder.
    - **Pre-launch container adoption gate** (fixes Flaws F2 and F3): In `decide_existing_daemon` (when `daemon.json` is absent) and in `connect_or_start_holding` (before launching a new container daemon under `DaemonStartGuard`), read `daemon-container.json` if present:
-     - `Running`: adopt it — run the unified `wait_for_ready_daemon` against the record's `metadata` and `probe_container_daemon`, publish `daemon.json` on readiness, and return the connected client.
-     - `Exited`: remove the stale `daemon-container.json` and proceed to launch.
+     - `Running`: adopt it — run the unified `wait_for_ready_daemon` against the record's `metadata` and `probe_container_daemon`, publish `daemon.json` after `Ping` and `Identity`, then run the ordinary build and placement decision on the published record.
+     - `Exited`: pass the unpublished record to the launcher. A retry targeting the same engine, full container ID, and loopback address reuses the token. A different target clears the prior record.
      - `Unknown(reason)`: fail visibly with `reason` and do NOT launch a second container daemon.
    - **Legacy `pid: 0` recovery UX (`mj-cli/src/main.rs`, `mj-cli/src/daemon.rs`):** Add `--force` to `DaemonStopArgs` (`mj daemon stop --force`). When `daemon.json` has `pid: 0`, no matching `daemon-container.json`, and does not answer `Stop`/`Ping`:
      - Ordinary startup, handoff, and `mj daemon stop` refuse visibly with a message naming the stale `daemon.json`, explaining that Mjolnir cannot verify which container engine owns a pre-tracking `pid: 0` record, and directing the user to confirm no container daemon is running and run `mj daemon stop --force` to clear it.
@@ -160,17 +176,17 @@ Execute in three sequential milestones, committing, reviewing (`request_review`)
 
 ### Milestone 3: Minimal detached one-child exit waiter and startup crash reporting (#1644)
 
-1. **Exit record schema (`mj-core/src/daemon_exit.rs` or `mj-client/src/daemon.rs`):** Define `DAEMON_EXIT_SCHEMA: u32 = 1`, `STORE_OWNED_EXIT_CODE: i32 = 75`, and `DaemonExitRecord` (`schema: u32`, `pid: u32`, `exited_at: String`, `exit_code: Option<i32>`, `signal: Option<i32>`, `signal_name: Option<String>`, `core_dumped: Option<bool>`) with **tolerant parsing** (no `deny_unknown_fields`, `#[serde(default)]` on optional fields) and `daemon_exits_dir() -> PathBuf` (`data_dir().join("daemon-exits")`).
+1. **Exit record schema (`mj-core/src/daemon_exit.rs`):** Define `DAEMON_EXIT_SCHEMA: u32 = 1`, `STORE_OWNED_EXIT_CODE: i32 = 75`, and `DaemonExitRecord` (`schema: u32`, `pid: u32`, `waiter_pid: Option<u32>`, `exited_at: String`, `exit_code: Option<i32>`, `signal: Option<i32>`, `signal_name: Option<String>`, `core_dumped: Option<bool>`) with **tolerant parsing** (no `deny_unknown_fields`, `#[serde(default)]` on optional fields) and `daemon_exits_dir(data_dir: &Path) -> PathBuf` (`data_dir.join("daemon-exits")`).
 2. **Distinguish lost-store-lock exit in `mj-daemon/src/daemon/process.rs` and `mj-cli/src/main.rs`:** In `mj-controller/src/controller.rs`, attach a typed marker (`StoreAlreadyOwnedError`) when `ControllerStoreGuard::acquire` finds the lock held. In `mj-cli/src/main.rs`'s `daemon-run` handler, print the error as today and exit with `STORE_OWNED_EXIT_CODE` (`75`) when `StoreAlreadyOwnedError` is in the chain, so the waiter ignores benign duplicate-launch lock races while manual `mj daemon-run` still exits non-zero visibly.
 3. **Minimal hidden one-child waiter (`mj-cli/src/daemon/wait_exit.rs`, wired in `mj-cli/src/main.rs`):**
    - Hidden CLI command: `mj daemon-wait-exit --exit-dir <dir> -- <program> [args...]`.
    - Ignores `SIGINT`, `SIGTERM`, and `SIGHUP` on Unix before spawning, holds no locks, opens no sockets, and owns no workers.
    - Spawns `<program> [args...]` directly (inheriting stdio/environment; setting `arg0 = "mj"` when `<program>` ends in `mj` / `/proc/.../exe` and `args[0] == "daemon-run"` so `ps` remains `mj daemon-run`), records `child.id()`, and blocks in `child.wait()`.
    - When `child.wait()` returns: if the exit is clean (`exit_code == Some(0)` or `exit_code == Some(STORE_OWNED_EXIT_CODE)`), exit 0 without writing anything. Otherwise (any other non-zero exit code or terminating signal), atomically write `<exit_dir>/<child_pid>.json` (`0600`) with `DaemonExitRecord` (including Unix `signal()`, `core_dumped()`, and human signal name like `SIGKILL`/`SIGABRT`/`SIGSEGV`) and exit 0.
-4. **Wrap outside `systemd-run --scope` (`mj-cli/src/daemon.rs`):** In `host_daemon_command`, build the exact existing command (whether `systemd-run --user --scope -- ... daemon-run` on Linux or direct `mj daemon-run`), then wrap it as `<this_exe> daemon-wait-exit --exit-dir <daemon_exits_dir> -- <existing_cmd...>`. Because `systemd-run --scope` execs `mj daemon-run` in place, the waiter's direct child PID IS the daemon's PID, and the waiter sits outside the scope so it survives scope-level kills. `spawn_detached` launches the waiter with the exact existing terminal/fd isolation; no PID handshake pipe is needed because the waiter exits immediately after its child exits (so `process_is_alive` on the spawned waiter tracks launch liveness cleanly) and `daemon.json` + `<pid>.json` both record the daemon's real PID.
-   - On container launches (`container.rs:658`), wrap `exec_daemon` with `mj daemon-wait-exit --exit-dir /var/lib/mjolnir/data/daemon-exits -- /usr/local/bin/mj daemon-run` cleanly because launch always targets this build's image (`resolve_image` requires matching revision), and our M2 `top` matcher checks `argv[1] == "daemon-run"`, so `mj daemon-wait-exit` never fools the liveness probe.
+4. **Wrap outside `systemd-run --scope` (`mj-cli/src/daemon.rs`):** In `host_daemon_command`, build the exact existing command (whether `systemd-run --user --scope -- ... daemon-run` on Linux or direct `mj daemon-run`), then wrap it as `<this_exe> daemon-wait-exit --exit-dir <daemon_exits_dir> -- <existing_cmd...>`. Because `systemd-run --scope` execs `mj daemon-run` in place, the waiter's direct child PID IS the daemon's PID, and the waiter sits outside the scope so it survives scope-level kills. `spawn_detached` launches the waiter with the exact existing terminal/fd isolation; the waiter PID tracks launch liveness and `daemon.json` and `<pid>.json` use the daemon PID. Startup failures find the daemon log through the exit record’s waiter PID or through the live direct child during a readiness timeout.
+   - On container launches (`container.rs:658`), wrap `exec_daemon` with `mj daemon-wait-exit --exit-dir /var/lib/mjolnir/data/daemon-exits -- /opt/mjolnir/mj daemon-run` cleanly because launch always targets this build's image (`resolve_image` requires matching revision), and the M2 `top` matcher already treats the waiter as live for its brief startup and exit transitions around the daemon child.
 5. **Consume and delete exit records in `mj-daemon/src/daemon/previous_daemon.rs`:**
-   - In `report_unclean_previous_daemon` (called while holding `ControllerStoreGuard`), read all `*.json` files in `daemon_exits_dir()` (ignoring any unreadable/corrupt file with a `WARN` rather than panicking).
+   - In `report_unclean_previous_daemon` (called while holding `ControllerStoreGuard`), scan regular, non-hidden `*.json` files in `daemon_exits_dir` in filename order. Warn about and remove unreadable records.
    - For each valid `DaemonExitRecord`: match against leftover `daemon.json` if `previous.pid == record.pid` (combining `previous_started_at`, `last_seen`, `host_boot`, `kept_logs`, `exit_code`, `signal`, `signal_name`, and `core_dumped` into one rich `WARN` line), or log a standalone `WARN` for exit records whose daemon died before publishing `daemon.json` or after the shutdown watchdog removed `daemon.json` (also renaming matching `mj-daemon-*-<pid>.log` files to crashed names!).
    - Delete each reported exit file from `daemon_exits_dir()` after logging so clean subsequent restarts never re-report it.
    - Preserve the existing behavior when `daemon.json` is left behind with no exit record (e.g., host reboot killed both waiter and daemon — `conclusion(last_seen, boot)` still identifies host restart!). Note: inside a container, `daemon.json` in the volume has the daemon's real in-namespace PID (`process.rs:835`), so `previous_daemon.rs` automatically reports container daemon crashes too!
@@ -201,7 +217,7 @@ Milestone 3 validation:
     cargo test -p brokk-mj-daemon previous_daemon
     cargo test -p brokk-mjolnir --test daemon_startup
     cargo test -p brokk-mjolnir daemon::
-    cargo clippy -p brokk-mj-core -p brokk-mj-client -p brokk-mj-daemon -p brokk-mjolnir --all-targets -- -D warnings
+    cargo clippy -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-daemon -p brokk-mjolnir --all-targets -- -D warnings
     cargo fmt --all -- --check
 
 ## Validation and Acceptance
@@ -216,7 +232,7 @@ Milestone 1 (#1568 Phase 1):
 
 Milestone 2 (#1458 + #1568 Phase 2):
 - Tolerant-parse fixture tests prove `DaemonMetadata` (`daemon.json`) keeps `deny_unknown_fields` compatibility for older readers while `ContainerDaemonRecord` (`daemon-container.json`) tolerates unknown future fields and fails closed (`Unknown`) when corrupt or unbound.
-- Recorded Docker (`docker top <id> -o args`) and Podman (`podman top <id> args`) output fixture tests prove `top_output_has_daemon_run` matches `mj daemon-run` (and pre-exec `sh -c ... daemon-run`), ignores `mj daemon-wait-exit`, sleeping PID 1, and live `hel` worker processes.
+- Recorded Docker (`docker top <id> -o args`) and Podman (`podman top <id> args`) output fixture tests prove `top_output_has_daemon_run` matches `mj daemon-run`, `mj daemon-wait-exit`, and their pre-exec launch shell. It ignores sleeping PID 1 and live `hel` worker processes.
 - Isolated fake-engine tests prove:
   1. Stopped or absent recorded container ID yields `DaemonRelease::Exited` and recovers cleanly.
   2. Running container with dead `daemon-run` and live worker processes yields `DaemonRelease::Exited` and relaunches in the same container without calling `engine stop`.
@@ -237,7 +253,7 @@ Milestone 3 (#1644):
 
 ## Idempotence and Recovery
 
-- `daemon-container.json` and `daemon-exits/<pid>.json` are written atomically with `0600` permissions via `mj_core::config::atomic_write`.
+- `daemon-container.json` and `daemon-exits/<pid>.json` are written atomically with `0600` permissions. Exit records use `mj_core::config::atomic_write_existing` after creating the owner-only directory.
 - `daemon-container.json` is bound to `daemon.json` by `(address, token)`; an unbound or unreadable `daemon-container.json` is treated as "no record" (`Unknown`), never `Exited`.
 - Consumed exit records in `daemon-exits/` are deleted once reported by the successor daemon, keeping the directory empty during healthy operation.
 
@@ -260,6 +276,8 @@ In `mj-client/src/daemon.rs`:
     pub struct ContainerDaemonRecord {
         #[serde(default = "default_container_owner_schema")]
         pub schema: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub protocol_version: Option<u32>,
         pub runtime: mj_core::config::DaemonRuntime,
         pub container_id: String,
         pub container_name: String,
@@ -309,6 +327,8 @@ In `mj-core/src/daemon_exit.rs` (shared by `mj-cli` and `mj-daemon`):
         #[serde(default = "default_daemon_exit_schema")]
         pub schema: u32,
         pub pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub waiter_pid: Option<u32>,
         #[serde(default)]
         pub exited_at: String,
         #[serde(default)]
@@ -321,5 +341,9 @@ In `mj-core/src/daemon_exit.rs` (shared by `mj-cli` and `mj-daemon`):
         pub core_dumped: Option<bool>,
     }
 
-    pub fn daemon_exits_dir() -> PathBuf;
+    pub fn daemon_exits_dir(data_dir: &Path) -> PathBuf;
     pub fn write_daemon_exit_record(exit_dir: &Path, record: &DaemonExitRecord) -> Result<PathBuf>;
+    pub fn read_daemon_exit_record(path: &Path) -> Result<DaemonExitRecord>;
+    pub fn format_exit_reason(record: &DaemonExitRecord) -> String;
+    #[cfg(unix)]
+    pub fn unix_signal_name(signal: i32) -> Option<&'static str>;

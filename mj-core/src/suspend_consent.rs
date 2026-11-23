@@ -139,6 +139,10 @@ pub struct CaptureConsent {
     pub untracked: UntrackedConsent,
     #[serde(default)]
     pub operations: OperationConsent,
+    // Older workers ignore this field and keep requiring consent for these
+    // files. They cannot silently discard them because of the new exemption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_keep: Option<crate::session_keep::MoveKeep>,
 }
 
 /// Consent persisted on `sessions.closing_consent` when a suspend is accepted,
@@ -159,6 +163,7 @@ pub struct SuspendConsent {
 impl SuspendConsent {
     pub fn capture_consent(&self) -> CaptureConsent {
         CaptureConsent {
+            move_keep: None,
             untracked: self.discard_untracked.clone(),
             operations: self.abort_operations.clone(),
         }
@@ -292,12 +297,26 @@ pub struct SuspendPreflight {
     pub interrupting: bool,
     #[serde(default)]
     pub children_not_handed_back: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub owning_children_to_suspend: usize,
     #[serde(default)]
     pub blockers: Vec<SuspendBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_checkpoint: Option<ExistingCheckpointSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<DryRunEstimate>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+pub fn owning_children_suspend_warning(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("Suspending also suspends one child with its own environment and drops that child's untracked files.".into()),
+        _ => Some(format!("Suspending also suspends {count} children with their own environments and drops their untracked files.")),
+    }
 }
 
 impl SuspendPreflight {
@@ -318,6 +337,7 @@ impl SuspendPreflight {
             || self.raw
             || self.interrupting
             || !self.children_not_handed_back.is_empty()
+            || self.owning_children_to_suspend > 0
     }
 
     pub fn shown_untracked_consent(&self) -> UntrackedConsent {
@@ -399,10 +419,17 @@ impl SuspendPreflight {
 
 /// Format the canonical agent/CLI refusal message for untracked files.
 pub fn format_untracked_refusal(count: usize, first_paths: &[String]) -> String {
+    format!(
+        "{} Ignored files are never kept.",
+        format_move_untracked_refusal(count, first_paths)
+    )
+}
+
+pub fn format_move_untracked_refusal(count: usize, first_paths: &[String]) -> String {
     let preview: Vec<&str> = first_paths.iter().take(5).map(String::as_str).collect();
     let suffix = if count > preview.len() { "…" } else { "" };
     format!(
-        "{count} untracked files will not be kept: {}{suffix} `git add` (or commit) anything you want to keep, or pass `--discard-untracked`. Ignored files are never kept.",
+        "{count} untracked files will not be kept: {}{suffix} `git add` (or commit) anything you want to keep, or pass `--discard-untracked`.",
         preview.join(", ")
     )
 }

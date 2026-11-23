@@ -2575,6 +2575,7 @@ mod tests {
         d2_session.id = "depth2-worker".into();
         d2_session.state = mj_core::state::SessionState::Running;
         let d2_record = mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "depth2-worker".into(),

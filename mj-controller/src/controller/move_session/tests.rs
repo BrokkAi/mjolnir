@@ -228,6 +228,7 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
     assert!(super::move_needs_fresh_capture(&failed, &reopened));
     let mut retry = failed.selection.clone();
     retry.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "available-model".into(),
             effort: None,
@@ -493,6 +494,11 @@ fn retrying_partially_started_move_without_queue_preserves_original_choice() {
         .sessions
         .insert(session.id.clone(), session.clone());
 
+    controller
+        .state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
+
     let mut failed = super::test_fixtures::source_recovery_operation(&session);
     failed.phase = MovePhase::Failed;
     failed.queue = ResumeQueueDisposition::Start;
@@ -746,7 +752,7 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
         fn shutdown_interrupted(&self) -> bool {
             self.shutdown.load(std::sync::atomic::Ordering::Acquire)
         }
-        fn before_move_source_stop(
+        fn stop_borrowed_workers_before_quiesce(
             &self,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
         {
@@ -759,7 +765,7 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
                     // Gate must be empty so try_close succeeds immediately.
                     assert!(
                         self.gate.try_close(),
-                        "before_move_source_stop still held handoff admission"
+                        "stop_borrowed_workers_before_quiesce still held handoff admission"
                     );
                 }
                 Ok(())
@@ -785,7 +791,7 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let admission = crate::controller::test_support::session_admission(&session.id);
 
-        // Handoff closes the gate during before_move_source_stop without waiting;
+        // Handoff closes the gate during stop_borrowed_workers_before_quiesce without waiting;
         // execute_move fails on end_resumable_work, and finish_move_result
         // preserves the durable Move as "interrupted" instead of Failed.
         let result = controller
@@ -820,7 +826,7 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
         );
 
         // Next daemon's startup recovery resumes the interrupted Capturing Move
-        // by re-entering execute_move (running before_move_source_stop again)
+        // by re-entering execute_move (running stop_borrowed_workers_before_quiesce again)
         // instead of failing and demanding an explicit retry.
         let gate2 = std::sync::Arc::new(crate::upgrade::Gate::default());
         let work2 = gate2.enter("session lifecycle").unwrap();
@@ -844,7 +850,7 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
         assert_eq!(
             recovery_executor.observed_labels.lock().unwrap().as_slice(),
             &[Vec::<String>::new()],
-            "recovery must resume execute_move through before_move_source_stop"
+            "recovery must resume execute_move through stop_borrowed_workers_before_quiesce"
         );
 
         // An interrupted Transferring cross-target Move (with Stopped source
@@ -915,4 +921,62 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
 
         channels.shutdown.shutdown().await.unwrap();
     });
+}
+
+#[test]
+fn parent_move_reports_only_workers_in_its_environment() {
+    use mj_core::state::{SessionState, State};
+    use mj_core::subagent::{SubagentKind, SubagentRecord};
+
+    let mut state = State::default();
+    for (id, owner, parent) in [
+        ("parent", "parent", None),
+        ("borrower", "parent", Some("parent")),
+        ("owned", "owned", Some("parent")),
+        ("depth-two", "owned", Some("owned")),
+    ] {
+        let record = crate::controller::test_support::checkpoint_test_session(id);
+        assert_eq!(record.state, SessionState::Running);
+        state.sessions.insert(id.into(), record);
+        state.environment_owners.insert(id.into(), owner.into());
+        if let Some(parent) = parent {
+            state.subagents.insert(
+                id.into(),
+                SubagentRecord {
+                    child_session_id: id.into(),
+                    parent_session_id: parent.into(),
+                    task_name: id.into(),
+                    profile_id: "codex".into(),
+                    working_directory: Default::default(),
+                    request_key: id.into(),
+                    created_at: "2026-06-01T00:00:00Z".into(),
+                    kind: SubagentKind::Worker,
+                    reviewer_launch: None,
+                    model: None,
+                    effort: None,
+                    initial_prompt: "inspect".into(),
+                    noticed_turn: None,
+                    reported_finish: None,
+                    handback_tool: true,
+                    supervisor: owner == id,
+                    resume_with_parent: false,
+                }
+                .into(),
+            );
+        }
+    }
+    let children = super::move_children(&state, "parent");
+    assert_eq!(
+        children
+            .iter()
+            .map(|child| child.child_session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["borrower"]
+    );
+    let refusal = super::roleless_move_children_error(&state, "parent").unwrap();
+    assert!(
+        refusal.contains("borrower")
+            && !refusal.contains("owned")
+            && !refusal.contains("depth-two")
+    );
 }

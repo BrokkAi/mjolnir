@@ -1844,8 +1844,7 @@ impl Controller {
             parent_tools_enabled(&move_subagent_policy(source, &selection), profile.kind);
         if in_place
             && !destination_has_parent_role
-            && let Some(error) =
-                roleless_move_children_error(&live_move_children(&self.state, &source.id))
+            && let Some(error) = roleless_move_children_error(&self.state, &source.id)
         {
             bail!("{error}; close or finish those children before moving to this harness");
         }
@@ -1875,35 +1874,19 @@ impl Controller {
                 })
             })
         };
-        let (suspend_preflight, skip_keep_sizes) = if !in_place
+        let (suspend_preflight, skip_keep_sizes) = if !keeps_workspace
             && matches!(
                 source.state,
                 SessionState::Running | SessionState::Disconnected
             )
             && source.target.is_some()
         {
-            match self.suspend_preflight(&source.id, true, false, executor) {
-                Ok(preflight) => {
-                    let skip_keep_sizes = selection
-                        .skip_keep_paths
-                        .iter()
-                        .map(|skip| {
-                            let bytes = preflight
-                                .keep_dir_entries
-                                .iter()
-                                .filter(|entry| {
-                                    entry
-                                        .path
-                                        .strip_prefix(&source.id)
-                                        .is_ok_and(|rel| rel == *skip || rel.starts_with(skip))
-                                })
-                                .map(|entry| entry.bytes)
-                                .sum();
-                            (skip.clone(), bytes)
-                        })
-                        .collect();
-                    (Some(Box::new(preflight)), skip_keep_sizes)
-                }
+            match self
+                .move_keep_selection(source, &selection, executor)
+                .and_then(|keep| {
+                    self.checkpoint_preflight(&source.id, true, false, Some(&keep), executor)
+                }) {
+                Ok((preflight, skip_keep_sizes)) => (Some(Box::new(preflight)), skip_keep_sizes),
                 Err(err) => {
                     tracing::debug!(
                         session_id = %source.id,
@@ -1932,7 +1915,7 @@ impl Controller {
             // that warning even when no managed child is recorded yet.
             stops_subagents: !in_place
                 || (!destination_has_parent_role
-                    && !self.state.active_child_session_ids(&source.id).is_empty()),
+                    && !self.state.active_borrowers(&source.id).is_empty()),
             conversion,
             selection,
             sized_by_destination_default,
@@ -2213,6 +2196,21 @@ impl Controller {
         .await
 
         }).await
+    }
+
+    pub(super) fn move_keep_selection(
+        &self,
+        source: &mj_core::state::SessionRecord,
+        selection: &MoveSelection,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::session_keep::MoveKeep> {
+        let locator = source
+            .target
+            .as_deref()
+            .context("Move source target is missing")?;
+        let backend = super::backend::backend_locator(locator, source, &self.config)?;
+        let directory = self.move_source_keep_dir(source, &backend, executor)?;
+        mj_core::session_keep::MoveKeep::new(directory, &selection.skip_keep_paths)
     }
 
     pub fn finish_move_result(
@@ -3212,7 +3210,7 @@ impl Controller {
                     }
                     if should_stop_move_subagents(true, destination_has_parent_role) {
                         let current = crate::database::load_state()?;
-                        let stopping_children = !current.active_child_session_ids(&id).is_empty();
+                        let stopping_children = !current.active_borrowers(&id).is_empty();
                         let error = if stopping_children && operation.quota_stop_reason.is_some() {
                             Some("automatic quota Move would stop existing sub-agents".into())
                         } else if stopping_children
@@ -3226,7 +3224,7 @@ impl Controller {
                                     .into(),
                             )
                         } else {
-                            roleless_move_children_error(&live_move_children(&current, &id))
+                            roleless_move_children_error(&current, &id)
                         };
                         if let Some(error) = error {
                             if closed_subagent_admission {
@@ -3247,7 +3245,7 @@ impl Controller {
                                 .as_ref()
                                 .is_none_or(|accepted| accepted.stops_subagents);
                         if stop_confirmed
-                            && let Err(error) = executor.before_move_source_stop().await
+                            && let Err(error) = executor.stop_borrowed_workers_before_quiesce().await
                         {
                             if closed_subagent_admission {
                                 source_relay
@@ -3735,7 +3733,7 @@ impl Controller {
             {
                 // Cross-target Move stops child sessions before source capture.
                 executor.begin_resumable_work()?;
-                let stopped_children = executor.before_move_source_stop().await;
+                let stopped_children = executor.stop_borrowed_workers_before_quiesce().await;
                 executor.end_resumable_work("start Move source capture")?;
                 stopped_children?;
                 ensure!(
@@ -4812,7 +4810,7 @@ pub(in crate::controller) fn move_children(
     parent_session_id: &str,
 ) -> Vec<mj_core::subagent::InPlaceSubagent> {
     state
-        .descendant_subagent_ids(parent_session_id)
+        .active_borrowers(parent_session_id)
         .into_iter()
         .filter_map(|child_id| state.subagents.get(&child_id))
         // These children are named to the primary after an in-place swap, and
@@ -4837,8 +4835,11 @@ pub(in crate::controller) fn move_children(
         .collect()
 }
 
-fn live_move_children(state: &mj_core::state::State, parent_session_id: &str) -> Vec<String> {
-    move_children(state, parent_session_id)
+fn roleless_move_children_error(
+    state: &mj_core::state::State,
+    parent_session_id: &str,
+) -> Option<String> {
+    let children: Vec<_> = move_children(state, parent_session_id)
         .into_iter()
         .filter(|child| child.state == mj_core::subagent::InPlaceSubagentState::Running)
         .map(|child| {
@@ -4847,10 +4848,7 @@ fn live_move_children(state: &mj_core::state::State, parent_session_id: &str) ->
                 child.name, child.child_session_id
             )
         })
-        .collect()
-}
-
-fn roleless_move_children_error(children: &[String]) -> Option<String> {
+        .collect();
     (!children.is_empty()).then(|| {
         format!(
             "cannot in-place Move to a harness without mj-agents parent tools while live sub-agents exist: {}",

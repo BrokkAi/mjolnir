@@ -83,7 +83,7 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut controller = stopped_podman_cleanup_controller(session_id);
     let persisted = RefCell::new(Vec::new());
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let failure = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.cleanup_stopped_target_with(
             session_id,
@@ -114,7 +114,7 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
     assert!(controller.state.sessions[session_id].last_error.is_some());
 
     let retry_persisted = RefCell::new(Vec::new());
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.cleanup_stopped_target_with(
             session_id,
@@ -145,7 +145,7 @@ fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut controller = stopped_podman_cleanup_controller(session_id);
     let previous = controller.state.sessions[session_id].clone();
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let failure = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.cleanup_stopped_target_with(
             session_id,
@@ -238,7 +238,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     };
     let persisted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_after_verified_checkpoint_with(
             session_id,
@@ -355,7 +355,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     };
     let persisted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let deferred = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_after_verified_checkpoint_with(
             session_id,
@@ -385,7 +385,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     assert!(!commands[0].args[1].contains("podman rm"));
     drop(commands);
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.cleanup_stopped_target_with(session_id, &executor, |record| {
             assert_eq!(record.state, SessionState::Stopped);
@@ -451,7 +451,7 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_after_verified_checkpoint_with(
             session_id,
@@ -481,7 +481,7 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
         SessionState::Stopped
     );
     // Hard-won: reclaimed ownership skipped a later explicit branch deletion.
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -528,7 +528,7 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(session_id, true, &ProcessExecutor, |_| Ok(()))
     })
@@ -592,7 +592,7 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(session_id, true, &ProcessExecutor, |_| Ok(()))
     })
@@ -644,7 +644,7 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(session_id, true, &FailingExecutor, |_| Ok(()))
     })
@@ -670,6 +670,7 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
 /// failed on a bare target, with its worker stopped.
 fn failed_subagent_relation(session_id: &str) -> mj_core::subagent::SubagentRecord {
     mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: session_id.into(),
@@ -706,6 +707,9 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
     Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             subagents: [(session_id.into(), relation.into())].into_iter().collect(),
             ..State::default()
@@ -766,7 +770,7 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     let mut controller = failed_subagent_controller(&worker_root, session_id);
 
     let reports = seed_child_reports(&mut controller, session_id, directory.path());
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(session_id, true, &ProcessExecutor, |_| Ok(()))
     })
@@ -870,7 +874,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
         worker: "dead",
         purposes: Default::default(),
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     controller
         .suspend_subagent_controlled(
             &crate::controller::test_support::session_admission(session_id),
@@ -906,7 +910,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
         worker: "dead",
         purposes: Default::default(),
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     controller
         .suspend_subagent_controlled(
             &crate::controller::test_support::session_admission(session_id),
@@ -1004,7 +1008,7 @@ async fn close_child_with_partial_root(
         worker,
         purposes: Default::default(),
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let result = controller
         .suspend_subagent_controlled(
             &crate::controller::test_support::session_admission(session_id),
@@ -1146,7 +1150,7 @@ fn checkpointed_close_keeps_a_child_report_directory() {
     session.state = SessionState::Closing;
     session.checkpoint = Some(Box::new(checkpoint.clone()));
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_after_verified_checkpoint_with(
             session_id,
@@ -1179,6 +1183,9 @@ fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
     let mut controller = Controller {
         config: Config::default(),
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1301,7 +1308,7 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
         calls: std::sync::Mutex::new(0),
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(session_id, true, &executor, |_| Ok(()))
     })
@@ -1393,7 +1400,7 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     let persisted = RefCell::new(Vec::new());
     std::fs::write(&checkpoint.archive_path, b"changed after checkpoint").unwrap();
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let error = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_after_verified_checkpoint_with(
             session_id,
@@ -1514,7 +1521,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     };
     let persisted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_after_verified_checkpoint_with(
             session_id,
@@ -1657,7 +1664,7 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     };
     let deleted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -1718,7 +1725,7 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -1767,7 +1774,7 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
     crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let deleted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let error = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.destroy_session_with_cleanup(
             session_id,
@@ -1803,7 +1810,7 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
     assert!(record.target.is_some());
     assert!(!crate::session_manager::session_target_is_pollable(record));
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -1854,7 +1861,7 @@ fn force_destroy_tolerates_a_missing_archive() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -1889,7 +1896,7 @@ fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let cause = "the harness never advertised its configuration within 300s";
 
     assert!(
@@ -2106,6 +2113,9 @@ fn running_managed_clone_controller(
     Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2138,7 +2148,7 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
         releases: std::sync::Mutex::new(Vec::new()),
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2194,7 +2204,7 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
         releases: std::sync::Mutex::new(Vec::new()),
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2260,7 +2270,7 @@ fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
     };
     let executor = RecordingTargets::default();
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2335,7 +2345,7 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
     let mut controller = stopped_cached_podman_controller(session_id, true);
     let executor = RecordingTargets::default();
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.cleanup_stopped_target_with(session_id, &executor, |_| Ok(()))
     })
@@ -2414,9 +2424,25 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
         max_size: None,
         target_root: None,
     });
+    let mut parent = checkpoint_test_session(parent_id);
+    parent.target = Some(Box::new(TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(parent_id).unwrap(),
+        workspace_storage: Default::default(),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    controller.state.sessions.insert(parent_id.into(), parent);
+    let mut relation = failed_subagent_relation(session_id);
+    relation.parent_session_id = parent_id.into();
+    crate::database::save_subagent_session(&controller.state.sessions[session_id], &relation)
+        .unwrap();
+    controller
+        .state
+        .subagents
+        .insert(session_id.into(), relation.into());
     let executor = RecordingTargets::default();
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2492,7 +2518,7 @@ fn destroy_removes_every_archive_of_the_session_and_only_those() {
         },
     };
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2531,7 +2557,7 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
     };
     let deleted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2567,7 +2593,7 @@ fn force_destroy_removes_a_failed_subagent() {
     let reports = seed_child_reports(&mut controller, session_id, directory.path());
     let deleted = RefCell::new(Vec::new());
 
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
         controller.force_destroy_session_with(
             session_id,
@@ -2611,7 +2637,7 @@ fn destroying_a_stopped_child_retains_reports_until_its_parent_retires() {
     child.state = SessionState::Stopped;
     child.target = None;
     crate::database::save_session(child).unwrap();
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(child_id, || {
         controller.destroy_session_controlled(child_id, &ProcessExecutor)
     })
@@ -2673,7 +2699,7 @@ fn report_removal_failure_does_not_fail_child_destroy() {
     let child_id = "0123456789abcdef0123456789abcdef";
     let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
     let reports = seed_child_reports(&mut controller, child_id, directory.path());
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     crate::controller::test_support::worker_test_scope(child_id, || {
         controller.force_destroy_session_with(
             child_id,
@@ -2693,7 +2719,7 @@ fn report_removal_failure_does_not_fail_child_destroy() {
 #[cfg(unix)]
 #[tokio::test]
 async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation() {
-    use crate::controller::checkpoint::tests::{LATCH_RELAY_SESSION, close_cut_controller_with};
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{
         Arc,
@@ -2729,16 +2755,21 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
     let data = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
     std::fs::create_dir_all(data.join("relay")).unwrap();
     std::fs::write(data.join("relay/unsettled-cancellation"), b"keep running").unwrap();
+    let relation = failed_subagent_relation(LATCH_RELAY_SESSION);
+    let mut parent = checkpoint_test_session(&relation.parent_session_id);
+    parent.project_directory = Some(data.join("project"));
+    crate::database::save_session(&parent).unwrap();
     let (mut controller, channels, handle) =
-        close_cut_controller_with(SessionState::Running, true).await;
+        crate::controller::checkpoint::stand_in::close_cut_controller_for_child(
+            SessionState::Running,
+            true,
+            Some(&relation),
+        )
+        .await;
     controller
         .config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    controller.state.subagents.insert(
-        LATCH_RELAY_SESSION.into(),
-        failed_subagent_relation(LATCH_RELAY_SESSION).into(),
-    );
     controller
         .state
         .sessions
@@ -2751,8 +2782,7 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap()
         .project_directory = Some(data.join("project"));
-    seed_child_reports(&mut controller, LATCH_RELAY_SESSION, &data);
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let worker_root = data.join("workers").join(LATCH_RELAY_SESSION);
     std::fs::create_dir_all(&worker_root).unwrap();
     std::fs::write(worker_root.join("private"), b"keep until synced").unwrap();
@@ -3023,6 +3053,12 @@ fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_des
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [
+                ("raw-session".into(), "raw-session".into()),
+                ("plain-session".into(), "plain-session".into()),
+            ]
+            .into_iter()
+            .collect(),
             sessions: [
                 ("raw-session".into(), raw_session.clone()),
                 ("plain-session".into(), plain_session),
@@ -3059,6 +3095,9 @@ fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_des
     let cutoff_controller = Controller {
         config: controller.config.clone(),
         state: State {
+            environment_owners: [("cutoff-session".into(), "cutoff-session".into())]
+                .into_iter()
+                .collect(),
             sessions: [("cutoff-session".into(), cutoff_session)]
                 .into_iter()
                 .collect(),
@@ -3147,7 +3186,7 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let err = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(
             session_id,
@@ -3229,14 +3268,14 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let preflight = controller
         .suspend_preflight(session_id, true, false, &ProcessExecutor)
@@ -3359,14 +3398,14 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let preflight = controller
         .suspend_preflight(session_id, false, false, &ProcessExecutor)
@@ -3410,6 +3449,7 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
         repositories: [(
             expected_repo_id.to_owned(),
             mj_checkpoint::snapshot::CaptureConsent {
+                move_keep: None,
                 untracked: shown.discard_untracked,
                 operations: shown.abort_operations,
             },
@@ -3461,7 +3501,7 @@ fn suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpo
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let err = crate::controller::test_support::worker_test_scope(session_id, || {
         controller.suspend_without_checkpoint_with(session_id, false, &FailingExecutor, |_| Ok(()))
@@ -3510,7 +3550,7 @@ async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
     let before_close_order = order.clone();
@@ -3569,14 +3609,14 @@ fn suspend_preflight_without_checkpoint_skips_unreachable_target() {
         created_at: "2026-11-21T00:00:00Z".into(),
         event_frontier: 1,
     }));
-    let controller = Controller {
+    let mut controller = Controller {
         config: Config::default(),
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let preflight = controller
         .suspend_preflight(session_id, false, true, &FailingExecutor)
@@ -3624,7 +3664,7 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let called_clone = called.clone();
@@ -3742,14 +3782,14 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let preflight = controller
         .suspend_preflight(session_id, false, false, &ProcessExecutor)
@@ -3817,6 +3857,7 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         &checkout,
         input.keep_dir.as_deref().unwrap(),
         &consent.untracked,
+        None,
     )
     .expect("capture check_keep_dir_consent must accept Shown consent built from preflight");
     let refused = mj_checkpoint::snapshot::capture_session_snapshot(
@@ -3838,6 +3879,153 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         &session_consent,
     )
     .expect("capture_session_snapshot must succeed with Shown consent built from preflight");
+}
+
+// Hard-won: #1660: Move asked for discard consent for files its keep stream carries.
+#[cfg(unix)]
+#[test]
+fn move_keep_preflight_and_capture_share_source_selection() {
+    let name = "move_keep_preflight_and_capture_share_source_selection";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    let source_root = mj_checkpoint::checkpoint::session_keep_dir(&repo, name).unwrap();
+    let keep_root = mj_checkpoint::checkpoint::checkout_keep_dir(&repo);
+    let outside = directory.path().join("outside");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+    };
+    git(&["worktree", "add", "--detach", outside.to_str().unwrap()]);
+    std::fs::write(repo.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
+    std::fs::create_dir_all(source_root.join("excluded")).unwrap();
+    std::fs::write(source_root.join("evidence.txt"), "carry this").unwrap();
+    std::fs::write(source_root.join("excluded/cache.dat"), "cache data").unwrap();
+    std::fs::write(keep_root.join("legacy.txt"), "older scratch").unwrap();
+    std::fs::create_dir(keep_root.join("sibling")).unwrap();
+    std::fs::write(keep_root.join("sibling/note.txt"), "sibling scratch").unwrap();
+    std::fs::write(repo.join("untracked.txt"), "untracked data").unwrap();
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Running;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(name),
+    }));
+    attach_local_managed_clone(&mut session, repo.clone(), origin);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+
+    use mj_core::suspend_consent::{CaptureConsent, SuspendConsent};
+    let source = &controller.state.sessions[name];
+    let (backend, _) = controller.worker_placement(name).unwrap();
+    let keep = mj_core::session_keep::MoveKeep::new(
+        controller
+            .move_source_keep_dir(source, &backend, &ProcessExecutor)
+            .unwrap(),
+        &[PathBuf::from("./excluded")],
+    )
+    .unwrap();
+    let capture_input = mj_checkpoint::checkpoint::managed_clone_snapshot_input(
+        super::super::checkpoint::HOST_CHECKOUT_REPOSITORY,
+        &repo,
+        Some(name),
+        directory.path().join("workspace.pack"),
+        None,
+    )
+    .unwrap();
+    let capture = |consent| {
+        mj_checkpoint::snapshot::capture_session_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            std::slice::from_ref(&capture_input),
+            &mj_checkpoint::snapshot::SessionCaptureConsent {
+                repositories: [(capture_input.id.clone(), consent)].into_iter().collect(),
+            },
+        )
+    };
+    let (blocked, _) = controller
+        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .unwrap();
+    let blocker = &blocked.blockers[0].remedy;
+    assert!(blocker.contains("unrepresented worktree"), "{blocker}");
+    assert!(blocker.contains("or move it inside the clone"), "{blocker}");
+    let refusal = controller
+        .check_origin_delta_preflight(
+            name,
+            &SuspendConsent::default(),
+            Some(&keep),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    assert!(format!("{refusal:#}").contains(blocker));
+    assert!(format!("{:#}", capture(CaptureConsent::default()).unwrap_err()).contains(blocker));
+    git(&["worktree", "remove", outside.to_str().unwrap()]);
+
+    let (preflight, skips) = controller
+        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .unwrap();
+    assert_eq!(skips, [(PathBuf::from("excluded"), 10)]);
+    let lost = preflight.untracked_display_paths();
+    assert_eq!(
+        lost,
+        [
+            "untracked.txt",
+            ".mj/keep/legacy.txt",
+            &format!(".mj/keep/{name}/excluded/cache.dat"),
+            ".mj/keep/sibling/note.txt",
+        ]
+    );
+    let refusal = controller
+        .check_origin_delta_preflight(
+            name,
+            &SuspendConsent::default(),
+            Some(&keep),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    let refusal = format!("{refusal:#}");
+    assert!(lost.iter().all(|path| refusal.contains(path)), "{refusal}");
+    assert!(!refusal.contains("evidence.txt"), "{refusal}");
+
+    let shown = preflight.shown_consent();
+    let mut current_worker = shown.capture_consent();
+    current_worker.move_keep = Some(keep.clone());
+    // The older worker's nested CaptureConsent accepts unknown fields. Its
+    // capture still sees carried scratch as uncovered and refuses safely.
+    #[derive(serde::Deserialize)]
+    struct LegacyCaptureConsent {
+        untracked: mj_core::suspend_consent::UntrackedConsent,
+        operations: mj_core::suspend_consent::OperationConsent,
+    }
+    let legacy: LegacyCaptureConsent =
+        serde_json::from_value(serde_json::to_value(&current_worker).unwrap()).unwrap();
+    let refusal = capture(CaptureConsent {
+        untracked: legacy.untracked,
+        operations: legacy.operations,
+        move_keep: None,
+    })
+    .unwrap_err();
+    assert!(format!("{refusal:#}").contains("evidence.txt"));
+
+    // Files created after preview still travel even though the user's consent
+    // only covers the exact lost files they saw.
+    std::fs::write(source_root.join("after-preview.txt"), "also carried").unwrap();
+    controller
+        .check_origin_delta_preflight(name, &shown, Some(&keep), &ProcessExecutor)
+        .unwrap();
+    capture(current_worker).unwrap();
 }
 
 #[cfg(unix)]
@@ -3908,6 +4096,98 @@ fn attach_local_managed_clone(session: &mut SessionRecord, clone: PathBuf, origi
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         target: mj_core::state::ManagedWorktreeTarget::Local,
     }));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_move_keep_lookup_recovers_the_accepted_suspend() {
+    use crate::controller::move_session::test_fixtures::source_recovery_operation;
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+
+    let name = "failed_move_keep_lookup_recovers_the_accepted_suspend";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, clone) = init_managed_clone_with_origin(directory.path(), name);
+    let worker_root = directory.path().join("workers").join(name);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let operation = "origin-delta-suspend-test".to_owned();
+    wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    wire::write(
+        &worker_root,
+        wire::REQUEST,
+        &SuspendRequest {
+            operation: operation.clone(),
+            worker: WorkerIdentity {
+                pid: u32::MAX,
+                start: 0,
+            },
+            checkout: clone.clone(),
+            child_sessions: Vec::new(),
+        },
+    )
+    .unwrap();
+    wire::write(
+        &worker_root,
+        wire::RECEIPT,
+        &SuspendReceipt {
+            operation: operation.clone(),
+            error: None,
+        },
+    )
+    .unwrap();
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Closing;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    attach_local_managed_clone(&mut session, clone.clone(), origin);
+    let mut move_operation = source_recovery_operation(&session);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+    // The worker already stopped. The retained checkout can disappear before
+    // the resumed Move resolves its source keep path.
+    std::fs::rename(&clone, directory.path().join("unavailable-checkout")).unwrap();
+    let admission = crate::controller::test_support::session_admission(name);
+    let error = controller
+        .suspend_session_controlled_with_manager(
+            &admission,
+            name,
+            &ProcessExecutor,
+            None,
+            Some((&mut move_operation, None)),
+            SourceTargetDisposition::RetainForInPlaceSwap,
+            CheckpointExportPolicy::OriginDelta,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
+            None,
+            LatchExclusivity::HoldThroughClose,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let error = format!("{error:#}");
+    let lookup_error = format!("resolve checkout {}", clone.display());
+    assert!(error.contains(&lookup_error), "{error}");
+    let restart = wire::read::<SuspendReceipt>(&worker_root, wire::RESTART)
+        .unwrap()
+        .expect("the accepted suspend must durably request a restart");
+    assert_eq!(restart.operation, operation);
+    assert!(restart.error.unwrap().contains(&lookup_error));
+    // This fixture has no installed worker to restart. Its Closing state must
+    // survive so the durable restart can be retried, instead of claiming Running.
+    let stored = crate::database::load_session_record(name).unwrap().unwrap();
+    assert_eq!(stored.state, SessionState::Closing);
+    assert_eq!(controller.state.sessions[name].state, SessionState::Closing);
 }
 
 #[cfg(unix)]
@@ -4003,7 +4283,7 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
     };
     let worker_root = worker_root.clone();
     attach_local_managed_clone(session, clone, origin);
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     std::fs::create_dir_all(&worker_root).unwrap();
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
@@ -4107,7 +4387,7 @@ async fn older_worker_suspend_preflight_refuses_before_touching_worker() {
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     assert_eq!(
         controller
@@ -4197,7 +4477,7 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
         }));
         attach_local_managed_clone(session, clone, origin);
     }
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     struct SkipHarnessPrepExecutor;
     impl CommandExecutor for SkipHarnessPrepExecutor {
@@ -4313,14 +4593,14 @@ async fn older_worker_swap_failure_attempts_one_in_place_recovery_before_recordi
     config
         .targets
         .insert("local-bare".into(), TargetTemplate::LocalBare);
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             sessions: [(session_id.into(), session.clone())].into_iter().collect(),
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     let previous = session;
 
     // Verify no leftover worker_restart intent remains after retiring on successful in-place recovery.
@@ -4423,7 +4703,7 @@ async fn legacy_closing_with_idle_relay_enters_origin_delta_and_refuses_without_
         }));
         attach_local_managed_clone(session, clone.clone(), origin);
     }
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
     let error = controller
@@ -4494,7 +4774,7 @@ async fn legacy_closing_with_running_relay_enters_origin_delta_and_refuses_witho
         }));
         attach_local_managed_clone(session, clone.clone(), origin);
     }
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
     let error = controller
@@ -4599,7 +4879,7 @@ async fn legacy_closing_with_closed_relay_finishes_from_installed_checkpoint() {
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap()
         .checkpoint = Some(Box::new(verified));
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     controller
         .recover_interrupted_close_managed(
@@ -4698,7 +4978,7 @@ async fn legacy_closing_with_closing_relay_waits_and_finishes_from_installed_che
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap()
         .checkpoint = Some(Box::new(verified));
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     controller
         .recover_interrupted_close_managed(
@@ -4765,7 +5045,7 @@ async fn legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_e
             ..State::default()
         },
     };
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
 
     // Empty session manager: Destroying must not query any relay.
     let channels = crate::session_manager::spawn_session_manager().unwrap();
@@ -4822,7 +5102,14 @@ async fn legacy_closing_and_destroying_subagent_routes_through_archive_free_comp
             .get_mut(session_id)
             .unwrap()
             .checkpoint = None;
-        persist_controller_fixture(&controller);
+        let mut relation = failed_subagent_relation(session_id);
+        relation.request_key = format!("close-{session_id}");
+        let mut parent = checkpoint_test_session(&relation.parent_session_id);
+        parent.target_template_id = "local".into();
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(&controller.state.sessions[session_id], &relation)
+            .unwrap();
+        persist_controller_fixture(&mut controller);
 
         let admission = crate::controller::test_support::session_admission(session_id);
         controller
@@ -5047,6 +5334,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -5075,7 +5365,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     assert!(!attempt.accepted());
     assert!(attempt.worker_capable(&fake).unwrap());
 
-    attempt.accept(&fake).unwrap();
+    attempt.accept(&fake, false).unwrap();
     assert!(attempt.accepted());
     attempt.request_stop(&fake).unwrap();
     assert!(attempt.request_recorded());
@@ -5288,6 +5578,9 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     let controller = Controller {
         config: config.clone(),
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session.clone())].into_iter().collect(),
             ..State::default()
         },
@@ -5310,7 +5603,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     let mut attempt =
         origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
     assert!(attempt.worker_capable(&fake).unwrap());
-    attempt.accept(&fake).unwrap();
+    attempt.accept(&fake, false).unwrap();
     attempt.request_stop(&fake).unwrap();
     // Worker exited without writing a receipt: wait_for_stop must report an error
     // rather than silently succeeding over potentially live writers.
@@ -5343,6 +5636,9 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     let cutoff_controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), cutoff_session)].into_iter().collect(),
             ..State::default()
         },
@@ -5430,6 +5726,12 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [
+                (ssh_id.into(), ssh_id.into()),
+                (podman_id.into(), podman_id.into()),
+            ]
+            .into_iter()
+            .collect(),
             sessions: [
                 (ssh_id.into(), ssh_session),
                 (podman_id.into(), podman_session),
@@ -5618,6 +5920,9 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -5868,6 +6173,9 @@ fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_su
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -5898,4 +6206,104 @@ fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_su
     );
     assert_eq!(preflight.untracked.len(), 1);
     assert_eq!(preflight.untracked[0].path, PathBuf::from("scratch.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_report_roots_follow_the_environment_binding_after_owned_child_registration() {
+    const NAME: &str =
+        "checkpoint_report_roots_follow_the_environment_binding_after_owned_child_registration";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let borrowed_id = "0123456789abcdef0123456789abcdef";
+    let owned_id = "123456789abcdef0123456789abcdef0";
+    let mut controller = failed_subagent_controller(&root.path().join(borrowed_id), borrowed_id);
+    let borrowed_root = seed_child_reports(&mut controller, borrowed_id, root.path());
+    let parent_id = controller.state.subagents[borrowed_id]
+        .parent_session_id
+        .clone();
+    let mut relation = failed_subagent_relation(owned_id);
+    relation.parent_session_id = parent_id.clone();
+    relation.request_key = "own-environment-report".into();
+    let mut owned = checkpoint_test_session(owned_id);
+    let project = root.path().join("owned-project");
+    std::fs::create_dir(&project).unwrap();
+    owned.target_template_id = "local".into();
+    owned.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.path().join(owned_id),
+    }));
+    owned.project_directory = Some(project);
+    crate::database::register_subagent_with_startup(&owned, &relation, vec![], None, None, true)
+        .unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    let (backend, _) = controller.worker_placement(owned_id).unwrap();
+    controller
+        .prepare_subagent_report_dir(owned_id, &backend, &ProcessExecutor)
+        .unwrap();
+    let report = crate::database::load_subagent_report(owned_id)
+        .unwrap()
+        .report_dir
+        .unwrap();
+    let report = PathBuf::from(report);
+    assert!(report.is_dir());
+    assert_eq!(
+        controller
+            .checkpoint_report_directories(&parent_id)
+            .unwrap(),
+        [borrowed_root.join(borrowed_id)]
+    );
+    assert_eq!(
+        controller.checkpoint_report_directories(owned_id).unwrap(),
+        [report]
+    );
+    // Moving the owning child to a new workspace layout (as Resume does) refreshes
+    // its persisted report_dir and launch env before staging worker files.
+    let moved_project = root.path().join("resumed-owned-project");
+    std::fs::create_dir(&moved_project).unwrap();
+    let mut moved = controller.state.sessions[owned_id].clone();
+    moved.project_directory = Some(moved_project.clone());
+    crate::database::save_session(&moved).unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    let (moved_backend, _) = controller.worker_placement(owned_id).unwrap();
+    controller
+        .prepare_subagent_report_dir(owned_id, &moved_backend, &ProcessExecutor)
+        .unwrap();
+    let moved_report = PathBuf::from(
+        crate::database::load_subagent_report(owned_id)
+            .unwrap()
+            .report_dir
+            .unwrap(),
+    );
+    assert!(moved_report.starts_with(moved_project.canonicalize().unwrap()));
+    assert!(moved_report.is_dir());
+    controller.config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            root.path().join("codex-profile"),
+        ),
+    );
+    let (launch, _, _) = controller
+        .session_launch_config(
+            owned_id,
+            &moved_backend,
+            crate::controller::worker_binary::LaunchHistory::Stored,
+        )
+        .unwrap();
+    assert_eq!(
+        launch.environment[mj_core::subagent::CHILD_REPORT_DIR_ENV],
+        moved_report.to_string_lossy()
+    );
+    crate::database::delete_session(borrowed_id).unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    assert_eq!(
+        controller
+            .checkpoint_report_directories(&parent_id)
+            .unwrap(),
+        [borrowed_root.join(borrowed_id)],
+        "the environment retains the borrower report after the borrower is stopped and removed"
+    );
 }

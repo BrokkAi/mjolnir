@@ -548,6 +548,7 @@ mod tests {
             ),
         ] {
             let record = mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind,
                 reviewer_launch: None,
                 child_session_id: child.into(),

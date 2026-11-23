@@ -344,6 +344,9 @@ fn sample_state() -> State {
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         version: STATE_VERSION,
+        environment_owners: [(session.id.clone(), session.id.clone())]
+            .into_iter()
+            .collect(),
         sessions: [(session.id.clone(), session)].into_iter().collect(),
         subagents: Default::default(),
         mount_history: [("local".into(), vec![PathBuf::from("/home/test/cache")])].into(),
@@ -638,7 +641,7 @@ fn session_records_written_before_container_overrides_still_load() {
 }
 
 #[test]
-fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
+fn ledger_ownership_controls_checkout_project_and_review_across_logical_ancestry() {
     let config = sample_config();
     let mut parent = sample_session();
     parent.id = "parent-session".into();
@@ -652,6 +655,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
         base_commit: None,
     }));
     parent.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
+    parent.review = Some(Box::new(crate::config::SessionReview::Off));
     // A child is launched into the parent's worktree checkout, which is named
     // after the parent session, and owns no worktree of its own.
     let mut child = sample_session();
@@ -662,6 +666,12 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
     state.sessions.insert(child.id.clone(), child.clone());
+    state
+        .environment_owners
+        .insert(parent.id.clone(), parent.id.clone());
+    state
+        .environment_owners
+        .insert(child.id.clone(), parent.id.clone());
     state.subagents.insert(
         child.id.clone(),
         crate::subagent::SubagentMetadata {
@@ -681,6 +691,28 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
             supervisor: false,
         },
     );
+    let mut owned = checkout_session("owned");
+    owned.project_directory = Some(PathBuf::from("/worktrees/owned"));
+    owned.review = Some(Box::new(crate::config::SessionReview::Push {
+        reviewers: None,
+    }));
+    state.sessions.insert(owned.id.clone(), owned.clone());
+    state
+        .environment_owners
+        .insert(owned.id.clone(), owned.id.clone());
+    let mut relation = state.subagents[&child.id].clone();
+    relation.child_session_id = owned.id.clone();
+    state.subagents.insert(owned.id.clone(), relation.clone());
+    let mut nested = checkout_session("nested");
+    nested.state = SessionState::Running;
+    state.sessions.insert(nested.id.clone(), nested.clone());
+    state
+        .environment_owners
+        .insert(nested.id.clone(), owned.id.clone());
+    relation.child_session_id = nested.id.clone();
+    relation.parent_session_id = owned.id.clone();
+    state.subagents.insert(nested.id.clone(), relation);
+    state.sessions.get_mut(&child.id).unwrap().state = SessionState::Running;
 
     assert_eq!(child.project_name(&config), "parent-session");
     assert_eq!(
@@ -696,6 +728,49 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
         parent.id,
         "a session that is not a sub-agent keeps its own project identity"
     );
+    assert_eq!(state.project_identity_session(&owned).id, owned.id);
+    assert_eq!(state.project_identity_session(&nested).id, owned.id);
+    assert_eq!(state.workspace_owner(&child.id).unwrap().id, parent.id);
+    assert_eq!(state.workspace_owner(&owned.id).unwrap().id, owned.id);
+    assert_eq!(state.workspace_owner(&nested.id).unwrap().id, owned.id);
+    assert_eq!(
+        state.review_owner(&child.id).unwrap().unwrap().id,
+        parent.id
+    );
+    assert_eq!(state.review_owner(&owned.id).unwrap().unwrap().id, owned.id);
+    assert_eq!(
+        state.review_owner(&nested.id).unwrap().unwrap().id,
+        owned.id
+    );
+    assert_eq!(state.active_borrowers(&parent.id), [child.id.clone()]);
+    assert_eq!(state.active_borrowers(&owned.id), [nested.id.clone()]);
+    assert_eq!(state.direct_owned_child_ids(&parent.id), [owned.id.clone()]);
+    assert!(state.direct_owned_child_ids(&owned.id).is_empty());
+    assert_eq!(state.owns_environment(&owned.id), Some(true));
+    assert_eq!(state.owns_environment(&child.id), Some(false));
+
+    let native = crate::native_agent::view_id(&parent.id, "native");
+    state
+        .sessions
+        .insert(native.clone(), checkout_session(&native));
+    state
+        .environment_owners
+        .insert(native.clone(), native.clone());
+    state
+        .environment_owners
+        .insert("unknown".into(), "unknown".into());
+    assert_eq!(state.owns_environment(&native), None);
+    assert_eq!(state.owns_environment("unknown"), None);
+    state.sessions.remove(&parent.id);
+    assert_eq!(
+        state.environment_owner_id(&child.id),
+        Some(parent.id.as_str())
+    );
+    assert!(state.workspace_owner(&child.id).is_err());
+    state.subagents.remove(&child.id);
+    state.environment_owners.remove(&child.id);
+    assert_eq!(state.owns_environment(&child.id), None);
+    assert!(state.checkout(&child.id).is_err());
 }
 
 #[test]
@@ -929,11 +1004,19 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         .sessions
         .insert(inconsistent_managed.id.clone(), inconsistent_managed);
 
+    state.environment_owners = state
+        .sessions
+        .keys()
+        .map(|id| (id.clone(), id.clone()))
+        .collect();
     let add_child = |state: &mut State, id: &str, parent: &SessionRecord| {
         let mut child = checkout_session(id);
         child.project_directory = parent.project_directory.clone();
         child.managed_worktree = None;
         state.sessions.insert(child.id.clone(), child.clone());
+        state
+            .environment_owners
+            .insert(child.id.clone(), parent.id.clone());
         state.subagents.insert(
             child.id.clone(),
             crate::subagent::SubagentMetadata {
@@ -2185,6 +2268,7 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
         (
             serde_json::json!({"mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"}),
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(crate::config::SubagentChoice {
                     model: "gpt-6-luna".into(),
                     effort: Some("max".into()),
@@ -2198,6 +2282,7 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
         (
             serde_json::json!({"mode":"all_models"}),
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -2207,6 +2292,7 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
         (
             serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -2214,6 +2300,7 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
         (
             serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"adaptive"}),
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -2221,6 +2308,7 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
         (
             serde_json::json!(true),
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },

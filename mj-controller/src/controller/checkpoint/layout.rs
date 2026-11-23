@@ -10,30 +10,37 @@ fn is_plain_project_directory(session: &mj_core::state::SessionRecord) -> bool {
 }
 
 impl Controller {
-    /// Report roots may be shared by several parents; the persisted child
-    /// directory is the ownership boundary, never a scan of that shared root.
-    pub(super) fn checkpoint_report_directories(&self, session_id: &str) -> Result<Vec<PathBuf>> {
-        let mut directories = Vec::new();
-        for child in self
-            .state
-            .subagents
-            .values()
-            .filter(|child| child.parent_session_id == session_id)
-        {
-            if let Some(directory) =
-                crate::database::load_subagent_report(&child.child_session_id)?.report_dir
-            {
-                let path = PathBuf::from(directory);
-                ensure!(
-                    path.file_name().and_then(|name| name.to_str())
-                        == Some(child.child_session_id.as_str()),
-                    "persisted report directory does not name its child"
-                );
-                directories.push(path);
+    /// Select reports attached to this exact environment, including reports
+    /// left by borrowers stopped before the checkpoint.
+    pub(in crate::controller) fn checkpoint_report_directories(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PathBuf>> {
+        let environment = crate::database::session_environment(session_id)?
+            .context("session has no environment binding")?;
+        let mut reports = std::collections::BTreeMap::new();
+        for (child_id, directory) in crate::database::environment_reports(&environment.id)? {
+            let path = PathBuf::from(&directory);
+            ensure!(
+                path.file_name().and_then(|name| name.to_str()) == Some(child_id.as_str()),
+                "persisted report directory does not name its child"
+            );
+            match reports.entry(child_id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(path);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if crate::database::load_subagent_report(entry.key())?
+                        .report_dir
+                        .as_deref()
+                        == Some(directory.as_str())
+                    {
+                        entry.insert(path);
+                    }
+                }
             }
         }
-        directories.sort();
-        Ok(directories)
+        Ok(reports.into_values().collect())
     }
 
     /// Where a session's repositories live on its target, and what each one

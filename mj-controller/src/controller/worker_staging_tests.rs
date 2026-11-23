@@ -717,6 +717,8 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
                 session_id: &session_id,
                 container: None,
                 parent_worktree: None,
+                owner: None,
+                working_directories: &[],
             },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,

@@ -16,15 +16,15 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_client::daemon::{
-    DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
-    metadata_path,
+    CONTAINER_OWNER_SCHEMA, ContainerDaemonRecord, DaemonMetadata, DaemonPlacement,
+    PROTOCOL_VERSION, remove_container_owner_if_matching, write_container_owner,
 };
 use mj_core::config::{DaemonConfig, DaemonRuntime, RELEASE_CONTAINER_IMAGE, data_dir};
 use sha2::Digest;
 use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Label carrying the instance identity, shared by every container this
 /// instance's daemons ever ran in.
@@ -43,14 +43,12 @@ const VOLUME_MOUNT: &str = "/var/lib/mjolnir";
 /// The daemon listens on this port inside its own network namespace. The host
 /// publishes it on a random loopback port, so containers never collide.
 const CONTAINER_PORT: u16 = 8787;
-/// How often a launch checks whether the new daemon answers.
-const START_POLL: Duration = Duration::from_millis(200);
-/// How long a container daemon gets to answer its first Ping.
-const START_TIMEOUT: Duration = Duration::from_secs(120);
-
+#[derive(Debug, Clone)]
 pub(super) struct ContainerLaunch {
-    pub(super) container: String,
-    pub(super) port: u16,
+    pub(super) runtime: DaemonRuntime,
+    pub(super) container_id: String,
+    pub(super) container_name: String,
+    pub(super) metadata: DaemonMetadata,
 }
 
 /// Where the configuration puts the daemon on this computer, decided once for
@@ -91,29 +89,65 @@ pub(super) async fn placement(config: &DaemonConfig) -> Result<Placement> {
 
 /// Start a daemon in the container `spec` describes, creating the container
 /// and its volume when they do not exist yet.
-pub(super) async fn launch(spec: &ContainerSpec) -> Result<ContainerLaunch> {
+pub(super) async fn launch(
+    spec: &ContainerSpec,
+    prior_unpublished: Option<&ContainerDaemonRecord>,
+) -> Result<ContainerLaunch> {
     let program = spec.program();
     remove_idle_predecessors(program, spec).await?;
     ensure_running(program, spec).await?;
     let port = published_port(program, &spec.name).await?;
-    let token = super::random_token()?;
-    let metadata = daemon_metadata(spec, port, token);
-    exec_daemon(program, spec, &metadata.token).await?;
-    wait_until_answering(program, spec, &metadata).await?;
-    super::write_launcher_metadata(&metadata)?;
+    let container_id = resolve_container_id(spec.runtime(), &spec.name)
+        .await?
+        .with_context(|| format!("daemon container {} disappeared before launch", spec.name))?;
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let token = match prior_unpublished {
+        Some(prior)
+            if prior.runtime == spec.runtime()
+                && prior.container_id == container_id
+                && prior.address == address =>
+        {
+            // Both execs may reach the store lock. Either winner must accept the published token.
+            prior.token.clone()
+        }
+        prior => {
+            if let Some(prior) = prior {
+                remove_container_owner_if_matching(prior.address, &prior.token)?;
+            }
+            super::random_token()?
+        }
+    };
+    let metadata = daemon_metadata(spec, address, token);
+    write_container_owner(&ContainerDaemonRecord {
+        schema: CONTAINER_OWNER_SCHEMA,
+        protocol_version: Some(metadata.protocol_version),
+        runtime: spec.runtime(),
+        container_id: container_id.clone(),
+        container_name: spec.name.clone(),
+        address: metadata.address,
+        token: metadata.token.clone(),
+        started_at: metadata.started_at.clone(),
+    })?;
+    exec_daemon(program, spec, &container_id, &metadata.token).await?;
     Ok(ContainerLaunch {
-        container: spec.name.clone(),
-        port,
+        runtime: spec.runtime(),
+        container_id,
+        container_name: spec.name.clone(),
+        metadata,
     })
 }
 
-fn daemon_metadata(spec: &ContainerSpec, port: u16, token: String) -> DaemonMetadata {
+fn daemon_metadata(
+    spec: &ContainerSpec,
+    address: std::net::SocketAddr,
+    token: String,
+) -> DaemonMetadata {
     DaemonMetadata {
         protocol_version: PROTOCOL_VERSION,
         // The daemon's PID is a container PID. Clients ask `Identity`; this
         // field is the frozen status shape and is never a host PID here.
         pid: 0,
-        address: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        address,
         token,
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         build_version: mj_client::build_identity::this_build().published(),
@@ -125,58 +159,187 @@ fn daemon_metadata(spec: &ContainerSpec, port: u16, token: String) -> DaemonMeta
     }
 }
 
-async fn wait_until_answering(
-    program: &str,
-    spec: &ContainerSpec,
-    metadata: &DaemonMetadata,
-) -> Result<()> {
-    let deadline = Instant::now() + START_TIMEOUT;
-    loop {
-        if let Ok(mut client) = DaemonClient::connect(metadata.clone()).await
-            && let Ok(DaemonReply::Pong) = client.request(DaemonAction::Ping).await
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            let log = log_tail(program, &spec.name).await;
-            let error = if log.is_empty() {
-                anyhow::anyhow!(
-                    "daemon container {} did not answer on loopback port {} within {}s",
-                    spec.name,
-                    metadata.address.port(),
-                    START_TIMEOUT.as_secs()
-                )
-            } else {
-                anyhow::anyhow!(
-                    "daemon container {} did not answer on loopback port {} within {}s; log:\n{log}",
-                    spec.name,
-                    metadata.address.port(),
-                    START_TIMEOUT.as_secs()
-                )
-            };
-            let _ = remove_metadata();
-            return Err(error);
-        }
-        tokio::time::sleep(START_POLL).await;
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ContainerDaemonStatus {
+    Running,
+    Exited { container_running: bool },
+    Unknown(String),
 }
 
-/// The host file clients read. The container cannot write it, so the launcher
-/// publishes it once the daemon answers.
-pub(super) async fn is_running(runtime: DaemonRuntime, name: &str) -> Result<bool> {
+pub(super) async fn resolve_container_id(
+    runtime: DaemonRuntime,
+    name: &str,
+) -> Result<Option<String>> {
     let program = runtime
         .engine()
         .context("the daemon container has no engine")?;
-    let output = engine(
+    resolve_id_by_name(program, name).await
+}
+
+async fn resolve_id_by_name(program: &str, name: &str) -> Result<Option<String>> {
+    // Container names may contain literal dots in addition to letters,
+    // digits, hyphens, and underscores. Docker matches names with a leading
+    // slash while Podman omits it, so accept an optional leading slash and
+    // verify the exact name from the formatted output.
+    ensure!(
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')),
+        "invalid daemon container name: {name:?}"
+    );
+    let pattern = name.replace('.', "[.]");
+    let listed = list_containers(
         program,
-        ["inspect", "--format={{.State.Running}}", name],
-        QUERY_TIMEOUT,
+        &format!("name=^/?{pattern}$"),
+        "{{.ID}}\t{{.Names}}",
     )
     .await?;
+    parse_container_id_for_name(program, &listed, name)
+}
+
+fn parse_container_id_for_name(program: &str, stdout: &str, name: &str) -> Result<Option<String>> {
+    let mut ids = stdout.lines().filter_map(|line| {
+        let (id, names) = line.split_once('\t')?;
+        let id = id.trim();
+        let matched = names
+            .split(',')
+            .any(|candidate| candidate.trim().trim_start_matches('/') == name);
+        (!id.is_empty() && matched).then_some(id)
+    });
+    let id = ids.next().map(str::to_owned);
+    ensure!(
+        ids.next().is_none(),
+        "{program} listed multiple containers named {name}"
+    );
+    Ok(id)
+}
+
+async fn list_container_ids(program: &str, filter: &str) -> Result<String> {
+    list_containers(program, filter, "{{.ID}}").await
+}
+
+async fn list_containers(program: &str, filter: &str, format: &str) -> Result<String> {
+    let output = engine(
+        program,
+        [
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--filter",
+            filter,
+            "--format",
+            format,
+        ],
+        QUERY_TIMEOUT,
+    )
+    .await
+    .with_context(|| format!("list containers matching {filter}"))?;
     if !output.status.success() {
-        return Ok(false);
+        return Err(failure(
+            program,
+            &format!("list containers matching {filter}"),
+            &output,
+        ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+    String::from_utf8(output.stdout).context("container listing was not valid UTF-8")
+}
+
+async fn container_is_running(program: &str, id: &str) -> Result<bool> {
+    let output = engine(
+        program,
+        ["inspect", "--format={{.State.Running}}", id],
+        QUERY_TIMEOUT,
+    )
+    .await
+    .with_context(|| format!("inspect container {id}"))?;
+    if !output.status.success() {
+        return Err(failure(
+            program,
+            &format!("inspect container {id}"),
+            &output,
+        ));
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        state => {
+            bail!("{program} reported an unexpected running state for container {id}: {state:?}")
+        }
+    }
+}
+
+async fn container_top(program: &str, id: &str, field: &str) -> Result<String> {
+    // Docker hands its arguments to ps(1); Podman takes field names.
+    let mut args = vec!["top", id];
+    if program == "docker" {
+        args.push("-o");
+    }
+    args.push(field);
+    let output = engine(program, args, QUERY_TIMEOUT)
+        .await
+        .with_context(|| format!("list processes in container {id}"))?;
+    if !output.status.success() {
+        return Err(failure(
+            program,
+            &format!("list processes in container {id}"),
+            &output,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+pub(super) async fn probe_container_daemon(
+    runtime: DaemonRuntime,
+    container_id: &str,
+) -> ContainerDaemonStatus {
+    let probe = async {
+        let program = runtime
+            .engine()
+            .context("the daemon container has no engine")?;
+        let ids = list_container_ids(program, &format!("id={container_id}")).await?;
+        if !ids.lines().any(|id| id.trim() == container_id)
+            || !container_is_running(program, container_id).await?
+        {
+            return Ok(ContainerDaemonStatus::Exited {
+                container_running: false,
+            });
+        }
+        let top = container_top(program, container_id, "args").await?;
+        Ok::<_, anyhow::Error>(if top_output_has_daemon_run(&top) {
+            ContainerDaemonStatus::Running
+        } else {
+            ContainerDaemonStatus::Exited {
+                container_running: true,
+            }
+        })
+    };
+    match probe.await {
+        Ok(status) => status,
+        Err(error) => ContainerDaemonStatus::Unknown(format!("{error:#}")),
+    }
+}
+
+pub(super) fn top_output_has_daemon_run(stdout: &str) -> bool {
+    stdout.lines().skip(1).any(|line| {
+        let mut argv = line.split_whitespace();
+        let Some(program) = argv.next().and_then(|arg| Path::new(arg).file_name()) else {
+            return false;
+        };
+        match argv.next() {
+            Some("daemon-run" | "daemon-wait-exit") => program == "mj",
+            Some("-c") if program == "sh" => {
+                // The transient launch shell execs the image binary in place.
+                let command = match argv.next() {
+                    Some("exec") => argv.next(),
+                    command => command,
+                };
+                command == Some(IMAGE_EXECUTABLE)
+                    && matches!(argv.next(), Some("daemon-run" | "daemon-wait-exit"))
+            }
+            _ => false,
+        }
+    })
 }
 
 /// Stop the daemon's container when it does not answer the protocol stop.
@@ -268,15 +431,6 @@ pub(crate) async fn exec_in_container(args: &[String], interactive: bool) -> Res
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(true)
-}
-
-/// Remove the host metadata a stopped container daemon leaves behind.
-pub(super) fn remove_metadata() -> Result<()> {
-    match std::fs::remove_file(metadata_path()) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("remove container daemon metadata"),
-    }
 }
 
 /// This client's Git revision, which the daemon image's label must carry.
@@ -563,7 +717,10 @@ async fn remove_idle_predecessors(program: &str, spec: &ContainerSpec) -> Result
         if name.is_empty() || name == spec.name {
             continue;
         }
-        if processes_in(program, name)
+        let Some(id) = resolve_id_by_name(program, name).await? else {
+            continue;
+        };
+        if processes_in(program, &id)
             .await?
             .is_some_and(|count| count > 1)
         {
@@ -571,7 +728,7 @@ async fn remove_idle_predecessors(program: &str, spec: &ContainerSpec) -> Result
                 "an earlier daemon container {name} still runs workers; finish or destroy those sessions before changing the daemon container"
             );
         }
-        let removed = engine(program, ["rm", "--force", name], QUERY_TIMEOUT).await?;
+        let removed = engine(program, ["rm", "--force", &id], QUERY_TIMEOUT).await?;
         if removed.status.success() {
             tracing::info!(container = name, "removed an idle earlier daemon container");
         } else {
@@ -586,31 +743,13 @@ async fn remove_idle_predecessors(program: &str, spec: &ContainerSpec) -> Result
 }
 
 /// How many processes run in a container, or `None` when it is not running.
-async fn processes_in(program: &str, name: &str) -> Result<Option<usize>> {
-    let running = engine(
-        program,
-        ["inspect", "--format={{.State.Running}}", name],
-        QUERY_TIMEOUT,
-    )
-    .await?;
-    if !running.status.success() || String::from_utf8_lossy(&running.stdout).trim() != "true" {
+async fn processes_in(program: &str, id: &str) -> Result<Option<usize>> {
+    if !container_is_running(program, id).await? {
         return Ok(None);
     }
-    // Docker hands its arguments to ps(1); Podman takes field names.
-    let fields: &[&str] = if program == "docker" {
-        &["-o", "pid"]
-    } else {
-        &["pid"]
-    };
-    let mut args = vec!["top", name];
-    args.extend(fields);
-    let top = engine(program, args, QUERY_TIMEOUT).await?;
-    if !top.status.success() {
-        return Err(failure(program, &format!("list processes in {name}"), &top));
-    }
+    let top = container_top(program, id, "pid").await?;
     Ok(Some(
-        String::from_utf8_lossy(&top.stdout)
-            .lines()
+        top.lines()
             .skip(1)
             .filter(|line| !line.trim().is_empty())
             .count(),
@@ -618,17 +757,11 @@ async fn processes_in(program: &str, name: &str) -> Result<Option<usize>> {
 }
 
 async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
-    let state = engine(
-        program,
-        ["inspect", "--format={{.State.Running}}", &spec.name],
-        QUERY_TIMEOUT,
-    )
-    .await?;
-    if state.status.success() {
-        if String::from_utf8_lossy(&state.stdout).trim() == "true" {
+    if let Some(id) = resolve_id_by_name(program, &spec.name).await? {
+        if container_is_running(program, &id).await? {
             return Ok(());
         }
-        let started = engine(program, ["start", &spec.name], QUERY_TIMEOUT).await?;
+        let started = engine(program, ["start", &id], QUERY_TIMEOUT).await?;
         if !started.status.success() {
             return Err(failure(program, &format!("start {}", spec.name), &started));
         }
@@ -654,8 +787,10 @@ async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
 /// Start a daemon process in the container's own filesystem. The token and
 /// the data roots are environment, never arguments, and the daemon's output
 /// goes to the volume's log.
-async fn exec_daemon(program: &str, spec: &ContainerSpec, token: &str) -> Result<()> {
-    let script = format!("exec {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1");
+async fn exec_daemon(program: &str, spec: &ContainerSpec, id: &str, token: &str) -> Result<()> {
+    let script = format!(
+        "exec {IMAGE_EXECUTABLE} daemon-wait-exit --exit-dir {VOLUME_MOUNT}/data/daemon-exits -- {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1"
+    );
     let args: Vec<OsString> = vec![
         "exec".into(),
         "--detach".into(),
@@ -670,7 +805,7 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, token: &str) -> Result
         format!("--env=MJ_DAEMON_CONTAINER={}", spec.name).into(),
         format!("--env=MJ_DAEMON_CONTAINER_RUNTIME={program}").into(),
         "--env=MJ_DAEMON_LOG=/var/lib/mjolnir/daemon.log".into(),
-        spec.name.clone().into(),
+        id.into(),
         "sh".into(),
         "-c".into(),
         script.into(),
@@ -690,6 +825,102 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, token: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_and_podman_top_distinguish_daemons_from_workers() {
+        let docker = "COMMAND\nsleep infinity\n/opt/mjolnir/mj daemon-run\n";
+        let podman = "COMMAND\nsleep infinity\nmj daemon-run\n";
+        for output in [
+            docker,
+            podman,
+            "COMMAND\n/usr/local/bin/mj daemon-run\n",
+            "COMMAND\nmj daemon-wait-exit -- /opt/mjolnir/mj daemon-run\n",
+            "COMMAND\nsh -c exec /opt/mjolnir/mj daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1\n",
+            "COMMAND\n/bin/sh -c exec /opt/mjolnir/mj daemon-wait-exit -- mj daemon-run\n",
+        ] {
+            assert!(top_output_has_daemon_run(output), "{output}");
+        }
+        let workers = "COMMAND\nsleep infinity\n/usr/local/bin/hel worker\n                       /usr/bin/codex app-server\n/bin/sh -c echo daemon-run\n                       grep daemon-run\n";
+        assert!(!top_output_has_daemon_run(workers));
+    }
+
+    #[test]
+    fn container_name_listing_matches_both_docker_and_podman_formats() {
+        let podman = "id-other\tmj-daemon-2\nid-match\tmj-daemon\n";
+        assert_eq!(
+            parse_container_id_for_name("podman", podman, "mj-daemon").unwrap(),
+            Some("id-match".into())
+        );
+        let docker = "id-match\t/mj-daemon\n";
+        assert_eq!(
+            parse_container_id_for_name("docker", docker, "mj-daemon").unwrap(),
+            Some("id-match".into())
+        );
+        let absent = "id-other\tmj-daemon-2\n";
+        assert_eq!(
+            parse_container_id_for_name("podman", absent, "mj-daemon").unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live podman socket"]
+    async fn podman_probe_distinguishes_stopped_container_and_live_placeholder() {
+        let name = format!(
+            "mj-test-daemon-probe-{}",
+            super::super::random_token().unwrap()
+        );
+        let runtime = DaemonRuntime::Podman;
+        let image = "docker.io/library/alpine:3";
+        let run = engine(
+            "podman",
+            ["run", "--detach", "--name", &name, image, "sleep", "3600"],
+            PULL_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            failure("podman", "run test container", &run)
+        );
+        let id = String::from_utf8(run.stdout).unwrap().trim().to_owned();
+
+        let resolved = resolve_container_id(runtime, &name).await;
+        let was_running = container_is_running("podman", &id).await;
+        let live = probe_container_daemon(runtime, &id).await;
+        let stopped = stop(runtime, &id).await;
+        let is_running = container_is_running("podman", &id).await;
+        let after_stop = probe_container_daemon(runtime, &id).await;
+        let cleanup = engine("podman", ["rm", "--force", &id], QUERY_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(
+            cleanup.status.success(),
+            "{}",
+            failure("podman", "remove test container", &cleanup)
+        );
+
+        assert_eq!(resolved.unwrap().as_deref(), Some(id.as_str()));
+        assert!(
+            was_running.unwrap(),
+            "the placeholder must still be running"
+        );
+        assert_eq!(
+            live,
+            ContainerDaemonStatus::Exited {
+                container_running: true
+            }
+        );
+        stopped.unwrap();
+        assert!(!is_running.unwrap());
+        assert_eq!(
+            after_stop,
+            ContainerDaemonStatus::Exited {
+                container_running: false
+            }
+        );
+    }
 
     fn spec(mounts: Vec<PathBuf>) -> ContainerSpec {
         ContainerSpec {
@@ -734,7 +965,11 @@ mod tests {
 
     #[test]
     fn a_container_daemon_publishes_no_host_pid() {
-        let metadata = daemon_metadata(&spec(Vec::new()), 43123, "token".into());
+        let metadata = daemon_metadata(
+            &spec(Vec::new()),
+            ([127, 0, 0, 1], 43123).into(),
+            "token".into(),
+        );
         assert_eq!(metadata.pid, 0);
         assert_eq!(metadata.address.port(), 43123);
         assert!(matches!(

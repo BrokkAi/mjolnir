@@ -6,12 +6,39 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
-/// Revision 151 is breaking: it adds `sessions.supervisors` and
-/// `supervisor_preference`, and supervisor children write `supervisor: true` in
-/// `record_json` (which older readers reject via `deny_unknown_fields`), while
-/// older writers drop `sessions.supervisors`.
-#[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 151;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 152;
+
+fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
+    use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
+
+    for (select, update) in [
+        (
+            "SELECT session_id, subagents FROM sessions WHERE supervisors = 1 AND subagents IS NOT NULL",
+            "UPDATE sessions SET subagents = ?2 WHERE session_id = ?1",
+        ),
+        (
+            "SELECT p.profile_id, p.policy FROM subagent_preference p
+             JOIN supervisor_preference s ON s.profile_id = p.profile_id WHERE s.enabled = 1",
+            "UPDATE subagent_preference SET policy = ?2 WHERE profile_id = ?1",
+        ),
+    ] {
+        let mut statement = transaction.prepare(select)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, json) in rows {
+            let mut policy = parse_stored_policy(&json)
+                .with_context(|| format!("read sub-agent policy for {id}"))?;
+            if let SubagentPolicy::Mjolnir { orchestrators, .. } = &mut policy {
+                *orchestrators = true;
+                transaction.execute(update, params![id, serde_json::to_string(&policy)?])?;
+            }
+        }
+    }
+    Ok(())
+}
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2962,6 +2989,25 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Breaking: revision-151 placement writes would rebind a target-bearing
+    // owned child to its parent's environment. Older strict record_json readers
+    // also reject resume_with_parent. Fold the legacy supervisor switches into
+    // the Mjolnir policy without removing the old schema or runtime switches.
+    if version < 152 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        migrate_orchestrator_policies(&transaction)?;
+        transaction.execute(
+            "UPDATE schema_compatibility SET minimum_compatible_version = ?1 WHERE singleton = 1",
+            [MINIMUM_COMPATIBLE_VERSION],
+        )?;
+        transaction.execute_batch(
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (152, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=152;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3886,6 +3932,114 @@ pub(super) fn restore_pre116_prompt_history(connection: &Connection, version: i6
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn schema_152_folds_only_mjolnir_policies_and_fences_revision_151() {
+        use mj_core::subagent::SubagentPolicy;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orchestrator-policies.sqlite");
+        let mut connection = open_writer(&path).unwrap();
+        let mjolnir = serde_json::json!({
+            "mode": "mjolnir",
+            "subtle": { "model": "preserved", "effort": "high" }
+        });
+        let transaction = connection.transaction().unwrap();
+        for (id, policy, enabled) in [
+            ("mjolnir", Some(mjolnir.clone()), true),
+            ("disabled", Some(mjolnir.clone()), false),
+            ("native", Some(serde_json::json!({"mode": "native"})), true),
+            ("none", Some(serde_json::json!({"mode": "none"})), true),
+            ("absent", None, true),
+        ] {
+            let mut session = super::super::tests::session(id, "project");
+            session.supervisors = enabled;
+            state_io::insert_session(&transaction, &session).unwrap();
+            transaction
+                .execute(
+                    "UPDATE sessions SET subagents = ?2 WHERE session_id = ?1",
+                    params![id, policy.as_ref().map(ToString::to_string)],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO supervisor_preference(profile_id, enabled) VALUES (?1, ?2)",
+                    params![id, enabled],
+                )
+                .unwrap();
+            if let Some(json) = policy {
+                transaction
+                    .execute(
+                        "INSERT INTO subagent_preference(profile_id, policy) VALUES (?1, ?2)",
+                        params![id, json.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+        transaction
+            .execute_batch(
+                "DELETE FROM schema_migrations WHERE version=152;
+             UPDATE schema_compatibility SET minimum_compatible_version=151;
+             PRAGMA user_version=151;
+             CREATE TRIGGER interrupt_152 BEFORE INSERT ON schema_migrations WHEN NEW.version=152
+             BEGIN SELECT RAISE(ABORT, 'fixture interruption'); END;",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+
+        assert!(migrate_schema(&connection).is_err());
+        let before = read_schema_state(&connection).unwrap();
+        assert_eq!(
+            (before.revision, before.minimum_compatible),
+            (151, Some(151))
+        );
+        let previous = state_io::load_state_with(&connection).unwrap();
+        assert!(matches!(
+            previous.sessions["mjolnir"].subagents,
+            Some(SubagentPolicy::Mjolnir {
+                orchestrators: false,
+                ..
+            })
+        ));
+        connection
+            .execute_batch("DROP TRIGGER interrupt_152")
+            .unwrap();
+        migrate_schema(&connection).unwrap();
+
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(
+            (schema.revision, schema.minimum_compatible),
+            (152, Some(152))
+        );
+        assert!(schema.ensure_supported_by(151).is_err());
+        let state = state_io::load_state_with(&connection).unwrap();
+        let migrated = state.sessions["mjolnir"].subagents.as_ref().unwrap();
+        assert!(matches!(
+            migrated,
+            SubagentPolicy::Mjolnir {
+                orchestrators: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            migrated
+                .override_choice(mj_core::subagent::SubagentTaskType::Subtle)
+                .unwrap()
+                .model,
+            "preserved"
+        );
+        assert_eq!(&state.last_subagent_policies["mjolnir"], migrated);
+        for id in ["native", "none", "disabled", "absent"] {
+            assert_eq!(
+                state.sessions[id].subagents,
+                previous.sessions[id].subagents
+            );
+            assert_eq!(
+                state.last_subagent_policies.get(id),
+                previous.last_subagent_policies.get(id)
+            );
+        }
+    }
 
     // Hard-won: unknown harness rows were erased by full snapshot saves.
     #[test]
@@ -5541,6 +5695,7 @@ mod reader_tests {
         );
 
         let relation = mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: new_child.id.clone(),
@@ -5766,6 +5921,7 @@ mod reader_tests {
         assert_eq!(
             state.sessions["all"].subagents,
             Some(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             })

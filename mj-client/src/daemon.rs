@@ -71,6 +71,83 @@ pub struct DaemonMetadata {
     pub placement: DaemonPlacement,
 }
 
+pub const CONTAINER_OWNER_SCHEMA: u32 = 1;
+
+/// Launch credentials for a container daemon, including before it is ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerDaemonRecord {
+    #[serde(default = "default_container_owner_schema")]
+    pub schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+    pub runtime: mj_core::config::DaemonRuntime,
+    pub container_id: String,
+    pub container_name: String,
+    pub address: SocketAddr,
+    pub token: String,
+    pub started_at: String,
+}
+
+fn default_container_owner_schema() -> u32 {
+    CONTAINER_OWNER_SCHEMA
+}
+
+impl ContainerDaemonRecord {
+    pub fn matches(&self, metadata: &DaemonMetadata) -> bool {
+        self.address == metadata.address && self.token == metadata.token
+    }
+}
+
+pub fn container_owner_path() -> PathBuf {
+    data_dir().join("daemon-container.json")
+}
+
+pub fn read_container_owner() -> Result<Option<ContainerDaemonRecord>> {
+    read_container_owner_at(&container_owner_path())
+}
+
+fn read_container_owner_at(path: &std::path::Path) -> Result<Option<ContainerDaemonRecord>> {
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    serde_json::from_slice(&body)
+        .map(Some)
+        .with_context(|| format!("parse {}", path.display()))
+}
+
+pub fn write_container_owner(record: &ContainerDaemonRecord) -> Result<()> {
+    let path = container_owner_path();
+    let parent = path
+        .parent()
+        .context("container owner path has no parent")?;
+    mj_core::config::create_owner_only_directory(parent)?;
+    mj_core::config::atomic_write_existing(&path, &serde_json::to_vec_pretty(record)?)
+}
+
+/// The caller serializes owner changes with the daemon startup lock.
+pub fn remove_container_owner_if_matching(address: SocketAddr, token: &str) -> Result<()> {
+    remove_container_owner_at(&container_owner_path(), address, token)
+}
+
+fn remove_container_owner_at(
+    path: &std::path::Path,
+    address: SocketAddr,
+    token: &str,
+) -> Result<()> {
+    if read_container_owner_at(path)?
+        .is_some_and(|record| record.address == address && record.token == token)
+    {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 /// Process-private credentials returned by `mj daemon endpoint --json`.
 /// This is not local PID metadata and must never be written to daemon.json.
 #[derive(Clone, Serialize, Deserialize)]
@@ -4129,6 +4206,53 @@ mod tests {
     use super::*;
     use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
     use std::path::Path;
+
+    #[test]
+    fn container_owner_tolerates_future_fields_while_legacy_metadata_stays_strict() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = directory.path().join("daemon-container.json");
+        fs::write(
+            &owner,
+            r#"{
+                "runtime": "podman",
+                "container_id": "full-id",
+                "container_name": "mj-daemon",
+                "address": "127.0.0.1:8787",
+                "token": "fixture-token",
+                "started_at": "2026-11-23T00:00:00Z",
+                "future_field": {"extra": true}
+            }"#,
+        )
+        .unwrap();
+        let record = read_container_owner_at(&owner).unwrap().unwrap();
+        assert_eq!(record.schema, CONTAINER_OWNER_SCHEMA);
+        assert_eq!(record.container_id, "full-id");
+        let other_address = "127.0.0.1:8788".parse().unwrap();
+        remove_container_owner_at(&owner, other_address, &record.token).unwrap();
+        remove_container_owner_at(&owner, record.address, "replacement-token").unwrap();
+        assert_eq!(
+            read_container_owner_at(&owner).unwrap(),
+            Some(record.clone())
+        );
+        remove_container_owner_at(&owner, record.address, &record.token).unwrap();
+        assert_eq!(read_container_owner_at(&owner).unwrap(), None);
+
+        let metadata = directory.path().join("daemon.json");
+        let mut fixture = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "pid": 0,
+            "address": record.address,
+            "token": record.token,
+            "started_at": record.started_at,
+            "build_version": "2.73.0"
+        });
+        fs::write(&metadata, fixture.to_string()).unwrap();
+        assert!(record.matches(&read_metadata_at(&metadata).unwrap()));
+        fixture["container_id"] = record.container_id.into();
+        fs::write(&metadata, fixture.to_string()).unwrap();
+        let error = read_metadata_at(&metadata).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `container_id`"));
+    }
 
     // Hard-won: c672eb41a1bf: macOS startup hang waited forever for an exited but unreaped daemon
     #[cfg(unix)]
