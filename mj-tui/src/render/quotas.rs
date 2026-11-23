@@ -234,7 +234,6 @@ pub(crate) fn quota_content_height(dashboard: &DashboardState) -> usize {
         usize::from(quota_pane_width(dashboard).saturating_sub(2)),
         now,
         false,
-        clock_label,
     )
     .0
     .len()
@@ -251,7 +250,7 @@ pub(crate) fn render_quotas(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    render_quotas_at(frame, area, dashboard, size, now, clock_label);
+    render_quotas_at(frame, area, dashboard, size, now);
 }
 
 pub(crate) fn render_quotas_at(
@@ -260,7 +259,6 @@ pub(crate) fn render_quotas_at(
     dashboard: &mut DashboardState,
     size: Option<PaneSize>,
     now: u64,
-    clock: fn(i64, &str) -> String,
 ) {
     // Provider discovery is polled once per frame by the combined renderer,
     // before pane sizing, so sizing and drawing use the same snapshot.
@@ -327,7 +325,7 @@ pub(crate) fn render_quotas_at(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let (lines, pool_rows, profile_rows) =
-        quota_lines(dashboard, usize::from(inner.width), now, focused, clock);
+        quota_lines(dashboard, usize::from(inner.width), now, focused);
     let viewport = usize::from(inner.height);
     dashboard.quota_viewport.set(viewport);
     let mut offset = dashboard
@@ -485,16 +483,6 @@ pub(crate) fn reset_duration(reset: Option<i64>, now: u64) -> String {
     } else {
         format!("{minutes}m")
     }
-}
-
-fn clock_label(epoch: i64, format: &str) -> String {
-    chrono::DateTime::from_timestamp(epoch, 0)
-        .map(|time| {
-            time.with_timezone(&chrono::Local)
-                .format(format)
-                .to_string()
-        })
-        .unwrap_or_else(|| "unknown".into())
 }
 
 fn pool_bar(
@@ -678,168 +666,611 @@ fn pool_bar(
     spans
 }
 
-fn lane(
-    member: &PoolMember,
-    period: &PoolPeriod,
-    cells: usize,
-    now: u64,
-    accent: Color,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    // A reading older than its own reset (weekly or five-hour) cannot say
-    // whether the profile is usable now, so draw no availability; reset
-    // markers from readings that are still current stay.
-    let unknown = member.awaiting_reading || member.five_hour_awaiting_reading;
-    for cell in 0..cells {
-        let t0 = now.saturating_add(cell as u64 * 86400 / cells as u64);
-        let t1 = now.saturating_add((cell + 1) as u64 * 86400 / cells as u64);
-        let contains = |reset: Option<i64>| {
-            reset.is_some_and(|reset| reset >= 0 && t0 <= reset as u64 && (reset as u64) < t1)
-        };
-        let weekly_reset = member.reset.filter(|_| !member.awaiting_reading);
-        let five_reset = member
-            .five_hour
-            .as_ref()
-            .filter(|_| !member.five_hour_awaiting_reading)
-            .and_then(|window| window.resets_at_epoch_seconds);
-        let blocked = member
-            .other_long_blocked_until
-            .is_some_and(|until| until > t0 as i64)
-            || (member.remaining == 0 && member.reset.is_none_or(|reset| reset > t0 as i64))
-            || member.five_hour.as_ref().is_some_and(|window| {
-                quota_remaining_percent(window) == Some(0)
-                    && window
-                        .resets_at_epoch_seconds
-                        .is_none_or(|reset| reset > t0 as i64)
-            });
-        // A five-hour reading without a reset time is still the active
-        // balance; only its end is unknown.
-        let five = member.five_hour.as_ref().filter(|window| {
-            window
-                .resets_at_epoch_seconds
-                .is_none_or(|reset| reset > t0 as i64)
-        });
-        let marker = if contains(weekly_reset) && contains(five_reset) {
-            Some('*')
-        } else if contains(weekly_reset) {
-            Some(period.marker())
-        } else if contains(five_reset) {
-            Some('5')
-        } else {
-            None
-        };
-        if unknown {
-            spans.push(Span::styled(
-                marker
-                    .unwrap_or(if theme::ascii() { '?' } else { '·' })
-                    .to_string(),
-                Style::default()
-                    .fg(if marker.is_some() {
-                        theme::palette().text
-                    } else {
-                        theme::palette().muted
-                    })
-                    .bg(theme::palette().background),
-            ));
-            continue;
+fn member_has_idle_five_hour(member: &PoolMember, period: &PoolPeriod) -> bool {
+    member.five_hour.is_none()
+        && !member.five_hour_awaiting_reading
+        && member.five_hour_idle
+        && *period == PoolPeriod::Week
+}
+
+fn other_long_blocked(member: &PoolMember, now: u64) -> bool {
+    member
+        .other_long_blocked_until
+        .is_some_and(|until| until >= 0 && until as u64 > now)
+}
+
+fn has_fable_row(member: &PoolMember) -> bool {
+    member.fable.as_ref().is_some_and(|fable| {
+        !(member.remaining == 0
+            && !member.awaiting_reading
+            && !member.fable_awaiting_reading
+            && quota_remaining_percent(fable) == Some(0))
+    })
+}
+
+fn hairline_bar(percent: u8, width: usize, fill: Color) -> Vec<Span<'static>> {
+    let palette = theme::palette();
+    let (full, empty, halves) = if theme::ascii() {
+        let mut cells = (usize::from(percent) * width + 50) / 100;
+        if percent > 0 && width > 0 {
+            cells = cells.max(1);
         }
-        let symbol = marker.unwrap_or(if blocked {
-            if theme::ascii() { '.' } else { '·' }
-        } else if theme::ascii() || theme::current() == theme::UiTheme::Mono {
-            if five.is_some() { '=' } else { '-' }
-        } else {
-            ' '
-        });
-        let background = if blocked {
-            theme::palette().background
-        } else if let Some(window) = five {
-            tint(
-                accent,
-                0.25 + 0.75 * f64::from(quota_remaining_percent(window).unwrap_or(0)) / 100.0,
-            )
-        } else {
-            tint(accent, 0.18)
-        };
-        spans.push(Span::styled(
-            symbol.to_string(),
-            Style::default()
-                .fg(if marker.is_some() {
-                    theme::palette().text
-                } else {
-                    theme::palette().muted
-                })
-                .bg(background),
-        ));
+        if percent < 100 && width >= 2 {
+            cells = cells.min(width - 1);
+        }
+        ("=", "-", cells * 2)
+    } else {
+        let mut halves = (usize::from(percent) * width * 2 + 50) / 100;
+        if (1..100).contains(&percent) && width > 0 {
+            halves = halves.clamp(1, width * 2 - 1);
+        }
+        ("━", "─", halves)
+    };
+    let mut spans = vec![Span::styled(
+        full.repeat(halves / 2),
+        Style::default().fg(fill),
+    )];
+    if halves % 2 != 0 {
+        spans.push(Span::styled("╸", Style::default().fg(fill)));
     }
+    spans.push(Span::styled(
+        empty.repeat(width - halves.div_ceil(2)),
+        Style::default().fg(palette.border),
+    ));
     spans
 }
 
-fn lane_note(
-    member: &PoolMember,
-    period: &PoolPeriod,
-    now: u64,
-    clock: fn(i64, &str) -> String,
-    refreshing: bool,
-) -> String {
-    // A collapsed segment can be too narrow to say so; the lane always does.
-    let refresh = if refreshing {
-        format!("refreshing{} · ", theme::glyphs().ellipsis)
-    } else {
-        String::new()
-    };
-    let mut note = if member.awaiting_reading {
-        format!("{} reset due, awaiting reading", period.label())
-    } else if member.remaining == 0 {
-        format!(
-            "{} back {} ({})",
-            period.label(),
-            member
-                .reset
-                .map(|reset| clock(reset, "%a %H:%M"))
-                .unwrap_or_else(|| "unknown".into()),
-            reset_label(member.reset, member.reset_text.as_deref(), now)
-        )
-    } else {
-        format!(
-            "{} {}%, resets in {}",
-            period.label(),
-            member.remaining,
-            reset_label(member.reset, member.reset_text.as_deref(), now)
-        )
-    };
-    if member.five_hour_awaiting_reading {
-        note.push_str(" · 5H reset due, awaiting reading");
-    } else if let Some(five) = &member.five_hour {
-        note.push_str(&format!(
-            " · 5H {}%, resets in {}",
-            quota_remaining_percent(five)
-                .map(|remaining| remaining.to_string())
-                .unwrap_or_else(|| "?".into()),
-            reset_label(five.resets_at_epoch_seconds, five.resets.as_deref(), now)
+fn cell_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+fn padded_cell(text: &str, width: usize) -> String {
+    let text = truncate_to_cells(text, width, Truncate::PLAIN);
+    let padding = " ".repeat(width.saturating_sub(cell_width(&text)));
+    format!("{text}{padding}")
+}
+
+struct DetailReading {
+    percent: Option<u8>,
+    reset: String,
+}
+
+impl DetailReading {
+    fn new(percent: Option<u8>, reset: String, awaiting: bool) -> Self {
+        if awaiting {
+            Self {
+                percent: None,
+                reset: "due".into(),
+            }
+        } else {
+            Self { percent, reset }
+        }
+    }
+
+    fn fill(&self, normal: Color) -> Color {
+        if self
+            .percent
+            .is_some_and(|percent| (1..=15).contains(&percent))
+        {
+            theme::palette().error
+        } else {
+            normal
+        }
+    }
+
+    fn percent_style(&self, fill: Color, bold: bool) -> Style {
+        let style = if self.percent.is_none_or(|percent| percent == 0) {
+            theme::muted()
+        } else {
+            Style::default().fg(fill)
+        };
+        if bold {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style
+        }
+    }
+
+    fn spans(
+        &self,
+        bar_width: usize,
+        reset_width: usize,
+        fill: Color,
+        percent_style: Style,
+        reset_style: Style,
+    ) -> Vec<Span<'static>> {
+        let mut spans = hairline_bar(self.percent.unwrap_or(0), bar_width, fill);
+        let percent = self
+            .percent
+            .map_or_else(|| "   ?".into(), |percent| format!("{percent:>3}%"));
+        spans.push(Span::styled(format!(" {percent} "), percent_style));
+        spans.push(Span::styled(
+            padded_cell(&self.reset, reset_width),
+            reset_style,
         ));
-    } else if member.remaining > 0
-        && !member.awaiting_reading
-        && member.five_hour_idle
-        && *period == PoolPeriod::Week
-    {
-        note.push_str(" · 5H idle: a fresh window starts on first use");
+        spans
     }
-    if member.remaining > 0
-        && !member.awaiting_reading
-        && let Some(fable) = member.fable
-    {
-        note.push_str(&format!(" · Fable {fable}%"));
+}
+
+enum FiveHourDetail {
+    Reading(DetailReading),
+    Due,
+    Ready,
+    Unavailable,
+}
+
+struct MemberReadings {
+    primary: DetailReading,
+    fable: Option<DetailReading>,
+    five_hour: FiveHourDetail,
+    other_long_blocked: bool,
+}
+
+impl MemberReadings {
+    fn new(member: &PoolMember, period: &PoolPeriod, now: u64) -> Self {
+        let primary = DetailReading::new(
+            Some(member.remaining),
+            reset_label(member.reset, member.reset_text.as_deref(), now),
+            member.awaiting_reading,
+        );
+        let other_long_blocked = other_long_blocked(member, now);
+        let five_hour = if member.five_hour_awaiting_reading {
+            FiveHourDetail::Due
+        } else if other_long_blocked || (member.remaining == 0 && !member.awaiting_reading) {
+            FiveHourDetail::Unavailable
+        } else if let Some(five) = &member.five_hour {
+            FiveHourDetail::Reading(DetailReading::new(
+                quota_remaining_percent(five),
+                reset_label(five.resets_at_epoch_seconds, five.resets.as_deref(), now),
+                false,
+            ))
+        } else if !member.awaiting_reading && member_has_idle_five_hour(member, period) {
+            FiveHourDetail::Ready
+        } else {
+            FiveHourDetail::Unavailable
+        };
+        let fable = member
+            .fable
+            .as_ref()
+            .filter(|_| has_fable_row(member))
+            .map(|fable| {
+                let reset = if fable.resets_at_epoch_seconds.is_some() || fable.resets.is_some() {
+                    reset_label(fable.resets_at_epoch_seconds, fable.resets.as_deref(), now)
+                } else {
+                    String::new()
+                };
+                DetailReading::new(
+                    quota_remaining_percent(fable),
+                    reset,
+                    member.fable_awaiting_reading,
+                )
+            });
+        Self {
+            primary,
+            fable,
+            five_hour,
+            other_long_blocked,
+        }
     }
-    if let Some(extra) = &member.note {
-        note.push_str(&format!(" · {extra}"));
+}
+
+struct PoolDetail {
+    width: usize,
+    name_width: usize,
+    primary_bar: usize,
+    primary_reset: usize,
+    five_bar: usize,
+    five_reset: usize,
+    bank: usize,
+    gap: usize,
+    wrap_secondary: bool,
+    wrap_bank: bool,
+    readings: Vec<MemberReadings>,
+}
+
+impl PoolDetail {
+    const INDENT: &'static str = "    ";
+    const MIN_BAR: usize = 6;
+    const READING_SPACING: usize = 6; // Four cells for the percentage and two spaces.
+
+    fn new(pool: &QuotaPool, width: usize, now: u64) -> Self {
+        let period = &pool.key.period;
+        let readings: Vec<_> = pool
+            .members
+            .iter()
+            .map(|member| MemberReadings::new(member, period, now))
+            .collect();
+        let show_five_hour = *period != PoolPeriod::FiveHour
+            && readings
+                .iter()
+                .any(|reading| !matches!(reading.five_hour, FiveHourDetail::Unavailable));
+        let bank = pool
+            .members
+            .iter()
+            .filter_map(|member| member.banked)
+            .filter(|&num| num > 0)
+            .map(|num| (num.to_string().len() + 1).max(4))
+            .max()
+            .unwrap_or(0);
+        let primary_reset = readings
+            .iter()
+            .flat_map(|reading| std::iter::once(&reading.primary).chain(reading.fable.as_ref()))
+            .map(|reading| cell_width(&reading.reset))
+            .max()
+            .unwrap_or(0)
+            .clamp(5, 7);
+        let five_reset = if show_five_hour {
+            readings
+                .iter()
+                .filter_map(|reading| match &reading.five_hour {
+                    FiveHourDetail::Reading(five) => Some(cell_width(&five.reset)),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
+                .clamp(5, 7)
+        } else {
+            0
+        };
+
+        let fable_name = if readings.iter().any(|reading| reading.fable.is_some()) {
+            9
+        } else {
+            0
+        };
+        let desired_name = pool
+            .members
+            .iter()
+            .map(|member| cell_width(&member.id))
+            .max()
+            .unwrap_or(0)
+            .max(fable_name);
+        let primary_target = if show_five_hour { 12 } else { 16 };
+        let five_target = if show_five_hour { 10 } else { 0 };
+        let primary_fixed = 4 + Self::READING_SPACING + primary_reset;
+        let five_fixed = if show_five_hour {
+            Self::READING_SPACING + five_reset
+        } else {
+            0
+        };
+        let columns = usize::from(show_five_hour) + usize::from(bank > 0);
+        let min_bars = Self::MIN_BAR * (1 + usize::from(show_five_hour));
+        let fixed = primary_fixed + five_fixed + bank;
+        let minimum_name = desired_name.min(9);
+        let name_budget = |available: usize| {
+            let preserve_name = minimum_name.min(available.saturating_sub(1));
+            desired_name.min(available.saturating_sub(Self::MIN_BAR).max(preserve_name))
+        };
+        let bounded_name = if columns == 0 {
+            name_budget(width.saturating_sub(primary_fixed))
+        } else {
+            desired_name.min(width.saturating_sub(fixed + 2 * columns + min_bars))
+        };
+        let wrap_secondary = columns > 0 && width < minimum_name + fixed + 2 * columns + min_bars;
+        let (name_width, primary_bar, five_bar, gap, wrap_bank) = if wrap_secondary {
+            let name = name_budget(width.saturating_sub(primary_fixed));
+            let primary = primary_target.min(width.saturating_sub(name + primary_fixed));
+            let available = width.saturating_sub(Self::INDENT.len() + five_fixed);
+            let wrap_bank = show_five_hour && bank > 0 && available < Self::MIN_BAR + 2 + bank;
+            let bank_space = if show_five_hour && bank > 0 && !wrap_bank {
+                2 + bank
+            } else {
+                0
+            };
+            let five = five_target.min(available.saturating_sub(bank_space));
+            (name, primary, five, 2, wrap_bank)
+        } else {
+            let gap = if bounded_name + fixed + 3 * columns + primary_target + five_target <= width
+            {
+                3
+            } else {
+                2
+            };
+            let available = width.saturating_sub(bounded_name + fixed + gap * columns);
+            let (primary, five) = if show_five_hour {
+                // Share the remaining cells in proportion to each bar's target above its minimum.
+                let extra = (available - min_bars).min(primary_target + five_target - min_bars);
+                let primary_extra = (extra * (primary_target - Self::MIN_BAR)
+                    + (primary_target + five_target - min_bars) / 2)
+                    / (primary_target + five_target - min_bars);
+                (
+                    Self::MIN_BAR + primary_extra,
+                    Self::MIN_BAR + extra - primary_extra,
+                )
+            } else {
+                (available.min(primary_target), 0)
+            };
+            (bounded_name, primary, five, gap, false)
+        };
+
+        Self {
+            width,
+            name_width,
+            primary_bar,
+            primary_reset,
+            five_bar,
+            five_reset,
+            bank,
+            gap,
+            wrap_secondary,
+            wrap_bank,
+            readings,
+        }
     }
-    if let Some(banked) = member.banked.filter(|banked| *banked > 0) {
-        note.push_str(&format!(
-            " · {}{banked} banked",
-            if theme::ascii() { "B" } else { "⟲" }
+
+    fn has_secondary(&self) -> bool {
+        self.five_reset > 0 || self.bank > 0
+    }
+
+    fn primary_end(&self) -> usize {
+        self.name_width + 4 + self.primary_bar + Self::READING_SPACING + self.primary_reset
+    }
+
+    fn five_width(&self) -> usize {
+        self.five_bar + Self::READING_SPACING + self.five_reset
+    }
+
+    fn append_secondary(
+        &self,
+        primary: &mut Vec<Span<'static>>,
+        five: Vec<Span<'static>>,
+        bank: Option<Span<'static>>,
+    ) -> Vec<Line<'static>> {
+        let mut continuation = Vec::new();
+        let mut following = Vec::new();
+        let target = if self.wrap_secondary {
+            if !five.is_empty() || (bank.is_some() && !self.wrap_bank) {
+                continuation.push(Span::raw(Self::INDENT));
+            }
+            &mut continuation
+        } else {
+            primary.push(Span::raw(" ".repeat(self.gap)));
+            primary
+        };
+        let has_five = !five.is_empty();
+        target.extend(five);
+        if let Some(bank) = bank {
+            if self.wrap_bank {
+                following.push(Line::from(vec![Span::raw(Self::INDENT), bank]));
+            } else {
+                if has_five {
+                    target.push(Span::raw(" ".repeat(self.gap)));
+                }
+                target.push(bank);
+            }
+        }
+        if !continuation.is_empty() {
+            following.insert(0, Line::from(continuation));
+        }
+        following
+    }
+
+    fn headers(&self, period: &PoolPeriod) -> Vec<Line<'static>> {
+        let title = period.label().to_ascii_uppercase();
+        let mut primary = vec![Span::styled(
+            format!(
+                "{}{}",
+                " ".repeat(self.name_width + 4),
+                padded_cell(&title, self.primary_end() - self.name_width - 4)
+            ),
+            theme::muted(),
+        )];
+        let five = if self.five_reset > 0 {
+            vec![Span::styled(
+                padded_cell("5H", self.five_width()),
+                theme::muted(),
+            )]
+        } else {
+            Vec::new()
+        };
+        let bank = (self.bank > 0).then(|| Span::styled("BANK", theme::muted()));
+        let mut following = self.append_secondary(&mut primary, five, bank);
+        following.insert(0, Line::from(primary));
+        following
+    }
+
+    fn five_hour_spans(&self, five: &FiveHourDetail, accent: Color) -> Vec<Span<'static>> {
+        let palette = theme::palette();
+        let (text, color) = match five {
+            FiveHourDetail::Reading(five) => {
+                let fill = five.fill(accent);
+                let percent_style = if five.percent == Some(0) {
+                    Style::default()
+                        .fg(palette.error)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    five.percent_style(fill, five.percent.is_some())
+                };
+                return five.spans(
+                    self.five_bar,
+                    self.five_reset,
+                    fill,
+                    percent_style,
+                    theme::muted(),
+                );
+            }
+            FiveHourDetail::Due => ("due", palette.warning),
+            FiveHourDetail::Ready => ("ready", palette.success),
+            FiveHourDetail::Unavailable => (if theme::ascii() { "-" } else { "—" }, palette.muted),
+        };
+        vec![Span::styled(
+            padded_cell(text, self.five_width()),
+            Style::default().fg(color),
+        )]
+    }
+
+    fn member_lines(
+        &self,
+        member: &PoolMember,
+        readings: &MemberReadings,
+        selected: bool,
+        refreshing: bool,
+        accent: Color,
+    ) -> Vec<Line<'static>> {
+        let palette = theme::palette();
+        let usable = member.remaining > 0 && !member.awaiting_reading;
+        let name_style = if selected {
+            theme::selection(true)
+        } else if usable {
+            Style::default().fg(palette.text)
+        } else {
+            theme::muted()
+        };
+        let selection = if selected { ">" } else { " " };
+        let name = padded_cell(&member.id, self.name_width);
+        let mut spans = vec![
+            Span::styled(format!("{selection} {name}"), name_style),
+            Span::raw("  "),
+        ];
+        let primary = &readings.primary;
+        let fill = primary.fill(accent);
+        spans.extend(primary.spans(
+            self.primary_bar,
+            self.primary_reset,
+            fill,
+            primary.percent_style(fill, usable),
+            theme::muted(),
         ));
+        let secondary = if self.has_secondary() {
+            let five = if self.five_reset > 0 {
+                self.five_hour_spans(&readings.five_hour, accent)
+            } else {
+                Vec::new()
+            };
+            self.append_secondary(&mut spans, five, banked_span(member))
+        } else {
+            Vec::new()
+        };
+
+        let mut notes = Vec::new();
+        if refreshing {
+            notes.push(format!("refreshing{}", theme::glyphs().ellipsis));
+        }
+        if member.awaiting_reading {
+            notes.push("reset due, awaiting reading".into());
+        }
+        if member.five_hour_awaiting_reading {
+            notes.push("5H reset due, awaiting reading".into());
+        }
+        if member.fable_awaiting_reading {
+            notes.push("Fable reset due, awaiting reading".into());
+        }
+        if readings.other_long_blocked {
+            notes.push("blocked by other limit".into());
+        }
+        if let Some(note) = &member.note {
+            notes.push(note.clone());
+        }
+        // Keep provider-supplied reset text readable without widening the countdown columns.
+        let mut full_reset = |label: &str, reset: &str, width| {
+            if cell_width(reset) > width {
+                notes.push(format!("{label} {reset}"));
+            }
+        };
+        full_reset("Resets", &primary.reset, self.primary_reset);
+        if let Some(fable) = &readings.fable {
+            full_reset("Fable resets", &fable.reset, self.primary_reset);
+        }
+        if self.five_reset > 0
+            && let FiveHourDetail::Reading(five) = &readings.five_hour
+        {
+            full_reset("5H resets", &five.reset, self.five_reset);
+        }
+        let note = notes.join(" · ");
+        let inline_note = !self.has_secondary()
+            && self.primary_end() + self.gap + cell_width(&note) <= self.width;
+        if inline_note && !note.is_empty() {
+            spans.push(Span::styled(
+                format!("{}{note}", " ".repeat(self.gap)),
+                theme::muted(),
+            ));
+        }
+        let mut lines = vec![Line::from(spans)];
+        lines.extend(secondary);
+
+        if let Some(fable) = &readings.fable {
+            let label = if theme::ascii() {
+                "  > fable"
+            } else {
+                "  ↳ fable"
+            };
+            let blocked = member.remaining == 0 && !member.awaiting_reading;
+            let (label_color, fill) = if blocked {
+                (palette.muted, palette.muted)
+            } else {
+                (palette.warning, fable.fill(palette.warning))
+            };
+            let same_reset = member.fable.as_ref().is_some_and(|window| {
+                match (window.resets_at_epoch_seconds, member.reset) {
+                    (None, None) => window.resets == member.reset_text,
+                    (fable, primary) => fable == primary,
+                }
+            });
+            let reset_color = if same_reset {
+                palette.border
+            } else {
+                palette.muted
+            };
+            let mut spans = vec![Span::styled(
+                format!("  {}  ", padded_cell(label, self.name_width)),
+                Style::default().fg(label_color),
+            )];
+            spans.extend(fable.spans(
+                self.primary_bar,
+                self.primary_reset,
+                fill,
+                fable.percent_style(fill, !blocked && fable.percent.is_some_and(|pct| pct <= 15)),
+                Style::default().fg(reset_color),
+            ));
+            let annotation = if blocked {
+                Some(("week 0%", palette.muted))
+            } else if !member.awaiting_reading
+                && fable.percent.is_some_and(|pct| pct < member.remaining)
+            {
+                let text = if theme::ascii() {
+                    "< fable cap"
+                } else {
+                    "◀ fable cap"
+                };
+                let color = if fable.percent <= Some(15) {
+                    palette.error
+                } else {
+                    palette.warning
+                };
+                Some((text, color))
+            } else {
+                None
+            };
+            if let Some((text, color)) = annotation
+                && self.primary_end() + self.gap + cell_width(text) <= self.width
+            {
+                spans.push(Span::styled(
+                    format!("{}{text}", " ".repeat(self.gap)),
+                    Style::default().fg(color),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        if !inline_note && !note.is_empty() {
+            let indent = &Self::INDENT[..Self::INDENT.len().min(self.width.saturating_sub(1))];
+            for text in wrap_note(&note, self.width.saturating_sub(indent.len())) {
+                lines.push(Line::styled(format!("{indent}{text}"), theme::muted()));
+            }
+        }
+        lines
     }
-    refresh + &note
+}
+
+fn banked_span(member: &PoolMember) -> Option<Span<'static>> {
+    let banked = member.banked.filter(|&banked| banked > 0)?;
+    let symbol = if theme::ascii() { "B" } else { "⟲" };
+    Some(Span::styled(
+        format!("{symbol}{banked}"),
+        Style::default()
+            .fg(theme::palette().warning)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn wrap_note(text: &str, width: usize) -> Vec<String> {
@@ -866,13 +1297,7 @@ type QuotaLines = (
     Vec<(QuotaRow, usize)>,
     Vec<(String, usize)>,
 );
-fn quota_lines(
-    dashboard: &DashboardState,
-    width: usize,
-    now: u64,
-    focused: bool,
-    clock: fn(i64, &str) -> String,
-) -> QuotaLines {
+fn quota_lines(dashboard: &DashboardState, width: usize, now: u64, focused: bool) -> QuotaLines {
     let mut lines = Vec::new();
     let mut pool_rows = Vec::new();
     let mut profile_rows = Vec::new();
@@ -957,89 +1382,24 @@ fn quota_lines(
                 ));
             }
             if expanded {
-                let name_width = pool
-                    .members
-                    .iter()
-                    .map(|member| member.id.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    + 3;
-                let name_width = name_width.min(width.saturating_sub(12).max(3));
-                let notes: Vec<_> = pool
-                    .members
-                    .iter()
-                    .map(|member| {
-                        lane_note(
-                            member,
-                            &pool.key.period,
-                            now,
-                            clock,
-                            dashboard.quota_refreshing.contains(&member.id),
-                        )
-                    })
-                    .collect();
-                let longest_note = notes
-                    .iter()
-                    .map(|note| Span::raw(note).width())
-                    .max()
-                    .unwrap_or(0);
-                let lane_width = width
-                    .saturating_sub(name_width + longest_note + 2)
-                    .clamp(12, 48)
-                    .min(width.saturating_sub(name_width));
-                let mut axis = vec![' '; lane_width];
-                for cell in (0..lane_width).step_by((lane_width / 6).max(6)) {
-                    let label = clock(now as i64 + (cell * 86400 / lane_width) as i64, "%H:%M");
-                    if cell + label.len() <= lane_width {
-                        for (i, ch) in label.chars().enumerate() {
-                            axis[cell + i] = ch;
-                        }
-                    }
+                let detail = PoolDetail::new(pool, width, now);
+                if detail.has_secondary() {
+                    lines.extend(detail.headers(&pool.key.period));
                 }
-                lines.push(Line::styled(
-                    format!("{:name_width$}{}", "", axis.into_iter().collect::<String>()),
-                    theme::muted(),
-                ));
-                for (member, mut note) in pool.members.iter().zip(notes) {
-                    profile_rows.push((member.id.clone(), lines.len()));
+                for (member, readings) in pool.members.iter().zip(&detail.readings) {
                     let row = QuotaRow::Lane(pool.key.clone(), member.id.clone());
                     let selected = focused && selection.as_ref() == Some(&row);
-                    pool_rows.push((row.clone(), lines.len()));
-                    let mut spans = vec![Span::styled(
-                        format!(
-                            "{} {:name$} ",
-                            if selected { ">" } else { " " },
-                            truncate_to_cells(&member.id, name_width - 3, Truncate::PLAIN),
-                            name = name_width - 3
-                        ),
-                        if selected {
-                            theme::selection(true)
-                        } else {
-                            Style::default()
-                        },
-                    )];
-                    let timeline = lane(member, &pool.key.period, lane_width, now, accent);
-                    if timeline.iter().any(|span| span.content == "*") {
-                        note.push_str(&format!(
-                            " · *={}+5 (both resets)",
-                            pool.key.period.marker()
-                        ));
-                    }
-                    spans.extend(timeline);
-                    if name_width + lane_width + 2 + Span::raw(&note).width() <= width {
-                        spans.push(Span::styled(format!("  {note}"), theme::muted()));
-                        lines.push(Line::from(spans));
-                    } else {
-                        lines.push(Line::from(spans));
-                        for text in wrap_note(&note, width.saturating_sub(4)) {
-                            pool_rows.push((row.clone(), lines.len()));
-                            profile_rows.push((member.id.clone(), lines.len()));
-                            lines.push(Line::styled(format!("    {text}"), theme::muted()));
-                        }
+                    let refreshing = dashboard.quota_refreshing.contains(&member.id);
+                    for line in detail.member_lines(member, readings, selected, refreshing, accent)
+                    {
+                        pool_rows.push((row.clone(), lines.len()));
+                        profile_rows.push((member.id.clone(), lines.len()));
+                        lines.push(line);
                     }
                 }
             }
         }
+
         for (id, label) in provider.text.into_iter().filter(|_| text_expanded) {
             let label = profile_status(&id, &label, &dashboard.quota_refreshing);
             let row = QuotaRow::Profile(id.clone());
@@ -1119,16 +1479,6 @@ mod tests {
         (dashboard, now)
     }
 
-    fn fixture_clock(epoch: i64, format: &str) -> String {
-        // The readings were recorded in Chicago in November; keep the render
-        // portable across CI hosts without changing the process timezone.
-        chrono::DateTime::from_timestamp(epoch, 0)
-            .unwrap()
-            .with_timezone(&chrono::FixedOffset::west_opt(6 * 3600).unwrap())
-            .format(format)
-            .to_string()
-    }
-
     fn capture(
         output: &mut String,
         label: &str,
@@ -1141,7 +1491,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
-                render_quotas_at(frame, frame.area(), dashboard, None, now, fixture_clock);
+                render_quotas_at(frame, frame.area(), dashboard, None, now);
                 if theme::ascii() {
                     theme::fold_buffer_to_ascii(frame.buffer_mut());
                 }
@@ -1228,15 +1578,15 @@ mod tests {
         banked.extra = Some("Booster balance".into());
         dashboard.quotas.get_mut("claude7").unwrap().windows[0].remaining_percent = Some(99);
 
-        let render = |dashboard: &DashboardState| {
-            let (lines, _, _) = quota_lines(dashboard, 22, now, true, fixture_clock);
+        let render = |dashboard: &DashboardState, width| {
+            let (lines, _, _) = quota_lines(dashboard, width, now, true);
             lines
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let collapsed = render(&dashboard);
+        let collapsed = render(&dashboard, 22);
         for id in ids {
             assert!(!collapsed.contains(id), "{collapsed}");
         }
@@ -1246,7 +1596,7 @@ mod tests {
         );
         assert_eq!(dashboard.quota_rows().len(), 1);
         dashboard.toggle_quota_pool();
-        let expanded = render(&dashboard);
+        let expanded = render(&dashboard, 26);
         for label in [
             "claude2",
             "claude5",
@@ -1264,7 +1614,7 @@ mod tests {
             dashboard.selected_quota_row(),
             Some(QuotaRow::Pool(_))
         ));
-        assert_eq!(render(&dashboard), collapsed);
+        assert_eq!(render(&dashboard, 22), collapsed);
     }
 
     #[test]
@@ -1542,6 +1892,14 @@ mod tests {
                         60,
                         40,
                     );
+                    capture(
+                        &mut output,
+                        &format!("{symbols:?} wrapped columns below minimum width"),
+                        &mut dashboard,
+                        now,
+                        44,
+                        32,
+                    );
                     dashboard.quota_expanded = dashboard
                         .quota_pools()
                         .into_iter()
@@ -1663,6 +2021,9 @@ mod tests {
             let (mut dashboard, now) = fixture();
             let mut reports = dashboard.quotas.clone();
             reports.get_mut("claude7").unwrap().windows[0].remaining_percent = Some(3);
+            reports.get_mut("claude5").unwrap().extra = Some(
+                "Refreshing the subscription reading is currently unavailable. The provider refused the latest check. The last reading is still shown.".into()
+            );
             let mut long = reports.remove("claude4").unwrap();
             let long_id = "claude-with-an-extremely-long-profile-name-that-must-not-hide-readings";
             long.profile_id = long_id.into();
@@ -1687,6 +2048,21 @@ mod tests {
                 .iter()
                 .position(|row| matches!(row, QuotaRow::Lane(_, id) if id == "claude5"))
                 .unwrap();
+            let row = dashboard.quota_rows()[lane].clone();
+            let (lines, pool_rows, profile_rows) = quota_lines(&dashboard, 58, now, true);
+            let [_, fable, ..] = pool_rows
+                .iter()
+                .filter_map(|(candidate, index)| (candidate == &row).then_some(*index))
+                .collect::<Vec<_>>()[..]
+            else {
+                panic!("Claude's Fable line has no selection row");
+            };
+            assert!(lines[fable].to_string().starts_with("    ↳ fable"));
+            assert!(
+                profile_rows
+                    .iter()
+                    .any(|(id, index)| id == "claude5" && *index == fable)
+            );
             dashboard.set_selection_for(Focus::Quota, lane);
             capture(
                 &mut output,
@@ -1762,6 +2138,20 @@ mod tests {
                 &mut dashboard,
                 now,
                 100,
+                12,
+            );
+            dashboard
+                .quotas
+                .get_mut("kimi")
+                .unwrap()
+                .windows
+                .retain(|window| window.label != "5H");
+            capture(
+                &mut output,
+                "Month without 5H shows the booster notice inline",
+                &mut dashboard,
+                now,
+                94,
                 12,
             );
             let mut reports = dashboard.quotas.clone();
@@ -1847,14 +2237,7 @@ mod tests {
                     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
                     terminal
                         .draw(|frame| {
-                            render_quotas_at(
-                                frame,
-                                frame.area(),
-                                &mut dashboard,
-                                None,
-                                now,
-                                fixture_clock,
-                            )
+                            render_quotas_at(frame, frame.area(), &mut dashboard, None, now)
                         })
                         .unwrap();
                     let buffer = terminal.backend().buffer();
@@ -1951,6 +2334,33 @@ mod tests {
                     })
                     .collect();
                 dashboard.set_selection_for(Focus::Quota, 0);
+                // A live 5H throttle and a spent Week both read 0%, but only the
+                // throttle is red and bold. The active Week uses OpenAI's color.
+                let (lines, _, _) = quota_lines(&dashboard, 130, now, true);
+                let balance_styles = |name: &str| {
+                    lines
+                        .iter()
+                        .find(|line| {
+                            line.spans
+                                .first()
+                                .is_some_and(|span| span.content.trim() == name)
+                        })
+                        .unwrap()
+                        .spans
+                        .iter()
+                        .filter(|span| span.content.trim_end().ends_with('%'))
+                        .map(|span| span.style)
+                        .collect::<Vec<_>>()
+                };
+                let bold = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
+                assert_eq!(
+                    balance_styles("codex"),
+                    [
+                        bold(provider_accent(&QuotaProvider::OpenAI)),
+                        bold(theme::palette().error),
+                    ]
+                );
+                assert_eq!(balance_styles("codex2"), [theme::muted()]);
                 capture(
                     &mut output,
                     &format!("{symbols:?} unreadable week and exhausted overlapping windows"),
@@ -1984,24 +2394,38 @@ mod tests {
             });
         }
         theme::with_symbols(SymbolSet::Unicode, || {
-            let (mut dashboard, now) = fixture();
-            let report = dashboard.quotas.get_mut("claude5").unwrap();
-            let reset = report.weekly_window().unwrap().resets_at_epoch_seconds;
-            report
-                .windows
-                .iter_mut()
-                .find(|window| window.label == "5H")
-                .unwrap()
-                .resets_at_epoch_seconds = reset;
-            dashboard.toggle_quota_pool();
-            capture(
-                &mut output,
-                "coincident weekly and five-hour resets",
-                &mut dashboard,
-                now,
-                60,
-                32,
-            );
+            theme::with_theme(theme::UiTheme::Light, || {
+                let (mut dashboard, now) = fixture();
+                let report = dashboard.quotas.get_mut("claude5").unwrap();
+                let reset = report.weekly_window().unwrap().resets_at_epoch_seconds;
+                report
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.label == "5H")
+                    .unwrap()
+                    .resets_at_epoch_seconds = reset;
+                report
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.model_scope.as_deref() == Some("fable"))
+                    .unwrap()
+                    .resets_at_epoch_seconds = Some(now as i64 - 4);
+                let overdue = dashboard.quotas.get_mut("claude2").unwrap();
+                overdue.refreshed_at_epoch_seconds = now - 3600;
+                overdue.windows[0].resets_at_epoch_seconds = Some(now as i64 - 4);
+                let fallback = &mut dashboard.quotas.get_mut("claude7").unwrap().windows[1];
+                fallback.resets_at_epoch_seconds = None;
+                fallback.resets = Some("Nov 24 at 1pm".into());
+                dashboard.toggle_quota_pool();
+                capture(
+                    &mut output,
+                    "Light · coincident Week and 5H, overdue Fable, and reset text",
+                    &mut dashboard,
+                    now,
+                    76,
+                    32,
+                );
+            });
         });
         // Hard-won: quota review: a Month limit did not block the weekly lane, a stale
         // five-hour reading hid the weekly reset marker, and indexed accents drew
@@ -2043,7 +2467,7 @@ mod tests {
                 capture(
                     &mut output,
                     &format!(
-                        "{symbols:?} month limit blocks week lane; stale five-hour keeps week marker"
+                        "{symbols:?} month limit blocks 5H on the Week row; overdue 5H preserves Week"
                     ),
                     &mut dashboard,
                     now,
@@ -2058,8 +2482,6 @@ mod tests {
                 dashboard.config.profiles.retain(|id, _| {
                     id.starts_with("claude") && id != "claude-aws" && id != "claude-login"
                 });
-                // Twelve timeline cells at this width: reset on cell starts,
-                // including the first cell, must belong to exactly one cell.
                 let template = dashboard.quotas["claude5"]
                     .five_hour_window()
                     .unwrap()
@@ -2076,7 +2498,7 @@ mod tests {
                 dashboard.toggle_quota_pool();
                 capture(
                     &mut output,
-                    &format!("{symbols:?} reset at cell start and banked balance"),
+                    &format!("{symbols:?} 5H reset at now and banked balance"),
                     &mut dashboard,
                     now,
                     60,

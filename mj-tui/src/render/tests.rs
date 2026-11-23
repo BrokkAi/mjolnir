@@ -1452,15 +1452,23 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         dashboard.toggle_quota_pool();
     }
     let lines = drawn(&mut dashboard, 200, 44);
-    for id in ["claude-1", "codex-1"] {
-        let row = lines
-            .iter()
-            .find(|line| line.contains(id) && line.contains("quota check refused"))
-            .unwrap_or_else(|| panic!("a rate limited row for {id}: {lines:#?}"));
-        assert!(row.contains("quota check refused · next in"), "{row:?}");
-        assert!(!row.contains("unavailable"), "{row:?}");
-        assert_eq!(row.contains("63%"), id == "claude-1", "{row:?}");
-    }
+    let claude = lines
+        .iter()
+        .position(|line| line.contains("claude-1"))
+        .unwrap_or_else(|| panic!("the Claude quota reading: {lines:#?}"));
+    assert!(lines[claude].contains("63%"), "{lines:#?}");
+    assert!(
+        lines[claude + 1].contains("quota check refused · next in"),
+        "{lines:#?}"
+    );
+    assert!(!lines[claude + 1].contains("unavailable"), "{lines:#?}");
+    let codex = lines
+        .iter()
+        .find(|line| line.contains("codex-1:"))
+        .unwrap_or_else(|| panic!("the Codex quota status: {lines:#?}"));
+    assert!(codex.contains("quota check refused · next in"), "{codex:?}");
+    assert!(!codex.contains("unavailable"), "{codex:?}");
+    assert!(!codex.contains("63%"), "{codex:?}");
 
     minimize_all_panes(&mut dashboard);
     let row = drawn(&mut dashboard, 120, 44)
