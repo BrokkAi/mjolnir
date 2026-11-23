@@ -7169,7 +7169,7 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
 
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
-pub(super) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
+pub(crate) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = remote.control.session_gate.clone();
     let upgrades =
@@ -9638,73 +9638,6 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             .unwrap()
             .is_none()
     );
-}
-
-/// A finished reviewer is destroyed, not left as a stopped sub-agent of the
-/// session that asked for the review (the shape the earlier suspend-only close
-/// left behind). Its usage stays in the accounting table.
-#[cfg(unix)]
-#[tokio::test]
-async fn destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting() {
-    const NAME: &str = "destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting";
-    const CHILD: &str = "MJ_TEST_DESTROY_FINISHED_REVIEWER";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), NAME),
-        )
-        .env(CHILD, "1")
-        .isolated_store(directory.path())
-        .env(
-            mj_core::config::SESSION_INDEX_ENV,
-            directory.path().join("sessionwiki"),
-        )
-        .env("HOME", &home)
-        .env("XDG_DATA_HOME", home.join(".local/share"))
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .run();
-        return;
-    }
-    let _writer = mj_controller::database::install_isolated_test_writer();
-    let workspace = mj_controller::database::create_workspace("Reviewer destroy").unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let parent_id = "0123456789abcdef0123456789abcdef";
-    let reviewer_id = "44444444444444444444444444444444";
-    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
-    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(parent_id),
-    }));
-    mj_controller::database::save_session(&parent).unwrap();
-    let reviewer = runtime_test_session(reviewer_id, &workspace.id, SessionState::Stopped);
-    let mut relation = runtime_test_subagent(reviewer_id, parent_id);
-    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
-    relation.task_name = "review".into();
-    mj_controller::database::save_subagent_session(&reviewer, &relation).unwrap();
-
-    let state = test_runtime_state_loading_the_store();
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        state.destroy_reviewer_child(reviewer_id.to_owned()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let stored = mj_controller::database::load_state().unwrap();
-    assert!(!stored.sessions.contains_key(reviewer_id));
-    assert!(!stored.subagents.contains_key(reviewer_id));
-    assert!(stored.sessions.contains_key(parent_id));
-    let connection = rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
-    let accounted: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM subagent_accounting WHERE child_session_id=?1 AND task_name='review'",
-            [reviewer_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(accounted, 1);
 }
 
 /// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test

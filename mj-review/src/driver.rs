@@ -9,7 +9,7 @@ use super::verdict::{ReviewPassEvidence, ReviewVerdict, ReviewerFailure, review_
 
 pub use mj_core::review::driver::*;
 
-/// One turn review, from the capture that starts it to the action that ends it.
+/// One before-push review, from its committed-change capture to its resolution.
 #[derive(Debug, Clone)]
 pub struct TurnReviewDriver {
     review_id: String,
@@ -19,8 +19,6 @@ pub struct TurnReviewDriver {
     /// notice emitted after the resolved phase replaces it.
     last_verdict: Option<ReviewVerdict>,
     deltas: Vec<RepoDelta>,
-    /// Who produces this review's findings, which decides how the corrective
-    /// prompt describes them.
     /// Frozen launch order and the sole owner of per-role terminal outcomes.
     roles: Vec<ReviewerOutcomeSlot>,
     sequence: u64,
