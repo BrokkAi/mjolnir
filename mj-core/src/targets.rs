@@ -93,7 +93,7 @@ impl ProvisionStage {
             }
             Self::WaitingForWorkerStore => "Waiting for shared target content".into(),
             Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
-            Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
+            Self::WaitingForStartSlot => "Waiting for a start slot".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),
@@ -288,6 +288,10 @@ pub struct CommandSpec {
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
+    /// Keep the stdin pipe open after sending the initial input. On cancellation
+    /// close it first so a cooperating command can clean up before being killed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_stdin_open: bool,
     #[serde(skip)]
     stream_reply: Option<StreamReply>,
     #[serde(skip)]
@@ -321,6 +325,7 @@ impl CommandSpec {
             ssh_session_probe: false,
             ssh_start_marker: false,
             sensitive_stdin: None,
+            keep_stdin_open: false,
             stream_reply: None,
             observer: None,
         }
@@ -471,6 +476,9 @@ impl CommandSpec {
         command.ssh_session = None;
         command.ssh_session_probe = false;
         command.args = session_command_args(&self.program, &self.args, ssh, &lease);
+        if self.keep_stdin_open && self.program == "ssh" {
+            ssh::configure_stdin_lifetime(&mut command.args);
+        }
         // The remote command line is the last argument of every `ssh` session
         // the builders in `targets/ssh.rs` make; `scp` has none.
         if marker
@@ -484,6 +492,12 @@ impl CommandSpec {
             command: std::borrow::Cow::Owned(command),
             lease: Some(lease),
         })
+    }
+
+    /// Retain the stdin pipe as a lifetime signal after any initial input.
+    pub fn keep_stdin_open(mut self) -> Self {
+        self.keep_stdin_open = true;
+        self
     }
 
     /// Whether the command's stdout starts with [`SSH_START_MARKER`].
@@ -1460,6 +1474,10 @@ impl Write for ProgressWriter<'_> {
     }
 }
 
+// Give a cooperating remote command time to stop its group and clean up
+// after SSH forwards EOF, even when the transport itself is unresponsive.
+const REMOTE_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
 /// Streams `input` into a freshly spawned child and collects its output.
 ///
 /// Both executors share this one implementation because the pipe edge cases
@@ -1550,6 +1568,16 @@ fn stream_command_with_stdin(
         let child_done = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let input_failed_writer = input_failed.clone();
         let child_done_writer = child_done.clone();
+        let wait_for_child_done = move || {
+            let (lock, cvar) = &*child_done_writer;
+            let done = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(
+                cvar.wait_while(done, |done| !*done)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        };
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
         // the process group and thereby close the blocked pipe.
@@ -1566,7 +1594,7 @@ fn stream_command_with_stdin(
             // The command stage owns SSH startup and post-EOF work. Start
             // the transfer clock once the writer can send and close stdin
             // before dropping the progress guard.
-            let _progress = command.observer.as_ref().map(|observer| {
+            let progress = command.observer.as_ref().map(|observer| {
                 observer.report(CommandActivity::StdinStarted);
                 ObservedStdin(observer)
             });
@@ -1590,15 +1618,7 @@ fn stream_command_with_stdin(
                     Ok(count) => count,
                     Err(error) => {
                         input_failed_writer.store(true, Ordering::Release);
-                        let (lock, cvar) = &*child_done_writer;
-                        let mut done = lock
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        while !*done {
-                            done = cvar
-                                .wait(done)
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        }
+                        wait_for_child_done();
                         return Err(error).context("read command input");
                     }
                 };
@@ -1610,6 +1630,10 @@ fn stream_command_with_stdin(
                     .context("stream command input")?;
             }
             stdin.flush().context("flush command input")?;
+            if command.keep_stdin_open {
+                drop(progress);
+                wait_for_child_done();
+            }
             Ok(true)
         });
         struct ChildDoneGuard<'a>(&'a (std::sync::Mutex<bool>, std::sync::Condvar));
@@ -1644,10 +1668,34 @@ fn stream_command_with_stdin(
                     .context("reap command after pipe failure")?;
             }
             if is_cancelled() {
-                terminate_cancellable_child(&mut child, false);
+                let close_stdin_first = command.keep_stdin_open
+                    && gate.is_none_or(|gate| gate.phase() == ssh::StartPhase::Started);
+                if !close_stdin_first {
+                    terminate_cancellable_child(&mut child, false);
+                }
                 mark_child_done();
                 if let Some(abort) = abort_stdin {
                     abort();
+                }
+                if close_stdin_first {
+                    let deadline = Instant::now() + REMOTE_CANCEL_GRACE;
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => break,
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, purpose = command.purpose, "wait for command after closing stdin");
+                                terminate_cancellable_child(&mut child, false);
+                                break;
+                            }
+                        }
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            terminate_cancellable_child(&mut child, false);
+                            break;
+                        }
+                        exit_watch.wait(remaining.min(Duration::from_millis(25)));
+                    }
                 }
                 end_reply();
                 if let Err(error) = input_writer.join() {
@@ -2297,8 +2345,8 @@ impl CancellableProcessExecutor {
     ) -> Result<CommandOutput> {
         use std::io::{Seek, SeekFrom};
         ensure!(
-            command.sensitive_stdin.is_none(),
-            "file-output commands cannot carry buffered stdin"
+            !command.keep_stdin_open && command.sensitive_stdin.is_none(),
+            "file-output commands cannot carry buffered or retained stdin"
         );
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
@@ -2333,8 +2381,8 @@ impl CancellableProcessExecutor {
         } else {
             None
         };
-        if let Some(input) = &command.sensitive_stdin {
-            let mut input = std::io::Cursor::new(input.0.as_slice());
+        if command.sensitive_stdin.is_some() || command.keep_stdin_open {
+            let mut input = std::io::Cursor::new(command.sensitive_stdin().unwrap_or_default());
             // Owned bytes, so each attempt gets its own reader.
             return stream_command_with_stdin(
                 process,
@@ -3623,7 +3671,70 @@ impl TargetTemplate {
     }
 }
 
+/// The engine and host holding a container, borrowed from its locator.
+#[derive(Clone, Copy)]
+pub struct ContainerEndpoint<'a> {
+    pub engine: &'static str,
+    pub ssh: Option<&'a SshTarget>,
+    pub container_id: &'a str,
+}
+
+impl ContainerEndpoint<'_> {
+    /// Run a command on the engine's host.
+    pub fn host_command(self, class: SshTrafficClass, command: CommandSpec) -> CommandSpec {
+        match self.ssh {
+            Some(ssh) => command_over_ssh(class, command, ssh),
+            None => command,
+        }
+    }
+}
+
+/// Move a command to the remote host without losing its input or lifecycle metadata.
+pub fn command_over_ssh(
+    class: SshTrafficClass,
+    mut command: CommandSpec,
+    ssh: &SshTarget,
+) -> CommandSpec {
+    let remote = std::iter::once(command.program)
+        .chain(command.args)
+        .collect();
+    let wrapped = ssh_command_owned(class, ssh, remote);
+    command.program = wrapped.program;
+    command.args = wrapped.args;
+    // The wrapped command now opens an SSH session, so it is admitted and
+    // placed on a shared connection like any other.
+    command.ssh_destination = wrapped.ssh_destination;
+    command.ssh_session = wrapped.ssh_session;
+    command
+}
+
 impl TargetLocator {
+    pub fn container_endpoint(&self) -> Option<ContainerEndpoint<'_>> {
+        let (ssh, container_id) = match self {
+            Self::LocalPodman { container_id, .. }
+            | Self::LocalDocker { container_id, .. }
+            | Self::AppleContainer { container_id, .. } => (None, container_id),
+            Self::SshPodman {
+                ssh, container_id, ..
+            }
+            | Self::SshDocker {
+                ssh, container_id, ..
+            }
+            | Self::SshAppleContainer {
+                ssh, container_id, ..
+            }
+            | Self::SshNitro {
+                ssh, container_id, ..
+            } => (Some(ssh), container_id),
+            _ => return None,
+        };
+        Some(ContainerEndpoint {
+            engine: self.container_engine().expect("container locator"),
+            ssh,
+            container_id,
+        })
+    }
+
     /// Container placement includes borrowed workers: each can survive its owner moving.
     pub fn cpu_accounting(&self) -> crate::cpu_usage::CpuAccountingMode {
         if self.container_engine().is_some() {
@@ -4837,6 +4948,116 @@ exit 0
         assert_eq!(output.stdout, b"secret\n");
         assert_eq!(fake.attempts(), 2);
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    // Hard-won: #1671: closing SSH stdin before the mirror finishes cancels it.
+    #[cfg(unix)]
+    #[test]
+    fn keep_stdin_open_allows_normal_completion() {
+        let command = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                r#"
+                exec 3<&0
+                (while IFS= read -r _unused; do :; done; printf early-eof) <&3 &
+                watcher=$!
+                dd if=/dev/zero bs=1024 count=128 2>/dev/null
+                sleep 0.1
+                kill "$watcher" || exit 1
+                wait "$watcher" 2>/dev/null || :
+            "#,
+            ],
+        )
+        .keep_stdin_open();
+        let cancellable =
+            CancellableProcessExecutor::new(Arc::default()).with_deadline(Duration::from_secs(5));
+        for executor in [&ProcessExecutor as &dyn CommandExecutor, &cancellable] {
+            let output = executor.execute(&command).unwrap();
+            assert_eq!(output.status, 0);
+            assert_eq!(output.stdout.len(), 128 * 1024);
+        }
+    }
+
+    // Hard-won: #1671: killing the local SSH client first orphaned remote Git.
+    #[cfg(unix)]
+    #[test]
+    fn keep_stdin_open_cancel_waits_for_eof_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let cleaned = directory.path().join("cleaned");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let command = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                r#"
+                sleep 60 &
+                worker=$!
+                trap 'wait "$worker" 2>/dev/null || :; printf "%s" "$worker" > "$1"; exit 0' TERM
+                exec 3<&0
+                (cat >/dev/null; kill -s TERM 0) <&3 &
+                printf ready
+                wait "$worker"
+            "#,
+                "sh",
+                cleaned.to_str().unwrap(),
+            ],
+        )
+        .keep_stdin_open()
+        .with_stream_reply(move |bytes| {
+            if bytes.is_some() {
+                flag.store(true, Ordering::Release);
+            }
+        });
+        let error = CancellableProcessExecutor::new(cancelled.clone())
+            .with_deadline(Duration::from_secs(5))
+            .execute(&command)
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+        assert!(cancelled.load(Ordering::Acquire));
+        let pid = std::fs::read_to_string(cleaned).unwrap();
+        assert!(process_gone(pid.parse().unwrap()));
+    }
+
+    #[cfg(unix)]
+    fn process_gone(pid: libc::pid_t) -> bool {
+        // SAFETY: signal zero checks existence without sending a signal.
+        (unsafe { libc::kill(pid, 0) == -1 })
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keep_stdin_open_cancel_reaps_a_child_that_ignores_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let command = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                r#"printf '%s' "$$" > "$1"; printf ready; exec sleep 60"#,
+                "sh",
+                pid_file.to_str().unwrap(),
+            ],
+        )
+        .keep_stdin_open()
+        .with_stream_reply(move |bytes| {
+            if bytes.is_some() {
+                flag.store(true, Ordering::Release);
+            }
+        });
+        let started = Instant::now();
+        let result = CancellableProcessExecutor::new(cancelled.clone())
+            .with_deadline(Duration::from_secs(5))
+            .execute(&command);
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(started.elapsed() >= REMOTE_CANCEL_GRACE);
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        assert!(process_gone(pid.parse().unwrap()));
     }
 
     /// A mid-stream stdin read error must kill the child before closing stdin so

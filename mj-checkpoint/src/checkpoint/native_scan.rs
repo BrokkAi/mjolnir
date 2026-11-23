@@ -173,9 +173,9 @@ pub fn native_artifacts_hold_conversation<'a>(
         // agy's `brain` files only support the conversation, which lives in
         // its database; agy loads a conversation without one and fails at the
         // next prompt, so the files alone are no history.
-        HarnessKind::Antigravity => {
-            session_files.any(|path| is_sqlite_native_database(harness, path))
-        }
+        HarnessKind::Antigravity => session_files.any(|path| {
+            is_sqlite_native_database(harness, path) || is_antigravity_legacy_conversation(path)
+        }),
         _ => session_files.next().is_some(),
     }
 }
@@ -217,6 +217,28 @@ pub fn collect_import_native_artifacts(
     session_id: &str,
     source_path: &Path,
 ) -> Result<Vec<NativeArtifact>> {
+    if harness == HarnessKind::OpenCode {
+        use crate::native::opencode;
+        let (database, id) = opencode::database_key(source_path)
+            .context("OpenCode import requires a migrated SQLite session")?;
+        ensure!(
+            id == session_id,
+            "OpenCode native ID does not match its source"
+        );
+        let metadata = fs::symlink_metadata(database)?;
+        ensure!(
+            metadata.is_file(),
+            "OpenCode database is not a regular file"
+        );
+        let data = sqlite_snapshot(database, "OpenCode", |copy| {
+            opencode::retain_session(copy, id)
+        })?;
+        return Ok(vec![NativeArtifact {
+            relative_path: PathBuf::from(OPENCODE_DATABASE),
+            data: data.into(),
+            mode: 0o600,
+        }]);
+    }
     if harness == HarnessKind::Muse {
         return collect_muse_import_artifacts(home, session_id, source_path);
     }
@@ -561,7 +583,7 @@ pub(super) fn is_dsh_session_record(relative_path: &Path, session_id: &str) -> b
 }
 
 /// OpenCode's database within a session home.
-pub(super) const OPENCODE_DATABASE: &str = ".data/opencode/opencode.db";
+pub(super) use crate::native::opencode::DATABASE as OPENCODE_DATABASE;
 
 /// OpenCode keeps every session of a data directory in one SQLite database,
 /// [`OPENCODE_DATABASE`]. A session home has exactly one data directory, so
@@ -583,7 +605,13 @@ pub(super) const ANTIGRAVITY_BRAIN: &str = "antigravity-cli/brain";
 /// selected: the snapshot taken of the database already holds their pages.
 pub(super) fn is_antigravity_native_artifact(relative_path: &Path, session_id: &str) -> bool {
     relative_path == Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{session_id}.db"))
+        || relative_path == Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{session_id}.pb"))
         || relative_path.starts_with(Path::new(ANTIGRAVITY_BRAIN).join(session_id))
+}
+
+fn is_antigravity_legacy_conversation(path: &Path) -> bool {
+    path.parent() == Some(Path::new(ANTIGRAVITY_CONVERSATIONS))
+        && path.extension().is_some_and(|ext| ext == "pb")
 }
 
 /// Whether `relative_path` is a SQLite database a checkpoint carries as a
@@ -805,4 +833,37 @@ pub(super) fn codex_rollout_has_thread_id(path: &Path, thread_id: &str) -> bool 
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_capture_requires_its_own_conversation_and_keeps_legacy_payload() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "literal-id";
+        let brain = Path::new(ANTIGRAVITY_BRAIN).join(id);
+        let log = brain.join("transcript.jsonl");
+        let other = Path::new(ANTIGRAVITY_CONVERSATIONS).join("other.pb");
+        fs::create_dir_all(home.path().join(brain)).unwrap();
+        fs::create_dir_all(home.path().join(ANTIGRAVITY_CONVERSATIONS)).unwrap();
+        fs::write(home.path().join(&log), b"transcript").unwrap();
+        fs::write(home.path().join(other), b"unrelated conversation").unwrap();
+        let error =
+            collect_native_artifacts(HarnessKind::Antigravity, home.path(), id, false).unwrap_err();
+        assert!(error.to_string().contains(NO_SESSION_ARTIFACTS));
+
+        let conversation = Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{id}.pb"));
+        fs::write(home.path().join(&conversation), b"legacy conversation").unwrap();
+        let artifacts =
+            collect_native_artifacts(HarnessKind::Antigravity, home.path(), id, false).unwrap();
+        assert_eq!(
+            artifacts
+                .into_iter()
+                .map(|artifact| artifact.relative_path)
+                .collect::<Vec<_>>(),
+            [log, conversation],
+        );
+    }
 }

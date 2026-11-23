@@ -656,23 +656,6 @@ fn session_environment_check_from(
             ),
         );
     }
-    // The daemon container's sessions run the image's harnesses, which bring
-    // their own Node.js; nothing is installed there.
-    if mj_core::placement::local_harness_runtime()
-        == mj_core::worker_launch::HarnessRuntimePolicy::Image
-    {
-        return DoctorCheck::warning(
-            "session.environment",
-            "Session environment",
-            format!(
-                "The daemon's image has no {} on the sessions' PATH ({entries} entries), so its \
-                 Node-based harnesses cannot start.",
-                join_english(&missing),
-            ),
-            "Run the daemon on an agent-dev image of this release: remove [daemon] image to use \
-             the release's own image.",
-        );
-    }
     if curl.is_some() {
         return DoctorCheck::ready(
             "session.environment",
@@ -1874,7 +1857,7 @@ fn image_worker_summary(inspection: &[u8]) -> String {
 
 fn missing_image_remediation(image: &str) -> String {
     format!(
-        "Pull it with `podman pull {image}`, build it from containers/Containerfile.agent-dev, or run `mj doctor --json --smoke` to verify the full pull-and-run path."
+        "Pull it with `podman pull {image}` or run `mj doctor --json --smoke` to verify the full pull-and-run path."
     )
 }
 
@@ -3521,23 +3504,20 @@ fn container_worker_architectures(config: ConfigStatus<'_>) -> Vec<String> {
     };
     let mut architectures = Vec::new();
     for target in config.targets.values() {
-        let container = match target {
-            TargetTemplate::LocalPodman { container }
-            | TargetTemplate::LocalDocker { container }
-            | TargetTemplate::AppleContainer { container }
-            | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. }
-            | TargetTemplate::SshNitro { container, .. } => container,
-            _ => continue,
+        let Some(container) = target.container() else {
+            continue;
+        };
+        let default_arch = match target {
+            TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. } => {
+                "aarch64"
+            }
+            _ => std::env::consts::ARCH,
         };
         let arch = container
             .platform
             .as_deref()
             .and_then(|platform| platform.rsplit('/').next())
-            .map_or_else(
-                || std::env::consts::ARCH.to_owned(),
-                normalized_worker_architecture,
-            );
+            .map_or_else(|| default_arch.to_owned(), normalized_worker_architecture);
         if !architectures.contains(&arch) {
             architectures.push(arch);
         }

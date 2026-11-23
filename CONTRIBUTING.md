@@ -49,16 +49,16 @@ and container targets, where an unoptimized binary costs transfer size and
 session speed. A profile flag applies to every binary a script builds, so pass
 `--profile dev` to both, or to neither, when trading that for link speed.
 
-Container sessions of a development build use `ghcr.io/brokkai/mjolnir/agent-dev:latest`,
-which master republishes whenever anything the worker compiles from changes. A
-development build installs the musl worker these scripts built and refuses one
-of any other build: a worker's build identity covers committed inputs only, so
-an image's worker that reports your build can still lack uncommitted changes.
-It runs the worker baked into the image only when it finds no worker of its own.
-To exercise that path, build the image from your checkout with
-`scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:dev`, set it
-as the target's `image`, and start `mj` without a portable worker beside it. A
-release instead runs `agent-dev:<version>` and the worker published in it.
+Container sessions use `docker.io/library/buildpack-deps:noble` by default.
+Use `mj image build` to build a per-bundle image from the project's mise recipe.
+Development builds prefer the portable worker built from your checkout. Its
+build identity covers committed inputs only, so a published worker that reports
+the same build can still lack your uncommitted changes.
+
+Daemon-container mode uses `ghcr.io/brokkai/mjolnir/daemon:latest` in development
+builds and the matching version tag in releases. To test daemon-container mode
+from your checkout, run `scripts/build-daemon-image.sh podman` and set
+`[daemon] image` to `localhost/mjolnir/daemon:dev`.
 
 Native Windows builds the controller only. Windows runs no worker, so it has no
 `localhost` target; its sessions run on Linux, in Docker Desktop's Linux engine

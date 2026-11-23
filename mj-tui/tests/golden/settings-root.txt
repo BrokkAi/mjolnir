@@ -22,16 +22,16 @@
 │                     │   SessionWiki                     Keeps every session                                        │                     │
 │                     │   Web Access                      On · 127.0.0.1:3765                                        │                     │
 │                     │                                                                                              │                     │
-│                     │   Display                                                                                    │  ───────────────────╯
-│                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ───────────────────╮
-│                     │   Notifications                   Terminal                                                   │                     │
+│                     │   Display                                                                                    │                     │
+│                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ───────────────────╯
+│                     │   Notifications                   Terminal                                                   │  ───────────────────╮
 │                     │   Advanced                        All off                                                    │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │   Privacy                                                                                    │  ──────────── ▁   ▄ ╮
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │   Other                                                                                      │  ──────────── ▁   ▄ ╮
-│                     │   GitHub events                   On · GitHub activity                                       │                     │
+│                     │                                                                                              │                     │
+│                     │   Privacy                                                                                    │  ───────────────────╯
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │   Other                                                                                      │  ───────────────────╯
+│                     │   GitHub events                   On · GitHub activity                                       │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │   Save and Close                                                                             │                     │
@@ -542,16 +542,16 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 │  │ No me  │ Type                              Podman ▾                                                   │           │
 │  │        │ Machine                           local ▾                                                    │           │
 │           │ Container image                   ubuntu:24.04                                               │           │
-│           │ Download image policy             Pull if missing ▾                                          │  ─────────╯
-│           │ CPU platform                      Default                                                    │  ─────────╮
-│           │ CPU limit                         Default                                                    │           │
+│           │ Download image policy             Pull if missing ▾                                          │           │
+│           │ CPU platform                      Default                                                    │  ─────────╯
+│           │ CPU limit                         Default                                                    │  ─────────╮
 │           │ Memory limit                      Default                                                    │           │
-│           │   Environment variables           0 settings  ›                                              │  ─────────╯
-│           │   Workspace storage               1 setting  ›                                               │  ── ▁   ▄ ╮
-│           │ ☐ Enforce host RAM budget                                                                    │           │
+│           │   Environment variables           0 settings  ›                                              │           │
+│           │   Workspace storage               1 setting  ›                                               │  ─────────╯
+│           │ ☐ Enforce host RAM budget                                                                    │  ── ▁   ▄ ╮
+│           │                                                                                              │           │
 │           │                                                                                              │  ─────────╯
 │           │                                                                                              │  ── ▁   ▄ ╮
-│           │                                                                                              │           │
 │           │                                                                                              │           │
 │           │                                                                                              │           │
 │           │                                                                                              │           │
@@ -785,13 +785,14 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                     ✦  M J O L N I R                     │
-│ Create   Open   Filter: _____________││                                                          │
-│hel ──────────────────────────────────││        Select a session to open its conversation.        │
-│› ■ ACP pretty name               ◇ ⋯ ││                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
+│hel ──────────────────────────────────││                                                          │
+│› ■ ACP pretty name               ◇ ⋯ ││        Select a session to open its conversation.        │
 │  Stopped  podman  codex-1            ││                                                          │
 │  │ No messages yet                   ││                                                          │
 │  │                                   ││                                                          │
+│                                      ││                                                          │
 │                                      ││                                                          │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────╮
@@ -803,10 +804,9 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                                         │
-│  claude-1: refreshing…                                                                           │
+│ + refreshing…                                                                                    │
 │OPENAI                                                                                            │
-│  codex-1: refreshing…                                                                            │
-│  codex-2: refreshing…                                                                            │
+│ + 2 refreshing…                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                 │

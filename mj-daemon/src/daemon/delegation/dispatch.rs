@@ -1,5 +1,5 @@
 //! Scheduling only: requests remain owned by the parent's durable worker queue.
-use mj_controller::database::StoredDelegationResult;
+use super::DelegationResult;
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -9,8 +9,8 @@ enum Phase {
     Pending(Instant),
     Executing,
     Recovery(Instant),
-    Delivery(StoredDelegationResult, Instant),
-    Delivering(StoredDelegationResult),
+    Delivery(DelegationResult, Instant),
+    Delivering(DelegationResult),
     Finished,
 }
 struct Entry {
@@ -35,7 +35,7 @@ pub(super) struct SubagentDispatch {
 }
 pub(super) enum Job {
     Execute(SubagentToolRequest),
-    Deliver(StoredDelegationResult),
+    Deliver(DelegationResult),
 }
 impl SubagentDispatch {
     pub fn observe(&mut self, parent: &str, requests: &[SubagentToolRequest]) {
@@ -85,16 +85,16 @@ impl SubagentDispatch {
             .map(|(id, e)| (e.request.created_at_ms, id.clone()))
             .collect::<Vec<_>>();
         ordered.sort();
-        // Child startup cannot occupy the reserved control lane.
-        let mut executing = [0usize; 2];
-        let mut delivering = 0usize;
+        // Child startup and teardown cannot occupy the listing lanes.
+        let mut executing = [0usize; 3];
+        let mut delivering = [0usize; 2];
         for entry in self.entries.values() {
             if !entry.occupies_slot() {
                 continue;
             }
             match entry.phase {
                 Phase::Executing => executing[execution_lane(&entry.request)] += 1,
-                Phase::Delivering(_) => delivering += 1,
+                Phase::Delivering(_) => delivering[delivery_lane(&entry.request)] += 1,
                 _ => {}
             }
         }
@@ -131,8 +131,10 @@ impl SubagentDispatch {
                     entry.phase = Phase::Executing;
                     ready.push((id, Job::Execute(entry.request.clone())));
                 }
-                Phase::Delivery(result, at) if *at <= now && delivering < 32 => {
-                    delivering += 1;
+                Phase::Delivery(result, at)
+                    if *at <= now && delivering[delivery_lane(&entry.request)] < 32 =>
+                {
+                    delivering[delivery_lane(&entry.request)] += 1;
                     entry
                         .deferred
                         .store(false, std::sync::atomic::Ordering::Release);
@@ -152,7 +154,7 @@ impl SubagentDispatch {
             .map(|entry| entry.deferred.clone())
             .unwrap_or_default()
     }
-    pub fn executed(&mut self, id: &Identity, result: StoredDelegationResult) {
+    pub fn executed(&mut self, id: &Identity, result: DelegationResult) {
         if let Some(entry) = self.entries.get_mut(id) {
             entry.failures = 0;
             entry.last_failure = None;
@@ -211,10 +213,15 @@ impl SubagentDispatch {
 }
 
 fn execution_lane(request: &SubagentToolRequest) -> usize {
-    usize::from(matches!(
-        request.action,
-        SubagentToolAction::CloseAgent { .. }
-    ))
+    match request.action {
+        SubagentToolAction::CloseAgent { .. } => 1,
+        SubagentToolAction::ListAgents => 2,
+        _ => 0,
+    }
+}
+
+fn delivery_lane(request: &SubagentToolRequest) -> usize {
+    usize::from(matches!(request.action, SubagentToolAction::ListAgents))
 }
 
 #[cfg(test)]
@@ -231,15 +238,15 @@ mod tests {
             },
         }
     }
-    fn result(id: &str) -> StoredDelegationResult {
-        StoredDelegationResult {
+    fn result(id: &str) -> DelegationResult {
+        DelegationResult {
             result: mj_core::subagent::SubagentToolResult {
                 request_id: id.into(),
                 completed_at_ms: 2,
                 is_error: false,
                 message: "done".into(),
             },
-            reported_finishes: Vec::new(),
+            persisted: true,
         }
     }
     #[test]
@@ -380,6 +387,54 @@ mod tests {
         let next = queue.ready(Instant::now());
         assert_eq!(next.len(), 2);
         assert!(next.iter().any(|(_, job)| matches!(job, Job::Deliver(_))));
+    }
+
+    #[test]
+    fn listing_executes_and_delivers_with_every_other_lane_saturated() {
+        let mut queue = SubagentDispatch::default();
+        let mut requests = (0..65)
+            .flat_map(|n| {
+                let mut spawn = input(&format!("spawn-{n}"), "", n);
+                spawn.action = SubagentToolAction::SpawnOrchestrator {
+                    task_name: format!("task-{n}"),
+                    instructions: "work".into(),
+                    target: None,
+                    repos: None,
+                    no_github_credentials: false,
+                };
+                let mut close = input(&format!("close-{n}"), "", n);
+                close.action = SubagentToolAction::CloseAgent {
+                    child_session_id: format!("child-{n}"),
+                };
+                [spawn, close]
+            })
+            .collect::<Vec<_>>();
+        queue.observe("parent", &requests);
+        let first = queue.ready(Instant::now());
+        assert_eq!(first.len(), 64);
+        for (id, _) in first.iter().filter(|(id, _)| id.1.starts_with("spawn")) {
+            queue.executed(id, result(&id.1));
+        }
+        let next = queue.ready(Instant::now());
+        assert_eq!(
+            next.iter()
+                .filter(|(_, job)| matches!(job, Job::Deliver(_)))
+                .count(),
+            32
+        );
+        let mut listing = input("list", "", 100);
+        listing.action = SubagentToolAction::ListAgents;
+        requests.push(listing);
+        queue.observe("parent", &requests);
+        let listing = queue.ready(Instant::now());
+        let [(id, Job::Execute(_))] = listing.as_slice() else {
+            panic!("only listing should execute");
+        };
+        assert_eq!(id.1, "list");
+        queue.executed(id, result(&id.1));
+        assert!(
+            matches!(queue.ready(Instant::now()).as_slice(), [(id, Job::Deliver(_))] if id.1 == "list")
+        );
     }
 
     #[test]

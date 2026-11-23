@@ -73,6 +73,7 @@ pub(crate) struct ApiClient {
     /// Where the one "waiting for the daemon" line goes; stderr outside tests.
     wait_notice: fn(&str),
     http: reqwest::Client,
+    _ssh_lease: Option<std::sync::Arc<mj_client::daemon::ssh::SshLease>>,
 }
 
 impl ApiClient {
@@ -89,9 +90,10 @@ impl ApiClient {
         loop {
             let started = std::time::Instant::now();
             let mut client = daemon::connect_or_start().await?;
-            let instance_id = client.identity().await?.instance_id;
+            let identity = client.identity().await?;
+            let instance_id = &identity.instance_id;
             let daemon_ready = started.elapsed();
-            let error = match Self::connect_to(&mut client).await {
+            let error = match Self::connect_to(&mut client, &identity).await {
                 Ok(connected) => {
                     // A slow command after a handoff has to say whether it
                     // waited for the daemon or for its web API.
@@ -115,7 +117,7 @@ impl ApiClient {
                 std::time::Instant::now() < deadline
             } else {
                 replaced += 1;
-                replaced <= 3 && daemon::daemon_was_replaced(&instance_id).await
+                replaced <= 3 && daemon::daemon_was_replaced(instance_id).await
             };
             if !follow {
                 return Err(error);
@@ -129,10 +131,24 @@ impl ApiClient {
     /// diagnostics use this so they never start or replace a daemon.
     pub(crate) async fn connect_running() -> Result<Self> {
         let mut client = mj_client::daemon::connect_existing().await?;
-        Self::connect_to(&mut client).await
+        let identity = client.identity().await?;
+        Self::connect_to(&mut client, &identity).await
     }
 
-    async fn connect_to(client: &mut daemon::DaemonClient) -> Result<Self> {
+    pub(crate) async fn connect_to(
+        client: &mut daemon::DaemonClient,
+        identity: &mj_client::daemon::DaemonIdentity,
+    ) -> Result<Self> {
+        if let Some((base_url, token)) = client.direct_api_endpoint(identity)? {
+            let http = http_client(None, None)?;
+            probe_api(&http, &base_url).await?;
+            let mut api = Self::with_http(base_url, token, http);
+            api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
+            api.daemon_instance = Some(identity.instance_id.clone());
+            api._ssh_lease = client.ssh_lease();
+            return Ok(api);
+        }
+
         let access = daemon::wait_for_web_access(client).await?;
         let mj_client::web::WebViewerAccess::Ready {
             viewer_url,
@@ -158,9 +174,8 @@ impl ApiClient {
         probe_api(&http, &viewer_url).await?;
         let token = client.api_credential().await?;
         let mut api = Self::with_http(viewer_url, token, http);
-        let identity = client.identity().await?;
-        api.daemon_on_client_filesystem = client.shares_client_filesystem(&identity);
-        api.daemon_instance = Some(identity.instance_id);
+        api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
+        api.daemon_instance = Some(identity.instance_id.clone());
         Ok(api)
     }
 
@@ -178,6 +193,7 @@ impl ApiClient {
             busy_retry: BusyRetry::DEFAULT,
             wait_notice: |line| eprintln!("{line}"),
             http,
+            _ssh_lease: None,
         }
     }
 

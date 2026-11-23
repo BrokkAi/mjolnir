@@ -506,9 +506,7 @@ impl Controller {
                     .additional_mounts
                     .clone_from(&record.additional_mounts);
             } else if plan.image_changed() {
-                settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(
-                    &plan.target_image,
-                ));
+                settings.record_upgrade_image(&plan.target_image);
             }
         }
         self.persist_session_state(session_id)

@@ -1,13 +1,10 @@
 **
 !containers/
-!containers/Containerfile.agent-dev
-!scripts/
-!scripts/install-muse.py
-!scripts/install-antigravity.py
-# The image's worker stage compiles mj-worker, and Cargo resolves the whole
+!containers/Containerfile.daemon
+# The image's worker stage compiles mj and mj-worker. Cargo resolves the whole
 # workspace, so it needs every member. Keep this list equal to the workspace
 # members in Cargo.toml and the worker stage's COPY lines in
-# containers/Containerfile.agent-dev; scripts/release-workflow.test.mjs checks.
+# containers/Containerfile.daemon; scripts/release-workflow.test.mjs checks.
 !Cargo.toml
 !Cargo.lock
 !rust-toolchain.toml

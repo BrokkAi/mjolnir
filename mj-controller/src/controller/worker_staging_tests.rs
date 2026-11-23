@@ -23,7 +23,7 @@ use crate::targets::{CommandPlan, ProcessExecutor};
 use crate::test_isolation::{IsolatedTest, test_name};
 
 #[test]
-#[ignore = "requires Docker, agent-dev image, MJ_WORKER_BINARY and MJ_INSTANCE=issue-1138-docker"]
+#[ignore = "requires Docker, the daemon image, MJ_WORKER_BINARY and MJ_INSTANCE=issue-1138-docker"]
 fn stopped_docker_session_recovers_with_the_current_worker_build() {
     assert_eq!(mj_core::config::instance_identity(), "issue-1138-docker");
     let source =
@@ -51,7 +51,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
                 &format!("dev.mj.session={session}"),
                 "--label",
                 "dev.mj.instance=issue-1138-docker",
-                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "ghcr.io/brokkai/mjolnir/daemon:latest",
                 "sleep",
                 "infinity",
             ],
@@ -179,7 +179,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
 }
 
 #[test]
-#[ignore = "requires Docker, the agent-dev image and a portable MJ_WORKER_BINARY of this build"]
+#[ignore = "requires Docker, the daemon image and a portable MJ_WORKER_BINARY of this build"]
 fn a_container_runs_its_images_worker_through_the_hel_link() {
     let source =
         PathBuf::from(std::env::var_os("MJ_WORKER_BINARY").expect("portable Linux worker"));
@@ -201,7 +201,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
                 "-d",
                 "--name",
                 &container_id,
-                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "ghcr.io/brokkai/mjolnir/daemon:latest",
                 "sleep",
                 "infinity",
             ],

@@ -5,7 +5,11 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
 // SessionOperationDisplay is one daemon-owned lifecycle operation the
@@ -306,7 +311,40 @@ func lastAgentMessage(transcript []*core.TranscriptItem, unchangedPrefix int, pr
 }
 
 func agentActivityText(item *core.TranscriptItem) (string, bool) {
-	panic("unported: mj-tui/src/ingest.rs agent_activity_text")
+	var text string
+	switch body := item.Body.(type) {
+	case core.TranscriptBodyThought:
+		text = core.MaterializedChunksText(body.Chunks)
+	case core.TranscriptBodyTool:
+		text = "[invalid tool call]"
+		if title, ok := ingestToolCallTitle(body.Call.Value()); ok {
+			text = title
+		}
+	default:
+		return "", false
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// ingestToolCallTitle is a tool call's "title" when the call is an object
+// whose title is a string (serde_json's `get("title").and_then(as_str)`).
+func ingestToolCallTitle(call json.RawMessage) (string, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(call, &object) != nil {
+		return "", false
+	}
+	raw, ok := object["title"]
+	if !ok {
+		return "", false
+	}
+	var title string
+	if raw = bytes.TrimSpace(raw); len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &title) != nil {
+		return "", false
+	}
+	return title, true
 }
 
 func latestAgentActivityIn(transcript []*core.TranscriptItem, start, end int) *indexedText {
@@ -375,7 +413,52 @@ type PreparedMaterializedSessionSummary struct {
 // PreparedMaterializedSessionSummaryFromMaterialized is
 // PreparedMaterializedSessionSummary::from_materialized.
 func PreparedMaterializedSessionSummaryFromMaterialized(summary core.MaterializedSessionSummary, viewedThroughEventOrdinal uint64) PreparedMaterializedSessionSummary {
-	panic("unported: mj-tui/src/ingest.rs PreparedMaterializedSessionSummary::from_materialized")
+	var lastAgentMessage *string
+	if summary.LastAgentMessage != nil {
+		text := *summary.LastAgentMessage
+		lastAgentMessage = &text
+	}
+	var lastUserMessage *string
+	if summary.LastUserMessage != nil {
+		visible := core.StripHiddenPromptContext(*summary.LastUserMessage)
+		if strings.TrimSpace(visible) != "" {
+			lastUserMessage = &visible
+		}
+	}
+	return PreparedMaterializedSessionSummary{
+		sessionID:                         summary.SessionID,
+		appliedEventOrdinal:               summary.AppliedEventOrdinal,
+		currentTurnStartedAt:              ingestTurnStartedAt(summary.Execution),
+		lastActivityAtMs:                  ingestPositiveMillis(summary.LastActivityAtMs),
+		lastAgentMessage:                  lastAgentMessage,
+		lastUserMessage:                   lastUserMessage,
+		lastAgentMessageFollowsLastUser:   summary.LastAgentMessageFollowsLastUser,
+		agentMessageLatestContentOrdinals: summary.AgentMessageLatestContentOrdinals,
+		unreadAgentMessages:               ingestCountAbove(summary.AgentMessageLatestContentOrdinals, viewedThroughEventOrdinal),
+		interruptionEventOrdinals:         summary.InterruptionEventOrdinals,
+		unreadInterruptions:               ingestCountAbove(summary.InterruptionEventOrdinals, viewedThroughEventOrdinal),
+	}
+}
+
+// ingestTurnStartedAt is when a running turn started, in epoch seconds; nil
+// for any other execution state or a start before the epoch.
+func ingestTurnStartedAt(execution core.MaterializedExecutionState) *uint64 {
+	running, ok := execution.(core.MaterializedExecutionStateRunning)
+	if !ok || running.StartedAtMs < 0 {
+		return nil
+	}
+	seconds := uint64(running.StartedAtMs) / 1_000
+	return &seconds
+}
+
+// ingestPositiveMillis is a millisecond timestamp when it is after the
+// epoch; nil otherwise.
+func ingestPositiveMillis(value *int64) *uint64 {
+	if value == nil || *value <= 0 {
+		return nil
+	}
+	millis := uint64(*value)
+	return &millis
 }
 
 // PreparedMaterializedSessionDetailFromMaterialized projects one session
@@ -389,7 +472,187 @@ func PreparedMaterializedSessionDetailFromMaterialized(session core.Materialized
 // transcript detail; semantic attention is served separately by the daemon,
 // except the latest-turn rule kept for pre-64 workers.
 func PreparedMaterializedSessionDetailFromAssessedMaterialized(session core.MaterializedSession, assessment *core.TurnAssessment, viewedThroughEventOrdinal uint64, previous MaterializedProjectionCache) PreparedMaterializedSessionDetail {
-	panic("unported: mj-tui/src/ingest.rs PreparedMaterializedSessionDetail::from_assessed_materialized")
+	items := session.Transcript
+	currentTurnStartedAt := ingestTurnStartedAt(session.Execution)
+	unchangedPrefix := previous.unchangedPrefix(items)
+	lastAgent := lastAgentMessage(items, unchangedPrefix, &previous)
+	latestActivity := latestAgentActivity(items, unchangedPrefix, &previous)
+	// `/clear` starts a new conversation; the preview fields describe only
+	// that conversation, never the one before the boundary. The cutoff is by
+	// position, as in the stored summary, so an item tied with the boundary
+	// (a restored archive allows ties) is excluded by both.
+	var conversationStart *uint64
+	for index := len(items) - 1; index >= 0; index-- {
+		if core.IsContextBoundary(items[index].StableID) {
+			position := items[index].Position
+			conversationStart = &position
+			break
+		}
+	}
+	inConversation := func(index int) bool {
+		return conversationStart == nil || items[index].Position > *conversationStart
+	}
+	var lastUser *indexedText
+	for index := len(items) - 1; index >= 0; index-- {
+		user, ok := items[index].Body.(core.TranscriptBodyUser)
+		if !ok {
+			continue
+		}
+		text := core.MaterializedContentText(user.Content)
+		if strings.TrimSpace(text) != "" {
+			lastUser = &indexedText{index: index, text: text}
+			break
+		}
+	}
+	if lastUser != nil && !inConversation(lastUser.index) {
+		lastUser = nil
+	}
+	var conversationAgent *indexedText
+	if lastAgent != nil && inConversation(lastAgent.index) {
+		conversationAgent = lastAgent
+	}
+	followsLastUser := conversationAgent != nil && (lastUser == nil || conversationAgent.index > lastUser.index)
+	var latestActivityAfterLastUser *string
+	if latestActivity != nil && inConversation(latestActivity.index) &&
+		(lastUser == nil || latestActivity.index > lastUser.index) {
+		text := latestActivity.text
+		latestActivityAfterLastUser = &text
+	}
+	// The cache is the previous projection's and is never written: a lookup
+	// is what Rust's remove does for the one item that holds each key.
+	cachedToolDiffstats := previous.toolDiffstats
+	toolDiffstats := map[toolDiffstatKey][]string{}
+	currentToolDiffstats := map[string][]string{}
+	for _, item := range items {
+		key := toolDiffstatKey{stableID: item.StableID, lastChangedAtMs: item.LastChangedAtMs}
+		stats, ok := cachedToolDiffstats[key]
+		if !ok {
+			stats, ok = transcript.MaterializedToolDiffstats(item)
+		}
+		if ok {
+			currentToolDiffstats[item.StableID] = stats
+			toolDiffstats[key] = stats
+		}
+	}
+	// Unread counting needs every agent message, so the list is carried
+	// forward and only its changed tail is rebuilt.
+	agentMessages := slices.Clone(previous.agentMessages[:ingestIndexedBefore(previous.agentMessages, unchangedPrefix)])
+	for index := unchangedPrefix; index < len(items); index++ {
+		item := items[index]
+		if item.IsNonemptyAgentMessage() && item.LatestContentEventOrdinal != nil {
+			agentMessages = append(agentMessages, indexedOrdinal{index: index, ordinal: *item.LatestContentEventOrdinal})
+		}
+	}
+	agentOrdinals := make([]uint64, 0, len(agentMessages))
+	for _, message := range agentMessages {
+		agentOrdinals = append(agentOrdinals, message.ordinal)
+	}
+	unreadAgentMessages := ingestCountAbove(agentOrdinals, viewedThroughEventOrdinal)
+	interruptionEvents := slices.Clone(previous.interruptionEvents[:ingestIndexedBefore(previous.interruptionEvents, unchangedPrefix)])
+	for index := unchangedPrefix; index < len(items); index++ {
+		if items[index].IsWorkInterruption() {
+			interruptionEvents = append(interruptionEvents, indexedOrdinal{index: index, ordinal: items[index].Position})
+		}
+	}
+	interruptionOrdinals := make([]uint64, 0, len(interruptionEvents)+1)
+	for _, event := range interruptionEvents {
+		interruptionOrdinals = append(interruptionOrdinals, event.ordinal)
+	}
+	if session.LastTurnOutcome != nil {
+		if ordinal, ok := session.LastTurnOutcome.InterruptionOrdinal(); ok {
+			interruptionOrdinals = append(interruptionOrdinals, ordinal)
+		}
+	}
+	slices.Sort(interruptionOrdinals)
+	interruptionOrdinals = slices.Compact(interruptionOrdinals)
+	unreadInterruptions := ingestCountAbove(interruptionOrdinals, viewedThroughEventOrdinal)
+	queuedPrompts := make([]core.QueuedPrompt, 0, len(session.QueuedPrompts))
+	for _, prompt := range session.QueuedPrompts {
+		kind := prompt.Kind
+		if kind == nil {
+			kind = core.QueuedCommandKindPrompt{}
+		}
+		queuedPrompts = append(queuedPrompts, core.QueuedPrompt{
+			ID:          prompt.CommandID,
+			Kind:        kind,
+			Text:        core.MaterializedContentText(ingestContentRaw(prompt.Content)),
+			Attachments: []core.Attachment{},
+			CreatedAtMs: prompt.QueuedAtMs,
+		})
+	}
+	legacyAwaitingInput := session.UnansweredInputOutcome(assessment, nil) != nil
+	pendingElicitations := slices.Clone(session.PendingElicitations)
+	snapshot := chat.TranscriptSnapshotFromMaterializedReusing(
+		&session,
+		currentToolDiffstats,
+		previous.convertedEntries,
+		previous.convertedDiffstats,
+	)
+	convertedEntries := snapshot.ConvertedEntries()
+	var lastAgentText *string
+	if conversationAgent != nil {
+		text := conversationAgent.text
+		lastAgentText = &text
+	}
+	var lastUserText *string
+	if lastUser != nil {
+		text := lastUser.text
+		lastUserText = &text
+	}
+	return PreparedMaterializedSessionDetail{
+		sessionID:                         session.SessionID,
+		appliedEventOrdinal:               session.AppliedEventOrdinal,
+		currentTurnStartedAt:              currentTurnStartedAt,
+		legacyAwaitingInput:               legacyAwaitingInput,
+		lastActivityAtMs:                  ingestPositiveMillis(session.GetLastActivityAtMs()),
+		lastAgentMessage:                  lastAgentText,
+		lastUserMessage:                   lastUserText,
+		lastAgentMessageFollowsLastUser:   followsLastUser,
+		latestAgentActivityAfterLastUser:  latestActivityAfterLastUser,
+		agentMessageLatestContentOrdinals: agentOrdinals,
+		unreadAgentMessages:               unreadAgentMessages,
+		interruptionEventOrdinals:         interruptionOrdinals,
+		unreadInterruptions:               unreadInterruptions,
+		transcript:                        snapshot,
+		queuedPrompts:                     queuedPrompts,
+		pendingElicitations:               pendingElicitations,
+		projection: MaterializedProjectionCache{
+			transcript:          items,
+			agentMessages:       agentMessages,
+			interruptionEvents:  interruptionEvents,
+			lastAgentMessage:    lastAgent,
+			latestAgentActivity: latestActivity,
+			toolDiffstats:       toolDiffstats,
+			convertedEntries:    convertedEntries,
+			convertedDiffstats:  currentToolDiffstats,
+		},
+	}
+}
+
+// ingestIndexedBefore is how many leading entries index a transcript item
+// before end (Rust's partition_point).
+func ingestIndexedBefore(entries []indexedOrdinal, end int) int {
+	count, _ := slices.BinarySearchFunc(entries, end, func(entry indexedOrdinal, end int) int {
+		if entry.index < end {
+			return -1
+		}
+		return 1
+	})
+	return count
+}
+
+// ingestContentRaw is queued prompt content in the form the transcript text
+// helpers read.
+func ingestContentRaw(content []any) []json.RawMessage {
+	raw := make([]json.RawMessage, 0, len(content))
+	for _, value := range content {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			encoded = []byte("null")
+		}
+		raw = append(raw, encoded)
+	}
+	return raw
 }
 
 // TranscriptHydration is whether a session's transcript has arrived. The
@@ -446,7 +709,75 @@ func (d *DashboardState) sessionDetailEntry(sessionID string) *SessionDetail {
 }
 
 func (d *DashboardState) SetNotificationCards(cards *core.SnapshotMap[string, client.NotificationCard]) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_notification_cards")
+	if ingestNotificationCardsEqual(d.notificationCards, cards) {
+		return
+	}
+	if cards != nil {
+		for id, detail := range *d.sessionDetails.Mut() {
+			accepted, ok := detail.notificationDismissal.(NotificationDismissalStateAccepted)
+			if !ok {
+				continue
+			}
+			switch accepted.Target.(type) {
+			case core.NotificationDismissalStack, core.NotificationDismissalQuestion:
+			default:
+				continue
+			}
+			var published core.NotificationDismissal
+			if card := cards.GetShared(id); card != nil {
+				published = card.Dismissal
+			}
+			if published == nil || !notificationDismissalEqual(published, accepted.Target) {
+				detail.notificationDismissal = nil
+			}
+		}
+		previous := d.notificationCards
+		for id := range d.notifications.errors {
+			var before *client.NotificationCard
+			if previous != nil {
+				before = previous.GetShared(id)
+			}
+			if !ingestNotificationCardEqual(before, cards.GetShared(id)) {
+				delete(d.notifications.errors, id)
+			}
+		}
+	}
+	d.notifications.prunePublishedSkips(func(id string) bool {
+		return cards != nil && cards.ContainsKey(id)
+	})
+	d.notificationCards = cards
+}
+
+// ingestNotificationCardsEqual compares two optional card publications as
+// Rust compares `Option<SnapshotMap<..>>`.
+func ingestNotificationCardsEqual(a, b *core.SnapshotMap[string, client.NotificationCard]) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b, func(left, right *client.NotificationCard) bool {
+		return ingestNotificationCardEqual(left, right)
+	})
+}
+
+// ingestNotificationCardEqual is NotificationCard's derived PartialEq on two
+// optional cards. A card is plain data, so equal cards serialize the same.
+func ingestNotificationCardEqual(a, b *client.NotificationCard) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a == b || ingestJSONEqual(a, b)
+}
+
+// ingestJSONEqual compares two plain-data values by their serialized form,
+// which is their derived PartialEq: nil and empty collections, which Rust
+// does not tell apart, serialize alike.
+func ingestJSONEqual[T any](a, b *T) bool {
+	if a == b {
+		return true
+	}
+	left, leftErr := json.Marshal(a)
+	right, rightErr := json.Marshal(b)
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
 func (d *DashboardState) SetSessionAttentionFor(sessionID string, attention core.SessionAttention) {
@@ -464,7 +795,29 @@ func (d *DashboardState) SetUnreadFrontiers(frontiers core.SnapshotMap[string, u
 }
 
 func (d *DashboardState) SetNotificationDismissals(targets core.SnapshotMap[string, core.NotificationDismissal]) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_notification_dismissals")
+	for id, detail := range *d.sessionDetails.Mut() {
+		accepted, ok := detail.notificationDismissal.(NotificationDismissalStateAccepted)
+		if !ok {
+			continue
+		}
+		if _, failure := accepted.Target.(core.NotificationDismissalFailure); !failure {
+			continue
+		}
+		if target, ok := targets.Get(id); !ok || !notificationDismissalEqual(target, accepted.Target) {
+			detail.notificationDismissal = nil
+		}
+	}
+	if d.notificationCards == nil {
+		held := d.notificationDismissals.Get()
+		for id := range d.notifications.errors {
+			before, hadBefore := held.Get(id)
+			after, hasAfter := targets.Get(id)
+			if hadBefore != hasAfter || (hadBefore && !notificationDismissalEqual(before, after)) {
+				delete(d.notifications.errors, id)
+			}
+		}
+	}
+	d.notificationDismissals = NewTracked(targets)
 }
 
 func (d *DashboardState) SetSessionAttention(attention core.SnapshotMap[string, core.SessionAttention]) {
@@ -475,7 +828,31 @@ func (d *DashboardState) SetSessionAttention(attention core.SnapshotMap[string, 
 }
 
 func (d *DashboardState) SetWorkspaceNames(names map[string]string) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_workspace_names")
+	d.workspaceNames = names
+	workspaceName := ""
+	if id := *d.activeWorkspaceID.Get(); id != nil {
+		workspaceName = d.workspaceDisplayName(*id)
+	}
+	if d.workspaceName != workspaceName {
+		d.workspaceName = workspaceName
+	}
+	// Tabs are alphabetical, ignoring case like workspace name uniqueness
+	// does; the id breaks ties so the order is stable.
+	type tab struct{ id, name string }
+	order := make([]tab, 0, len(names))
+	for id, name := range names {
+		order = append(order, tab{id: id, name: strings.ToLower(name)})
+	}
+	slices.SortFunc(order, func(a, b tab) int {
+		if c := strings.Compare(a.name, b.name); c != 0 {
+			return c
+		}
+		return strings.Compare(a.id, b.id)
+	})
+	d.workspaceOrder = make([]string, 0, len(order))
+	for _, entry := range order {
+		d.workspaceOrder = append(d.workspaceOrder, entry.id)
+	}
 }
 
 func (d *DashboardState) SetWorkspaceName(workspaceName string) {
@@ -491,11 +868,129 @@ func (d *DashboardState) NotifyConfig() *core.NotifyConfig {
 }
 
 func (d *DashboardState) SetConfig(config core.Config) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_config")
+	// Background saves return a fresh snapshot even when configuration did
+	// not change. They must not close a dialog opened after submission.
+	if reflect.DeepEqual(*d.config.Get(), config) {
+		return
+	}
+	for id := range d.quotas {
+		if _, ok := config.EnabledProfile(id); !ok {
+			delete(d.quotas, id)
+		}
+	}
+	for id := range d.quotaRefreshing {
+		if _, ok := config.EnabledProfile(id); !ok {
+			delete(d.quotaRefreshing, id)
+		}
+	}
+	// A `[keys]` edit takes effect with the reload that carried it, so the
+	// bindings are rebuilt before the configuration they came from lands.
+	if d.simpleMode {
+		d.keybinds = core.SimpleKeybinds()
+	} else {
+		d.keybinds = config.Keybinds()
+	}
+	profilesChanged := !reflect.DeepEqual(d.config.Get().Profiles, config.Profiles)
+	d.config.Set(config)
+	if profilesChanged {
+		d.invalidateProfileLoginStatuses()
+	}
+	// A background refresh must not dismiss a newer interaction. Forms
+	// retain their drafts; command availability reads the current config.
+	d.clampSelections()
+}
+
+// ingestChangedRecord is one session record set_state reconciles: its id
+// and its new record, nil when it left.
+type ingestChangedRecord struct {
+	id     string
+	record *core.SessionRecord
 }
 
 func (d *DashboardState) SetState(state core.StateState) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_state")
+	stoppedBySuspend := d.subagentsStoppedBySuspend(&state)
+	changedIDs := map[string]struct{}{}
+	for id := range d.durableRecords.Changes(state.Sessions, ingestJSONEqual[core.SessionRecord]) {
+		changedIDs[id] = struct{}{}
+	}
+	// Local launch rows and optimistic presentation edits must also yield to
+	// the authoritative snapshot, even when that snapshot is unchanged.
+	nativeAgents := *d.nativeAgents.Get()
+	for id := range d.presentedRecords.Changes(d.state.Get().Sessions, ingestJSONEqual[core.SessionRecord]) {
+		if _, native := nativeAgents[id]; !native {
+			changedIDs[id] = struct{}{}
+		}
+	}
+	d.reconciliationVisits += len(changedIDs)
+	changed := make([]ingestChangedRecord, 0, len(changedIDs))
+	for _, id := range slices.Sorted(maps.Keys(changedIDs)) {
+		var record *core.SessionRecord
+		if next, ok := state.Sessions.Get(id); ok {
+			record = &next
+		}
+		changed = append(changed, ingestChangedRecord{id: id, record: record})
+	}
+	// A suspended session leaves the feed, which carries only live sessions.
+	// A pinned pane that showed it says why it emptied, named while the
+	// record is still here to name it.
+	unpinnedBySuspend := []string{}
+	for _, entry := range changed {
+		if entry.record != nil {
+			continue
+		}
+		if kind, ok := d.SessionOperationKind(entry.id); !ok || kind != SessionOperationKindSuspending {
+			continue
+		}
+		if pane, ok := d.PaneForSession(entry.id); ok && pane != d.BrowsePane() {
+			unpinnedBySuspend = append(unpinnedBySuspend, d.sessionNoticeName(entry.id))
+		}
+	}
+	d.durableRecords = state.Sessions
+	for id := range d.state.Get().EnvironmentOwners.Changes(state.EnvironmentOwners, func(a, b *string) bool { return *a == *b }) {
+		delete(*d.projectSources.Mut(), id)
+	}
+	rows := d.state.Get().Sessions
+	for _, entry := range changed {
+		if entry.record != nil {
+			rows.Insert(entry.id, *entry.record)
+			continue
+		}
+		rows.Remove(entry.id)
+		for child := range d.nativeByOwner[entry.id] {
+			rows.Remove(child)
+			delete(*d.sessionDetails.Mut(), child)
+			delete(*d.projectSources.Mut(), child)
+		}
+		delete(*d.sessionDetails.Mut(), entry.id)
+		delete(*d.projectSources.Mut(), entry.id)
+	}
+	state.Sessions = rows
+	d.state.Set(state)
+	d.applyOperationProjection()
+	activeWorkspaceID := *d.activeWorkspaceID.Get()
+	if d.navigation.retainSessions(func(id string) bool {
+		return sessionBelongsInLayout(d.state.Get(), *d.nativeAgents.Get(), activeWorkspaceID, id)
+	}) {
+		d.reconcilePins()
+		d.markLayoutModified()
+	}
+	for _, name := range unpinnedBySuspend {
+		d.saySuspendedSessionWasUnpinned(name)
+	}
+	for _, entry := range changed {
+		if entry.record == nil || !entry.record.State.HasLiveWorker() {
+			d.ClearSessionUnreachable(entry.id)
+		}
+		d.releaseFinishedConversation(entry.id)
+		if entry.record != nil {
+			d.sessionDetailEntry(entry.id).updateUnread(entry.record.ViewedThroughEventOrdinal)
+		}
+	}
+	// After the projection, so the rows see the records the dashboard does.
+	d.RebuildResumeRows()
+	d.clampSelections()
+	d.leaveSubagentsStoppedBySuspend(stoppedBySuspend)
+	d.presentedRecords = d.state.Get().Sessions
 }
 
 // SetMoveOperations replaces the daemon's complete durable Move projection.
@@ -513,7 +1008,80 @@ func (d *DashboardState) SetMoveOperations(operations []core.MoveOperation) {
 }
 
 func (d *DashboardState) SetMoveSnapshot(operations core.SnapshotMap[string, core.MoveOperation]) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_move_snapshot")
+	type moveChange struct {
+		previous *core.MoveOperation
+		next     *core.MoveOperation
+	}
+	changes := []moveChange{}
+	for id, next := range d.moveOperations.Changes(operations, ingestJSONEqual[core.MoveOperation]) {
+		change := moveChange{}
+		if previous, ok := d.moveOperations.Get(id); ok {
+			change.previous = &previous
+		}
+		if next != nil {
+			copied := *next
+			change.next = &copied
+		}
+		changes = append(changes, change)
+	}
+	if len(changes) == 0 {
+		return
+	}
+	previousActive := map[string]string{}
+	for _, change := range changes {
+		if change.previous != nil && change.previous.IsActive() {
+			previousActive[change.previous.Selection.SessionID] = change.previous.OperationID
+		}
+	}
+	d.moveOperations = operations
+	type activeMove struct {
+		sessionID        string
+		operationID      string
+		profileID        *string
+		targetTemplateID *string
+		createdAt        string
+	}
+	active := []activeMove{}
+	for _, change := range changes {
+		if change.next == nil || !change.next.IsActive() {
+			continue
+		}
+		active = append(active, activeMove{
+			sessionID:        change.next.Selection.SessionID,
+			operationID:      change.next.OperationID,
+			profileID:        change.next.Selection.ProfileID,
+			targetTemplateID: change.next.Selection.TargetTemplateID,
+			createdAt:        change.next.CreatedAt,
+		})
+	}
+	for _, sessionID := range slices.Sorted(maps.Keys(previousActive)) {
+		operationID := previousActive[sessionID]
+		current, ok := d.moveOperations.Get(sessionID)
+		stillActive := ok && current.IsActive()
+		if stillActive {
+			continue
+		}
+		if operation, ok := (*d.sessionOperations.Get())[sessionID]; ok &&
+			operation.operationID != nil && *operation.operationID == operationID {
+			d.FinishSessionOperation(sessionID)
+		}
+	}
+	for _, move := range active {
+		if _, ok := d.SessionOperationKind(move.sessionID); !ok {
+			var startedAt uint64
+			if created, err := time.Parse(time.RFC3339, move.createdAt); err == nil {
+				startedAt = uint64(max(created.Unix(), 0))
+			}
+			d.BeginSessionOperationAt(move.sessionID, SessionOperationKindMoving, nil, startedAt)
+		}
+		if move.profileID != nil && move.targetTemplateID != nil {
+			d.SetResumeDestination(move.sessionID, *move.profileID, *move.targetTemplateID)
+		}
+		operationID := move.operationID
+		d.SetSessionOperationIdentity(move.sessionID, &operationID, true)
+	}
+	d.RebuildResumeRows()
+	d.clampSelections()
 }
 
 func (d *DashboardState) BeginSessionOperation(sessionID string, kind SessionOperationKind, placeholder *core.SessionRecord) {
@@ -584,7 +1152,20 @@ func (d *DashboardState) SetResumeDestination(sessionID string, profileID string
 }
 
 func (d *DashboardState) FinishSessionOperation(sessionID string) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::finish_session_operation")
+	operations := d.sessionOperations.Mut()
+	operation, ok := (*operations)[sessionID]
+	previewFinished := ok && operation.placeholder != nil
+	delete(*operations, sessionID)
+	pending := false
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil {
+		pending = strings.HasPrefix(session.ID, "pending-")
+	}
+	if (previewFinished && !d.durableRecords.ContainsKey(sessionID)) || pending {
+		d.state.Mut().Sessions.Remove(sessionID)
+	}
+	d.releaseFinishedConversation(sessionID)
+	d.RebuildResumeRows()
+	d.clampSelections()
 }
 
 // releaseFinishedConversation: a lifecycle ending releases its pane and
@@ -592,7 +1173,18 @@ func (d *DashboardState) FinishSessionOperation(sessionID string) {
 // historical row may still be inspected without trying to attach to a
 // stopped worker.
 func (d *DashboardState) releaseFinishedConversation(sessionID string) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::release_finished_conversation")
+	if !d.PaneSessionIsSuspended(sessionID) && d.state.Get().Sessions.ContainsKey(sessionID) {
+		return
+	}
+	pane, ok := d.PaneForSession(sessionID)
+	if !ok {
+		return
+	}
+	if pane != d.BrowsePane() && d.state.Get().Sessions.ContainsKey(sessionID) {
+		d.ReleaseSuspendedPane(pane, sessionID)
+	} else {
+		d.SetPaneSession(pane, nil)
+	}
 }
 
 func (d *DashboardState) SessionOperationKind(sessionID string) (SessionOperationKind, bool) {
@@ -632,10 +1224,14 @@ func (d *DashboardState) MoveOperationActive(sessionID string) bool {
 }
 
 func (d *DashboardState) applyOperationProjection() {
-	state := d.state.Mut()
 	for _, sessionID := range slices.Sorted(maps.Keys(*d.sessionOperations.Get())) {
 		operation := (*d.sessionOperations.Get())[sessionID]
-		if operation.placeholder != nil && !state.Sessions.ContainsKey(sessionID) {
+		if operation.placeholder == nil {
+			continue
+		}
+		// Rust's entry() takes the state mutably for every placeholder.
+		state := d.state.Mut()
+		if !state.Sessions.ContainsKey(sessionID) {
 			state.Sessions.Insert(sessionID, *operation.placeholder)
 		}
 	}
@@ -701,17 +1297,90 @@ func (d *DashboardState) SetTargetStorage(views []core.TargetStorageView) {
 // daemon's verdict on each: its worker root, workspace, staged profile home
 // and /tmp.
 func (d *DashboardState) sessionFilesystems(sessionID string) []SessionFilesystem {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::session_filesystems")
+	record := d.state.Get().Sessions.GetShared(sessionID)
+	if record == nil || record.Target == nil {
+		return []SessionFilesystem{}
+	}
+	var projectDirectory *string
+	if checkout, err := d.state.Get().Checkout(sessionID); err == nil {
+		if directory, ok := checkout.ProjectDirectory(); ok {
+			projectDirectory = &directory
+		}
+	}
+	paths := core.SessionStoragePathsOf(record.Target, sessionID, projectDirectory)
+	var view *core.TargetStorageView
+	for index := range d.targetStorage {
+		if d.targetStorage[index].Host == paths.Host {
+			view = &d.targetStorage[index]
+			break
+		}
+	}
+	if view == nil {
+		return []SessionFilesystem{}
+	}
+	filesystems := []SessionFilesystem{}
+	for _, path := range paths.All() {
+		if path == "" {
+			continue
+		}
+		filesystem := view.FilesystemFor(path)
+		if filesystem == nil || slices.ContainsFunc(filesystems, func(known SessionFilesystem) bool {
+			return known.Filesystem.Mount == filesystem.Mount
+		}) {
+			continue
+		}
+		filesystems = append(filesystems, SessionFilesystem{View: view, Filesystem: filesystem})
+	}
+	return filesystems
 }
 
 // sessionStorageProblem is "disk full: …" while one of the session's own
 // filesystems is full.
 func (d *DashboardState) sessionStorageProblem(sessionID string) (string, bool) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::session_storage_problem")
+	record := d.state.Get().Sessions.GetShared(sessionID)
+	if record == nil || record.Target == nil {
+		return "", false
+	}
+	checkout, err := d.state.Get().Checkout(sessionID)
+	if err != nil {
+		return "", false
+	}
+	var projectDirectory *string
+	if directory, ok := checkout.ProjectDirectory(); ok {
+		projectDirectory = &directory
+	}
+	paths := core.SessionStoragePathsOf(record.Target, sessionID, projectDirectory)
+	for index := range d.targetStorage {
+		if d.targetStorage[index].Host == paths.Host {
+			return d.targetStorage[index].ProblemFor(paths.All())
+		}
+	}
+	return "", false
 }
 
 func (d *DashboardState) SetHostCapacities(capacities []client.RuntimeHostCapacity) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::set_host_capacities")
+	held := make([]client.RuntimeHostCapacity, 0, len(d.capacityDetails))
+	for _, id := range slices.Sorted(maps.Keys(d.capacityDetails)) {
+		held = append(held, d.capacityDetails[id])
+	}
+	if slices.EqualFunc(held, capacities, func(a, b client.RuntimeHostCapacity) bool {
+		return ingestJSONEqual(&a, &b)
+	}) {
+		return
+	}
+	affected := []string{}
+	for _, detail := range held {
+		affected = append(affected, detail.Reading.TargetIDs...)
+	}
+	for _, detail := range capacities {
+		affected = append(affected, detail.Reading.TargetIDs...)
+	}
+	d.capacityDetails = make(map[string]client.RuntimeHostCapacity, len(capacities))
+	for _, detail := range capacities {
+		d.capacityDetails[detail.Reading.ID] = detail
+	}
+	d.capacityIndex = min(d.capacityIndex, max(len(d.capacityDetails)-1, 0))
+	d.refreshWizardResourceLimits(affected)
 }
 
 // ApplyMaterializedSession replaces dashboard detail with the controller's
@@ -743,14 +1412,81 @@ func (d *DashboardState) TakeProjectionCache(sessionID string) MaterializedProje
 }
 
 func (d *DashboardState) ApplyPreparedMaterializedSession(prepared PreparedMaterializedSessionDetail) bool {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::apply_prepared_materialized_session")
+	sessionID := prepared.sessionID
+	var through uint64
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil {
+		through = session.ViewedThroughEventOrdinal
+	}
+	detail := d.sessionDetailEntry(sessionID)
+	if current := detail.materializedAppliedEventOrdinal; current != nil && prepared.appliedEventOrdinal < *current {
+		return false
+	}
+	applied := prepared.appliedEventOrdinal
+	detail.materializedAppliedEventOrdinal = &applied
+	detail.currentTurnStartedAt = prepared.currentTurnStartedAt
+	detail.legacyAwaitingInput = prepared.legacyAwaitingInput
+	if accepted, ok := detail.notificationDismissal.(NotificationDismissalStateAccepted); ok {
+		if _, question := accepted.Target.(core.NotificationDismissalQuestion); question && prepared.appliedEventOrdinal >= accepted.Ordinal {
+			detail.notificationDismissal = nil
+		}
+	}
+	detail.lastActivityAtMs = prepared.lastActivityAtMs
+	detail.lastAgentMessage = prepared.lastAgentMessage
+	detail.lastUserMessage = prepared.lastUserMessage
+	detail.lastAgentMessageFollowsLastUser = prepared.lastAgentMessageFollowsLastUser
+	detail.latestAgentActivityAfterLastUser = prepared.latestAgentActivityAfterLastUser
+	detail.agentMessageLatestContentOrdinals = prepared.agentMessageLatestContentOrdinals
+	detail.unreadAgentMessages = prepared.unreadAgentMessages
+	detail.interruptionEventOrdinals = prepared.interruptionEventOrdinals
+	detail.unreadInterruptions = prepared.unreadInterruptions
+	// The replaced transcript owns every converted entry and rendered line of
+	// the previous projection, so it is freed off the loop.
+	retire(struct {
+		transcript *chat.TranscriptSnapshot
+		projection MaterializedProjectionCache
+	}{detail.transcript, detail.projection})
+	detail.transcript = prepared.transcript
+	detail.projection = prepared.projection
+	detail.transcriptHydration = TranscriptHydrationReady
+	detail.queuedPrompts = prepared.queuedPrompts
+	detail.pendingElicitations = prepared.pendingElicitations
+	detail.pendingElicitationsAppliedEventOrdinal = &applied
+	detail.updateUnread(through)
+	return true
 }
 
 // ApplyPreparedMaterializedSessionSummary applies the small startup
 // projection while leaving transcript hydration pending for the live
 // session's complete snapshot.
 func (d *DashboardState) ApplyPreparedMaterializedSessionSummary(prepared PreparedMaterializedSessionSummary) bool {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::apply_prepared_materialized_session_summary")
+	sessionID := prepared.sessionID
+	var through uint64
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil {
+		through = session.ViewedThroughEventOrdinal
+	}
+	detail := d.sessionDetailEntry(sessionID)
+	if current := detail.materializedAppliedEventOrdinal; current != nil &&
+		(prepared.appliedEventOrdinal < *current ||
+			(prepared.appliedEventOrdinal == *current && detail.transcript != nil)) {
+		return false
+	}
+	// Summary text has no stable identity; an older cached projection cannot
+	// name this newer message until full hydration catches up.
+	detail.transcriptHydration = TranscriptHydrationSummary
+	applied := prepared.appliedEventOrdinal
+	detail.materializedAppliedEventOrdinal = &applied
+	detail.currentTurnStartedAt = prepared.currentTurnStartedAt
+	detail.lastActivityAtMs = prepared.lastActivityAtMs
+	detail.lastAgentMessage = prepared.lastAgentMessage
+	detail.lastUserMessage = prepared.lastUserMessage
+	detail.lastAgentMessageFollowsLastUser = prepared.lastAgentMessageFollowsLastUser
+	detail.latestAgentActivityAfterLastUser = nil
+	detail.agentMessageLatestContentOrdinals = prepared.agentMessageLatestContentOrdinals
+	detail.unreadAgentMessages = prepared.unreadAgentMessages
+	detail.interruptionEventOrdinals = prepared.interruptionEventOrdinals
+	detail.unreadInterruptions = prepared.unreadInterruptions
+	detail.updateUnread(through)
+	return true
 }
 
 func (d *DashboardState) notificationDismissalPending(sessionID string) bool {
@@ -830,7 +1566,28 @@ func (d *DashboardState) NotificationDismissalFinished(sessionID string, target 
 // each applied as a single dismissal is, then one notice, so a later
 // success cannot hide an earlier failure.
 func (d *DashboardState) NotificationsDismissed(results []NotificationDismissalResult) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::notifications_dismissed")
+	cleared := 0
+	failures := []string{}
+	for _, result := range results {
+		applied, ok := d.applyNotificationDismissal(result.SessionID, result.Target, result.Ordinal, result.Err)
+		switch {
+		case !ok:
+		case applied == nil:
+			cleared++
+		default:
+			failures = append(failures, applied.Error())
+		}
+	}
+	count := func(n int) string { return counted(n, "notification", "notifications") }
+	switch {
+	case len(failures) == 0 && cleared == 0:
+	case len(failures) == 0:
+		d.SetNotice(fmt.Sprintf("Cleared %s.", count(cleared)))
+	case cleared == 0:
+		d.SetNotice(fmt.Sprintf("Could not dismiss %s: %s", count(len(failures)), failures[0]))
+	default:
+		d.SetNotice(fmt.Sprintf("Cleared %s; could not dismiss %d: %s", count(cleared), len(failures), failures[0]))
+	}
 }
 
 // applyNotificationDismissal applies one dismissal result to the session it
@@ -838,7 +1595,57 @@ func (d *DashboardState) NotificationsDismissed(results []NotificationDismissalR
 // false when the notification has since changed and the result no longer
 // applies.
 func (d *DashboardState) applyNotificationDismissal(sessionID string, target core.NotificationDismissal, ordinal uint64, err error) (error, bool) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::apply_notification_dismissal")
+	detail, ok := (*d.sessionDetails.Mut())[sessionID]
+	if !ok {
+		return nil, false
+	}
+	current, ok := notificationDismissalTarget(detail.notificationDismissal)
+	if !ok || !notificationDismissalEqual(current, target) {
+		return nil, false
+	}
+	if err != nil {
+		detail.notificationDismissal = nil
+		if d.notifications.errors == nil {
+			d.notifications.errors = map[string]string{}
+		}
+		d.notifications.errors[sessionID] = err.Error()
+		return err, true
+	}
+	accepted := NotificationDismissalStateAccepted{Target: target, Ordinal: ordinal}
+	switch target.(type) {
+	case core.NotificationDismissalFailure:
+		detail.notificationDismissal = nil
+		if held, ok := d.notificationDismissals.Get().Get(sessionID); ok && notificationDismissalEqual(held, target) {
+			detail.notificationDismissal = accepted
+		}
+	case core.NotificationDismissalReadThrough:
+		detail.updateUnread(ordinal)
+		if record := d.state.Mut().Sessions.GetMut(sessionID); record != nil {
+			record.ViewedThroughEventOrdinal = max(record.ViewedThroughEventOrdinal, ordinal)
+		}
+		// The daemon persisted the receipt before replying, so a read
+		// dismissal is complete now. Waiting for a worker projection would
+		// block a parked session forever.
+		detail.notificationDismissal = nil
+	default:
+		if d.notificationCards != nil {
+			// The replacement card can arrive either before or after the
+			// acknowledgement, without its transcript being loaded.
+			detail.notificationDismissal = nil
+			if card := d.notificationCards.GetShared(sessionID); card != nil &&
+				card.Dismissal != nil && notificationDismissalEqual(card.Dismissal, target) {
+				detail.notificationDismissal = accepted
+			}
+		} else {
+			// A question dismissal completes only once the worker's command
+			// reaches the projection.
+			detail.notificationDismissal = nil
+			if applied := detail.materializedAppliedEventOrdinal; applied == nil || *applied < ordinal {
+				detail.notificationDismissal = accepted
+			}
+		}
+	}
+	return nil, true
 }
 
 func (d *DashboardState) SetCurrentStepStart(sessionID string, timestampMs *int64) {
@@ -942,7 +1749,29 @@ func (d *DashboardState) sessionReviews(sessionID string) []client.RuntimeReview
 // owners into hydration status. Missing content alone never means a request
 // is running.
 func (d *DashboardState) SyncTranscriptHydration(pending map[string]struct{}) {
-	panic("unported: mj-tui/src/ingest.rs DashboardState::sync_transcript_hydration")
+	type hydrationChange struct {
+		id   string
+		next TranscriptHydration
+	}
+	details := *d.sessionDetails.Get()
+	changes := []hydrationChange{}
+	for _, id := range slices.Sorted(maps.Keys(pending)) {
+		if _, ok := details[id]; !ok {
+			changes = append(changes, hydrationChange{id: id, next: TranscriptHydrationLoading})
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(details)) {
+		_, isPending := pending[id]
+		switch hydration := details[id].transcriptHydration; {
+		case hydration == TranscriptHydrationUnavailable && isPending:
+			changes = append(changes, hydrationChange{id: id, next: TranscriptHydrationLoading})
+		case hydration == TranscriptHydrationLoading && !isPending:
+			changes = append(changes, hydrationChange{id: id, next: TranscriptHydrationUnavailable})
+		}
+	}
+	for _, change := range changes {
+		d.sessionDetailEntry(change.id).transcriptHydration = change.next
+	}
 }
 
 func (d *DashboardState) MarkTranscriptUnavailable(sessionID string) {

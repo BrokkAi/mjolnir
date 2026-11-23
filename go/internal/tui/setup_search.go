@@ -10,7 +10,9 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -45,7 +47,83 @@ func setupSearchIndex(draft any) []SearchEntry {
 
 // setupSearchWalk is Rust's search::walk.
 func setupSearchWalk(draft any, path []string, trail string, entries *[]SearchEntry) {
-	panic("unported: mj-tui/src/setup/search.rs walk")
+	current, ok := setupLookup(draft, path)
+	if !ok {
+		return
+	}
+	if isSubagentCategoryPage(path) {
+		items, ok := setupValueArray(current)
+		if !ok {
+			return
+		}
+		for index, item := range items {
+			entryPath := []string{path[0], path[1], strconv.Itoa(index)}
+			modelPath := append(slices.Clone(entryPath), "model")
+			if setupValueHas(item, "model") {
+				value := setupValueGet(item, "model")
+				label := fmt.Sprintf("Model %d", index+1)
+				summary := rowSummary(entryPath, "model", value, draft, nil)
+				*entries = append(*entries, SearchEntry{
+					haystack: strings.ToLower(fmt.Sprintf("%s %s model %s %s", label, trail, summary, client.Help(modelPath))),
+					path:     modelPath,
+					label:    label,
+					trail:    trail,
+					value:    summary,
+				})
+			}
+			model, isText := setupValueString(setupValueGet(item, "model"))
+			if isText && strings.TrimSpace(model) != "" && setupValueHas(item, "effort") {
+				value := setupValueGet(item, "effort")
+				effortPath := append(slices.Clone(entryPath), "effort")
+				label := fmt.Sprintf("Effort %d", index+1)
+				summary := rowSummary(entryPath, "effort", value, draft, nil)
+				*entries = append(*entries, SearchEntry{
+					haystack: strings.ToLower(fmt.Sprintf("%s %s effort %s %s", label, trail, summary, client.Help(effortPath))),
+					path:     effortPath,
+					label:    label,
+					trail:    trail,
+					value:    summary,
+				})
+			}
+		}
+		return
+	}
+	for _, itemPath := range client.VisiblePaths(path, current) {
+		key := ""
+		if len(itemPath) > 0 {
+			key = itemPath[len(itemPath)-1]
+		}
+		parent := slices.Clone(itemPath[:max(len(itemPath)-1, 0)])
+		value, ok := setupLookup(draft, itemPath)
+		if !ok {
+			continue
+		}
+		parentValue, ok := setupLookup(draft, parent)
+		if !ok {
+			parentValue = current
+		}
+		label := client.RowLabel(parent, parentValue, key, value)
+		summary, ok := setupSearchPageSummary(itemPath, value, draft)
+		if !ok {
+			summary = rowSummary(parent, key, value, draft, nil)
+		}
+		*entries = append(*entries, SearchEntry{
+			haystack: strings.ToLower(fmt.Sprintf("%s %s %s %s %s", label, trail, key, summary, client.Help(itemPath))),
+			path:     slices.Clone(itemPath),
+			label:    label,
+			trail:    trail,
+			value:    summary,
+		})
+		// Code Review is edited by its own dialog, so its values are not
+		// reachable as a page of the tree and must not be indexed as one.
+		if (setupValueIsObject(value) || setupValueIsArray(value)) && !slices.Equal(itemPath, []string{"review"}) {
+			nested := label
+			if trail != "" {
+				nested = trail + " › " + label
+			}
+			setupSearchWalk(draft, itemPath, nested, entries)
+		}
+	}
 }
 
 // setupSearchPageSummary is what a page row holds: a first-page section's

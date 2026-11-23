@@ -148,18 +148,23 @@ or another OverlayFS, to read-only and reports that change during launch.
 
 ## Verify Docker and the image
 
-For a local target, first make sure the CLI can reach the daemon:
+Session targets default to `docker.io/library/buildpack-deps:noble`. Use
+`mj image build` to build a per-bundle image from the project's mise recipe.
+Daemon-container mode uses `ghcr.io/brokkai/mjolnir/daemon`.
+
+For a local target, make sure the CLI can reach the daemon and pull the target's
+image. The examples use the default session image:
 
 ```console
 docker info
-docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+docker pull docker.io/library/buildpack-deps:noble
 ```
 
 For an SSH target, run the equivalent checks on the configured host:
 
 ```console
 ssh builder docker info
-ssh builder docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+ssh builder docker pull docker.io/library/buildpack-deps:noble
 ```
 
 Then run Mjolnir's checks:

@@ -20,7 +20,7 @@ import (
 //
 //	[daemon]
 //	runtime = "podman"          # "host" (default), "podman", "docker" or "ssh"
-//	image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+//	image = "ghcr.io/brokkai/mjolnir/daemon:latest"
 //	mounts = ["/srv/projects"]  # optional host paths, mounted explicitly
 //
 // Image and Mounts apply only to a container runtime. A container otherwise
@@ -36,8 +36,7 @@ type DaemonConfig struct {
 	// RemoteCommand is the remote executable; nil means `mj` on the login
 	// shell PATH. Read it with RemoteCommandOrDefault.
 	RemoteCommand *string `json:"remote_command,omitempty" toml:"remote_command,omitempty"`
-	// Image is the daemon container's image. Nil is this build's agent-dev
-	// image, which carries the harnesses local sessions run.
+	// Image is the daemon container's image. Nil is this build's daemon image.
 	Image *string `json:"image,omitempty" toml:"image,omitempty"`
 	// Mounts is host directories explicitly mounted into the daemon container
 	// at the same path. Nothing is mounted by default; the daemon's own data

@@ -873,8 +873,8 @@ func TestRetiringAPodmanGenerationPreservesTheDestinationTemporaryVolume(t *test
 	}
 }
 
-func agentDevTemplate(storage core.TargetsPodmanWorkspaceStorage) core.TargetsContainerTemplate {
-	return containerTemplate("ghcr.io/brokkai/mjolnir/agent-dev:latest", core.ImagePullPolicyNever, nil, storage)
+func sessionTestTemplate(storage core.TargetsPodmanWorkspaceStorage) core.TargetsContainerTemplate {
+	return containerTemplate(core.DefaultSessionImage, core.ImagePullPolicyNever, nil, storage)
 }
 
 func runAndClose(t *testing.T, locator *core.TargetsTargetLocator, session string, work func() error) {
@@ -909,7 +909,7 @@ func TestPodmanSessionContainerCanRecordPerfSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := mustResourceName(t, session)
-	template := agentDevTemplate(core.TargetsPodmanWorkspaceStorage{Kind: core.TargetsPodmanWorkspaceStorageContainerLayer})
+	template := containerTemplate("ghcr.io/brokkai/mjolnir/agent-dev:latest", core.ImagePullPolicyNever, nil, core.TargetsPodmanWorkspaceStorage{Kind: core.TargetsPodmanWorkspaceStorageContainerLayer})
 	layer := core.TargetsPodmanWorkspaceLocator{Kind: core.TargetsPodmanWorkspaceLocatorContainerLayer}
 	locator := localPodmanLocator(name, layer)
 	if ssh != nil {
@@ -937,7 +937,7 @@ test -s /tmp/mj-perf.txt
 
 func TestPodmanTemporaryVolumeIsNativeAndWritableByRootInDefaultNamespace(t *testing.T) {
 	skipOnWindows(t, "Unix only")
-	skipUnlessIgnoredTestsRequested(t, "requires rootless Podman with runc installed, a cached agent-dev image, and MJ_INSTANCE=tmp1212")
+	skipUnlessIgnoredTestsRequested(t, "requires rootless Podman with runc installed, a cached buildpack-deps:noble image, and MJ_INSTANCE=tmp1212")
 	if instance, ok := core.InstanceName(); !ok || instance != "tmp1212" {
 		t.Fatal(instance)
 	}
@@ -975,7 +975,7 @@ func TestPodmanTemporaryVolumeIsNativeAndWritableByRootInDefaultNamespace(t *tes
 				t.Fatal(err)
 			}
 			name := mustResourceName(t, session)
-			template := agentDevTemplate(storage)
+			template := sessionTestTemplate(storage)
 			workspace, err := core.PodmanWorkspaceLocatorNamed(&template, name)
 			if err != nil {
 				t.Fatal(err)
@@ -1032,13 +1032,13 @@ func TestPodmanTemporaryVolumeIsNativeAndWritableByRootInDefaultNamespace(t *tes
 // Hard-won: #1303: an agent's kill of PID 1 stopped the session container
 func TestPodmanSessionContainerSurvivesSignalsSentToPid1(t *testing.T) {
 	skipOnWindows(t, "Unix only")
-	skipUnlessIgnoredTestsRequested(t, "requires rootless Podman and a cached agent-dev image")
+	skipUnlessIgnoredTestsRequested(t, "requires rootless Podman and a cached buildpack-deps:noble image")
 	session, err := core.NewSessionID()
 	if err != nil {
 		t.Fatal(err)
 	}
 	name := mustResourceName(t, session)
-	template := agentDevTemplate(core.TargetsPodmanWorkspaceStorage{})
+	template := sessionTestTemplate(core.TargetsPodmanWorkspaceStorage{})
 	workspace, err := core.PodmanWorkspaceLocatorNamed(&template, name)
 	if err != nil {
 		t.Fatal(err)

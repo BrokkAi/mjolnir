@@ -7,6 +7,7 @@
 package tui
 
 import (
+	"math"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -51,9 +52,81 @@ func setupReportLines(rejected []RejectedRuntime) []chat.Line {
 // handleReportEvent applies a scroll key or wheel step to the open report,
 // and reports whether the event was the report's: scrolling, or leaving it.
 func handleReportEvent(dialog *SetupDialog, event tea.Msg) bool {
-	panic("unported: mj-tui/src/setup/report.rs handle_report_event")
+	report := dialog.report
+	if report == nil {
+		return false
+	}
+	var step int
+	switch msg := event.(type) {
+	case tea.KeyPressMsg:
+		switch msg.Key().Code {
+		case tea.KeyDown:
+			step = 1
+		case tea.KeyUp:
+			step = -1
+		case tea.KeyPgDown:
+			step = 10
+		case tea.KeyPgUp:
+			step = -10
+		case tea.KeyHome:
+			report.scrollTo(0)
+			return true
+		case tea.KeyEnd:
+			report.scrollTo(report.maxScroll)
+			return true
+		case tea.KeyEscape, tea.KeyBackspace:
+			dialog.report = nil
+			return true
+		default:
+			return false
+		}
+	case tea.MouseWheelMsg:
+		switch msg.Mouse().Button {
+		case tea.MouseWheelDown:
+			step = 3
+		case tea.MouseWheelUp:
+			step = -3
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+	scroll := report.scroll + step
+	report.scrollTo(min(max(scroll, 0), math.MaxUint16))
+	return true
 }
 
 func renderReport(frame *chat.Frame, popup uv.Rectangle, inner uv.Rectangle, dialog *SetupDialog) {
-	panic("unported: mj-tui/src/setup/report.rs render_report")
+	report := dialog.report
+	if report == nil {
+		return
+	}
+	form := &dialog.form
+	form.BeginFrame()
+	title := dismissibleModalTitle(&form.Form, popup, "Settings", chat.Title(true), !dialog.saving)
+	frame.RenderWidget(
+		chat.Modal().
+			WithTitle(title).
+			WithTitle(chat.StyledLine(" Detection results ", chat.Muted()).RightAligned()).
+			WithTitleBottom(chat.RawLine(" ↑/↓ scroll · PgUp/PgDn · Home/End · Esc back ")),
+		popup,
+	)
+	frame.RenderWidget(
+		chat.NewParagraph(chat.RawText("Why the last Detect runtimes left each one out. Esc returns to Runtimes.")).
+			WithWrap(chat.Wrap{Trim: false}).
+			WithStyle(chat.Muted()),
+		uv.Rect(inner.Min.X, inner.Min.Y, inner.Dx(), 2),
+	)
+	footerRow := chat.DialogShellLayout(inner, 0).Actions
+	top := inner.Min.Y + 3
+	body := uv.Rect(inner.Min.X, top, inner.Dx(), max(footerRow.Min.Y-top, 1))
+	blocks := chat.NewParagraph(chat.TextFrom(setupReportLines(dialog.detectionRejected)...)).
+		WithWrap(chat.Wrap{Trim: false})
+	total := min(blocks.LineCount(max(body.Dx(), 1)), math.MaxUint16)
+	maxScroll := max(total-body.Dy(), 0)
+	report.maxScroll = maxScroll
+	frame.RenderWidget(blocks.WithScroll(min(report.scroll, maxScroll), 0), body)
+	form.RenderActions(frame, footerRow, dialog.footerActions())
+	form.EndFrame(SetupControlBack)
 }

@@ -57,7 +57,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: daemon
-          image: ghcr.io/brokkai/mjolnir/agent-dev:latest
+          image: ghcr.io/brokkai/mjolnir/daemon:latest
           command: ["/opt/mjolnir/mj"]
           args: ["daemon-run"]
           env:

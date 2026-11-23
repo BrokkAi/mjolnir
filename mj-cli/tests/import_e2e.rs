@@ -1,7 +1,7 @@
 //! Host-only test for importing and natively resuming a vanilla Claude rollout.
 //!
 //! It is intentionally ignored: it needs a signed-in `claude`, a container
-//! runtime, and the agent-development image. Run it through
+//! runtime, and a session image. Run it through
 //! `scripts/test-import-e2e.sh` on the host.
 
 mj_core::enable_test_fixtures_on_startup!();
@@ -60,7 +60,7 @@ fn fallback_mj_binary(test_executable: &Path) -> PathBuf {
 }
 
 #[test]
-#[ignore = "requires a signed-in Claude, Podman, and the Mjolnir agent-development image"]
+#[ignore = "requires a signed-in Claude, Podman, and a session image set by MJ_IMPORT_E2E_IMAGE"]
 fn imported_claude_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -210,7 +210,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
 }
 
 #[test]
-#[ignore = "requires a signed-in Kimi Code, Podman, and the Mjolnir agent-development image"]
+#[ignore = "requires a signed-in Kimi Code, Podman, and a session image set by MJ_IMPORT_E2E_IMAGE"]
 fn imported_kimi_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -347,7 +347,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "requires a signed-in Grok Build, Podman, and the Mjolnir agent-development image"]
+#[ignore = "requires a signed-in Grok Build, Podman, and a session image set by MJ_IMPORT_E2E_IMAGE"]
 fn imported_grok_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -591,7 +591,7 @@ fn run(command: &mut Command) -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "requires a signed-in Codex, Podman, and the Mjolnir agent-development image"]
+#[ignore = "requires a signed-in Codex, Podman, and a session image set by MJ_IMPORT_E2E_IMAGE"]
 fn imported_codex_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()

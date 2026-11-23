@@ -62,9 +62,9 @@ type ContainerSettings struct {
 	// upgrades care: non-nil to a non-nil string for the default image of
 	// the Mjolnir that created it, non-nil to nil for a configured image, and
 	// nil for a container recorded before Mjolnir tracked this. Old
-	// release-image strings remain readable; an explicit upgrade follows the
-	// current session default. This snapshot never authorizes container
-	// replacement.
+	// release-image strings remain readable. An explicit upgrade can use the
+	// retained agent-dev tag for sessions created on that default. This
+	// snapshot never authorizes container replacement.
 	DefaultImage **string `json:"default_image,omitempty"`
 }
 
@@ -154,21 +154,19 @@ func ContainerSettingsApplied(session *SessionRecord, image string) ContainerSet
 }
 
 // ContainerSettingsDefaultMarker is the default_image marker for a container
-// running image: the image when it is one of Mjolnir's own defaults, nil
-// for a configured one.
+// running image: the image when it is the session default, nil for a
+// configured image.
 func ContainerSettingsDefaultMarker(image string) *string {
-	if image == DefaultSessionImage || image == ReleaseContainerImage {
+	if image == DefaultSessionImage {
 		return &image
 	}
 	return nil
 }
 
 // ContainerSettingsUpgradeImage is the image an explicit upgrade replaces
-// this session's container with, given the image its target resolves to
-// now. A container created on the old default, the release image, upgrades
-// to the current release image rather than to the new session default: the
-// replacement keeps the source's user, home and tools, which the release
-// image provides.
+// this session's container with. Sessions created on the old default follow
+// the retained agent-dev tag when the target resolves to the session default,
+// preserving their user, home and tools.
 func ContainerSettingsUpgradeImage(session *SessionRecord, resolved string) string {
 	applied := containerSettingsAppliedTo(session)
 	if applied != nil && applied.DefaultImage != nil && *applied.DefaultImage != nil && resolved == DefaultSessionImage {
@@ -354,12 +352,11 @@ func (s TargetRuntimeSettings) MarshalJSON() ([]byte, error) {
 	return json.Marshal(plain(s))
 }
 
-// defaultFamilyImage is which of today's defaults a recorded default image
-// corresponds to: the session default stays itself; any earlier default
-// was a release image.
+// defaultFamilyImage normalizes recorded defaults to the current session
+// default or the retained agent-dev tag.
 func defaultFamilyImage(recorded string) string {
 	if recorded == DefaultSessionImage {
 		return DefaultSessionImage
 	}
-	return ReleaseContainerImage
+	return LegacyDefaultContainerImage
 }

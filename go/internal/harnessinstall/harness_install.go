@@ -387,7 +387,7 @@ func antigravityMatchesPin(ctx context.Context, program string, environment map[
 }
 
 // imagePrograms is the image's own programs for harness, by the names the
-// agent-dev image installs on `PATH`: the ACP bridge, the native harness the
+// older daemon images provided on `PATH`: the ACP bridge, the native harness the
 // launch runs, and the harness's command-line program.
 func imagePrograms(harness core.HarnessKind) (string, string, string) {
 	switch harness {
@@ -414,7 +414,7 @@ func imagePrograms(harness core.HarnessKind) (string, string, string) {
 func locateInImage(ctx context.Context, harness core.HarnessKind, executionPolicy core.ExecutionPolicy, environment map[string]string) (Located, error) {
 	bridgeName, entryName, cliName := imagePrograms(harness)
 	missing := func(name string) error {
-		return fmt.Errorf("the daemon's image does not provide %s for %s; the daemon container runs only the image's pinned harnesses, so use an agent-dev image of this release", name, harness.DisplayName())
+		return fmt.Errorf("the daemon's image does not provide %s for %s; this launch spec requires the harness bundled in the daemon image", name, harness.DisplayName())
 	}
 	search := maps2Clone(environment)
 	names := []string{bridgeName, entryName, cliName}
@@ -487,7 +487,7 @@ func locateInImage(ctx context.Context, harness core.HarnessKind, executionPolic
 			return Located{}, err
 		}
 		if !matches {
-			return Located{}, fmt.Errorf("the daemon's image must provide agy %s; use an agent-dev image of this release", core.AntigravityVersion)
+			return Located{}, fmt.Errorf("the daemon's image must provide agy %s for this launch spec", core.AntigravityVersion)
 		}
 		command = bridge
 		if args, err = nativeACPArgs(harness, executionPolicy, environment); err != nil {

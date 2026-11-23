@@ -19,7 +19,9 @@
 package tui
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -131,17 +133,90 @@ type SplashFrame struct {
 
 // RenderSplash draws frame into area of buf.
 func RenderSplash(area uv.Rectangle, buf *uv.Buffer, frame *SplashFrame) {
-	panic("unported: mj-tui/src/splash.rs render_splash")
+	area = area.Intersect(buf.Bounds())
+	if area.Empty() {
+		return
+	}
+	dissolve := frame.Timeline.dissolveProgress(frame.Elapsed)
+	if dissolve >= 1.0 || !Fits(area.Dx()) {
+		fill(area, buf, frame.Background)
+		return
+	}
+	t := frame.Timeline.sceneTime(frame.Elapsed)
+	holding := frame.Timeline.Holding(frame.Elapsed)
+
+	canvas := newCanvas(area.Dx(), area.Dy()*2)
+	view := newView(canvas.width, canvas.height, t)
+	strike, struck := strikeAt(t, holding)
+	// Only a strong strike lights the whole sky, and then all at once: a
+	// continuous fade would repaint every cloud cell on every frame.
+	var flash float32
+	if struck && strike.brightness > 1.0 {
+		flash = 1.0
+	}
+	pose, posed := poseAt(t)
+
+	sky(&canvas, &view, t, flash)
+	ground(&canvas, &view, t, flash)
+	cracks(&canvas, &view, t)
+	shockwave(&canvas, &view, t)
+	var charge float32 = 0.12
+	if t >= impact {
+		charge = 0.35
+		if struck {
+			charge += strike.brightness
+		}
+	}
+	hammerDraw(&canvas, &view, t, charge)
+	if struck && posed {
+		lightningDraw(&canvas, &view, &strike, pose)
+	}
+	sparks(&canvas, &view, t)
+	if title, ok := titleLayout(&view); ok {
+		fontDraw(&canvas, title, t, holding)
+	}
+	impactFlash(&canvas, t)
+
+	var fade *Dissolve
+	if dissolve > 0.0 {
+		fade = &Dissolve{progress: dissolve, background: frame.Background}
+	}
+	canvas.blit(area, buf, fade)
+	if fade == nil && holding {
+		drawStatus(area, buf, frame.Status, t)
+	}
 }
 
 func fill(area uv.Rectangle, buf *uv.Buffer, background chat.Color) {
-	panic("unported: mj-tui/src/splash.rs fill")
+	for y := area.Min.Y; y < area.Max.Y; y++ {
+		for x := area.Min.X; x < area.Max.X; x++ {
+			cell := uv.EmptyCell
+			chat.Style{Bg: background}.ApplyTo(&cell.Style)
+			buf.SetCell(x, y, &cell)
+		}
+	}
 }
 
 // drawStatus draws the startup notice, or a quiet default, centred on the
 // bottom row.
 func drawStatus(area uv.Rectangle, buf *uv.Buffer, status *string, t float32) {
-	panic("unported: mj-tui/src/splash.rs draw_status")
+	dots := asUsize(t*3.0) % 4
+	notice := "Starting Mjolnir"
+	if status != nil {
+		notice = *status
+	}
+	text := []rune(fmt.Sprintf("%s%-3s", notice, strings.Repeat(".", dots)))
+	width := min(len(text), area.Dx())
+	x := area.Min.X + (area.Dx()-width)/2
+	y := area.Max.Y - 1
+	for offset, character := range text[:width] {
+		current := buf.CellAt(x+offset, y)
+		background := current.Style.Bg
+		cell := uv.Cell{Content: string(character), Width: 1}
+		chat.Style{Fg: splashColor([3]uint8{140, 152, 184})}.ApplyTo(&cell.Style)
+		cell.Style.Bg = background
+		buf.SetCell(x+offset, y, &cell)
+	}
 }
 
 // View maps canvas pixels to scene units: the origin is the screen centre,
@@ -154,7 +229,18 @@ type View struct {
 }
 
 func newView(width, height int, t float32) View {
-	panic("unported: mj-tui/src/splash.rs View::new")
+	scale := min(float32(width)/2.6, float32(height)/2.1)
+	since := t - impact
+	amplitude := 0.035 * splashExp(-max(since, 0.0)*9.0)
+	// Shaking by less than half a pixel only shimmers every edge.
+	var shake [2]float32
+	if since >= 0.0 && amplitude*scale > 0.5 {
+		shake = [2]float32{
+			amplitude * splashSin(since*95.0),
+			amplitude * 0.7 * splashCos(since*71.0),
+		}
+	}
+	return View{width: width, height: height, scale: scale, shake: shake}
 }
 
 // scene is the scene point under a pixel's centre.
@@ -232,4 +318,59 @@ func (r *Rng) between(low, high float32) float32 {
 func hash2(x, y int32) float32 {
 	rng := newRng(uint64(uint32(x))<<32 | uint64(uint32(y)))
 	return rng.unit()
+}
+
+// splashPi is Rust's std::f32::consts::PI: a float32 variable, so products
+// with it round as Rust's f32 products do rather than folding exactly.
+var splashPi = float32(math.Pi)
+
+// splashTau is Rust's std::f32::consts::TAU, kept as a variable for the same
+// reason as splashPi.
+var splashTau = float32(2 * math.Pi)
+
+// The f32 math of Rust's splash. Go's math works in float64; each result is
+// rounded to float32 as Rust's f32 functions return it.
+
+func splashSin(x float32) float32 { return float32(math.Sin(float64(x))) }
+
+func splashCos(x float32) float32 { return float32(math.Cos(float64(x))) }
+
+func splashExp(x float32) float32 { return float32(math.Exp(float64(x))) }
+
+func splashPow(x, y float32) float32 { return float32(math.Pow(float64(x), float64(y))) }
+
+func splashFloor(x float32) float32 { return float32(math.Floor(float64(x))) }
+
+func splashCeil(x float32) float32 { return float32(math.Ceil(float64(x))) }
+
+func splashAbs(x float32) float32 { return float32(math.Abs(float64(x))) }
+
+// splashClamp is Rust's f32::clamp.
+func splashClamp(x, low, high float32) float32 {
+	return min(max(x, low), high)
+}
+
+// asUsize is Rust's `f32 as usize`: truncation toward zero, saturating at
+// the bounds, NaN giving 0.
+func asUsize(x float32) int {
+	switch {
+	case !(x > 0):
+		return 0
+	case x >= float32(math.MaxInt):
+		return math.MaxInt
+	default:
+		return int(x)
+	}
+}
+
+// asU64 is Rust's `f32 as u64`, saturating as asUsize does.
+func asU64(x float32) uint64 {
+	switch {
+	case !(x > 0):
+		return 0
+	case x >= float32(math.MaxUint64):
+		return math.MaxUint64
+	default:
+		return uint64(x)
+	}
 }

@@ -404,6 +404,11 @@ func (c StorageCondition) rank() int {
 	}
 }
 
+// Compare is the derived Ord::cmp: Ok < Low < Full.
+func (c StorageCondition) Compare(other StorageCondition) int {
+	return cmp.Compare(c.rank(), other.rank())
+}
+
 // FilesystemView is one filesystem with the storage owner's verdict.
 type FilesystemView struct {
 	FilesystemSpace

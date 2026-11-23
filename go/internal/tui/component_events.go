@@ -5,6 +5,8 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
@@ -16,7 +18,51 @@ import (
 // so a drag can select the drawn text instead. It returns the event to hand
 // to the form, or nil when the caller routes it as usual.
 func (d *DashboardState) RouteQuestionPress(selection *chat.SelectionState, chatOwnsPointer bool, event tea.Msg) tea.Msg {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::route_question_press")
+	switch mouse := event.(type) {
+	case tea.MouseClickMsg:
+		if mouse.Button != tea.MouseLeft {
+			return nil
+		}
+		d.questionPress = nil
+		surfaces := d.FrameSurfaces()
+		answerRow := false
+		if !d.ModalOpen() {
+			if surface := surfaces.SurfaceAt(mouse.X, mouse.Y); surface != nil {
+				switch surface.ID.(type) {
+				// A boolean question's title and description lie inside its
+				// checkbox hitbox.
+				case chat.SurfaceIdNotificationFormBody, chat.SurfaceIdNotificationText, chat.SurfaceIdElicitationMessage:
+					answerRow = true
+				case chat.SurfaceIdModalBody:
+					answerRow = surfaces.Surface(chat.SurfaceIdElicitationMessage{}) != nil
+				}
+			}
+		}
+		if !(chatOwnsPointer && answerRow) {
+			return nil
+		}
+		selection.OnMouseDown(mouse.X, mouse.Y, d.FrameSurfaces())
+		if selection.OwnsPointer() {
+			press := uv.Pos(mouse.X, mouse.Y)
+			d.questionPress = &press
+		}
+		return event
+	case tea.MouseReleaseMsg:
+		// A release in the press cell is the form's click. One anywhere else
+		// goes to the selection engine, which tracks its position even when
+		// the terminal sent no drag event.
+		if mouse.Button != tea.MouseLeft || d.questionPress == nil ||
+			*d.questionPress != uv.Pos(mouse.X, mouse.Y) {
+			return nil
+		}
+		if _, selecting := selection.Range(); selecting {
+			return nil
+		}
+		d.questionPress = nil
+		selection.Clear()
+		return event
+	}
+	return nil
 }
 
 // SettleQuestionPress releases the form's armed control once the press
@@ -51,19 +97,31 @@ func (d *DashboardState) PrepareComponentEvent(event tea.Msg, chats map[string]*
 }
 
 func (d *DashboardState) dialogLayerKey() string {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::dialog_layer_key")
+	detail := ""
+	if modal := d.activeModal(); modal != nil {
+		detail = modal.layerDetail()
+	}
+	// The mode's variant stands in for Rust's mem::discriminant: the key is
+	// only ever compared with an earlier key.
+	return fmt.Sprintf("%t/%T/%s/%t", d.awayDialog() != nil, d.mode, detail, d.dialogConfirmationOpen())
 }
 
 func (d *DashboardState) prepareDialogState() {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::prepare_dialog_state")
+	d.showPendingWelcome()
+	if modal := d.activeModalMut(); modal != nil {
+		modal.prepareDialogState()
+	}
 }
 
 func (d *DashboardState) dialogConfirmationOpen() bool {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::dialog_confirmation_open")
+	modal := d.activeModal()
+	return modal != nil && modal.confirmationOpen()
 }
 
 func (d *DashboardState) renderDialogConfirmation(frame *chat.Frame, area uv.Rectangle, surfaces *chat.FrameSurfaces) {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::render_dialog_confirmation")
+	if modal := d.activeModal(); modal != nil {
+		modal.renderConfirmation(frame, area, surfaces)
+	}
 }
 
 // componentModalOpen reports whether the open mode routes events away from
@@ -82,7 +140,26 @@ func (d *DashboardState) ComponentPointerCaptured() bool {
 // ComponentHandlesMouse reports whether a form owns this pointer event, ahead
 // of selectable body text.
 func (d *DashboardState) ComponentHandlesMouse(mouse tea.MouseMsg) bool {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::component_handles_mouse")
+	if d.awayDialog() != nil {
+		return true
+	}
+	if d.resumeScrollbarHandlesMouse(mouse) || d.workspaceScrollbar.IsDragging() {
+		return true
+	}
+	_, palette := d.mode.(ModePalette)
+	click, isClick := mouse.(tea.MouseClickMsg)
+	if d.paneMenu != nil || (isClick && click.Button == tea.MouseRight) ||
+		d.dialogConfirmationOpen() || palette {
+		return true
+	}
+	position := mouse.Mouse()
+	if _, dashboard := d.mode.(ModeDashboard); dashboard {
+		return d.surfaceForm.CapturesPointer() ||
+			d.surfaceForm.Contains(position.X, position.Y) ||
+			(d.workspacePaneArea != nil && uv.Pos(position.X, position.Y).In(*d.workspacePaneArea))
+	}
+	modal := d.activeModal()
+	return modal != nil && modal.handlesMouse(position.X, position.Y)
 }
 
 // CancelComponentPointer releases any pressed dashboard control. Global
@@ -90,13 +167,83 @@ func (d *DashboardState) ComponentHandlesMouse(mouse tea.MouseMsg) bool {
 // an armed control is itself a visible change and therefore requests a
 // repaint.
 func (d *DashboardState) CancelComponentPointer() bool {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::cancel_component_pointer")
+	workspaceDragging := d.workspaceScrollbar.IsDragging()
+	if workspaceDragging {
+		d.workspaceScrollbar.Clear()
+	}
+	changed := d.surfaceForm.CapturesPointer()
+	d.surfaceForm.CancelPointer()
+	changed = changed || workspaceDragging
+	if modal := d.activeModalMut(); modal != nil {
+		changed = modal.cancelPointer() || changed
+	}
+	return changed
 }
 
 func (d *DashboardState) resetComponentGeometry() {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::reset_component_geometry")
+	d.quotaRowAreas = d.quotaRowAreas[:0]
+	d.quotaPoolAreas = d.quotaPoolAreas[:0]
+	d.notifications.formArea = nil
+	d.surfaceForm.ResetGeometry()
+	if modal := d.activeModalMut(); modal != nil {
+		modal.resetGeometry()
+	}
 }
 
 func (d *DashboardState) handleComponentEvent(event tea.Msg) DashboardAction {
-	panic("unported: mj-tui/src/component_events.rs DashboardState::handle_component_event")
+	if d.awayDialog() != nil {
+		return d.handleAwayEvent(event)
+	}
+	d.prepareDialogState()
+	switch d.mode.(type) {
+	case ModePalette:
+		return d.handlePaletteEvent(event)
+	case ModeResumeDialog:
+		return d.handleResumeDialogEvent(event)
+	case ModeWorkspaceManager:
+		return d.handleWorkspaceManagerEvent(event)
+	}
+	mode := d.mode
+	d.mode = ModeDashboard{}
+	switch mode := mode.(type) {
+	case ModeEditContainer:
+		return d.handleContainerEditEvent(event, *mode.ContainerEditor)
+	case ModeSetup:
+		return d.handleSetupEvent(event, mode.SetupDialog)
+	case ModeWelcome:
+		return d.handleWelcomeEvent(event, mode.WelcomeDialog)
+	case ModeRename:
+		return d.handleRenameEvent(event, *mode.RenameEditor)
+	case ModeGitIdentity:
+		return d.handleGitIdentityEvent(event, *mode.GitIdentityDialog)
+	case ModeChangedFiles:
+		return d.handleChangedFilesEvent(event, *mode.ChangedFilesDialog)
+	case ModeSessionCpuReport:
+		return d.handleSessionCpuReportEvent(event, *mode.SessionCpuReportDialog)
+	case ModeSessionUsageReport:
+		return d.handleSessionUsageReportEvent(event, *mode.SessionUsageDialog)
+	case ModeNoticeLog:
+		return d.handleNoticeLogEvent(event, *mode.NoticeLogDialog)
+	case ModeConfigId:
+		return d.handleConfigIDEvent(event, *mode.ConfigIdEditor)
+	case ModeRepositoryOrigin:
+		return d.handleRepositoryOriginEvent(event, *mode.RepositoryOriginDialog)
+	case ModeTargetActions:
+		return d.handleTargetActionsEvent(event, *mode.TargetActionsDialog)
+	case ModeWeb:
+		return d.handleWebEvent(event, *mode.WebDialog)
+	case ModeImporting:
+		return d.handleImportProgressEvent(event, *mode.ImportProgress)
+	case ModeConfirmImportBundle:
+		return d.handleImportBundleEvent(event, *mode.ImportBundleConfirmation)
+	case ModeConfirm:
+		return d.handleConfirmationEvent(event, *mode.ConfirmDialog)
+	case ModeNew:
+		return d.handleWizardEvent(event, mode.NewWizard)
+	case ModeResume:
+		return d.handleWizardEvent(event, mode.ResumeWizard)
+	default:
+		d.mode = mode
+		return DashboardActionNone{}
+	}
 }

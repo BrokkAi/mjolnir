@@ -42,7 +42,7 @@ func (d *DashboardState) PaneSession(pane PaneId) (string, bool) {
 // PaneAssignment is the identity captured by background work for the
 // session assigned to a pane.
 func (d *DashboardState) PaneAssignment(pane PaneId) (PaneAssignment, bool) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::pane_assignment")
+	return d.navigation.assignment(pane)
 }
 
 // PaneForSession is the pane showing sessionID. A session is in at most one
@@ -133,7 +133,14 @@ func (d *DashboardState) zoomPaneCommand() DashboardAction {
 // small to split, in which case the layout is unchanged and
 // [SplitRefusedNotice] is shown.
 func (d *DashboardState) SplitFocusedPane(direction chat.Direction, session *string) (PaneId, bool) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::split_focused_pane")
+	pane, ok := d.SplitConversationPane(d.FocusedPane(), direction)
+	if !ok {
+		return 0, false
+	}
+	if session != nil {
+		d.SetPaneSession(pane, session)
+	}
+	return pane, true
 }
 
 func (d *DashboardState) HasConversationPane(pane PaneId) bool {
@@ -141,7 +148,21 @@ func (d *DashboardState) HasConversationPane(pane PaneId) bool {
 }
 
 func (d *DashboardState) SplitConversationPane(target PaneId, direction chat.Direction) (PaneId, bool) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::split_conversation_pane")
+	pane, ok := d.navigation.splitPane(target, direction, 0.5, d.conversationArea())
+	if !ok {
+		d.SetNotice(SplitRefusedNotice)
+		return 0, false
+	}
+	if notice, shown := d.Notice(); shown && notice == SplitRefusedNotice {
+		d.ClearNotice()
+	}
+	d.conversationZoomed = false
+	d.browsePane = &pane
+	d.navigation.focusPane(pane)
+	d.reconcilePins()
+	d.FocusSessions()
+	d.markLayoutModified()
+	return pane, true
 }
 
 func (d *DashboardState) splitCommand(direction chat.Direction) DashboardAction {
@@ -151,7 +172,16 @@ func (d *DashboardState) splitCommand(direction chat.Direction) DashboardAction 
 // ClosePane removes a pinned or empty pane and reports the session it
 // showed. Browse remains available for list navigation.
 func (d *DashboardState) ClosePane(pane PaneId) (string, bool) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::close_pane")
+	if pane == d.BrowsePane() {
+		d.SetNotice("Browse must remain; move it with Swap pane.")
+		return "", false
+	}
+	d.conversationZoomed = false
+	session, ok := d.navigation.closePane(pane)
+	d.reconcilePins()
+	d.markLayoutModified()
+	d.clampSelections()
+	return session, ok
 }
 
 func (d *DashboardState) BrowsePane() PaneId {
@@ -167,14 +197,47 @@ func (d *DashboardState) PinID(session string) (uint32, bool) {
 }
 
 func (d *DashboardState) reconcilePins() {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::reconcile_pins")
+	browse := d.BrowsePane()
+	sessions := d.navigation.sessions()
+	if d.pinIDs == nil {
+		d.pinIDs = map[string]uint32{}
+	}
+	for session := range d.pinIDs {
+		shown := false
+		for pane, current := range sessions {
+			if pane != browse && current == session {
+				shown = true
+				break
+			}
+		}
+		if !shown {
+			delete(d.pinIDs, session)
+		}
+	}
+	// Rust walks the panes as a BTreeMap, in pane id order.
+	for _, pane := range slices.Sorted(maps.Keys(sessions)) {
+		session := sessions[pane]
+		if _, pinned := d.pinIDs[session]; pane == browse || pinned {
+			continue
+		}
+		badge := uint32(0)
+		for slices.Contains(slices.Collect(maps.Values(d.pinIDs)), badge) {
+			badge++
+		}
+		d.pinIDs[session] = badge
+	}
 }
 
 // TakeSessionToOpen is the session a finished workspace switch should open,
 // if the move that asked for the switch wanted it opened rather than only
 // selected.
 func (d *DashboardState) TakeSessionToOpen() (string, bool) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::take_session_to_open")
+	navigation := d.pendingNavigation
+	d.pendingNavigation = nil
+	if navigation == nil || !navigation.open {
+		return "", false
+	}
+	return navigation.sessionID, true
 }
 
 func (d *DashboardState) RevealPane(pane PaneId) {
@@ -297,7 +360,19 @@ func (d *DashboardState) resizePaneCommand(nav NavDirection) DashboardAction {
 // DashboardState's measured band must not be named conversationArea in Go:
 // the method has the name.
 func (d *DashboardState) conversationArea() uv.Rectangle {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::conversation_area")
+	if d.conversationAreaField != nil {
+		return *d.conversationAreaField
+	}
+	if d.paneAreas != nil {
+		sessions, targets := d.paneAreas[0], d.paneAreas[1]
+		return uv.Rect(
+			sessions.Max.X,
+			sessions.Min.Y,
+			max(targets.Max.X-sessions.Max.X, 0),
+			sessions.Dy(),
+		)
+	}
+	return unmeasuredConversationArea
 }
 
 // ExportConversationLayout is the live arrangement in the form the
@@ -313,19 +388,49 @@ func (d *DashboardState) ExportConversationLayout() core.ConversationLayout {
 // ConversationLayoutFor is the arrangement saved for one workspace: the
 // live tree when it is the active workspace, and the cached copy otherwise.
 func (d *DashboardState) ConversationLayoutFor(workspaceID string) core.ConversationLayout {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::conversation_layout_for")
+	if active := *d.activeWorkspaceID.Get(); active != nil && *active == workspaceID {
+		return d.ExportConversationLayout()
+	}
+	if view, ok := d.workspaceViews[workspaceID]; ok {
+		return view.conversationLayout
+	}
+	return core.NewConversationLayout()
 }
 
 // CacheWorkspaceLayout applies a controller-provided layout unless this
 // client has already changed that workspace's arrangement.
 func (d *DashboardState) CacheWorkspaceLayout(workspaceID string, layout core.ConversationLayout) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::cache_workspace_layout")
+	if layout.Validate() != nil {
+		return
+	}
+	if _, modified := d.workspaceLayoutsModified[workspaceID]; modified {
+		return
+	}
+	if active := *d.activeWorkspaceID.Get(); active != nil && *active == workspaceID {
+		d.restoreConversationLayout(&layout)
+		d.clampSelections()
+	}
+	if d.workspaceViews == nil {
+		d.workspaceViews = map[string]WorkspaceViewState{}
+	}
+	view, ok := d.workspaceViews[workspaceID]
+	if !ok {
+		view = WorkspaceViewState{
+			paneSizes:            core.NewPaneSizes(),
+			conversationLayout:   core.NewConversationLayout(),
+			collapsedProjectKeys: map[string]struct{}{},
+			focus:                FocusSessions,
+		}
+	}
+	view.conversationLayout = layout
+	d.workspaceViews[workspaceID] = view
 }
 
 // WorkspaceLayoutModified reports whether the local client has changed this
 // workspace's arrangement.
 func (d *DashboardState) WorkspaceLayoutModified(workspaceID string) bool {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::workspace_layout_modified")
+	_, modified := d.workspaceLayoutsModified[workspaceID]
+	return modified
 }
 
 // restoreConversationLayout adopts a stored arrangement. A pane whose
@@ -333,7 +438,24 @@ func (d *DashboardState) WorkspaceLayoutModified(workspaceID string) bool {
 // empty pane rather than a failure: sessions are closed and removed outside
 // this client.
 func (d *DashboardState) restoreConversationLayout(layout *core.ConversationLayout) {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::restore_conversation_layout")
+	state := d.state.Get()
+	nativeAgents := *d.nativeAgents.Get()
+	activeWorkspaceID := *d.activeWorkspaceID.Get()
+	d.navigation.restore(layout, func(id string) bool {
+		return sessionBelongsInLayout(state, nativeAgents, activeWorkspaceID, id)
+	})
+	browse := layout.Focus
+	if layout.Browse != nil {
+		browse = *layout.Browse
+	}
+	browsePane := PaneIdFromRaw(browse)
+	d.browsePane = &browsePane
+	d.pinIDs = maps.Clone(layout.Pins)
+	if d.pinIDs == nil {
+		d.pinIDs = map[string]uint32{}
+	}
+	d.conversationZoomed = false
+	d.reconcilePins()
 }
 
 // resetConversationLayout starts over with one empty pane, for a workspace
@@ -347,7 +469,12 @@ func (d *DashboardState) resetConversationLayout() {
 }
 
 func (d *DashboardState) markLayoutModified() {
-	panic("unported: mj-tui/src/dashboard_conversation.rs DashboardState::mark_layout_modified")
+	if workspaceID := *d.activeWorkspaceID.Get(); workspaceID != nil {
+		if d.workspaceLayoutsModified == nil {
+			d.workspaceLayoutsModified = map[string]struct{}{}
+		}
+		d.workspaceLayoutsModified[*workspaceID] = struct{}{}
+	}
 }
 
 // sessionBelongsInLayout reports whether a conversation pane of the active

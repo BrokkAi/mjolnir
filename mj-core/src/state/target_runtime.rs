@@ -45,8 +45,9 @@ pub struct ContainerSettings {
     /// `Some(Some(image))` for the default image of the Mjolnir that created
     /// it, `Some(None)` for a configured image, and `None` for a container
     /// recorded before Mjolnir tracked this. Old release-image strings remain
-    /// readable; an explicit upgrade follows the current session default.
-    /// This snapshot never authorizes container replacement.
+    /// readable. An explicit upgrade can use the retained agent-dev tag for
+    /// sessions created on that default. This snapshot never authorizes
+    /// container replacement.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -81,8 +82,7 @@ impl ContainerSettings {
         Self {
             additional_mounts: session.additional_mounts.clone(),
             resource_allocation: session.resource_allocation.clone(),
-            // A container on the default image follows the default to the one
-            // this Mjolnir names; a configured image stays as it was.
+            // Normalize the recorded default within its image family.
             default_image: Self::applied_to(session)
                 .and_then(|applied| applied.default_image.as_ref())
                 .map(|image| {
@@ -103,18 +103,32 @@ impl ContainerSettings {
     }
 
     /// The `default_image` marker for a container running `image`: the image
-    /// when it is one of Mjolnir's own defaults, `None` for a configured one.
+    /// when it is the session default, `None` for a configured image.
     pub fn default_marker(image: &str) -> Option<String> {
-        (image == crate::config::DEFAULT_SESSION_IMAGE
-            || image == crate::config::RELEASE_CONTAINER_IMAGE)
-            .then(|| image.to_owned())
+        (image == crate::config::DEFAULT_SESSION_IMAGE).then(|| image.to_owned())
     }
 
-    /// The image an explicit upgrade replaces this session's container with,
-    /// given the image its target resolves to now. A container created on the
-    /// old default, the release image, upgrades to the current release image
-    /// rather than to the new session default: the replacement keeps the
-    /// source's user, home and tools, which the release image provides.
+    /// Record the replacement image, retaining the legacy default marker when
+    /// an upgrade refreshes an existing session on that image family.
+    pub fn record_upgrade_image(&mut self, image: &str) {
+        let legacy_default = self
+            .default_image
+            .as_ref()
+            .and_then(Option::as_deref)
+            .is_some_and(|recorded| {
+                default_family_image(recorded) == image
+                    && image == crate::config::LEGACY_DEFAULT_CONTAINER_IMAGE
+            });
+        self.default_image = Some(if legacy_default {
+            Some(image.to_owned())
+        } else {
+            Self::default_marker(image)
+        });
+    }
+
+    /// The replacement image for an explicit upgrade. Sessions created on the
+    /// old default follow the retained agent-dev tag when the target resolves
+    /// to the session default, preserving their user, home and tools.
     pub fn upgrade_image<'a>(session: &SessionRecord, resolved: &'a str) -> &'a str {
         let recorded = Self::applied_to(session)
             .and_then(|applied| applied.default_image.as_ref())
@@ -282,12 +296,12 @@ impl From<&TargetTemplate> for std::sync::Arc<TargetRuntimeSettings> {
     }
 }
 
-/// Which of today's defaults a recorded default image corresponds to: the
-/// session default stays itself; any earlier default was a release image.
+/// Normalize recorded defaults to the current session default or the retained
+/// agent-dev tag.
 fn default_family_image(recorded: &str) -> &'static str {
     if recorded == crate::config::DEFAULT_SESSION_IMAGE {
         crate::config::DEFAULT_SESSION_IMAGE
     } else {
-        crate::config::RELEASE_CONTAINER_IMAGE
+        crate::config::LEGACY_DEFAULT_CONTAINER_IMAGE
     }
 }

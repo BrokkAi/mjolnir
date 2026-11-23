@@ -20,16 +20,16 @@
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -61,16 +61,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -102,16 +102,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -143,16 +143,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -184,16 +184,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -212,10 +212,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │ ╭Session──────────────────────────╮  ││                                                                              │
-│ │Dismiss notification             │  ││                               ✦  M J O L N I R                               │
-│ │Copy session ID                  │  ││                                                                              │
-│ │New session with these settings  │  ││                  Select a session to open its conversation.                  │
-│ ╰─────────────────────────────────╯  ││                                                                              │
+│ │Dismiss notification             │  ││                                                                              │
+│ │Copy session ID                  │  ││                               ✦  M J O L N I R                               │
+│ │New session with these settings  │  ││                                                                              │
+│ ╰─────────────────────────────────╯  ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -235,10 +236,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -257,8 +257,9 @@ context menu Enter opens on Copy: CopySessionId { session_id: "session-1" }
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -280,10 +281,9 @@ context menu Enter opens on Copy: CopySessionId { session_id: "session-1" }
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -298,8 +298,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -321,10 +322,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -352,16 +352,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -381,8 +381,9 @@ action: CopySessionId { session_id: "session-1" }
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -404,10 +405,9 @@ action: CopySessionId { session_id: "session-1" }
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -439,16 +439,16 @@ selection after disabled click: Some(RenameSession)
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Give the selected session your own title.                                           │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Give the selected session your own title.                                           │  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -464,11 +464,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰╭Workspace────────────╮───────────────╯│                                                                              │
 ╭│Clear notifications  │──── ▁   ▄   □ ╮│                                                                              │
 │╰─────────────────────╯: _____________││                                                                              │
-│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
-│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Question  podman  codex-1           ││                  Select a session to open its conversation.                  │
-│  │ Waiting on you to choose a target.││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
+│  Question  podman  codex-1           ││                                                                              │
+│  │ Waiting on you to choose a target.││                  Select a session to open its conversation.                  │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -484,10 +485,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
@@ -507,13 +507,14 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
-│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
-│ ╭Session──────────────────────────╮  ││                  Select a session to open its conversation.                  │
-│ │Dismiss notification             │t.││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
+│ ╭Session──────────────────────────╮  ││                                                                              │
+│ │Dismiss notification             │t.││                  Select a session to open its conversation.                  │
 │ │Copy session ID                  │  ││                                                                              │
 │ │New session with these settings  │  ││                                                                              │
 │ ╰─────────────────────────────────╯  ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -527,10 +528,9 @@ notice after a refused workspace clear: Some("Could not dismiss 1 notification: 
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
@@ -558,16 +558,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │› Dismiss notification                                                              │  ──────────────╯
-│                │  Ignore                                                                            │  ──────────────╮
-│                │                                                                                    │                │
+│                │› Dismiss notification                                                              │                │
+│                │  Ignore                                                                            │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
-│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
-│                │  Change Workspace › — There is no other workspace.                                 │                │
-│                │                                                                                    │  ──────────────╯
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
-│                │  Container settings                                                                │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │  ──────────────╯
+│                │  Change Workspace › — There is no other workspace.                                 │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╯
+│                │  Container settings                                                                │  ─────── ▁   ▄ ╮
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
 │                │  Restart                                                                           │                │
@@ -606,16 +606,16 @@ dismiss exact question: DismissNotification { session_id: "session-1", target: Q
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)…                                              │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -648,16 +648,16 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │  ──────────────╯
-│                │  Suspend…                                                          ctrl+b shift+x  │  ─────── ▁   ▄ ╮
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  Destroy…                                                                          │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╯
+│                │  Restart                                                                           │  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
@@ -684,6 +684,7 @@ unread dismissed: Some("Notification dismissed.")
 │ ╰─────────────────────────────────╯  ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
 │                                      ││No conversation open.                                                         │
@@ -694,10 +695,9 @@ unread dismissed: Some("Notification dismissed.")
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
@@ -725,16 +725,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
-│                │  Changed files — The session's target is not running.                    ctrl+b d  │  ──────────────╯
-│                │› Open sub-agent question                                                           │  ──────────────╮
-│                │  Ignore                                                                            │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │› Open sub-agent question                                                           │  ──────────────╯
+│                │  Ignore                                                                            │  ──────────────╮
 │                │                                                                                    │                │
-│                │  Organize  ──────────────────────────────────────────────────────────────────────  │  ──────────────╯
-│                │  Rename…                                                           ctrl+b shift+t  │  ─────── ▁   ▄ ╮
-│                │  Pin…                                                                              │                │
-│                │  Change Workspace › — There is no other workspace.                                 │  ──────────────╯
-│                │                                                                                    │  ─────── ▁   ▄ ╮
-│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │  ──────────────╯
+│                │  Pin…                                                                              │  ─────── ▁   ▄ ╮
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │  ──────────────╯
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │  ─────── ▁   ▄ ╮
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │

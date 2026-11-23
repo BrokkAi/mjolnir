@@ -299,8 +299,26 @@ func (a Account) environment() (LoginEnvironmentEnvironment, error) {
 		"USER":    a.user,
 		"LOGNAME": a.user,
 		"SHELL":   a.shell,
-		"PATH":    "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"PATH":    accountSystemPath,
 	}, nil
+}
+
+// accountSystemPath is the account's bootstrap PATH, and where the
+// account-database tools are found.
+const accountSystemPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+// accountTool is the account-database tool name in accountSystemPath. Rust
+// reads the account through getpwuid_r, which the caller's PATH cannot
+// change; a worker started from a launcher with a foreign PATH must still
+// find its own account.
+func accountTool(name string) (string, error) {
+	for _, directory := range filepath.SplitList(accountSystemPath) {
+		candidate := filepath.Join(directory, name)
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("read target account: %s is not installed in %s", name, accountSystemPath)
 }
 
 // accountCurrent reads the effective user's entry from the account
@@ -337,7 +355,11 @@ func accountCurrent() (Account, error) {
 // accountFromNameService reads `getent passwd <euid>`:
 // name:password:uid:gid:gecos:home:shell.
 func accountFromNameService() (Account, error) {
-	output, err := core.Capture(context.Background(), exec.Command("getent", "passwd", strconv.Itoa(os.Geteuid())))
+	getent, err := accountTool("getent")
+	if err != nil {
+		return Account{}, err
+	}
+	output, err := core.Capture(context.Background(), exec.Command(getent, "passwd", strconv.Itoa(os.Geteuid())))
 	if err != nil {
 		return Account{}, fmt.Errorf("read target account: %w", err)
 	}

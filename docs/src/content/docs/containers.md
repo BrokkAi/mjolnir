@@ -108,13 +108,12 @@ profiling also needs the host's `kernel.perf_event_paranoid` set to 1 or lower
 and a seccomp profile that permits `perf_event_open` with `CAP_PERFMON`.
 Install profiling tools in the project's recipe when needed.
 
-## The release image
+## The daemon image
 
-Mjolnir also publishes `ghcr.io/brokkai/mjolnir/agent-dev` for `linux/amd64`
-and `linux/arm64`. Releases use an immutable version tag; development builds
-use `:latest`. This image carries Mjolnir, its worker, and pinned harnesses.
-[Daemon-container mode](/daemon-container/) uses this release image by default.
-It is separate from the default session image.
+Mjolnir publishes `ghcr.io/brokkai/mjolnir/daemon` for `linux/amd64` and
+`linux/arm64` for [daemon-container mode](/daemon-container/). Releases use
+an immutable version tag and development builds use `:latest`. The image
+carries Mjolnir and its worker. Mjolnir installs harnesses on demand.
 
 Quota checks run beside the daemon and never start a container. Codex, Grok
 and Claude Code use an installed CLI on the host's `PATH`; Grok also finds the
@@ -126,15 +125,15 @@ pulled.
 
 Older `[quota] runtime` values (`auto`, `host`, `podman`, and `docker`) are
 accepted but ignored and dropped when the configuration is saved. When the
-daemon itself runs in a container, checks use that container's installed
-harnesses. Claude Code on macOS reads its login from the host's Keychain.
+daemon runs in a container, it prepares and runs quota checks inside that
+container. Claude Code on macOS reads its login from the host's Keychain.
 
-The image also carries the session worker, built from the same commit at
-`/opt/mjolnir/mj-worker` and labelled `org.brokk.mjolnir.worker-build`. A release
-of `mj` runs the worker baked into its own image, or into a custom image built
-from it, and copies nothing into the container. Any other image gets the worker
-installed from beside `mj` as before, and Mjolnir checks that it is the matching
-build either way. A development build prefers the worker it was built with.
+The daemon image carries the matching session worker at
+`/opt/mjolnir/mj-worker` and records its build identity in the
+`org.brokk.mjolnir.worker-build` label. For session images that need a worker
+installed, Mjolnir copies the matching binary from beside `mj`.
+
+## Upgrading sessions
 
 Upgrading `mj` reconnects to compatible existing workers and preserves their
 containers. Supported worker-only upgrades happen inside the existing container
@@ -165,14 +164,6 @@ Use `mj upgrade-container --session <id>` to preview, add
 `--acknowledge-writable-layer-loss` to queue, or use `--cancel` to cancel a pending
 request. The [HTTP API](/api-reference/#container-upgrades) exposes the same
 preview, acknowledgment and cancellation semantics.
-
-Building it yourself remains a supported alternative, for example to
-customize the image or to work offline. Build from a Git checkout with the
-script, which computes the worker build identity the image needs:
-
-```console
-scripts/build-agent-dev-image.sh podman localhost/mjolnir/agent-dev:latest --pull=always
-```
 
 ## Choose a runtime in the UI
 

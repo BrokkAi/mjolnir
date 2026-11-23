@@ -16,7 +16,7 @@ use crate::targets::{
 };
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
 #[cfg(test)]
-use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION};
+use mj_core::harness_runtime::CODEX_ACP_VERSION;
 use mj_core::project_memory::ProjectMemoryIdentity;
 use mj_core::worker_build::{verify_worker_build, worker_build_id};
 use mj_core::worker_launch::{

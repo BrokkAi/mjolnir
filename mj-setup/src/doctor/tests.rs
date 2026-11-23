@@ -2150,6 +2150,22 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
 /// The remote Apple container check runs every probe on the far side of SSH,
 /// and its failure names the one thing that is missing (a running daemon)
 /// rather than an unreachable host.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn remote_apple_without_platform_requires_an_arm_worker() {
+    let mut config = Config::default();
+    config.targets.insert(
+        "mac-apple".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-apple-container",
+            "host": "mac.test",
+            "image": "example.invalid/agent:latest"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(container_worker_architectures(Ok(&config)), ["aarch64"]);
+}
+
 #[test]
 fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
     let ssh = RuntimeSshTarget {

@@ -13,11 +13,13 @@ use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+use agent_client_protocol::v1::schema::{SessionUpdate, ToolCallContent};
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
+use mj_core::activity::ForegroundOwner;
 use mj_core::clock::epoch_millis;
 
 use super::snapshot::{
@@ -803,12 +805,18 @@ impl DurableRelay {
         let previous_native_session_id = self.snapshot.native_session_id.clone();
         let previous_assessment = self.snapshot.assessment.clone();
         match staged {
-            Some(next_snapshot) => self.snapshot = next_snapshot,
+            Some(next_snapshot) => {
+                self.retire_tools_at_boundary(&next_snapshot, &event.observation);
+                self.snapshot = next_snapshot;
+            }
             // Applying is still what moves the frontier, so a misclassified
             // observation cannot silently lose its state change. It cannot
             // fail here either: this event was digested from this exact
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
+        }
+        if let RelayObservation::SessionUpdate { update } = &event.observation {
+            self.observe_committed_tools(update, event.recorded_at_ms);
         }
         if self.snapshot.native_session_id != previous_native_session_id {
             self.forget_antigravity_state();
@@ -911,6 +919,116 @@ impl DurableRelay {
         self.suppress_child_assessment()?;
         self.service_live_baselines();
         Ok(ordinal)
+    }
+
+    fn retire_tools_at_boundary(&mut self, next: &RelaySnapshot, observation: &RelayObservation) {
+        if matches!(
+            observation,
+            RelayObservation::SessionRestarted
+                | RelayObservation::Closing
+                | RelayObservation::Closed
+                | RelayObservation::CommandCompleted {
+                    outcome: RelayCommandOutcome::Closed,
+                    ..
+                }
+        ) {
+            self.forget_harness_processes();
+            return;
+        }
+        if let Some(prompt) = &self.snapshot.active_prompt
+            && next
+                .active_prompt
+                .as_ref()
+                .is_none_or(|active| active.command_id != prompt.command_id)
+        {
+            let owner = ForegroundOwner::Prompt(prompt.command_id.clone());
+            if next.goal.running() && next.execution == mj_core::relay::RelayExecutionState::Running
+            {
+                let continuing_owner = next.harness_turn.map_or(ForegroundOwner::Unowned, |turn| {
+                    ForegroundOwner::HarnessTurn(turn.first_ordinal)
+                });
+                self.foreground_tools
+                    .transfer_owner(&owner, continuing_owner);
+            } else {
+                self.foreground_tools.retire_owner(&owner);
+            }
+        }
+        let previous_turn = self.snapshot.harness_turn;
+        let next_turn = next.harness_turn;
+        if previous_turn != next_turn {
+            if let Some(turn) = previous_turn {
+                self.foreground_tools
+                    .retire_owner(&ForegroundOwner::HarnessTurn(turn.first_ordinal));
+            }
+            if let Some(turn) = next_turn
+                && next.active_prompt.is_none()
+            {
+                self.foreground_tools.transfer_owner(
+                    &ForegroundOwner::Unowned,
+                    ForegroundOwner::HarnessTurn(turn.first_ordinal),
+                );
+            }
+        }
+        let markerless_goal_ended = self.snapshot.goal.running()
+            && !next.goal.running()
+            && next.active_prompt.is_none()
+            && next_turn.is_none();
+        if markerless_goal_ended
+            || matches!(
+                observation,
+                RelayObservation::CommandCompleted {
+                    outcome: RelayCommandOutcome::ContextCleared { .. },
+                    ..
+                }
+            )
+        {
+            // No remaining turn can retire markerless calls after this boundary.
+            self.foreground_tools
+                .retire_owner(&ForegroundOwner::Unowned);
+        }
+    }
+
+    fn observe_committed_tools(&mut self, update: &SessionUpdate, recorded_at_ms: i64) {
+        if matches!(
+            update,
+            SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_)
+        ) && !matches!(
+            self.snapshot.execution,
+            mj_core::relay::RelayExecutionState::Closing
+                | mj_core::relay::RelayExecutionState::Closed
+        ) {
+            let terminal = match update {
+                SessionUpdate::ToolCall(call)
+                    if crate::acp::is_fallback_terminal_tool_call(call) =>
+                {
+                    call.content.iter().find_map(|content| match content {
+                        ToolCallContent::Terminal(terminal) => {
+                            Some(terminal.terminal_id.to_string())
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            let owner = if let Some(terminal) = terminal {
+                ForegroundOwner::HostedTerminal(terminal)
+            } else if let Some(prompt) = &self.snapshot.active_prompt {
+                ForegroundOwner::Prompt(prompt.command_id.clone())
+            } else if let Some(turn) = self.snapshot.harness_turn {
+                ForegroundOwner::HarnessTurn(turn.first_ordinal)
+            } else {
+                ForegroundOwner::Unowned
+            };
+            self.foreground_tools.observe_for_owner(
+                update,
+                self.step_clock.started_at_ms().unwrap_or(recorded_at_ms),
+                owner,
+            );
+        }
+        if self.background_work == super::BackgroundWorkPolicy::KimiTasks {
+            self.track_agent_terminal_tool_call(update);
+            self.track_kimi_background_agent(update);
+        }
     }
 
     fn commit_journal_append(

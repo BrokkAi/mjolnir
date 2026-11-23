@@ -3938,7 +3938,14 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
             if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("tool_call"))
     })
     .await;
-    tools.open("long-build", mj_core::clock::epoch_millis());
+    tools.observe_for_owner(
+        &SessionUpdate::ToolCall(
+            agent_client_protocol::v1::schema::ToolCall::new("long-build", "Long build")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::InProgress),
+        ),
+        mj_core::clock::epoch_millis(),
+        mj_core::activity::ForegroundOwner::Prompt("prompt-1".into()),
+    );
 
     // Well past the silence bound, and nothing has arrived since the tool call.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -3996,7 +4003,14 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
         .unwrap();
     let mut methods = Vec::new();
     wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
-    tools.open("long-build", mj_core::clock::epoch_millis());
+    tools.observe_for_owner(
+        &SessionUpdate::ToolCall(
+            agent_client_protocol::v1::schema::ToolCall::new("long-build", "Long build")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::InProgress),
+        ),
+        mj_core::clock::epoch_millis(),
+        mj_core::activity::ForegroundOwner::Prompt("prompt-1".into()),
+    );
 
     let warning = wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::Warning { .. })

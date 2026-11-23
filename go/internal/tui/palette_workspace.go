@@ -10,12 +10,14 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // WorkspacePopup is the workspace list open on the "Change workspace" row.
@@ -73,32 +75,160 @@ func (p *WorkspacePopup) options() []chat.Line {
 // render draws the anchored list on row, the palette row of the command.
 // bounds is what the popup may cover.
 func (p *WorkspacePopup) render(frame *chat.Frame, bounds uv.Rectangle, row uv.Rectangle, sessionMenu bool, form *chat.Dialog[PaletteControl]) {
-	panic("unported: mj-tui/src/palette/workspace.rs WorkspacePopup::render")
+	// The row's own words, so the field reads as the item opened. The menu
+	// spells it in title case, the palette in sentence case.
+	label := "Change workspace"
+	if sessionMenu {
+		label = "Change Workspace"
+	}
+	fieldWidth := min(chat.RawLine(label).Width()+1+chat.RawLine(chat.ComboBoxCurrentGlyph()).Width(), row.Dx())
+	field := uv.Rect(row.Min.X, row.Min.Y, fieldWidth, 1)
+	frame.RenderWidget(chat.Clear{}, field)
+	chat.ComboBoxRender(
+		frame,
+		bounds,
+		field,
+		label,
+		p.options(),
+		p.selected(),
+		p.combo.IsOpen(PaletteControlWorkspace),
+		true,
+		" workspace · ↑/↓ select · Enter choose ",
+		chat.PopupSideBelow,
+		// The palette stays open underneath; the list takes less of it.
+		chat.ComboBoxDefaultMaxVisibleRows-2,
+		&form.Form,
+		PaletteControlWorkspace,
+	)
 }
 
 // beginChangeWorkspace opens Change Workspace from a keybinding or another
 // command, which has no palette open: the session menu appears with the
 // list already open on its row.
 func (d *DashboardState) beginChangeWorkspace() {
-	panic("unported: mj-tui/src/palette/workspace.rs DashboardState::begin_change_workspace")
+	if _, open := d.mode.(ModePalette); !open {
+		d.beginSessionPalette()
+		if palette, ok := d.mode.(ModePalette); ok {
+			index := slices.IndexFunc(palette.entries, func(entry PaletteEntry) bool {
+				return entry.id == CommandIdChangeWorkspace
+			})
+			if index >= 0 {
+				palette.selected = index
+				palette.prepare()
+			}
+		}
+	}
+	d.openWorkspacePopup()
 }
 
 // openWorkspacePopup opens the workspace list on the open palette's Change
 // workspace row, on the session's current workspace.
 func (d *DashboardState) openWorkspacePopup() {
-	panic("unported: mj-tui/src/palette/workspace.rs DashboardState::open_workspace_popup")
+	palette, ok := d.mode.(ModePalette)
+	if !ok {
+		return
+	}
+	var session *core.SessionRecord
+	if palette.sessionID != nil {
+		session = d.state.Get().Sessions.GetShared(*palette.sessionID)
+	} else if id, ok := d.commandSessionID(); ok {
+		session = d.state.Get().Sessions.GetShared(id)
+	}
+	if session == nil {
+		d.CancelModal()
+		d.SetNotice("This session is no longer available.")
+		return
+	}
+	sessionID := session.ID
+	workspaceID := session.WorkspaceID
+	var choices [][2]string
+	for _, id := range d.workspaceIDs() {
+		choices = append(choices, [2]string{id, d.workspaceDisplayName(id)})
+	}
+	if len(choices) < 2 {
+		d.CancelModal()
+		d.SetNotice("There is no other workspace to move this session to.")
+		return
+	}
+	current := max(slices.IndexFunc(choices, func(choice [2]string) bool { return choice[0] == workspaceID }), 0)
+	var combo chat.ComboBoxState[PaletteControl]
+	combo.Open(PaletteControlWorkspace, current)
+	palette.workspacePopup = &WorkspacePopup{
+		sessionID: sessionID,
+		choices:   choices,
+		current:   current,
+		combo:     combo,
+	}
+	palette.prepare()
+	palette.form.Focus(PaletteControlWorkspace)
 }
 
 // handleWorkspacePopupEvent gives keys and clicks to the list while it is
 // open. Esc closes the list and leaves the menu.
 func (d *DashboardState) handleWorkspacePopupEvent(event tea.Msg) DashboardAction {
-	panic("unported: mj-tui/src/palette/workspace.rs DashboardState::handle_workspace_popup_event")
+	palette, ok := d.mode.(ModePalette)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	popup := palette.workspacePopup
+	if popup == nil {
+		return DashboardActionNone{}
+	}
+	result := palette.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	routed := popup.combo.Route(result.Action)
+	if commit, ok := routed.(chat.InteractionComboBoxCommit[PaletteControl]); ok {
+		return d.commitWorkspaceChoice(commit.Index)
+	}
+	if _, ok := routed.(chat.InteractionCancel[PaletteControl]); ok {
+		d.CancelModal()
+		return DashboardActionNone{}
+	}
+	if popup.combo.IsOpen(PaletteControlWorkspace) {
+		palette.prepare()
+	} else {
+		closePopup(palette.CommandPalette)
+	}
+	return DashboardActionNone{}
 }
 
 // commitWorkspaceChoice moves the session at once (it is reversible);
 // picking its own workspace only says so.
 func (d *DashboardState) commitWorkspaceChoice(index int) DashboardAction {
-	panic("unported: mj-tui/src/palette/workspace.rs DashboardState::commit_workspace_choice")
+	palette, ok := d.mode.(ModePalette)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	popup := palette.workspacePopup
+	if popup == nil {
+		return DashboardActionNone{}
+	}
+	palette.workspacePopup = nil
+	if index < 0 || index >= len(popup.choices) {
+		closePopup(palette.CommandPalette)
+		return DashboardActionNone{}
+	}
+	workspaceID, workspaceName := popup.choices[index][0], popup.choices[index][1]
+	d.CancelModal()
+	session := d.state.Get().Sessions.GetShared(popup.sessionID)
+	if session == nil {
+		d.SetNotice("This session is no longer available.")
+		return DashboardActionNone{}
+	}
+	name := sessionName(session)
+	if index == popup.current {
+		d.SetNotice(fmt.Sprintf(
+			"Session \"%s\" is already in workspace \"%s\".",
+			FitSessionName(name, NoticeNameCells),
+			FitSessionName(workspaceName, NoticeNameCells),
+		))
+		return DashboardActionNone{}
+	}
+	return DashboardActionChangeWorkspace{
+		SessionID:     popup.sessionID,
+		WorkspaceID:   workspaceID,
+		WorkspaceName: workspaceName,
+	}
 }
 
 // closePopup closes the list and returns the focus to the menu behind it.

@@ -2363,7 +2363,12 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
     )
     .unwrap();
 
-    assert!(plan.commands[1].args.windows(2).any(|args| {
+    let run = plan
+        .commands
+        .iter()
+        .find(|command| command.creates_target)
+        .unwrap();
+    assert!(run.args.windows(2).any(|args| {
         args == [
             "--mount",
             "type=bind,source=/Users/me/assets,target=/mnt/assets,readonly",
@@ -4254,7 +4259,7 @@ test -s /tmp/mj-perf.txt
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman with runc installed, a cached agent-dev image, and MJ_INSTANCE=tmp1212"]
+#[ignore = "requires rootless Podman with runc installed, a cached buildpack-deps:noble image, and MJ_INSTANCE=tmp1212"]
 fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace() {
     assert_eq!(mj_core::config::instance_name().as_deref(), Some("tmp1212"));
     let runc_conf = tempfile::NamedTempFile::new().unwrap();
@@ -4292,7 +4297,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
         let session = mj_core::state::new_session_id().unwrap();
         let name = resource_name(&session).unwrap();
         let template = ContainerTemplate {
-            image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+            image: "docker.io/library/buildpack-deps:noble".to_owned(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![],
             workspace_storage: storage,
@@ -4344,12 +4349,12 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
 // Hard-won: #1303: an agent's kill of PID 1 stopped the session container
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman and a cached agent-dev image"]
+#[ignore = "requires rootless Podman and a cached buildpack-deps:noble image"]
 fn podman_session_container_survives_signals_sent_to_pid_1() {
     let session = mj_core::state::new_session_id().unwrap();
     let name = resource_name(&session).unwrap();
     let template = ContainerTemplate {
-        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+        image: "docker.io/library/buildpack-deps:noble".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: Default::default(),
@@ -5360,7 +5365,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires a running Docker daemon and cached agent-dev image"]
+#[ignore = "requires a running Docker daemon and cached buildpack-deps:noble image"]
 fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     let source = docker_overlay_smoke_directory(cfg!(target_os = "macos")).unwrap();
     let session = format!(
@@ -5385,7 +5390,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     std::os::unix::fs::symlink("payload", source.path().join("link")).unwrap();
     let template = ContainerTemplate {
         build_cache: None,
-        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+        image: "docker.io/library/buildpack-deps:noble".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],
         workspace_storage: Default::default(),
@@ -5716,7 +5721,7 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman and cached ghcr.io/brokkai/mjolnir/agent-dev:latest image"]
+#[ignore = "requires rootless Podman and cached docker.io/library/buildpack-deps:noble image"]
 fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout() {
     struct ContainerGuard(String);
     impl Drop for ContainerGuard {
@@ -5742,7 +5747,7 @@ fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout()
                 "dev.mj.managed=true",
                 "--label",
                 &format!("dev.mj.session={session}"),
-                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "docker.io/library/buildpack-deps:noble",
                 "sleep",
                 "300",
             ],

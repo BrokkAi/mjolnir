@@ -2,6 +2,8 @@
 package tui
 
 import (
+	"cmp"
+	"slices"
 	"strings"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -17,7 +19,33 @@ import (
 // [chordPrefix] on the first chord that survives — `ctrl+b then c create` —
 // so the reader always sees which key starts the chord.
 func footerCommands(dashboard *DashboardState, group FooterGroup) []chat.FooterItem[CommandId] {
-	panic("unported: mj-tui/src/render/footer.rs footer_commands")
+	type rankedHint struct {
+		rank uint8
+		item chat.FooterItem[CommandId]
+	}
+	var hints []rankedHint
+	for _, id := range available(dashboard, nil) {
+		spec := spec(id)
+		if spec.footerGroup != group {
+			continue
+		}
+		word, ok := spec.footer(dashboard)
+		if !ok {
+			continue
+		}
+		key, ok := dashboard.footerKey(id)
+		if !ok {
+			continue
+		}
+		hints = append(hints, rankedHint{spec.footerRank, chat.FooterItem[CommandId]{Key: id, Text: key + " " + word}})
+	}
+	// Stable, as Rust's sort_by_key: equal ranks keep registry order.
+	slices.SortStableFunc(hints, func(a, b rankedHint) int { return cmp.Compare(a.rank, b.rank) })
+	items := make([]chat.FooterItem[CommandId], len(hints))
+	for i, hint := range hints {
+		items[i] = hint.item
+	}
+	return items
 }
 
 // chordPrefix is the words that lead the chord group: `ctrl+b then `.
@@ -49,7 +77,18 @@ func footerGroups(dashboard *DashboardState) [3][]chat.FooterItem[CommandId] {
 // directPaletteCommands is the palette hint under its direct (non-chord)
 // key, when the palette is available and has one.
 func directPaletteCommands(dashboard *DashboardState) []chat.FooterItem[CommandId] {
-	panic("unported: mj-tui/src/render/footer.rs direct_palette_commands")
+	if !slices.Contains(available(dashboard, nil), CommandIdPalette) {
+		return nil
+	}
+	key, ok := dashboard.directPaletteFooterKey()
+	if !ok {
+		return nil
+	}
+	word, ok := spec(CommandIdPalette).footer(dashboard)
+	if !ok {
+		return nil
+	}
+	return []chat.FooterItem[CommandId]{{Key: CommandIdPalette, Text: key + " " + word}}
 }
 
 // fittedFooterGroups is the groups that fit in width, with the prefix still
@@ -91,7 +130,51 @@ func combinedFooterText(dashboard *DashboardState, width int) string {
 // composer's own footer works, so the two are interchangeable and the row
 // costs one line whichever surface drew it.
 func renderFooter(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/render/footer.rs render_footer")
+	rowStyle := chat.Muted().Background(chat.ThemePalette().Surface)
+	// A half-typed chord owns the row: what the reader needs there is the
+	// way out of it, not the hints they are already part-way through.
+	if dashboard.PrefixPending() {
+		frame.RenderWidget(chat.NewParagraph(chat.TextFrom(prefixBannerLine(dashboard))).WithStyle(rowStyle), area)
+		return
+	}
+	if dashboard.ResizeModeActive() {
+		frame.RenderWidget(chat.NewParagraph(chat.TextFrom(resizeBannerLine())).WithStyle(rowStyle), area)
+		return
+	}
+	notice, hasNotice := dashboard.notices.Current()
+	groups := fittedFooterGroups(dashboard, area.Dx())
+	var line chat.Line
+	if hasNotice {
+		line = chat.StyledLine(notice, chat.Style{}.Foreground(chat.ThemePalette().Warning))
+	} else {
+		line = chat.Hints(combinedFooterText(dashboard, area.Dx()))
+	}
+	frame.RenderWidget(chat.NewParagraph(chat.TextFrom(line)).WithStyle(rowStyle), area)
+	// The dashboard has no active composer to register these controls for
+	// us. Register the same fitted segments that were drawn so a footer
+	// click dispatches the command represented by that exact hint.
+	if hasNotice {
+		return
+	}
+	x := area.Min.X
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
+		}
+		if x > area.Min.X {
+			x += chat.RawLine(chat.FooterGroupSeparator()).Width()
+		}
+		for index, item := range group {
+			if index > 0 {
+				x += chat.RawLine(chat.FooterSeparator()).Width()
+			}
+			width := chat.RawLine(item.Text).Width()
+			renderFooterCommand(frame,
+				uv.Rect(x, area.Min.Y, min(width, max(area.Max.X-x, 0)), area.Dy()),
+				dashboard, item.Key, item.Text)
+			x += width
+		}
+	}
 }
 
 // resizeBannerLine is the footer row while panes are being resized.

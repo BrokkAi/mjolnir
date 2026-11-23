@@ -10005,3 +10005,73 @@ fn suspend_settlement_rolls_back_transcript_deletes_and_temporary_close_preserve
     );
     assert!(load_session_record("child").unwrap().is_none() && !detail.exists());
 }
+
+#[test]
+fn materialized_foreground_tool_settles_after_actor_reload() {
+    use agent_client_protocol::v1::schema::{SessionUpdate, ToolCall, ToolCallStatus};
+    use mj_core::relay::{RelayEvent, RelayObservation};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "tool-settlement";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+    let empty = MaterializedSession::empty(session_id);
+    save_materialized_session_to(&path, &empty).unwrap();
+
+    let apply = |observation| {
+        let (current, _) = load_materialized_actor_projection_from(&path, session_id)
+            .unwrap()
+            .unwrap();
+        let mut event = RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V2,
+            ordinal: current.applied_event_ordinal + 1,
+            previous_digest: String::new(),
+            digest: String::new(),
+            recorded_at_ms: 100 + current.applied_event_ordinal as i64,
+            command_id: None,
+            observation,
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let mutation = mj_transcript::projection::project_relay_event(&current, &event)
+            .unwrap()
+            .mutation;
+        apply_projection_page_to(&path, session_id, |page| {
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )
+        })
+        .unwrap();
+    };
+    apply(RelayObservation::HarnessTurnStarted { started_at_ms: 99 });
+    apply(RelayObservation::SessionUpdate {
+        update: Box::new(SessionUpdate::ToolCall(
+            ToolCall::new("active", "Build").status(ToolCallStatus::InProgress),
+        )),
+    });
+    apply(RelayObservation::SessionUpdate {
+        update: Box::new(SessionUpdate::ToolCall(
+            mj_core::acp::fallback_terminal_tool_call("detached", "Build".into()),
+        )),
+    });
+    let stored = |stable_id: &str| {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .query_row(
+                "SELECT settled, json_extract(body_json, '$.call.status')
+                 FROM materialized_transcript_items WHERE session_id=?1 AND stable_id=?2",
+                rusqlite::params![session_id, stable_id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(stored("tool:active"), (false, "in_progress".into()));
+    apply(RelayObservation::SessionRestarted);
+    assert_eq!(stored("tool:active"), (true, "failed".into()));
+    assert_eq!(
+        stored("tool:hel-terminal:detached"),
+        (false, "in_progress".into())
+    );
+}

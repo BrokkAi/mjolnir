@@ -22,12 +22,7 @@ pub fn daemon_container() -> Option<String> {
 /// Where harness programs come from for work this machine runs itself: local
 /// sessions, the model-discovery probe, `mj login` and local quota checks.
 ///
-/// The daemon container's image carries the pinned harnesses, so they are the
-/// only source there. A host gets Mjolnir's managed installation.
+/// Mjolnir manages these installations on the host and in the daemon container.
 pub fn local_harness_runtime() -> HarnessRuntimePolicy {
-    if daemon_container().is_some() {
-        HarnessRuntimePolicy::Image
-    } else {
-        HarnessRuntimePolicy::Managed
-    }
+    HarnessRuntimePolicy::Managed
 }

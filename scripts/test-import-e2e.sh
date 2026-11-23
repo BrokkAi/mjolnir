@@ -14,7 +14,7 @@ fi
 export CLAUDE_CONFIG_DIR="$real_claude_home"
 export MJ_IMPORT_E2E_ROOT="$test_root"
 export MJ_IMPORT_E2E_REPOSITORY="${MJ_IMPORT_E2E_REPOSITORY:-BrokkAi/mjolnir}"
-export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-localhost/mjolnir/agent-dev:latest}"
+export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-docker.io/library/buildpack-deps:noble}"
 # Keep the test's imported state and archive separate from the user's Mjolnir data.
 export MJ_CONFIG_DIR="$test_root/config/mjolnir"
 export MJ_DATA_DIR="$test_root/data/mjolnir"

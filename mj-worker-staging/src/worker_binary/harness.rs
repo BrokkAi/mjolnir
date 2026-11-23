@@ -43,13 +43,6 @@ pub fn workspace_paths(
     Ok((primary_path, additional))
 }
 
-// Package versions for ACP bridges and their harnesses. Keep these in lockstep with the global
-// npm installs in containers/Containerfile.agent-dev; bridge_pins_match_containerfile() below
-// fails the build when they drift.
-// Codex 0.148 reuses pending MCP startups during runtime reconciliation. Older
-// releases could cancel the first project-memory startup while immediately
-// replacing it with an equivalent connection, leaving a false failed-tool
-// event at the beginning of every session.
 /// Stage shown after the worker is reachable and while its ACP bridge becomes
 /// ready. Every remaining harness launches through a default launcher that can
 /// fetch it, so the stage names the harness being installed.

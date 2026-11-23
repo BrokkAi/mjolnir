@@ -15,6 +15,14 @@ name = "mj_client"
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+subtle = "2.6"
+tokio-util.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 url.workspace = true
 libc.workspace = true
 sysinfo.workspace = true

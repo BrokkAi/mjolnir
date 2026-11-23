@@ -102,6 +102,7 @@ use github::github_token;
 mod mailbox;
 pub use mj_session_runtime::wait_policy::*;
 mod routes;
+pub(super) use routes::loopback_authenticated;
 pub use routes::*;
 mod config;
 pub use config::*;
