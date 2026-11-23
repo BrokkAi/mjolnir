@@ -4644,6 +4644,37 @@ async fn repeated_wrong_codes_lock_the_login_endpoint() {
     assert_eq!(attempt("123456").await, StatusCode::TOO_MANY_REQUESTS);
 }
 
+#[tokio::test]
+async fn cloned_listener_options_share_code_lockouts_and_keep_cookie_security_local() {
+    let phone_options = detached_options();
+    let code = phone_options.viewer_code().to_owned();
+    let mut loopback_options = phone_options.clone();
+    loopback_options.secure_cookie = false;
+    let loopback = router(loopback_options);
+    let phone = router(phone_options);
+    let login = |app: &Router, code| {
+        app.clone().oneshot(
+            Request::post("/auth/session")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "code": code }).to_string()))
+                .unwrap(),
+        )
+    };
+    for (app, secure) in [(&phone, true), (&loopback, false)] {
+        let response = login(app, code.as_str()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let cookie = response.headers()[SET_COOKIE].to_str().unwrap();
+        assert_eq!(cookie.split("; ").any(|part| part == "Secure"), secure);
+    }
+
+    for _ in 0..MAX_CODE_FAILURES {
+        let response = login(&loopback, "invalid").await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = login(&phone, code.as_str()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 #[test]
 fn viewer_code_lockouts_lengthen_instead_of_resetting_after_every_wait() {
     let serve_one_lockout = |guard: &mut CodeGuard, now: Instant| {

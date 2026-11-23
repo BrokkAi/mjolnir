@@ -109,7 +109,6 @@ pub(crate) async fn start_api(
     )?;
     options.set_background_task_stop_tx(background_task_stop_tx);
     options.shutdown = termination.clone();
-    options.secure_cookie = false;
     options.delegate_image_build_shutdown();
     // Keep signed-in phones and logged-out identities consistent across
     // restarts. Loading the signing key and revocations runs off this loop.
@@ -142,6 +141,7 @@ pub(crate) async fn start_api(
     }));
     let image_builds = options.image_builds.clone();
     let mut loopback_options = options.clone();
+    loopback_options.secure_cookie = false;
     loopback_options.set_loopback_token(loopback_token);
     let mut serve = ViewerServer::spawn(crate::server::run_server_on_listener(
         loopback_options,

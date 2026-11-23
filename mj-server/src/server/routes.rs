@@ -117,13 +117,13 @@ pub(super) fn router(options: ServerOptions) -> Router {
         viewer_revocations: options.viewer_revocations,
         session_ttl: options.session_ttl,
         secure_cookie: options.secure_cookie,
-        code_guard: Arc::new(Mutex::new(CodeGuard::default())),
+        code_guard: options.code_guard,
         api_token: options.api_token.into(),
         loopback_token: options.loopback_token.into(),
         subagent: options.subagent,
         preferences_path: options.preferences_path,
         worker_source_check: options.worker_source_check,
-        held_prompts: Arc::new(api::HeldPrompts::default()),
+        held_prompts: options.held_prompts,
         upgrade_gate: options.upgrade_gate,
     };
     let upgrade_gate = state.upgrade_gate.clone();

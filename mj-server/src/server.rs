@@ -155,6 +155,8 @@ pub struct ServerOptions {
     login_token: String,
     cookie_key: Vec<u8>,
     viewer_revocations: Arc<ViewerRevocations>,
+    code_guard: Arc<Mutex<CodeGuard>>,
+    held_prompts: Arc<api::HeldPrompts>,
     browser: BrowserSource,
     api_token: String,
     loopback_token: String,
@@ -226,6 +228,8 @@ impl ServerOptions {
             login_token: derive_login_token(&cookie_key),
             cookie_key,
             viewer_revocations: Arc::new(ViewerRevocations::default()),
+            code_guard: Arc::new(Mutex::new(CodeGuard::default())),
+            held_prompts: Arc::new(api::HeldPrompts::default()),
             browser,
             // An empty token authenticates nothing: the daemon installs the
             // persisted one, and a server without it serves the viewer only.
