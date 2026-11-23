@@ -387,6 +387,7 @@ impl OriginDeltaSuspend {
                     session.container_workspace.as_deref(),
                 ))
             }
+            mj_core::state::Checkout::Attached { path } => path.to_path_buf(),
             _ => bail!("managed checkout is missing"),
         };
         let accepted = read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?;
@@ -397,12 +398,17 @@ impl OriginDeltaSuspend {
                 .as_ref()
                 .is_some_and(|request| &request.operation == operation)
         });
+        let mut child_sessions = controller.state.active_borrowers(session_id);
+        if !child_sessions.is_empty() {
+            let peers = crate::database::bound_environment_member_ids(session_id)?;
+            child_sessions.retain(|id| peers.contains(id));
+        }
         Ok(Self {
             session_id: session_id.to_owned(),
             backend,
             root,
             checkout: checkout_path,
-            child_sessions: controller.state.active_child_session_ids(session_id),
+            child_sessions,
             request_recorded,
             accepted: accepted.is_some(),
             operation: match accepted {
@@ -416,8 +422,20 @@ impl OriginDeltaSuspend {
         self.accepted
     }
 
-    pub(super) fn accept(&mut self, executor: &(impl CommandExecutor + Sync)) -> Result<()> {
-        self.operation = new_command_id("origin-delta-suspend")?;
+    pub(super) fn already_quiescent(&self) -> bool {
+        self.operation.starts_with("parked-origin-delta-suspend-")
+    }
+
+    pub(super) fn accept(
+        &mut self,
+        executor: &(impl CommandExecutor + Sync),
+        parked: bool,
+    ) -> Result<()> {
+        self.operation = new_command_id(if parked {
+            "parked-origin-delta-suspend"
+        } else {
+            "origin-delta-suspend"
+        })?;
         write_wire(
             &self.backend,
             &self.session_id,

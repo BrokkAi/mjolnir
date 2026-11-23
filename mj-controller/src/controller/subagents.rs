@@ -236,10 +236,24 @@ impl Controller {
         if crate::database::load_subagent(session_id)?.is_none() {
             return Ok(());
         }
-        let Some(directory) = crate::database::load_subagent_report(session_id)?.report_dir else {
-            return Ok(());
-        };
-        prepare_report_dir(executor, backend, session_id, &directory, None)?;
+        if self.state.owns_environment(session_id) == Some(true) {
+            let checkout = self.state.checkout(session_id)?;
+            let (root, exclude_in) =
+                subagent_report_root(&self.state.sessions[session_id], backend, &checkout);
+            let directory = format!("{}/{session_id}", root.trim_end_matches('/'));
+            let absolute = prepare_report_dir(
+                executor,
+                backend,
+                session_id,
+                &directory,
+                exclude_in.as_deref(),
+            )?;
+            crate::database::record_subagent_report_dir(session_id, &absolute)?;
+        } else if let Some(directory) =
+            crate::database::load_subagent_report(session_id)?.report_dir
+        {
+            prepare_report_dir(executor, backend, session_id, &directory, None)?;
+        }
         Ok(())
     }
 

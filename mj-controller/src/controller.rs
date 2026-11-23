@@ -118,7 +118,6 @@ pub use mj_client::daemon::GitIdentity;
 pub use mj_session_runtime::host_git_config::{
     controller_git_identity, set_controller_git_identity,
 };
-pub use provisioning::CreateKind;
 pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,

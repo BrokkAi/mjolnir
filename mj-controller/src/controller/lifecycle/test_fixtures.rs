@@ -82,6 +82,9 @@ pub fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
     Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -91,10 +94,11 @@ pub fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
 pub const ISOLATED_STORE_CHILD: &str = "MJ_LIFECYCLE_ISOLATED_STORE_CHILD";
 
 /// Resource fixtures publish the same durable ownership as real provisioning.
-pub fn persist_controller_fixture(controller: &Controller) {
+pub fn persist_controller_fixture(controller: &mut Controller) {
     for session in controller.state.sessions.values() {
         crate::database::save_session(session).unwrap();
     }
+    controller.state.environment_owners = crate::database::load_state().unwrap().environment_owners;
 }
 
 /// Run `test` alone in a child with its own store; true in that child.

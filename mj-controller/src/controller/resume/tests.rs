@@ -318,6 +318,9 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -382,6 +385,9 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -481,6 +487,9 @@ async fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
             ..Config::default()
         },
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -668,6 +677,9 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             ..Config::default()
         },
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -970,6 +982,9 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1692,6 +1707,9 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1874,6 +1892,9 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2126,6 +2147,9 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2433,6 +2457,9 @@ exit 0
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },

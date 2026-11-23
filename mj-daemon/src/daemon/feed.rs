@@ -1271,6 +1271,8 @@ mod tests {
         let mut live = RuntimeProjection::default();
         live.records
             .insert("session".into(), record("session", SessionState::Running));
+        live.environment_owners
+            .insert("session".into(), "session".into());
         history.publish(live.clone()).unwrap();
         let first = history.browser_views(None);
         assert_eq!(first.cursor, history.cursor());

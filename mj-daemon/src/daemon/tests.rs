@@ -603,57 +603,50 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     for state in [SessionState::Closing, SessionState::Destroying] {
         let mut session = runtime_test_session("session", "workspace", state);
         session.target = target.clone().map(Box::new);
-        assert_eq!(
-            close_route(Some(&session), false),
-            CloseRoute::RecoverInterrupted
-        );
+        assert_eq!(close_route(&session, true), CloseRoute::RecoverInterrupted);
         // Without a target there is nothing left for recovery to finish, and
         // nothing to checkpoint either: the close settles instead of waiting
         // on a relay that does not exist.
         session.target = None;
         assert_eq!(
-            close_route(Some(&session), false),
+            close_route(&session, true),
             CloseRoute::SettleWithoutCheckpoint
         );
     }
 
     let mut running = runtime_test_session("session", "workspace", SessionState::Running);
     running.target = target.clone().map(Box::new);
-    assert_eq!(close_route(Some(&running), false), CloseRoute::Graceful);
-    assert_eq!(close_route(None, false), CloseRoute::Graceful);
+    assert_eq!(close_route(&running, true), CloseRoute::Graceful);
 
     // A session wedged in provisioning has no harness state and no relay, with
     // or without the container it managed to create (#1059).
     let mut provisioning = runtime_test_session("session", "workspace", SessionState::Provisioning);
     assert_eq!(
-        close_route(Some(&provisioning), false),
+        close_route(&provisioning, true),
         CloseRoute::SettleWithoutCheckpoint
     );
     provisioning.target = target.clone().map(Box::new);
     assert_eq!(
-        close_route(Some(&provisioning), false),
+        close_route(&provisioning, true),
         CloseRoute::SettleWithoutCheckpoint
     );
 
     // The same session once startup reconciliation has failed it (#1070).
     let failed = runtime_test_session("session", "workspace", SessionState::Error);
     assert_eq!(
-        close_route(Some(&failed), false),
+        close_route(&failed, true),
         CloseRoute::SettleWithoutCheckpoint
     );
     // A failed session that still names its target keeps a workspace worth
     // checkpointing, so it takes the graceful close.
     let mut failed_with_target = failed.clone();
     failed_with_target.target = target.clone().map(Box::new);
-    assert_eq!(
-        close_route(Some(&failed_with_target), false),
-        CloseRoute::Graceful
-    );
+    assert_eq!(close_route(&failed_with_target, true), CloseRoute::Graceful);
     // Every child takes the ownership-aware close, including recovery of an
     // interrupted teardown; none needs its parent's workspace checkpoint.
     assert_eq!(
-        close_route(Some(&failed_with_target), true),
-        CloseRoute::Subagent
+        close_route(&failed_with_target, false),
+        CloseRoute::Borrower
     );
     for state in [
         SessionState::Running,
@@ -666,16 +659,13 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     ] {
         let mut child = running.clone();
         child.state = state;
-        assert_eq!(close_route(Some(&child), true), CloseRoute::Subagent);
+        assert_eq!(close_route(&child, false), CloseRoute::Borrower);
     }
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
-    assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
+    assert_eq!(close_route(&stopped, true), CloseRoute::Done);
     stopped.target = target.map(Box::new);
-    assert_eq!(
-        close_route(Some(&stopped), false),
-        CloseRoute::DeferredCleanup
-    );
+    assert_eq!(close_route(&stopped, true), CloseRoute::DeferredCleanup);
 }
 
 /// A process that has exited but has not been reaped still answers
@@ -3058,9 +3048,9 @@ fn start_deferred_cleanup_test(
     use mj_controller::controller::lifecycle::test_fixtures::{
         persist_controller_fixture, stopped_podman_cleanup_controller,
     };
-    let controller = stopped_podman_cleanup_controller(DEFERRED_CLEANUP_TEST_SESSION);
+    let mut controller = stopped_podman_cleanup_controller(DEFERRED_CLEANUP_TEST_SESSION);
     controller.config.save().unwrap();
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     fs::write(root.join("volume"), "").unwrap();
     fs::write(root.join("replacement-volume"), "").unwrap();
     let (state, _, upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
@@ -7296,7 +7286,8 @@ async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resu
         .start_create_lifecycle(
             session.id.clone(),
             control.clone(),
-            create::CreateInputs::TopLevel {
+            create::CreateInputs {
+                child: None,
                 publication: Some(publication),
                 remember_launch_choices: false,
             },
@@ -17306,4 +17297,230 @@ async fn suspend_preflight_runs_through_cancellable_machine_action_dispatch() {
     assert_eq!(preflight.session_id, session_id);
     drop(client);
     server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_suspend_records_only_children_it_stops_and_resume_keeps_failed_children_eligible() {
+    const NAME: &str =
+        "parent_suspend_records_only_children_it_stops_and_resume_keeps_failed_children_eligible";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Owned children").unwrap();
+    let parent_id = "11111111111111111111111111111111";
+    let live_id = "22222222222222222222222222222222";
+    let manual_id = "33333333333333333333333333333333";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    mj_controller::database::save_session(&parent).unwrap();
+    for (id, status) in [
+        (live_id, SessionState::Provisioning),
+        (manual_id, SessionState::Stopped),
+    ] {
+        let session = runtime_test_session(id, &workspace.id, status);
+        mj_controller::database::register_subagent_with_startup(
+            &session,
+            &runtime_test_subagent(id, parent_id),
+            vec![],
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+    }
+    let failed_id = "44444444444444444444444444444444";
+    let mut failed = runtime_test_session(failed_id, &workspace.id, SessionState::Parked);
+    let unbootable_root = mj_core::config::data_dir().join(failed_id);
+    std::fs::create_dir(&unbootable_root).unwrap();
+    failed.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: unbootable_root,
+    }));
+    mj_controller::database::register_subagent_with_startup(
+        &failed,
+        &runtime_test_subagent(failed_id, parent_id),
+        vec![],
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    state.suspend_session(parent_id.into()).await.unwrap();
+    let load_flag = |id| {
+        mj_controller::database::load_subagent(id)
+            .unwrap()
+            .unwrap()
+            .resume_with_parent
+    };
+    assert!(load_flag(live_id));
+    assert!(!load_flag(manual_id));
+    assert!(!load_flag(failed_id));
+    assert_ne!(
+        mj_controller::database::load_session_state(failed_id).unwrap(),
+        Some(SessionState::Stopped)
+    );
+    assert_eq!(
+        mj_controller::database::load_session_state(parent_id).unwrap(),
+        Some(SessionState::Stopped)
+    );
+    assert_eq!(
+        mj_controller::database::load_session_state(live_id).unwrap(),
+        Some(SessionState::Stopped)
+    );
+
+    // An already-running parent must retry a child's Resume. With no recovery
+    // archive, the failure leaves its eligibility available on the next retry.
+    parent.state = SessionState::Running;
+    mj_controller::database::save_lifecycle_session(&parent).unwrap();
+    let request = ResumeSessionRequest {
+        session_id: parent_id.into(),
+        workspace_id: workspace.id.clone(),
+        profile_id: "codex".into(),
+        target_template_id: "local".into(),
+        additional_mounts: None,
+        resource_allocation: None,
+        discard_queue: false,
+        repository_preflight: None,
+    };
+    for _ in 0..2 {
+        state.resume_session(request.clone()).await.unwrap();
+        assert!(load_flag(live_id));
+        assert!(!load_flag(manual_id));
+    }
+    state.suspend_session(live_id.into()).await.unwrap();
+    assert!(
+        !load_flag(live_id),
+        "explicit suspend cleared eligibility on a stopped child"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn archive_refuses_parent_with_live_or_resume_eligible_owned_child() {
+    const NAME: &str = "archive_refuses_parent_with_live_or_resume_eligible_owned_child";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Archive protection").unwrap();
+    let parent_id = "11111111111111111111111111111111";
+    let child_id = "22222222222222222222222222222222";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    mj_controller::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
+    mj_controller::database::register_subagent_with_startup(
+        &child,
+        &runtime_test_subagent(child_id, parent_id),
+        vec![],
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    parent.state = SessionState::Stopped;
+    mj_controller::database::save_lifecycle_session(&parent).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    assert!(
+        state
+            .archive_stopped_session(parent_id.into())
+            .await
+            .is_err()
+    );
+    child.state = SessionState::Stopped;
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
+    mj_controller::database::set_subagent_resume_with_parent(child_id, true).unwrap();
+    assert!(
+        state
+            .archive_stopped_session(parent_id.into())
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .archive_stopped_session(child_id.into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        mj_controller::database::load_session_state(parent_id).unwrap(),
+        Some(SessionState::Stopped)
+    );
+    assert_eq!(
+        mj_controller::database::load_session_state(child_id).unwrap(),
+        Some(SessionState::Stopped)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const NAME: &str = "close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fails";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Already quiescent").unwrap();
+    let parent = "77777777777777777777777777777777";
+    let child = "88888888888888888888888888888888";
+    let mut config = mj_core::config::Config::default();
+    config
+        .targets
+        .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            mj_core::config::data_dir().join("profile"),
+        ),
+    );
+    config.save().unwrap();
+    mj_controller::database::save_session(&runtime_test_session(
+        parent,
+        &workspace.id,
+        SessionState::Running,
+    ))
+    .unwrap();
+    let mut record = runtime_test_session(child, &workspace.id, SessionState::Parked);
+    let root = tempfile::tempdir().unwrap();
+    let worker_root = root.path().join(child);
+    std::fs::create_dir(&worker_root).unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    record.project_directory = Some(project);
+    let worker = worker_root.join("hel");
+    let start_marker = root.path().join("started");
+    std::fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\necho started >> {}\n",
+            start_marker.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    mj_controller::database::register_subagent_with_startup(
+        &record,
+        &runtime_test_subagent(child, parent),
+        vec![],
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    // Fail before spawning any worker, while attempting to read the installed launch.
+    std::fs::write(worker_root.join("launch.json"), b"{").unwrap();
+    let state = test_runtime_state_loading_the_store();
+    assert!(state.suspend_session(child.into()).await.is_err());
+    let saved = mj_controller::database::read_durable_session_record(child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.state, SessionState::Parked);
+    assert_eq!(saved.target, record.target);
+    assert!(!start_marker.exists());
 }

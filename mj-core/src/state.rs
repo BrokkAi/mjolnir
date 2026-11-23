@@ -2964,6 +2964,21 @@ impl State {
         owned
     }
 
+    pub fn can_suspend_owned_child(&self, id: &str) -> bool {
+        self.owns_environment(id) == Some(true)
+            && self.subagents.contains_key(id)
+            && self.sessions.get(id).is_some_and(|record| {
+                record.state == SessionState::Parked || record.state.has_live_worker()
+            })
+    }
+
+    pub fn suspendable_owned_child_ids(&self, parent_id: &str) -> Vec<String> {
+        self.direct_owned_child_ids(parent_id)
+            .into_iter()
+            .filter(|id| self.can_suspend_owned_child(id))
+            .collect()
+    }
+
     /// All sub-agent descendants of `root_id` in BFS order, guarded against cycles.
     #[must_use]
     pub fn descendant_subagent_ids(&self, root_id: &str) -> Vec<String> {

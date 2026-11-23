@@ -292,7 +292,11 @@ impl RuntimeState {
         self.start_create_lifecycle(
             relation.child_session_id.clone(),
             LifecycleControl::default(),
-            CreateInputs::Subagent(Box::new(relation.clone())),
+            CreateInputs {
+                child: Some(relation.clone()),
+                publication: None,
+                remember_launch_choices: false,
+            },
             None,
         )
         .await
@@ -735,7 +739,8 @@ impl RuntimeState {
         self.start_create_lifecycle(
             session_id,
             control,
-            CreateInputs::TopLevel {
+            CreateInputs {
+                child: None,
                 publication,
                 remember_launch_choices,
             },
@@ -771,13 +776,12 @@ impl RuntimeState {
     ) -> Result<()> {
         let recovering = recovery_operation.is_some();
         let scheduled_at = std::time::Instant::now();
-        let request_key = match &inputs {
-            CreateInputs::Subagent(relation) => Some(relation.request_key.clone()),
-            CreateInputs::TopLevel { .. } => {
-                recovery_operation.map(|operation| format!("recovery:{operation}"))
-            }
-        };
-        let automatic = recovering || matches!(&inputs, CreateInputs::Subagent(_));
+        let automatic = recovering || inputs.child.is_some();
+        let request_key = inputs
+            .child
+            .as_ref()
+            .map(|child| child.request_key.clone())
+            .or_else(|| recovery_operation.map(|operation| format!("recovery:{operation}")));
         let mut start =
             super::lifecycle::LifecycleStart::request(String::new(), None, Some(control.clone()));
         start.request_key = request_key;
@@ -874,7 +878,7 @@ impl RuntimeState {
                     session_id,
                     cancelled,
                     control,
-                    CreateInputs::TopLevel { publication: None, remember_launch_choices: false },
+                    CreateInputs { child: None, publication: None, remember_launch_choices: false },
                     true,
                     scheduled_at,
                 ).await
@@ -914,23 +918,12 @@ impl RuntimeState {
         {
             return Ok(DaemonLifecycleResult::Done);
         }
-        let (kind, publication, parent): (_, Option<Publication>, Option<String>) = match inputs {
-            CreateInputs::TopLevel {
-                publication,
-                remember_launch_choices,
-            } => (
-                mj_controller::controller::CreateKind::TopLevel {
-                    remember_launch_choices,
-                },
-                publication,
-                None,
-            ),
-            CreateInputs::Subagent(relation) => (
-                mj_controller::controller::CreateKind::Subagent,
-                None,
-                Some(relation.parent_session_id),
-            ),
-        };
+        let CreateInputs {
+            child,
+            publication,
+            remember_launch_choices,
+        } = inputs;
+        let parent = child.map(|relation| relation.parent_session_id);
         let publication_timing =
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "await publication");
         let publication_error = if let Some(publication) = publication {
@@ -988,7 +981,7 @@ impl RuntimeState {
             .run_create(
                 &session_id,
                 &executor,
-                kind,
+                remember_launch_choices,
                 recovering,
                 commit,
                 &interrupted,
@@ -1058,9 +1051,14 @@ impl RuntimeState {
                     self.session_manager
                         .restore_starting(intent.session_id.clone())
                         .await?;
-                    CreateInputs::Subagent(Box::new(relation))
+                    CreateInputs {
+                        child: Some(relation),
+                        publication: None,
+                        remember_launch_choices: intent.remember_launch_choices,
+                    }
                 }
-                None => CreateInputs::TopLevel {
+                None => CreateInputs {
+                    child: None,
                     publication: None,
                     remember_launch_choices: intent.remember_launch_choices,
                 },
@@ -1103,16 +1101,10 @@ impl RuntimeState {
     }
 }
 
-/// The inputs only one kind of create has.
-pub(super) enum CreateInputs {
-    /// A session with its own environment. A phone create supplies the
-    /// publication that tells it the session exists.
-    TopLevel {
-        publication: Option<Publication>,
-        remember_launch_choices: bool,
-    },
-    /// A child worker on its parent's target.
-    Subagent(Box<mj_core::subagent::SubagentRecord>),
+pub(super) struct CreateInputs {
+    pub(super) publication: Option<Publication>,
+    pub(super) remember_launch_choices: bool,
+    pub(super) child: Option<mj_core::subagent::SubagentRecord>,
 }
 
 /// Tells a create that its phone was told the session exists.

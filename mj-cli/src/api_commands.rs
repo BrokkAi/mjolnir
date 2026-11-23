@@ -2630,6 +2630,11 @@ pub(crate) fn format_suspend_dry_run(
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "dry run for session {}", preflight.session_id);
+    if let Some(warning) = mj_core::suspend_consent::owning_children_suspend_warning(
+        preflight.owning_children_to_suspend,
+    ) {
+        let _ = writeln!(out, "{warning}");
+    }
     if let Some(est) = &preflight.dry_run {
         match (est.git_delta_bytes, &est.git_delta_unavailable_reason) {
             (Some(bytes), _) => {

@@ -18,7 +18,7 @@ fn live_sessions(ids: &[&str]) -> LiveSessions {
 }
 use tokio::sync::mpsc;
 
-fn view(id: &str, completed: bool) -> ManagedSessionView {
+pub(super) fn view(id: &str, completed: bool) -> ManagedSessionView {
     let mut materialized = MaterializedSession::empty(id);
     materialized.transcript = vec![
         Arc::new(TranscriptItem {

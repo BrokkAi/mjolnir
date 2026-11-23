@@ -11,7 +11,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use mj_core::config::{Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate};
 #[cfg(unix)]
-use mj_core::state::{SessionState, State, TargetLocator};
+use mj_core::state::{SessionState, TargetLocator};
 
 #[cfg(unix)]
 use crate::controller::Controller;
@@ -153,6 +153,19 @@ pub async fn close_cut_controller_with(
     crate::session_manager::SessionManagerChannels,
     ManagedSessionHandle,
 ) {
+    close_cut_controller_for_child(state, running, None).await
+}
+
+#[cfg(unix)]
+pub async fn close_cut_controller_for_child(
+    state: SessionState,
+    running: bool,
+    relation: Option<&mj_core::subagent::SubagentRecord>,
+) -> (
+    Controller,
+    crate::session_manager::SessionManagerChannels,
+    ManagedSessionHandle,
+) {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(120));
         eprintln!("the suspend never finished");
@@ -192,7 +205,11 @@ pub async fn close_cut_controller_with(
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
     }));
     session.checkpoint = Some(Box::new(checkpoint));
-    crate::database::save_session(&session).unwrap();
+    if let Some(relation) = relation {
+        crate::database::save_subagent_session(&session, relation).unwrap();
+    } else {
+        crate::database::save_session(&session).unwrap();
+    }
 
     let mut config = Config::default();
     config.profiles.insert(
@@ -220,12 +237,7 @@ pub async fn close_cut_controller_with(
     );
     let controller = Controller {
         config,
-        state: State {
-            sessions: [(LATCH_RELAY_SESSION.into(), session)]
-                .into_iter()
-                .collect(),
-            ..State::default()
-        },
+        state: crate::database::load_state().unwrap(),
     };
 
     let channels = crate::session_manager::spawn_session_manager().unwrap();

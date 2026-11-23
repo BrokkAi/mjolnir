@@ -323,6 +323,7 @@ pub(super) fn stop_borrower(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn retire_session_environment(
     session: &SessionRecord,
     config: &Config,

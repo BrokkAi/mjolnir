@@ -505,6 +505,15 @@ struct EnvironmentPeer {
     upgrade_phase: Option<String>,
 }
 
+/// Operational sessions currently bound to the same environment as the member.
+pub fn bound_environment_member_ids(member: &str) -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    Ok(environment_peers(&connection, member)?
+        .into_iter()
+        .map(|peer| peer.id)
+        .collect())
+}
+
 fn environment_peers(connection: &Connection, member: &str) -> Result<Vec<EnvironmentPeer>> {
     let mut peers = connection.prepare(
         "SELECT s.session_id, s.state, t.session_id IS NOT NULL,

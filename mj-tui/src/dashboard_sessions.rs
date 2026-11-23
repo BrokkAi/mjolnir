@@ -784,6 +784,7 @@ impl DashboardState {
         let mut children = self
             .managed_active_child_ids(parent_id)
             .into_iter()
+            .filter(|id| self.state.owns_environment(id) != Some(true))
             .chain(
                 self.native_by_parent
                     .get(parent_id)
