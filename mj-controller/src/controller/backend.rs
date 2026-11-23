@@ -315,6 +315,7 @@ impl Controller {
             executor,
             TargetCheck::BeforeLaunch,
         )
+        .map(|_| ())
     }
 
     /// The check a session wizard runs before it offers a target: the same
@@ -329,6 +330,7 @@ impl Controller {
             executor,
             TargetCheck::BeforeLaunch,
         )
+        .map(|_| ())
     }
 
     fn configured_target(&self, target_id: &str) -> Result<&TargetTemplate> {
@@ -446,13 +448,13 @@ pub(super) fn preflight_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
     check: TargetCheck,
-) -> Result<()> {
+) -> Result<Option<targets::CgroupCapabilities>> {
     match template {
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
         | TargetTemplate::SshAppleContainer { ssh, .. } => {
-            verify_ssh_connectivity(&SshTarget::from(ssh), executor)
+            verify_ssh_connectivity(&SshTarget::from(ssh), executor).map(|()| None)
         }
         _ => verify_target(template, executor, check),
     }
@@ -507,25 +509,27 @@ pub(super) fn verify_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
     check: TargetCheck,
-) -> Result<()> {
+) -> Result<Option<targets::CgroupCapabilities>> {
     let then_retry = check.then_retry();
+    let capabilities = |preflight: targets::ContainerPreflight, show_warnings: bool| {
+        if show_warnings {
+            for warning in preflight.warnings {
+                executor.notify_notice(&warning.notice());
+            }
+        }
+        Some(preflight.cgroups)
+    };
     match template {
         TargetTemplate::LocalPodman { .. } => targets::verify_local_podman(executor)
-            .map(|preflight| {
-                // A launch reports what it changes for these itself.
-                if check == TargetCheck::BeforeLaunch {
-                    for warning in preflight.warnings {
-                        executor.notify_notice(&warning.notice());
-                    }
-                }
-            })
+            // A launch reports the limits it actually drops.
+            .map(|preflight| capabilities(preflight, check == TargetCheck::BeforeLaunch))
             .map_err(|error| {
                 anyhow::anyhow!(
                     "local Podman is not ready. Fix the problem below{then_retry}: {error:#}"
                 )
             }),
         TargetTemplate::LocalDocker { .. } => targets::verify_local_docker(executor)
-            .map(|_| ())
+            .map(|preflight| capabilities(preflight, check == TargetCheck::BeforeLaunch))
             .map_err(
                 |error| match error.downcast_ref::<targets::DockerUnavailable>() {
                     // Leads with the sentence the launch options use, so a
@@ -546,11 +550,7 @@ pub(super) fn verify_target(
         TargetTemplate::SshPodman { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_podman(&ssh, executor)
-                .map(|preflight| {
-                    for warning in preflight.warnings {
-                        executor.notify_notice(&warning.notice());
-                    }
-                })
+                .map(|preflight| capabilities(preflight, true))
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Podman is not ready on {}. Fix the problem below{then_retry}: {error:#}",
@@ -561,7 +561,7 @@ pub(super) fn verify_target(
         TargetTemplate::SshDocker { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_docker(&ssh, executor)
-                .map(|_| ())
+                .map(|preflight| capabilities(preflight, true))
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Docker preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
@@ -571,7 +571,7 @@ pub(super) fn verify_target(
         }
         TargetTemplate::AppleContainer { .. } => {
             targets::ensure_apple_container_runtime(executor)
-                .map(|_| ())
+                .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "Apple container is not ready{then_retry}. Fix the problem below: {error:#}"
@@ -581,7 +581,7 @@ pub(super) fn verify_target(
         TargetTemplate::SshAppleContainer { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_apple_container(&ssh, executor)
-                .map(|_| ())
+                .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Apple container preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
@@ -595,7 +595,7 @@ pub(super) fn verify_target(
             // before the first command that needs it.
             super::worker_binary::ensure_microvm_engine(&ssh, executor)
                 .and_then(|()| targets::verify_ssh_nitro(&ssh, executor))
-                .map(|_| ())
+                .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "Nitro sandbox host preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
@@ -604,10 +604,10 @@ pub(super) fn verify_target(
                 })
         }
         TargetTemplate::SshBare { ssh, .. } => {
-            verify_ssh_connectivity(&SshTarget::from(ssh), executor)
+            verify_ssh_connectivity(&SshTarget::from(ssh), executor).map(|()| None)
         }
         TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
-        TargetTemplate::LocalBare => Ok(()),
+        TargetTemplate::LocalBare => Ok(None),
     }
 }
 

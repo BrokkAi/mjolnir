@@ -1136,6 +1136,7 @@ work when Git is older.
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
 | `memory` | string | no | unset (no template override) | Runtime memory value, for example `"32g"`. Per-session selection can override it. |
+| `memory_hard_limit` | boolean | no | false on Docker and Podman, true on Apple containers and Nitro | Require a known budget with sufficient RAM to start a container. Nitro uses a fixed memory pool and requires this setting to stay enabled. |
 | `environment` | table of strings or references | no | empty | Environment placed inside the target container. Values take the same forms as a profile's; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. |
 | `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
 

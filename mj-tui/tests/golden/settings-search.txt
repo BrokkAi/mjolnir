@@ -49,7 +49,7 @@ matching paths: [["targets", "podman", "memory"]]
 │                     │ Memory limit                      Default                                                    │                     │
 │                     │   Environment variables           0 settings  ›                                              │  ───────────────────╯
 │                     │   Workspace storage               1 setting  ›                                               │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
+│                     │ ☐ Enforce host RAM budget                                                                    │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │

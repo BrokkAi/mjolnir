@@ -115,6 +115,25 @@ impl DoctorCheck {
         }
     }
 
+    fn with_preflight_warnings(
+        mut self,
+        warnings: &[crate::targets::ContainerPreflightWarning],
+    ) -> Self {
+        if !warnings.is_empty() {
+            if self.status == CheckStatus::Ready {
+                self.status = CheckStatus::Warning;
+            }
+            self.detail.push(' ');
+            self.detail.push_str(&preflight_warning_details(warnings));
+            let remediation = self.remediation.get_or_insert_with(String::new);
+            if !remediation.is_empty() {
+                remediation.push(' ');
+            }
+            remediation.push_str(&preflight_warning_remediations(warnings));
+        }
+        self
+    }
+
     pub fn fixable(
         id: impl Into<String>,
         title: impl Into<String>,
@@ -1846,7 +1865,7 @@ fn docker_checks(
         "Docker",
         "docker",
     );
-    if preflight.status != CheckStatus::Ready {
+    if !matches!(preflight.status, CheckStatus::Ready | CheckStatus::Warning) {
         return vec![preflight];
     }
     let mut checks = vec![preflight];
@@ -1870,7 +1889,8 @@ pub fn local_docker_runtime_check(executor: &impl CommandExecutor) -> DoctorChec
                 "Docker {} is connected to a Linux daemon.",
                 preflight.version
             ),
-        ),
+        )
+        .with_preflight_warnings(&preflight.warnings),
         Err(error) => match error.downcast_ref::<DockerUnavailable>() {
             Some(problem) => DoctorCheck::fixable(
                 "runtime.docker",
@@ -2296,7 +2316,7 @@ fn ssh_podman_check(
     )
 }
 
-fn preflight_warning_details(warnings: &[crate::targets::PodmanPreflightWarning]) -> String {
+fn preflight_warning_details(warnings: &[crate::targets::ContainerPreflightWarning]) -> String {
     warnings
         .iter()
         .map(|warning| warning.detail.as_str())
@@ -2304,7 +2324,9 @@ fn preflight_warning_details(warnings: &[crate::targets::PodmanPreflightWarning]
         .join(" ")
 }
 
-fn preflight_warning_remediations(warnings: &[crate::targets::PodmanPreflightWarning]) -> String {
+fn preflight_warning_remediations(
+    warnings: &[crate::targets::ContainerPreflightWarning],
+) -> String {
     warnings
         .iter()
         .map(|warning| warning.remediation.as_str())
@@ -2908,7 +2930,7 @@ fn ssh_docker_check(
                     "Fix the configured image or Docker runtime on {destination}, then run `mj doctor --json --smoke` again."
                 ),
             ),
-        };
+        }.with_preflight_warnings(&preflight.warnings);
     }
 
     let image_command = ssh_command(
@@ -2952,7 +2974,7 @@ fn ssh_docker_check(
                 "Verify `ssh {destination} docker info` succeeds, then pull {image} on that host."
             ),
         ),
-    }
+    }.with_preflight_warnings(&preflight.warnings)
 }
 
 /// One check per `ssh-apple-container` target: the same platform and daemon

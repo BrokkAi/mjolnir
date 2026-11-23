@@ -465,6 +465,7 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&str>) -> Confi
 /// The shared setup/startup template for a locally available container engine.
 pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str, TargetTemplate) {
     let container = ContainerTemplate {
+        memory_hard_limit: None,
         build_cache: None,
         image: image.trim().to_owned(),
         pull_policy: Default::default(),

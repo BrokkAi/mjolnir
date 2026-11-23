@@ -545,6 +545,16 @@ impl Policy {
             QuotaUpdate::Refreshing { profile_ids } => self.probing.extend(profile_ids),
             QuotaUpdate::Report(outcome) => {
                 let profile_id = outcome.report.profile_id.clone();
+                // Every check the poller starts ends in a report, so a report
+                // ends the probing mark, accepted or not.
+                self.probing.remove(&profile_id);
+                // A login the check rotated is in the profile's home whether
+                // or not its reading still applies.
+                if outcome.credentials_changed {
+                    self.credentials
+                        .handle()
+                        .sync_profile_now(&profile_id, None);
+                }
                 let accepted = {
                     let mut reports = self.reports.lock().expect("quota reports poisoned");
                     let accepted = publish_quota_outcome(&mut reports, &outcome);
@@ -558,33 +568,21 @@ impl Policy {
                         profile_id,
                         "discarding quota result for an obsolete profile identity"
                     );
-                    return;
-                }
-                if outcome.credentials_changed {
-                    self.credentials
-                        .handle()
-                        .sync_profile_now(&profile_id, None);
-                }
-                self.probing.remove(&profile_id);
-                // A usage-priced profile has no allowance to run out of.
-                let windows = outcome.report.error.is_none().then(|| {
-                    if outcome.report.is_usage_priced() {
+                } else if outcome.report.error.is_none() {
+                    // A usage-priced profile has no allowance to run out of.
+                    let windows = if outcome.report.is_usage_priced() {
                         Vec::new()
                     } else {
                         outcome.report.windows.clone()
-                    }
-                });
-                if let Some(windows) = windows {
+                    };
                     mj_controller::profile_health::shared()
                         .lock()
                         .expect("profile health poisoned")
                         .observe_quota(&profile_id, &windows, SystemTime::now());
                 }
             }
-            QuotaUpdate::Finished { .. } => {
-                self.probing.clear();
-                self.cycles += 1;
-            }
+            // Reports end probing, so a finished cycle only counts (#1595).
+            QuotaUpdate::Finished { .. } => self.cycles += 1,
         }
         self.publish_quotas();
     }

@@ -842,10 +842,8 @@ impl Controller {
             {
                 use_github_https_urls(bundle);
             }
-            preflight_target(template, executor, TargetCheck::Launch)?;
-            for notice in enforce_cgroup_capable_limits(&mut target, executor) {
-                executor.notify_notice(&notice);
-            }
+            let cgroups = preflight_target(template, executor, TargetCheck::Launch)?;
+            enforce_cgroup_capable_limits(&mut target, cgroups, executor);
             let (resource_name, moving_workspace) = provisioned_resource_name(session_id)?;
             // Reserve physical ownership before creation, including a target
             // whose creation or locator discovery later fails. Rollback uses
@@ -1980,62 +1978,37 @@ pub(super) fn enforce_overlay_capable_mounts(
     notices
 }
 
-/// Drop the CPU and memory limits a Podman host cannot enforce. Like the
-/// overlay downgrade, this belongs to the host the container lands on, so it
-/// is decided at every creation and never written over the session's sizes.
+/// Drop limits the destination engine cannot enforce for this creation.
 pub(super) fn enforce_cgroup_capable_limits(
     target: &mut targets::TargetTemplate,
+    preflight: Option<targets::CgroupCapabilities>,
     executor: &impl CommandExecutor,
-) -> Vec<String> {
-    let (ssh, container) = match target {
-        targets::TargetTemplate::LocalPodman(container) => (None, container),
-        targets::TargetTemplate::SshPodman { ssh, container } => (Some(&*ssh), container),
-        _ => return Vec::new(),
+) {
+    let Some((host, _)) = target.image_host() else {
+        return;
     };
-    let sets = |limit: targets::CgroupLimit, args: &[String]| {
-        args.iter()
-            .any(|argument| argument.starts_with(limit.run_flag_prefix()))
+    let container = match target {
+        targets::TargetTemplate::LocalPodman(container)
+        | targets::TargetTemplate::LocalDocker(container)
+        | targets::TargetTemplate::SshPodman { container, .. }
+        | targets::TargetTemplate::SshDocker { container, .. } => container,
+        _ => return,
     };
-    if !targets::CgroupLimit::ALL
-        .into_iter()
-        .any(|limit| sets(limit, &container.extra_run_args))
-    {
-        return Vec::new();
-    }
-    let unenforceable = match targets::probe_podman_unenforceable_limits(ssh, executor) {
-        Ok(limits) => limits,
-        Err(error) => {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "could not read Podman's cgroup controllers; keeping session limits"
-            );
-            return vec![format!(
-                "Could not read Podman's cgroup controllers, so the session keeps its CPU and \
-                 memory limits: {error:#}"
-            )];
-        }
-    };
-    let dropped = unenforceable
-        .into_iter()
-        .filter(|limit| sets(*limit, &container.extra_run_args))
-        .collect::<Vec<_>>();
-    if dropped.is_empty() {
-        return Vec::new();
-    }
-    container.extra_run_args.retain(|argument| {
+    let args = &mut container.extra_run_args;
+    let dropped = targets::unenforceable_container_limits(
+        &host,
+        preflight,
+        |limit| {
+            args.iter()
+                .any(|arg| arg.starts_with(limit.run_flag_prefix()))
+        },
+        executor,
+    );
+    args.retain(|arg| {
         !dropped
             .iter()
-            .any(|limit| argument.starts_with(limit.run_flag_prefix()))
+            .any(|limit| arg.starts_with(limit.run_flag_prefix()))
     });
-    let scope = match ssh {
-        Some(ssh) => format!("On {}: ", ssh.destination),
-        None => String::new(),
-    };
-    vec![format!(
-        "{} {scope}{}",
-        targets::unenforceable_limits_detail(&dropped),
-        targets::CGROUP_DELEGATION_REMEDIATION
-    )]
 }
 
 /// Reports every command an installer issues as one launch stage, so progress

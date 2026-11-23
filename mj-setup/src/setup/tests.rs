@@ -517,7 +517,7 @@ fn podman_without_delegated_cpu_cgroup_is_a_warning_but_still_usable() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         ok(info.to_string().as_bytes()),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
     ]);
     let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
     let podman = runtimes
@@ -533,7 +533,7 @@ fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         podman_info(true),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
     ]);
     let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
 
@@ -554,7 +554,7 @@ fn macos_setup_probes_rootless_podman_and_keeps_platform_gated_runtimes_out() {
         let executor = RuntimeProbeExecutor::new([
             ok(b"podman version 5.4.2\n"),
             podman_info(true),
-            ok(b"29.0.1 linux\n"),
+            ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
         ]);
         let runtimes = probe_local_runtimes(
             &executor,
@@ -592,7 +592,7 @@ fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         podman_info(true),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
         ok(b"container version 1\n"),
         ok(b"running\n"),
     ]);
@@ -607,7 +607,7 @@ fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
     let missing = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         podman_info(true),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
     ]);
     let runtimes = probe_local_runtimes(&missing, &platform);
     let apple = runtimes
