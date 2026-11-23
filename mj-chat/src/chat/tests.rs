@@ -2988,6 +2988,7 @@ mod golden_cases {
                     action: "accept".into(),
                     reply: Some(reply),
                     answers: None,
+                    permission_decision: None,
                 })
                 .unwrap(),
             },

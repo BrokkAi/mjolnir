@@ -1,5 +1,6 @@
 //! Provider identity is resolved off the UI thread; pooling uses only snapshots.
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::thread::JoinHandle;
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
@@ -261,24 +262,18 @@ impl PoolPeriod {
             Self::Other { label, .. } => label,
         }
     }
+}
 
-    /// One character naming the period on timelines and in the legend.
-    pub(crate) fn marker(&self) -> char {
-        match self {
-            Self::Week => 'W',
-            Self::Month => 'M',
-            Self::FiveHour => '5',
-            Self::Other { label, .. } => label
-                .chars()
-                .find(|ch| ch.is_alphabetic())
-                .map_or('R', |ch| ch.to_ascii_uppercase()),
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum QuotaGroup {
+    Pool(PoolKey),
+    Provider(QuotaProvider),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QuotaRow {
     Pool(PoolKey),
+    ProviderText(QuotaProvider),
     Profile(String),
     Lane(PoolKey, String),
 }
@@ -287,43 +282,112 @@ impl QuotaRow {
     pub(crate) fn pool(&self) -> Option<&PoolKey> {
         match self {
             Self::Pool(key) | Self::Lane(key, _) => Some(key),
-            Self::Profile(_) => None,
+            Self::ProviderText(_) | Self::Profile(_) => None,
         }
+    }
+}
+
+pub(crate) fn provider_text_expanded(
+    provider: &ProviderQuota,
+    expanded: &BTreeSet<QuotaGroup>,
+) -> bool {
+    if provider.pools.is_empty() {
+        expanded.contains(&QuotaGroup::Provider(provider.provider.clone()))
+    } else {
+        provider.pools.iter().any(|pool| pool.is_expanded(expanded))
     }
 }
 
 pub(crate) fn selectable_rows(
     providers: &[ProviderQuota],
-    expanded: &std::collections::BTreeSet<PoolKey>,
+    expanded: &BTreeSet<QuotaGroup>,
 ) -> Vec<QuotaRow> {
-    providers
-        .iter()
-        .flat_map(|provider| {
-            provider
-                .pools
-                .iter()
-                .flat_map(|pool| {
-                    std::iter::once(QuotaRow::Pool(pool.key.clone())).chain(
-                        pool.members
-                            .iter()
-                            .filter(|_| expanded.contains(&pool.key))
-                            .map(|member| QuotaRow::Lane(pool.key.clone(), member.id.clone())),
-                    )
-                })
-                .chain(
-                    provider
-                        .text
+    let mut rows = Vec::new();
+    for provider in providers {
+        rows.extend(provider.text_header());
+        for pool in &provider.pools {
+            rows.push(QuotaRow::Pool(pool.key.clone()));
+            if pool.is_expanded(expanded) {
+                rows.extend(
+                    pool.members
                         .iter()
-                        .map(|(id, _)| QuotaRow::Profile(id.clone())),
-                )
-        })
-        .collect()
+                        .map(|member| QuotaRow::Lane(pool.key.clone(), member.id.clone())),
+                );
+            }
+        }
+        if provider_text_expanded(provider, expanded) {
+            rows.extend(
+                provider
+                    .text
+                    .iter()
+                    .map(|(id, _)| QuotaRow::Profile(id.clone())),
+            );
+        }
+    }
+    rows
+}
+
+pub(crate) fn profile_status<'a>(
+    id: &str,
+    label: &'a str,
+    refreshing: &BTreeSet<String>,
+) -> Cow<'a, str> {
+    if refreshing.contains(id) {
+        format!("refreshing{}", mj_chat::theme::glyphs().ellipsis).into()
+    } else {
+        label.into()
+    }
+}
+
+pub(crate) fn provider_status_summary(
+    provider: &ProviderQuota,
+    refreshing: &BTreeSet<String>,
+) -> String {
+    let mut counts = Vec::new();
+    for (id, label) in &provider.text {
+        let label = profile_status(id, label, refreshing);
+        if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| *seen == label) {
+            *count += 1;
+        } else {
+            counts.push((label, 1));
+        }
+    }
+    if provider.text.len() == 1 {
+        return counts.remove(0).0.into_owned();
+    }
+    counts
+        .into_iter()
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub(crate) struct ProviderQuota {
     pub provider: QuotaProvider,
     pub pools: Vec<QuotaPool>,
     pub text: Vec<(String, String)>,
+}
+
+impl ProviderQuota {
+    pub(crate) fn text_header(&self) -> Option<QuotaRow> {
+        (self.pools.is_empty() && !self.text.is_empty())
+            .then(|| QuotaRow::ProviderText(self.provider.clone()))
+    }
+
+    pub(crate) fn first_row(&self) -> Option<QuotaRow> {
+        self.pools
+            .first()
+            .map(|pool| QuotaRow::Pool(pool.key.clone()))
+            .or_else(|| self.text_header())
+    }
+
+    pub(crate) fn has_profile(&self, id: &str) -> bool {
+        self.text.iter().any(|(profile, _)| profile == id)
+            || self
+                .pools
+                .iter()
+                .any(|pool| pool.members.iter().any(|member| member.id == id))
+    }
 }
 
 pub(crate) struct QuotaPool {
@@ -336,6 +400,10 @@ pub(crate) struct QuotaPool {
 }
 
 impl QuotaPool {
+    pub(crate) fn is_expanded(&self, expanded: &BTreeSet<QuotaGroup>) -> bool {
+        expanded.contains(&QuotaGroup::Pool(self.key.clone()))
+    }
+
     pub(super) fn reported_members(&self) -> impl Iterator<Item = &PoolMember> {
         self.members
             .iter()
@@ -379,7 +447,7 @@ pub(crate) struct PoolMember {
     /// The reset time has passed and no reading taken since has arrived.
     pub awaiting_reading: bool,
     /// Latest reset among the profile's other exhausted unscoped long windows
-    /// (`i64::MAX` when one reports no reset): the lane stays blocked until then.
+    /// (`i64::MAX` when one reports no reset): the other limit blocks use until then.
     pub other_long_blocked_until: Option<i64>,
     pub banked: Option<u64>,
     pub five_hour: Option<QuotaWindow>,
@@ -387,7 +455,8 @@ pub(crate) struct PoolMember {
     /// The provider's reset text, for reports without a reset timestamp.
     pub reset_text: Option<String>,
     pub five_hour_idle: bool,
-    pub fable: Option<u8>,
+    pub fable: Option<QuotaWindow>,
+    pub fable_awaiting_reading: bool,
     pub note: Option<String>,
 }
 
@@ -507,17 +576,24 @@ pub(crate) fn provider_pools(
                         });
                         group.pools.len() - 1
                     });
+                let reset_is_due = |reset: i64| {
+                    reset >= 0
+                        && reset as u64 <= now
+                        && quota.refreshed_at_epoch_seconds < reset as u64
+                };
+                let fable = if key_period == PoolPeriod::Week {
+                    quota.fable_weekly_window().cloned()
+                } else {
+                    None
+                };
+                let five_hour = report.five_hour_window().filter(|five| *five != window);
                 group.pools[index].members.push(PoolMember {
                     id: id.into(),
                     weight: quota.monthly_price_usd.map(f64::from).unwrap_or(0.0),
                     limit: window.limit.filter(|limit| *limit > 0),
                     remaining,
                     reset: window.resets_at_epoch_seconds,
-                    awaiting_reading: window.resets_at_epoch_seconds.is_some_and(|reset| {
-                        reset >= 0
-                            && reset as u64 <= now
-                            && quota.refreshed_at_epoch_seconds < reset as u64
-                    }),
+                    awaiting_reading: window.resets_at_epoch_seconds.is_some_and(reset_is_due),
                     other_long_blocked_until: report
                         .windows
                         .iter()
@@ -534,24 +610,19 @@ pub(crate) fn provider_pools(
                         .max(),
                     banked: report.banked_resets_for_window(window),
                     reset_text: window.resets.clone(),
-                    five_hour: report
-                        .five_hour_window()
-                        .filter(|five| *five != window)
-                        .cloned(),
-                    five_hour_awaiting_reading: report.five_hour_window().is_some_and(|five| {
-                        five.resets_at_epoch_seconds.is_some_and(|reset| {
-                            reset >= 0
-                                && reset as u64 <= now
-                                && quota.refreshed_at_epoch_seconds < reset as u64
-                        })
-                    }),
+                    five_hour: five_hour.cloned(),
+                    five_hour_awaiting_reading: five_hour
+                        .and_then(|five| five.resets_at_epoch_seconds)
+                        .is_some_and(reset_is_due),
                     // Claude omits the short window until first use, and Muse
                     // while none is open; other adapters do not define an
                     // absent window as idle.
                     five_hour_idle: matches!(profile.kind, HarnessKind::Claude | HarnessKind::Muse),
-                    fable: quota
-                        .fable_weekly_window()
-                        .and_then(quota_remaining_percent),
+                    fable_awaiting_reading: fable
+                        .as_ref()
+                        .and_then(|fable| fable.resets_at_epoch_seconds)
+                        .is_some_and(reset_is_due),
+                    fable,
                     note: {
                         let mut notes: Vec<String> = report
                             .windows

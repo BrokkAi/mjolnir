@@ -1157,7 +1157,7 @@ func SpecificHelp(path []string) (string, bool) {
 	case last == "runtime" && first == "daemon":
 		return "Host: a process on this computer. Podman or Docker: a container sharing this computer's network and processes, where local sessions run too. Linux only.", true
 	case last == "image" && first == "daemon":
-		return "The daemon container's image. Blank uses this release's agent-dev image.", true
+		return "The daemon container's image. Blank uses this build's daemon image.", true
 	case last == "mounts" && first == "daemon":
 		return "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere.", true
 	case last == "jev":

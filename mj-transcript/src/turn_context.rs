@@ -714,6 +714,7 @@ mod tests {
                 elicitation,
                 None,
                 "accept",
+                None,
                 Some("Same reply"),
                 None,
             )

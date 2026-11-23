@@ -20,6 +20,7 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -29,7 +30,6 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -62,6 +62,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -71,7 +72,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │ Choose a model for Straightforward entry 1, or remove it.                                    │                     │
@@ -104,6 +104,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -113,7 +114,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -146,6 +146,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -155,7 +156,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -188,6 +188,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -197,7 +198,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -230,6 +230,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -239,7 +240,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │ Saving settings…                                                                             │                     │
@@ -272,6 +272,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -281,7 +282,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │ Could not save: [subagents.subtle] requires [subagents.straightforward]; configure           │                     │
 │                     │ straightforward alone or both                                                                │                     │

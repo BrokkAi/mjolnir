@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Build the agent-dev image from this checkout, including the session worker
+# Build the daemon image from this checkout, including the session worker
 # compiled from the same commit. The image's worker stage cannot see Git, so
 # this computes the identities mj-core/build.rs would read from it, exactly as
 # the publish workflow does, and passes them as build arguments.
 #
-# usage: build-agent-dev-image.sh docker-or-podman [tag] [extra build arguments...]
+# usage: build-daemon-image.sh docker-or-podman [tag] [extra build arguments...]
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-engine=${1:?usage: build-agent-dev-image.sh docker-or-podman [tag] [build arguments...]}
+engine=${1:?usage: build-daemon-image.sh docker-or-podman [tag] [build arguments...]}
 shift
-tag=${1:-localhost/mjolnir/agent-dev:latest}
+tag=${1:-localhost/mjolnir/daemon:dev}
 shift || true
 
 revision=${MJ_BUILD_REVISION:-$(git -C "$repo_root" rev-parse HEAD)}
@@ -25,7 +25,7 @@ if ! git -C "$repo_root" diff --quiet HEAD -- $(grep -v '^#' "$repo_root/mj-core
 fi
 
 "$engine" build \
-  --file "$repo_root/containers/Containerfile.agent-dev" \
+  --file "$repo_root/containers/Containerfile.daemon" \
   --tag "$tag" \
   --build-arg "MJ_BUILD_REVISION=$revision" \
   --build-arg "MJ_WORKER_INPUTS_ID=$inputs" \

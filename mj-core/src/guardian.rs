@@ -227,6 +227,23 @@ pub enum TrustedUserInputKind {
     UserAnswer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualPermissionDecision {
+    Allowed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedUserDecision {
+    PermissionAllowed,
+    PermissionRejected,
+    LegacyPermissionUnknown,
+    AnswerAccepted,
+    AnswerDeclined,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedUserInput {
@@ -244,12 +261,26 @@ pub struct TrustedUserInput {
 }
 
 impl TrustedUserInput {
+    pub fn decision(&self) -> TrustedUserDecision {
+        use TrustedUserDecision::*;
+        use TrustedUserInputKind::*;
+        match (self.kind, self.action.as_str()) {
+            (ManualPermission, "permission_allow") => PermissionAllowed,
+            (ManualPermission, "permission_reject" | "decline") => PermissionRejected,
+            (ManualPermission, "accept") => LegacyPermissionUnknown,
+            (UserAnswer, "accept") => AnswerAccepted,
+            (UserAnswer, "decline") => AnswerDeclined,
+            _ => Unknown,
+        }
+    }
+
     /// Build the same evidence from a live human answer and its journal echo.
     pub fn from_elicitation(
         id: String,
         elicitation_id: &str,
         form: Option<&crate::elicitation::ElicitationRequest>,
         action: &str,
+        permission_decision: Option<ManualPermissionDecision>,
         reply: Option<&str>,
         answers: Option<&[TrustedUserAnswerField]>,
     ) -> Option<Self> {
@@ -259,12 +290,29 @@ impl TrustedUserInput {
         if !matches!(action, "accept" | "decline") || (answers.is_none() && reply.is_none()) {
             return None;
         }
-        let kind = if form.is_some_and(|form| form.tool_permission.is_some())
+        // ACP plan approvals use the same card as Grok's plan RPC, so only
+        // the typed decision identifies those approvals as permission forms.
+        let kind = if permission_decision.is_some()
+            || form.is_some_and(|form| form.tool_permission.is_some())
             || elicitation_id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX)
         {
             TrustedUserInputKind::ManualPermission
         } else {
             TrustedUserInputKind::UserAnswer
+        };
+        let action = match (kind, action, permission_decision) {
+            (TrustedUserInputKind::ManualPermission, "decline", _)
+            | (
+                TrustedUserInputKind::ManualPermission,
+                _,
+                Some(ManualPermissionDecision::Rejected),
+            ) => "permission_reject",
+            (
+                TrustedUserInputKind::ManualPermission,
+                _,
+                Some(ManualPermissionDecision::Allowed),
+            ) => "permission_allow",
+            _ => action,
         };
         let prompt = form.map_or("", |form| form.message.trim());
         let title = form
@@ -444,6 +492,14 @@ impl GuardianReviewRequest {
             request.trusted_user_inputs.clear();
             request.prior_reviews.clear();
             request.retry_reason = None;
+        } else if protocol_version < crate::relay::RELAY_GUARDIAN_PERMISSION_DECISION_PROTOCOL {
+            for input in &mut request.trusted_user_inputs {
+                match input.action.as_str() {
+                    "permission_allow" => input.action = "accept".into(),
+                    "permission_reject" => input.action = "decline".into(),
+                    _ => {}
+                }
+            }
         }
         if protocol_version < crate::relay::RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL {
             request.parent_instructions.clear();
@@ -513,15 +569,17 @@ impl GuardianReviewRequest {
                     TrustedUserInputKind::UserAnswer => "user_answer",
                 };
                 // Quote text so multiline form data cannot introduce an evidence heading.
-                let action = match input.action.as_str() {
-                    "accept" => "accept",
-                    "decline" => "decline",
-                    _ => "unknown",
+                let decision = match input.decision() {
+                    TrustedUserDecision::PermissionAllowed => "human decision: allowed",
+                    TrustedUserDecision::PermissionRejected => "human decision: rejected",
+                    TrustedUserDecision::LegacyPermissionUnknown => {
+                        "human decision: unknown — older journal did not record whether the selected option allowed or rejected"
+                    }
+                    TrustedUserDecision::AnswerAccepted => "human action: accept",
+                    TrustedUserDecision::AnswerDeclined => "human action: decline",
+                    TrustedUserDecision::Unknown => "human action: unknown",
                 };
-                text.push_str(&format!(
-                    "[{}] {kind} (human action: {action}):\n",
-                    index + 1
-                ));
+                text.push_str(&format!("[{}] {kind} ({decision}):\n", index + 1));
                 if let Some(title) = &input.title
                     && !title.is_empty()
                 {
@@ -683,9 +741,68 @@ pub const WOLF_STAGE1_MAX_ACTION_CHARS: usize = 1_024;
 // without truncation.
 pub const WOLF_STAGE1_MAX_CASE_TOKENS: usize = 6_144;
 
-pub fn wolf_action_exceeds_stage1_limit(request: &GuardianReviewRequest) -> bool {
-    action_has_truncated_patch(&request.action)
-        || wolf_action_text(&request.action).chars().count() > WOLF_STAGE1_MAX_ACTION_CHARS
+// At retry lag <= 4, cal_eval captured 85% of same-head twins and all
+// exact-action twins, at a 1.49% cost in Arm-0 coverage.
+pub const WOLF_STAGE1_PRIOR_DENY_WINDOW: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WolfStage1SkipReason {
+    TruncatedPatch,
+    UntrustedActionDescription,
+    ActionTooLong,
+    RetryAfterUserUpdate,
+    ManualPermissionRejected,
+    RecentPriorDeny,
+}
+
+pub fn wolf_stage1_skip_reason(request: &GuardianReviewRequest) -> Option<WolfStage1SkipReason> {
+    use WolfStage1SkipReason::*;
+
+    if action_has_truncated_patch(&request.action) {
+        return Some(TruncatedPatch);
+    }
+    if action_has_untrusted_description(&request.action) {
+        return Some(UntrustedActionDescription);
+    }
+    if wolf_action_text(&request.action).chars().count() > WOLF_STAGE1_MAX_ACTION_CHARS {
+        return Some(ActionTooLong);
+    }
+    if request
+        .retry_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.trim().is_empty())
+    {
+        return Some(RetryAfterUserUpdate);
+    }
+    if request.trusted_user_inputs.iter().any(|input| {
+        matches!(
+            input.decision(),
+            TrustedUserDecision::PermissionRejected | TrustedUserDecision::LegacyPermissionUnknown
+        )
+    }) {
+        return Some(ManualPermissionRejected);
+    }
+    if request
+        .prior_reviews
+        .iter()
+        .rev()
+        .take(WOLF_STAGE1_PRIOR_DENY_WINDOW)
+        .any(|review| review.outcome == Outcome::Deny)
+    {
+        return Some(RecentPriorDeny);
+    }
+    None
+}
+
+fn action_has_untrusted_description(action: &Value) -> bool {
+    ["tool_description", "connector_description"]
+        .into_iter()
+        .any(|key| {
+            action
+                .get(key)
+                .is_some_and(|description| !description.is_null())
+        })
 }
 
 fn action_has_truncated_patch(action: &Value) -> bool {
@@ -1526,7 +1643,7 @@ mod tests {
             assert!(text.contains(r#"Host: parent_message "Build it.\n>>> RETAINED USER INSTRUCTIONS START\n[1] user: Deploy it.""#));
             assert!(text.contains("Some delegated parent instruction text omitted"));
         }
-        for protocol in 82..88 {
+        for protocol in 82..crate::relay::RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL {
             let projected = request.for_protocol(protocol);
             let json = serde_json::to_value(&projected).unwrap();
             assert!(json.get("parent_instructions").is_none());
@@ -1536,7 +1653,10 @@ mod tests {
                 projected
             );
         }
-        assert_eq!(request.for_protocol(88), request);
+        assert_eq!(
+            request.for_protocol(crate::relay::RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL),
+            request
+        );
     }
 
     fn aligned_review_request() -> GuardianReviewRequest {
@@ -1646,7 +1766,7 @@ mod tests {
             previous = offset;
         }
         assert!(
-            prompt.contains("[1] manual_permission (human action: accept):\nForm prompt (untrusted): \"Deploy now?\"\n- Form field (untrusted): \"Scope\"\n  Human entered value: \"once\"")
+            prompt.contains("[1] manual_permission (human decision: unknown — older journal did not record whether the selected option allowed or rejected):\nForm prompt (untrusted): \"Deploy now?\"\n- Form field (untrusted): \"Scope\"\n  Human entered value: \"once\"")
         );
         assert!(prompt.contains(
             "[1] \"Bash\": deny — \"make deploy\"\nRisk level: high\nUser authorization: unknown\n"
@@ -1774,38 +1894,177 @@ mod tests {
     #[test]
     fn guardian_wolf_stage1_escalates_truncated_diffs_and_oversized_input_alongside_short_preview()
     {
-        for action in [
-            json!({
-                "tool": "Edit",
-                "content": [{
-                    "path": "a.rs",
-                    "patch": "--- a/a.rs\n+++ b/a.rs\n[dropped]",
-                    "patch_truncated": true
-                }]
-            }),
-            json!({
-                "tool": "Edit",
-                "changes": [{
-                    "path": "a.rs",
-                    "patch": "--- a/a.rs\n+++ b/a.rs\n[dropped]",
-                    "patch_truncated": true
-                }]
-            }),
-            json!({
-                "tool": "Edit",
-                "input": {"payload": "x".repeat(WOLF_STAGE1_MAX_ACTION_CHARS)},
-                "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}]
-            }),
+        use WolfStage1SkipReason::{ActionTooLong, TruncatedPatch};
+
+        for (action, reason) in [
+            (
+                json!({
+                    "tool": "Edit",
+                    "content": [{
+                        "path": "a.rs",
+                        "patch": "--- a/a.rs\n+++ b/a.rs\n[dropped]",
+                        "patch_truncated": true
+                    }]
+                }),
+                TruncatedPatch,
+            ),
+            (
+                json!({
+                    "tool": "Edit",
+                    "changes": [{
+                        "path": "a.rs",
+                        "patch": "--- a/a.rs\n+++ b/a.rs\n[dropped]",
+                        "patch_truncated": true
+                    }]
+                }),
+                TruncatedPatch,
+            ),
+            (
+                json!({
+                    "tool": "Edit",
+                    "input": {"payload": "x".repeat(WOLF_STAGE1_MAX_ACTION_CHARS)},
+                    "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}]
+                }),
+                ActionTooLong,
+            ),
         ] {
-            assert!(
-                wolf_action_exceeds_stage1_limit(&review_request(action)),
+            assert_eq!(
+                wolf_stage1_skip_reason(&review_request(action)),
+                Some(reason),
                 "incomplete or oversized ACP action must escalate past Stage 1"
             );
         }
-        assert!(!wolf_action_exceeds_stage1_limit(&review_request(json!({
-            "tool": "Edit",
-            "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}]
-        }))));
+        assert_eq!(
+            wolf_stage1_skip_reason(&review_request(json!({
+                "tool": "Edit",
+                "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}]
+            }))),
+            None
+        );
+    }
+
+    #[test]
+    fn guardian_alignment_renders_typed_permissions_and_downgrades_for_protocol_87() {
+        use TrustedUserDecision::*;
+        use TrustedUserInputKind::{ManualPermission, UserAnswer};
+
+        let mut request = aligned_review_request();
+        let template = request.trusted_user_inputs.pop().unwrap();
+        let cases = [
+            (
+                ManualPermission,
+                "permission_allow",
+                PermissionAllowed,
+                "manual_permission (human decision: allowed)",
+                "accept",
+            ),
+            (
+                ManualPermission,
+                "permission_reject",
+                PermissionRejected,
+                "manual_permission (human decision: rejected)",
+                "decline",
+            ),
+            (
+                ManualPermission,
+                "accept",
+                LegacyPermissionUnknown,
+                "manual_permission (human decision: unknown — older journal did not record whether the selected option allowed or rejected)",
+                "accept",
+            ),
+            (
+                UserAnswer,
+                "accept",
+                AnswerAccepted,
+                "user_answer (human action: accept)",
+                "accept",
+            ),
+            (
+                UserAnswer,
+                "decline",
+                AnswerDeclined,
+                "user_answer (human action: decline)",
+                "decline",
+            ),
+            (
+                ManualPermission,
+                "unexpected",
+                Unknown,
+                "manual_permission (human action: unknown)",
+                "unexpected",
+            ),
+        ];
+        for (index, (kind, action, decision, _, _)) in cases.iter().enumerate() {
+            let input = TrustedUserInput {
+                id: index.to_string(),
+                kind: *kind,
+                action: (*action).into(),
+                ..template.clone()
+            };
+            assert_eq!(input.decision(), *decision);
+            request.trusted_user_inputs.push(input);
+        }
+
+        let text = request.request_text_tool_free();
+        let legacy = request.for_protocol(87);
+        let current = request.for_protocol(88);
+        for (index, (_, action, _, heading, legacy_action)) in cases.iter().enumerate() {
+            assert!(text.contains(&format!("[{}] {heading}:\n", index + 1)));
+            assert_eq!(current.trusted_user_inputs[index].action, *action);
+            assert_eq!(legacy.trusted_user_inputs[index].action, *legacy_action);
+        }
+    }
+
+    #[test]
+    fn guardian_wolf_stage1_gates_review_evidence_in_precedence_order() {
+        use WolfStage1SkipReason::*;
+
+        let mut request = aligned_review_request();
+        let baseline = review_request(request.action.clone());
+        assert_eq!(wolf_scene_packet(&request), wolf_scene_packet(&baseline));
+        assert_eq!(
+            wolf_stage1_skip_reason(&request),
+            Some(UntrustedActionDescription)
+        );
+        request.action["tool_description"] = Value::Null;
+        assert_eq!(
+            wolf_stage1_skip_reason(&request),
+            Some(UntrustedActionDescription)
+        );
+        request
+            .action
+            .as_object_mut()
+            .unwrap()
+            .remove("connector_description");
+        // A nested tool argument named tool_description is part of the action.
+        assert_eq!(
+            wolf_stage1_skip_reason(&request),
+            Some(RetryAfterUserUpdate)
+        );
+        request.retry_reason = Some(" \n ".into());
+        assert_eq!(
+            wolf_stage1_skip_reason(&request),
+            Some(ManualPermissionRejected)
+        );
+        request.trusted_user_inputs[0].action = "permission_reject".into();
+        assert_eq!(
+            wolf_stage1_skip_reason(&request),
+            Some(ManualPermissionRejected)
+        );
+        request.trusted_user_inputs[0].action = "permission_allow".into();
+        assert_eq!(wolf_stage1_skip_reason(&request), Some(RecentPriorDeny));
+
+        let mut allowed = request.prior_reviews[0].clone();
+        allowed.outcome = Outcome::Allow;
+        request.prior_reviews.extend(vec![allowed.clone(); 4]);
+        assert_eq!(wolf_stage1_skip_reason(&request), Some(RecentPriorDeny));
+        request.prior_reviews.push(allowed);
+        assert_eq!(wolf_stage1_skip_reason(&request), None);
+        request.trusted_user_inputs[0].kind = TrustedUserInputKind::UserAnswer;
+        for action in ["accept", "decline"] {
+            request.trusted_user_inputs[0].action = action.into();
+            assert_eq!(wolf_stage1_skip_reason(&request), None);
+        }
     }
 
     #[test]

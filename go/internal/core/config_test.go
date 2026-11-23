@@ -2819,7 +2819,7 @@ func TestAReleasePinsItsVersionAndADevelopmentBuildUsesLatest(t *testing.T) {
 	if got := ContainerImageFor(version, true); got != ContainerImageRepository+":"+version {
 		t.Fatal(got)
 	}
-	if got := ContainerImageFor(version, false); got != LegacyDefaultContainerImage {
+	if got := ContainerImageFor(version, false); got != "ghcr.io/brokkai/mjolnir/daemon:latest" {
 		t.Fatal(got)
 	}
 }

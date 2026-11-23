@@ -78,6 +78,7 @@ pub(super) fn locate(
     Ok(LocatedNativeSession {
         native_session_id: candidate.native_session_id.clone(),
         source_path: candidate.session_path.clone(),
+        modified_at: candidate.modified_at,
     })
 }
 

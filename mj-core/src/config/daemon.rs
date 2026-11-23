@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// ```toml
 /// [daemon]
 /// runtime = "podman"          # "host" (default), "podman", "docker" or "ssh"
-/// image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+/// image = "ghcr.io/brokkai/mjolnir/daemon:latest"
 /// mounts = ["/srv/projects"]  # optional host paths, mounted explicitly
 /// ```
 ///
@@ -30,8 +30,7 @@ pub struct DaemonConfig {
     /// Remote executable; omitted means `mj` on the login shell PATH.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_command: Option<String>,
-    /// The daemon container's image. `None` is this build's agent-dev image,
-    /// which carries the harnesses local sessions run.
+    /// The daemon container's image. `None` is this build's daemon image.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Host directories explicitly mounted into the daemon container at the

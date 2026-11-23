@@ -16,7 +16,7 @@
 #   MJ_BUILD_COMMIT_TIME  that commit's Unix time (git log -1 --format=%ct)
 #   MJ_WORKER_INPUTS_ID   40-digit worker input digest, overriding Git's
 #   MJ_BUILD_CHANNEL      "release" for a release build
-#   MJ_AGENT_DEV_IMAGE    the session image the build names, overriding the channel
+#   MJ_DAEMON_IMAGE       the daemon image the build names, overriding the channel
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p bin/.mj-development-build
@@ -89,16 +89,16 @@ else
 fi
 ldflags+=("-X '$buildid.workerInputsID=$worker_inputs'")
 
-# A release names its own version's session image; keep this one rule for
+# A release names its own version's daemon image; keep this one rule for
 # both the image and whether that image carries this build's worker.
 release=false
 if [[ "${MJ_BUILD_CHANNEL-}" == release ]]; then
 	release=true
 	ldflags+=("-X '$buildid.buildChannel=release'")
 fi
-if [[ -n "${MJ_AGENT_DEV_IMAGE+set}" ]]; then
-	[[ "$MJ_AGENT_DEV_IMAGE" != *"'"* ]] || fail "MJ_AGENT_DEV_IMAGE cannot contain a quote"
-	ldflags+=("-X '$core.ReleaseContainerImage=$MJ_AGENT_DEV_IMAGE'")
+if [[ -n "${MJ_DAEMON_IMAGE+set}" ]]; then
+	[[ "$MJ_DAEMON_IMAGE" != *"'"* ]] || fail "MJ_DAEMON_IMAGE cannot contain a quote"
+	ldflags+=("-X '$core.ReleaseContainerImage=$MJ_DAEMON_IMAGE'")
 elif $release; then
 	repository="$(go_constant ContainerImageRepository internal/core/config.go)"
 	ldflags+=("-X '$core.ReleaseContainerImage=$repository:$version'")

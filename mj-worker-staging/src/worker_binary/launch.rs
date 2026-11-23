@@ -589,8 +589,7 @@ pub fn exclude_harness_environment(
 }
 
 /// Where a worker on `backend` gets its harness. Local work follows
-/// [`mj_core::placement::local_harness_runtime`]: the image's harnesses in the
-/// daemon container, the managed installation on a host.
+/// [`mj_core::placement::local_harness_runtime`].
 pub fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {
     match backend {
         targets::TargetLocator::LocalBare { .. } => mj_core::placement::local_harness_runtime(),
@@ -605,5 +604,6 @@ pub fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntim
 /// a local worker beside a daemon in its container.
 pub fn worker_runs_in_image(backend: &targets::TargetLocator) -> bool {
     backend.container_engine().is_some()
-        || harness_runtime_policy(backend) == HarnessRuntimePolicy::Image
+        || (matches!(backend, targets::TargetLocator::LocalBare { .. })
+            && mj_core::placement::daemon_container().is_some())
 }

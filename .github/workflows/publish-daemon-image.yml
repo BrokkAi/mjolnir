@@ -1,33 +1,53 @@
-name: Publish agent-dev image
+name: Publish daemon image
 
 on:
   push:
     branches: [ 'master' ]
-    # The image bakes in the session worker, so :latest is rebuilt whenever
-    # anything the worker compiles from changes: every entry in
-    # mj-core/worker-build-inputs.txt (scripts/release-workflow.test.mjs checks).
+    # Rebuild when inputs to either baked binary change. The workflow test
+    # checks the complete worker input list and the workspace build context.
     paths:
       - 'containers/**'
       - '.dockerignore'
-      - 'scripts/install-muse.py'
-      - 'scripts/install-antigravity.py'
-      - '.github/workflows/publish-agent-dev-image.yml'
+      - '.github/workflows/publish-daemon-image.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
+      - 'mj-accounts/**'
+      - 'mj-build-cache/**'
       - 'mj-build-id/**'
+      - 'mj-chat/**'
       - 'mj-checkpoint/**'
+      - 'mj-cli/**'
+      - 'mj-client/**'
+      - 'mj-controller/**'
       - 'mj-core/**'
+      - 'mj-daemon/**'
+      - 'mj-github-relevance/**'
+      - 'mj-github-watch/**'
       - 'mj-harness-install/**'
-      - 'mj-review/**'
-      - 'mj-transcript/**'
+      - 'mj-import/**'
       - 'mj-microvm/**'
-      - 'mj-worker-mcp/**'
-      - 'mj-worker-review/**'
+      - 'mj-profile-catalog/**'
+      - 'mj-review/**'
+      - 'mj-review-host/**'
+      - 'mj-server/**'
+      - 'mj-session-runtime/**'
+      - 'mj-session-types/**'
+      - 'mj-sessionwiki/**'
+      - 'mj-setup/**'
+      - 'mj-store/**'
+      - 'mj-targets/**'
+      - 'mj-transcript/**'
+      - 'mj-tui/**'
       - 'mj-worker/**'
       - 'mj-worker-bin/**'
+      - 'mj-worker-launch/**'
+      - 'mj-worker-mcp/**'
+      - 'mj-worker-review/**'
+      - 'mj-worker-staging/**'
+      - 'voice-worker/**'
   workflow_dispatch: {}
-  # Called by release.yml so a tagged release publishes agent-dev:<version>
+  # Called by release.yml so a tagged release publishes daemon:<version>
   # from the same workflow that publishes :latest from master. The push,
   # schedule and dispatch triggers use these defaults and keep publishing the
   # floating :latest tag.
@@ -84,11 +104,11 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          echo "name=ghcr.io/$owner/mjolnir/agent-dev" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/$owner/mjolnir/daemon" >> "$GITHUB_OUTPUT"
 
       # The worker stage cannot see Git, so compute here the identities
       # mj-core/build.rs reads from it, the same way scripts/build-linux-worker.sh
-      # and scripts/build-agent-dev-image.sh do. The release's own worker jobs
+      # and scripts/build-daemon-image.sh do. The release's own worker jobs
       # compute the same identity from the same commit.
       - name: Resolve worker build identity
         id: worker
@@ -119,7 +139,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: containers/Containerfile.agent-dev
+          file: containers/Containerfile.daemon
           platforms: ${{ matrix.platform }}
           pull: true
           provenance: false
@@ -132,9 +152,9 @@ jobs:
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }}
           cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }},mode=max
           labels: |
-            org.opencontainers.image.title=Mjolnir agent development environment
+            org.opencontainers.image.title=Mjolnir daemon
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=Mjolnir agent development environment with Node, Rust, Go, cargo-nextest, OpenJDK, and the pinned ACP bridges
+            org.opencontainers.image.description=Mjolnir daemon and portable session worker
             org.opencontainers.image.licenses=GPL-3.0-only
           build-args: |
             MJ_BUILD_REVISION=${{ github.sha }}
@@ -180,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          echo "name=ghcr.io/$owner/mjolnir/agent-dev" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/$owner/mjolnir/daemon" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4

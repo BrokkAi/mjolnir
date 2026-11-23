@@ -1062,6 +1062,7 @@ async fn emit_elicitation_resolution(
     form: &ElicitationRequest,
     action: &str,
     response: Option<&ElicitationResponse>,
+    permission_decision: Option<mj_core::guardian::ManualPermissionDecision>,
 ) -> Result<()> {
     let permit = events
         .reserve()
@@ -1076,6 +1077,7 @@ async fn emit_elicitation_resolution(
         &form.id,
         Some(form),
         action,
+        permission_decision,
         reply.as_deref(),
         answers.as_deref(),
     );
@@ -1085,6 +1087,7 @@ async fn emit_elicitation_resolution(
             action: action.to_owned(),
             reply,
             answers,
+            permission_decision,
         })
     };
     if let Some(input) = input {

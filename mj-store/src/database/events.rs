@@ -620,6 +620,7 @@ mod tests {
             // Even a historical worker carrying a reply must not manufacture a user answer.
             reply: Some("not a user answer".into()),
             answers: None,
+            permission_decision: None,
         };
         // A question already open when AFK starts must be captured into that AFK period
         // when the worker's away resolution arrives.
@@ -885,6 +886,7 @@ mod tests {
                     action: "cancel".into(),
                     reply: None,
                     answers: None,
+                    permission_decision: None,
                 });
             }
             observations
@@ -1135,6 +1137,7 @@ mod tests {
                         },
                     )),
                     answers: None,
+                    permission_decision: None,
                 },
             ],
         );

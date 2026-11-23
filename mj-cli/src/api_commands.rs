@@ -2896,6 +2896,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                     crate::import::import_named_native_session(
                         harness,
                         native_session_id.clone(),
+                        &indexed_at,
                         &workspace_id,
                     )
                     .with_context(|| {

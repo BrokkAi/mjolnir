@@ -555,7 +555,7 @@ pub(super) async fn serve_session(
     // design refuses.
     if offered_mcp_servers > 0 && !mcp_available {
         let remedy = format!(
-            "Managed targets install muse-acp {}; on a container target, suspend and resume the session once its agent-dev image has updated",
+            "Managed targets install muse-acp {}; on a container target, suspend and resume the session after updating its image to one with a compatible Muse runtime",
             mj_core::harness_runtime::MUSE_ACP_VERSION
         );
         if !spec.extra_mcp_servers.is_empty() {

@@ -1608,7 +1608,9 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
                     elapsed_ms: 1,
                 },
                 "overflow" => GuardianStage1Verdict::Overflow { tokens: 6145 },
-                "long" => GuardianStage1Verdict::EscalatedActionTooLong,
+                "long" => GuardianStage1Verdict::Escalated(
+                    mj_core::guardian::WolfStage1SkipReason::ActionTooLong,
+                ),
                 "unavailable" => GuardianStage1Verdict::Unavailable {
                     reason: "loading".into(),
                 },

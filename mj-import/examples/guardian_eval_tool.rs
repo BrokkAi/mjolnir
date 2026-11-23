@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail, ensure};
 use futures::{StreamExt, stream};
 use mj_core::config::{Config, HarnessKind};
 use mj_core::guardian::{
-    GuardianReviewRequest, collect_project_instructions, compact_action_packet, rich_scene_packet,
-    wolf_scene_packet_with_budget,
+    GuardianReviewRequest, PriorGuardianReview, TrustedUserInput, collect_project_instructions,
+    compact_action_packet, rich_scene_packet, wolf_scene_packet_with_budget,
+    wolf_stage1_skip_reason,
 };
 use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -32,6 +33,12 @@ struct CorpusRow {
     cwd: String,
     user_instructions: Vec<String>,
     recent_transcript: String,
+    #[serde(default)]
+    trusted_user_inputs: Vec<TrustedUserInput>,
+    #[serde(default)]
+    prior_reviews: Vec<PriorGuardianReview>,
+    #[serde(default)]
+    retry_reason: Option<String>,
 }
 
 impl CorpusRow {
@@ -69,11 +76,11 @@ impl CorpusRow {
             // record whether the history preceding the retained ones is complete.
             user_instructions_omitted: true,
             project_instructions,
-            trusted_user_inputs: Vec::new(),
+            trusted_user_inputs: self.trusted_user_inputs,
             parent_instructions: Vec::new(),
             parent_instructions_omitted: false,
-            prior_reviews: Vec::new(),
-            retry_reason: None,
+            prior_reviews: self.prior_reviews,
+            retry_reason: self.retry_reason,
             transcript: self.recent_transcript,
         })
     }
@@ -112,6 +119,7 @@ fn canonicalize(input: &Path, output: &Path) -> Result<()> {
                 "wolf_scene_1k": wolf_scene_packet_with_budget(&request, 1_000),
                 "wolf_scene_1500": wolf_scene_packet_with_budget(&request, 1_500),
                 "wolf_scene_2k": wolf_scene_packet_with_budget(&request, 2_000),
+                "stage1_skip_reason": wolf_stage1_skip_reason(&request),
                 "request_text": request.request_text(),
             }),
         )?;

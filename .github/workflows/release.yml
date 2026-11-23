@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 # Every binary built for this tag belongs to the release channel: its default
-# container image is the immutable agent-dev:<version> tag built below, not the
+# container image is the immutable daemon:<version> tag built below, not the
 # floating :latest a development build uses. See mj-core/build.rs.
 env:
   MJ_BUILD_CHANNEL: release
@@ -38,19 +38,19 @@ jobs:
             jq -e --arg version "$version" 'all(.packages[]; .version == $version)'
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  # A release's container sessions default to this image, so it has to exist
+  # A release uses this image for daemon-container mode, so it has to exist
   # for the tag before the release is published. :latest keeps tracking master;
   # only the release's own version tag and the commit tag are published here.
-  publish-agent-dev-image:
-    name: Publish agent-dev image
+  publish-daemon-image:
+    name: Publish daemon image
     needs: verify-version
     permissions:
       contents: read
       packages: write
-    uses: ./.github/workflows/publish-agent-dev-image.yml
+    uses: ./.github/workflows/publish-daemon-image.yml
     with:
       extra_tags: ${{ needs.verify-version.outputs.version }}
-      publish_latest: 'false'
+      publish_latest: ${{ 'false' }}
 
   # The full CI suite on the tagged commit. Builds run beside it; only
   # publication waits for it, so a release never depends on a branch CI run
@@ -609,7 +609,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [ci, verify-version, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
+    needs: [ci, verify-version, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-daemon-image]
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -626,16 +626,16 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # The release binaries name agent-dev:<version>; publish the digest of the
+      # The release binaries name daemon:<version>; publish the digest of the
       # multi-arch manifest list beside them so a host can pin the exact image.
       - name: Stage the release image reference
         env:
-          IMAGE_DIGEST: ${{ needs.publish-agent-dev-image.outputs.digest }}
+          IMAGE_DIGEST: ${{ needs.publish-daemon-image.outputs.digest }}
           VERSION: ${{ needs.verify-version.outputs.version }}
         run: |
           set -euo pipefail
-          printf 'ghcr.io/brokkai/mjolnir/agent-dev:%s@%s\n' "$VERSION" "$IMAGE_DIGEST" \
-            > agent-dev-image.txt
+          printf 'ghcr.io/brokkai/mjolnir/daemon:%s@%s\n' "$VERSION" "$IMAGE_DIGEST" \
+            > daemon-image.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v3
@@ -646,7 +646,7 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            agent-dev-image.txt
+            daemon-image.txt
             artifacts/brokk-mjolnir-*.tar.gz
             artifacts/brokk-mjolnir-*.tar.gz.sha256
             artifacts/brokk-mjolnir-*.zip

@@ -987,6 +987,20 @@ mod tests {
     #[test]
     fn quota_row_right_click_offers_load_balancing_preference_and_clear() {
         let mut d = dashboard_with_session(running_session());
+        let openai = d
+            .quota_rows()
+            .into_iter()
+            .find(|row| {
+                matches!(
+                    row,
+                    crate::render::quota_pools::QuotaRow::ProviderText(
+                        mj_core::config::QuotaProvider::OpenAI
+                    )
+                )
+            })
+            .expect("OpenAI status group");
+        d.quota_selection = Some(openai);
+        d.toggle_quota_pool();
         let _ = drawn(&mut d, 140, 40);
         let (profile, at) = {
             let areas = d.quota_row_areas.borrow();

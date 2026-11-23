@@ -468,12 +468,12 @@ class BifrostRunner:
             run_kwargs = {"start_new_session": True}
 
         t0 = time.monotonic()
+        timed_out = False
+        returncode = None
         try:
             with raw_path.open("wb") as out_handle, stderr_path.open("wb") as err_handle:
                 with subprocess.Popen(cmd, stdout=out_handle, stderr=err_handle, env=env, **run_kwargs) as proc:
-                    try:
-                        returncode = proc.wait(timeout=self.query_timeout_s)
-                    except BaseException:
+                    def terminate():
                         try:
                             proc.kill()
                         except OSError:
@@ -489,6 +489,14 @@ class BifrostRunner:
                             proc.wait(timeout=15)
                         except subprocess.TimeoutExpired:
                             pass
+
+                    try:
+                        returncode = proc.wait(timeout=self.query_timeout_s)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        terminate()
+                    except BaseException:
+                        terminate()
                         raise
         finally:
             try:
@@ -496,12 +504,14 @@ class BifrostRunner:
             except FileNotFoundError:
                 pass
         wall_s = round(time.monotonic() - t0, 2)
+        if timed_out:
+            return wall_s, True
         if returncode != 0:
             tail = stderr_path.read_text(errors="replace")[-500:]
             raise RuntimeError(
                 f"bifrost query exited {returncode} on {repo}@{commit[:12]}: {tail}"
             )
-        return wall_s
+        return wall_s, False
 
     def query(self, repo, commit, query_text):
         """Run or resume a checkpointed real Bifrost documented query."""
@@ -531,13 +541,38 @@ class BifrostRunner:
             if completed_path.exists():
                 if not intent_path.exists():
                     raise ValueError(f"bifrost checkpoint is missing intent.json at {directory}")
-                return json.loads(completed_path.read_bytes())
+                saved = json.loads(completed_path.read_bytes())
+                if not saved.get("timed_out") or saved.get("query_timeout_s") == self.query_timeout_s:
+                    return saved
 
             driver.save(intent_path, intent)
             checkout = self._checkout_commit(repo, commit)
             cache_env = self._cache_env(repo)
             index_wall_s = self._ensure_warm(repo, commit, checkout, cache_env)
-            wall_s = self._run_query_file(repo, commit, checkout, cache_env, executed_query, raw_path, stderr_path)
+            wall_s, timed_out = self._run_query_file(
+                repo, commit, checkout, cache_env, executed_query, raw_path, stderr_path
+            )
+            if timed_out:
+                record = {
+                    "rows": [],
+                    "raw_row_count": 0,
+                    "truncated": False,
+                    "timed_out": True,
+                    "query_timeout_s": self.query_timeout_s,
+                    "diagnostics": [{
+                        "impact": "incomplete",
+                        "message": f"bifrost query timed out after {self.query_timeout_s}s",
+                    }],
+                    "complete": False,
+                    "skipped_external": 0,
+                    "skipped_empty_file": 0,
+                    "wall_s": wall_s,
+                    "index_wall_s": index_wall_s,
+                    "bifrost_build_identity": self.build_identity,
+                    "bifrost_binary_sha256": self.binary_sha256,
+                }
+                driver.save(completed_path, record)
+                return record
             try:
                 raw = json.loads(raw_path.read_bytes())
             except ValueError as error:
@@ -550,6 +585,7 @@ class BifrostRunner:
             record = {
                 "rows": rows,
                 **meta,
+                "timed_out": False,
                 "wall_s": wall_s,
                 "index_wall_s": index_wall_s,
                 "bifrost_build_identity": self.build_identity,

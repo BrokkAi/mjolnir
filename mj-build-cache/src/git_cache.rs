@@ -405,8 +405,13 @@ ssh_command=$6
 source_id=$7
 host_only=$8
 exact_ref=$9
+watch_stdin=${10}
 # Any further arguments are a history cutoff: its head, then its base.
-shift 9
+shift 10
+if [ "$has_token" = 1 ]; then
+    IFS= read -r GH_TOKEN || exit 1
+    export GH_TOKEN
+fi
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
 # The session root's own time is its preparation stamp: until the container
@@ -427,10 +432,25 @@ pinned="$preparation/pinned.git"
 cutoff_repository="$snapshot.cutoff-$$"
 cleanup() {
     cleanup_cache_locks
+    if [ -n "${watcher_pid:-}" ]; then
+        kill "$watcher_pid" 2>/dev/null || :
+        wait "$watcher_pid" 2>/dev/null || :
+    fi
     rm -rf -- "$preparation" "$snapshot_partial" "$cutoff_repository"
 }
 track_cache_locks
 trap cleanup EXIT
+# OpenSSH gives this non-PTY command a process group of its own. The
+# watcher alone reads the channel; Git inherits /dev/null.
+if [ "$watch_stdin" = 1 ]; then
+    exec 3<&0 </dev/null
+    (
+        while IFS= read -r _unused; do :; done
+        kill -s TERM 0 2>/dev/null || :
+    ) <&3 >/dev/null 2>&1 &
+    watcher_pid=$!
+    exec 3<&-
+fi
 attempt=0
 while ! try_cache_lock "$lock"; do
     attempt=$((attempt + 1))
@@ -440,10 +460,6 @@ while ! try_cache_lock "$lock"; do
     fi
     sleep 0.2
 done
-if [ "$has_token" = 1 ]; then
-    IFS= read -r GH_TOKEN || exit 1
-    export GH_TOKEN
-fi
 export GIT_TERMINAL_PROMPT=0
 if [ -n "$ssh_command" ]; then
     export GIT_SSH_COMMAND="$ssh_command"
@@ -560,6 +576,7 @@ fn prepare_repository(
     };
     let github_token = github_token.filter(|_| is_github_https_url(source));
     let token = github_token.is_some();
+    let watch_stdin = !matches!(host, CacheHost::Local);
     let mut arguments = vec![
         cache_root.to_string_lossy().into_owned(),
         key.to_owned(),
@@ -575,6 +592,7 @@ fn prepare_repository(
         lower_hex(Sha256::digest(source.as_bytes())),
         u8::from(is_host_only_git_source(source)).to_string(),
         exact_ref,
+        u8::from(watch_stdin).to_string(),
     ];
     if let Some(cutoff) = cutoff {
         cutoff.validate()?;
@@ -585,6 +603,9 @@ fn prepare_repository(
         arguments,
         format!("prepare cached Git objects for {}", display_url(source)),
     );
+    if watch_stdin {
+        command = command.keep_stdin_open();
+    }
     if let Some(token) = github_token {
         let mut input = token.as_bytes().to_vec();
         input.push(b'\n');
@@ -1338,6 +1359,144 @@ mod tests {
         assert!(!snapshot.exists());
     }
 
+    // Hard-won: #1671: cancelling a remote clone left Git, the lock and its partial mirror behind.
+    #[cfg(unix)]
+    #[test]
+    fn remote_cache_stdin_eof_cleans_up_and_allows_same_key_retry() {
+        use mj_core::targets::CancellableProcessExecutor;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::Duration;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let bin = root.join("bin");
+        let source = root.join("source.git");
+        let source_arg = source.to_str().unwrap();
+        let output = ProcessExecutor
+            .execute(&CommandSpec::new("git", ["init", "--bare", source_arg]))
+            .unwrap();
+        assert_eq!(output.status, 0, "{output:?}");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir(&bin).unwrap();
+        let fake_git = bin.join("git");
+        std::fs::write(
+            &fake_git,
+            r#"#!/bin/sh
+set -eu
+if [ "$SLOW_CLONE" = 1 ]; then
+    [ "${GH_TOKEN:-}" = "$EXPECTED_TOKEN" ]
+    sleep 60 &
+    worker=$!
+    trap 'wait "$worker" 2>/dev/null || :; printf "%s %s" "$$" "$worker" > "$CLONE_STOPPED"; exit 143' TERM
+    printf 'clone started\n'
+    wait "$worker"
+fi
+ps -o pgid= -p "$$" > "$CLONE_GROUP"
+exec "$REAL_GIT" "$@"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let real_git = ProcessExecutor
+            .execute(&CommandSpec::new("sh", ["-c", "command -v git"]))
+            .unwrap();
+        assert_eq!(real_git.status, 0);
+        let real_git = std::str::from_utf8(&real_git.stdout).unwrap().trim();
+
+        for token in ["", "fixture-token"] {
+            let has_token = !token.is_empty();
+            let cache = root.join(if has_token {
+                "with-token"
+            } else {
+                "without-token"
+            });
+            let snapshot = cache.join("sessions/fixture/repository.git");
+            let stopped = cache.join("stopped");
+            let group = cache.join("group");
+            let mut command = CacheHost::Local
+                .git_shell_command(
+                    PREPARE_REPOSITORY_SCRIPT,
+                    [
+                        cache.to_str().unwrap(),
+                        "repository",
+                        source_arg,
+                        snapshot.to_str().unwrap(),
+                        if has_token { "1" } else { "0" },
+                        "",
+                        "fixture-source",
+                        "0",
+                        "",
+                        "1",
+                    ]
+                    .map(str::to_owned),
+                    "prepare isolated EOF-watched repository",
+                )
+                .keep_stdin_open();
+            if has_token {
+                command = command.with_sensitive_stdin(format!("{token}\n").into_bytes());
+            }
+            command.env_remove.push("GH_TOKEN".into());
+            command.env.extend([
+                (
+                    "PATH".into(),
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                ),
+                ("REAL_GIT".into(), real_git.into()),
+                ("EXPECTED_TOKEN".into(), token.into()),
+                ("CLONE_STOPPED".into(), stopped.to_str().unwrap().into()),
+                ("CLONE_GROUP".into(), group.to_str().unwrap().into()),
+                ("SLOW_CLONE".into(), "1".into()),
+            ]);
+
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let flag = cancelled.clone();
+            let slow = command.clone().with_stream_reply(move |bytes| {
+                if bytes.is_some() {
+                    flag.store(true, Ordering::Release);
+                }
+            });
+            let error = CancellableProcessExecutor::new(cancelled.clone())
+                .with_deadline(Duration::from_secs(5))
+                .execute(&slow)
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"), "{error:#}");
+            assert!(cancelled.load(Ordering::Acquire), "clone never started");
+            let pids = std::fs::read_to_string(stopped).unwrap();
+            for pid in pids.split_whitespace() {
+                let output = ProcessExecutor
+                    .execute(&CommandSpec::new("ps", ["-p", pid]))
+                    .unwrap();
+                assert_ne!(output.status, 0, "clone process {pid} survived");
+            }
+            assert!(!cache.join("locks/repository").exists());
+            assert_eq!(std::fs::read_dir(cache.join("mirrors")).unwrap().count(), 0);
+
+            command.env.insert("SLOW_CLONE".into(), "0".into());
+            let output = CancellableProcessExecutor::new(Arc::default())
+                .with_deadline(Duration::from_secs(5))
+                .execute(&command)
+                .unwrap();
+            checked(output, &command).unwrap();
+            assert!(snapshot.join("HEAD").is_file());
+            let group = std::fs::read_to_string(&group).unwrap();
+            let processes = ProcessExecutor
+                .execute(&CommandSpec::new("ps", ["-A", "-o", "pgid="]))
+                .unwrap();
+            assert_eq!(processes.status, 0);
+            let process_groups = std::str::from_utf8(&processes.stdout).unwrap();
+            assert!(
+                !process_groups
+                    .lines()
+                    .any(|pgid| pgid.trim() == group.trim())
+            );
+            assert!(!cache.join("locks/repository").exists());
+            assert_eq!(std::fs::read_dir(cache.join("mirrors")).unwrap().count(), 1);
+        }
+    }
+
     /// The clone cache runs Git on the controller or on a container target's
     /// SSH host with the SSH command the controller decided, so the operator's
     /// `GIT_SSH_COMMAND` governs it as it does every other Git command.
@@ -1384,6 +1543,7 @@ mod tests {
                     "ssh-fixture-source".into(),
                     "0".into(),
                     String::new(),
+                    "0".into(),
                 ],
                 "prepare cached Git objects",
             );

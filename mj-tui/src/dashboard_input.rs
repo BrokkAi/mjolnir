@@ -406,8 +406,9 @@ impl DashboardState {
                 self.focus = Focus::Quota;
                 self.set_selection_for(Focus::Quota, index);
                 if matches!(
-                    self.selected_quota_row(),
-                    Some(crate::render::quota_pools::QuotaRow::Pool(_))
+                    row,
+                    crate::render::quota_pools::QuotaRow::Pool(_)
+                        | crate::render::quota_pools::QuotaRow::ProviderText(_)
                 ) {
                     self.toggle_quota_pool();
                 }

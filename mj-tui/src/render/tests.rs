@@ -1425,6 +1425,8 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
     only_limited.rate_limited_until_epoch_seconds = Some(now_seconds() + 5 * 60);
 
     let mut dashboard = dashboard_with_session(running_session());
+    dashboard.config.profiles.remove("codex-2");
+    dashboard.set_pane_size(SupportPane::Quota, PaneSize::Maximized);
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
         reports: BTreeMap::from([
             ("claude-1".to_owned(), held),
@@ -1432,16 +1434,41 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         ]),
         ..Default::default()
     });
-    let lines = drawn(&mut dashboard, 120, 44);
-    for id in ["claude-1", "codex-1"] {
-        let row = lines
+    let lines = drawn(&mut dashboard, 200, 44);
+    assert!(
+        lines
             .iter()
-            .find(|line| line.contains(id) && line.contains("quota check refused"))
-            .unwrap_or_else(|| panic!("a rate limited row for {id}: {lines:#?}"));
-        assert!(row.contains("quota check refused · next in"), "{row:?}");
-        assert!(!row.contains("unavailable"), "{row:?}");
-        assert_eq!(row.contains("63%"), id == "claude-1", "{row:?}");
+            .any(|line| line.contains(" + quota check refused · next in"))
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("quota check refused"))
+            .count(),
+        1
+    );
+    for row in dashboard.quota_rows() {
+        dashboard.quota_selection = Some(row);
+        dashboard.toggle_quota_pool();
     }
+    let lines = drawn(&mut dashboard, 200, 44);
+    let claude = lines
+        .iter()
+        .position(|line| line.contains("claude-1"))
+        .unwrap_or_else(|| panic!("the Claude quota reading: {lines:#?}"));
+    assert!(lines[claude].contains("63%"), "{lines:#?}");
+    assert!(
+        lines[claude + 1].contains("quota check refused · next in"),
+        "{lines:#?}"
+    );
+    assert!(!lines[claude + 1].contains("unavailable"), "{lines:#?}");
+    let codex = lines
+        .iter()
+        .find(|line| line.contains("codex-1:"))
+        .unwrap_or_else(|| panic!("the Codex quota status: {lines:#?}"));
+    assert!(codex.contains("quota check refused · next in"), "{codex:?}");
+    assert!(!codex.contains("unavailable"), "{codex:?}");
+    assert!(!codex.contains("63%"), "{codex:?}");
 
     minimize_all_panes(&mut dashboard);
     let row = drawn(&mut dashboard, 120, 44)

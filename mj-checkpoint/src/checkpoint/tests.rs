@@ -136,6 +136,7 @@ fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace(
     let restored: serde_json::Value = serde_json::from_slice(
         &restored_native_artifact_bytes(
             HarnessKind::Dsh,
+            DSH_NATIVE,
             &relative,
             &artifact_bytes(&artifacts[0]),
             Some(&moved),
@@ -180,7 +181,7 @@ fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
              refresh_token text, token_expiry integer, time_created integer, time_updated integer);
          CREATE TABLE control_account (email text, url text, access_token text, refresh_token text,
              token_expiry integer, active integer, time_created integer, time_updated integer);
-         CREATE TABLE session_v2 (id text PRIMARY KEY, title text);",
+         CREATE TABLE session_v2 (id text PRIMARY KEY, title text, directory text);",
     )
     .unwrap();
     let credential = |id: &str, key: &str| {
@@ -202,7 +203,7 @@ fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
     )
     .unwrap();
     live.execute(
-        "INSERT INTO session_v2 VALUES ('ses_old', 'in the file')",
+        "INSERT INTO session_v2 VALUES ('ses_old', 'in the file', '/work/app')",
         [],
     )
     .unwrap();
@@ -212,7 +213,7 @@ fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
         .unwrap();
     credential("cred_newer", secrets[3]);
     live.execute(
-        "INSERT INTO session_v2 VALUES ('ses_live', 'still in the log')",
+        "INSERT INTO session_v2 VALUES ('ses_live', 'still in the log', '/work/app')",
         [],
     )
     .unwrap();
@@ -1115,6 +1116,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
 
     let summary = restored_native_artifact_bytes(
             HarnessKind::Grok,
+            NATIVE,
             &path,
             br#"{"info":{"id":"01a00c3a","cwd":"/home/jonathan/Projects/app"},"grok_home":"/home/jonathan/.grok","num_messages":3}"#,
             target_primary_cwd("app", &repositories, Path::new("/workspace")).as_deref(),
@@ -1129,6 +1131,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
     // Transcript files travel unchanged.
     let history = restored_native_artifact_bytes(
         HarnessKind::Grok,
+        NATIVE,
         Path::new(&format!(
             "sessions/%2Fworkspace%2Fapp/{NATIVE}/chat_history.jsonl"
         )),
@@ -1197,6 +1200,7 @@ fn restored_native_sessions_follow_each_harness_reading_of_the_launch_cwd() {
     );
     let rewritten = restored_native_artifact_bytes(
         HarnessKind::Grok,
+        NATIVE,
         &summary,
         format!(
             r#"{{"info":{{"id":"{NATIVE}","cwd":"/old/project/.mj/clones/s1/"}},"grok_home":"/old/profile"}}"#
@@ -1223,6 +1227,7 @@ fn restored_native_sessions_follow_each_harness_reading_of_the_launch_cwd() {
     );
     let state = restored_native_artifact_bytes(
         HarnessKind::Kimi,
+        NATIVE,
         Path::new(&format!("sessions/key/session_{NATIVE}/state.json")),
         br#"{"workDir":"/old"}"#,
         Some(launch_cwd),
@@ -1485,6 +1490,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     );
     let state = restored_native_artifact_bytes(
             HarnessKind::Kimi,
+            NATIVE,
             &path,
             br#"{"workDir":"/home/jonathan/Projects/kimi-code","cwd":"/home/jonathan/Projects/kimi-code"}"#,
             target_primary_cwd("app", &repositories, Path::new("/workspace")).as_deref(),
@@ -1496,6 +1502,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     assert_eq!(state["cwd"], "/workspace/app");
     let registry = restored_native_artifact_bytes(
             HarnessKind::Kimi,
+            NATIVE,
             Path::new("workspaces.json"),
             br#"{"version":1,"deleted_workspace_ids":[],"workspaces":{"wd_kimi-code_78153cfca00c":{"root":"/home/jonathan/Projects/kimi-code","name":"kimi-code"}}}"#,
             target_primary_cwd("app", &repositories, Path::new("/workspace")).as_deref(),
@@ -1515,6 +1522,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
 
     let index = restored_native_artifact_bytes(
             HarnessKind::Kimi,
+            NATIVE,
             Path::new("session_index.jsonl"),
             br#"{"sessionId":"session_1b6c3192-2480-48e0-8f49-4b8a1572f5b2","workDir":"/home/jonathan/Projects/kimi-code","sessionDir":"/home/jonathan/.kimi-code/sessions/wd_kimi-code_78153cfca00c/session_1b6c3192-2480-48e0-8f49-4b8a1572f5b2"}"#,
             target_primary_cwd("app", &repositories, Path::new("/workspace")).as_deref(),
@@ -5166,6 +5174,92 @@ fn missing_parent_restore_preserves_current_components_and_retries_partial_failu
         fs::read(from_store.harness_home.join(&native_relative)).unwrap(),
         b"newer native history"
     );
+}
+
+#[test]
+fn full_restore_relocates_legacy_opencode_wal_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    export_checkpoint(&spec).unwrap();
+    let original = read_archive_verified(&spec.output_path).unwrap();
+    let mut session = original.manifest.session.clone();
+    session.harness_kind = HarnessKind::OpenCode;
+    let id = session.native_session_id.clone();
+    let source = temp.path().join("legacy.db");
+    let live = rusqlite::Connection::open(&source).unwrap();
+    live.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .unwrap();
+    let main = fs::read(&source).unwrap();
+    live.execute("INSERT INTO session_v2 VALUES (?1, '/old/app')", [&id])
+        .unwrap();
+    assert_eq!(fs::read(&source).unwrap(), main);
+    let wal = fs::read(temp.path().join("legacy.db-wal")).unwrap();
+    drop(live);
+
+    let relative = PathBuf::from(".data/opencode/opencode.db");
+    let legacy = temp.path().join("legacy.hel.zip");
+    write_archive_hashed(
+        &legacy,
+        &ArchiveInput {
+            session,
+            target: original.manifest.target.clone(),
+            bundle: original.manifest.bundle.clone(),
+            canonical_session: original.canonical_session().unwrap(),
+            repositories: original
+                .manifest
+                .repositories
+                .iter()
+                .map(|repository| archived_repository_snapshot(&original, repository).unwrap())
+                .collect(),
+            native_artifacts: vec![
+                NativeArtifact {
+                    relative_path: relative.clone(),
+                    data: main.into(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from(".data/opencode/opencode.db-wal"),
+                    data: wal.into(),
+                    mode: 0o600,
+                },
+            ],
+        },
+    )
+    .unwrap();
+
+    let target_cwd = temp.path().join("relocated/app");
+    let home = temp.path().join("restored-home");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: legacy,
+            workspace_root: spec.workspace_root,
+            report_root: None,
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Discard,
+            primary_repository_root: Some(target_cwd.clone()),
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    assert!(!home.join(".data/opencode/opencode.db-wal").exists());
+    assert!(!home.join(".data/opencode/opencode.db-shm").exists());
+    let database = rusqlite::Connection::open(home.join(relative)).unwrap();
+    let directory: String = database
+        .query_row(
+            "SELECT directory FROM session_v2 WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Path::new(&directory), target_cwd);
 }
 
 // Hard-won: bd6363001 review: publishing a SQLite database before its WAL made retry silently lose conversation rows.

@@ -84,24 +84,28 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
 
 const npmWorkflow = readFileSync(join(root, '.github/workflows/publish-npm.yml'), 'utf8');
 
-const publishImage = readFileSync(join(root, '.github/workflows/publish-agent-dev-image.yml'), 'utf8');
+const publishImage = readFileSync(join(root, '.github/workflows/publish-daemon-image.yml'), 'utf8');
 
-// The release's container sessions default to agent-dev:<version>, so the
+// The release's containerized daemon defaults to daemon:<version>, so the
 // tagged workflow must publish that image and must not move the floating
 // :latest tag that development builds use.
 test('a release publishes its version image and leaves :latest to master', () => {
-  const job = release.split('  publish-agent-dev-image:\n')[1].split(/\n  [\w-]+:\n/)[0];
-  assert.match(job, /uses: \.\/\.github\/workflows\/publish-agent-dev-image\.yml/);
+  const job = release.split('  publish-daemon-image:\n')[1].split(/\n  [\w-]+:\n/)[0];
+  assert.match(job, /uses: \.\/\.github\/workflows\/publish-daemon-image\.yml/);
   assert.match(job, /extra_tags: \$\{\{ needs\.verify-version\.outputs\.version \}\}/);
-  assert.match(job, /publish_latest: 'false'/);
-  const releaseJob = release.split('  release:\n')[1].split('    steps:')[0];
-  assert.match(releaseJob, /needs: \[[^\]]*publish-agent-dev-image\]/);
+  assert.match(job, /publish_latest: \$\{\{ 'false' \}\}/);
+  const releaseJob = release.split('  release:\n')[1];
+  assert.match(releaseJob, /needs: \[[^\]]*publish-daemon-image\]/);
+  assert.match(releaseJob, /IMAGE_DIGEST: \$\{\{ needs\.publish-daemon-image\.outputs\.digest \}\}/);
+  assert.match(releaseJob, /ghcr\.io\/brokkai\/mjolnir\/daemon:%s@%s/);
+  assert.match(releaseJob, /^            daemon-image\.txt$/m);
 });
 
-// The image bakes in the session worker, so :latest has to be rebuilt whenever
-// anything the worker compiles from changes on master. Otherwise development
-// builds find an image whose worker trails master and install a host copy.
-test('every worker input republishes the agent-dev image', () => {
+const manifest = readFileSync(join(root, 'Cargo.toml'), 'utf8');
+const workspaceMembers = [...manifest.match(/^members = \[([^\]]*)\]/m)[1].matchAll(/"([^"]+)"/g)].map(match => match[1]);
+
+// Edits to either baked binary's build inputs must rebuild :latest.
+test('worker and workspace inputs republish the daemon image', () => {
   const paths = publishImage.split('    paths:\n')[1].split(/\n  \w/)[0];
   const filters = [...paths.matchAll(/^      - '([^']+)'$/gm)].map(match => match[1]);
   const inputs = readFileSync(join(root, 'mj-core/worker-build-inputs.txt'), 'utf8')
@@ -109,7 +113,7 @@ test('every worker input republishes the agent-dev image', () => {
     .map(line => line.trim())
     .filter(line => line && !line.startsWith('#'));
   assert.ok(inputs.length > 0);
-  for (const input of inputs) {
+  for (const input of new Set([...inputs, ...workspaceMembers])) {
     const directory = statSync(join(root, input)).isDirectory();
     assert.ok(filters.includes(directory ? `${input}/**` : input), `${input} is not in the publish path filter`);
   }
@@ -118,23 +122,16 @@ test('every worker input republishes the agent-dev image', () => {
 // Cargo resolves the whole workspace even to build one package, so the image's
 // worker stage needs every member: admitted by .dockerignore and copied in.
 test("the image's worker stage receives every workspace member", () => {
-  const manifest = readFileSync(join(root, 'Cargo.toml'), 'utf8');
-  const members = [...manifest.match(/^members = \[([^\]]*)\]/m)[1].matchAll(/"([^"]+)"/g)].map(match => match[1]);
   const dockerignore = readFileSync(join(root, '.dockerignore'), 'utf8').split('\n');
-  const containerfile = readFileSync(join(root, 'containers/Containerfile.agent-dev'), 'utf8');
+  const containerfile = readFileSync(join(root, 'containers/Containerfile.daemon'), 'utf8');
   const stage = containerfile.split(/^FROM .* AS worker$/m)[1].split(/^FROM /m)[0];
   for (const file of ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml']) {
     assert.ok(dockerignore.includes(`!${file}`), `.dockerignore excludes ${file}`);
     assert.match(stage, new RegExp(`^COPY .*\\b${file.replace('.', '\\.')}\\b`, 'm'), `the worker stage does not copy ${file}`);
   }
-  for (const member of members) {
+  for (const member of workspaceMembers) {
     assert.ok(dockerignore.includes(`!${member}/`), `.dockerignore excludes ${member}`);
     assert.ok(stage.includes(`COPY ${member}/ ${member}/`), `the worker stage does not copy ${member}`);
-  }
-  for (const installer of ['scripts/install-muse.py', 'scripts/install-antigravity.py']) {
-    assert.ok(dockerignore.includes(`!${installer}`), `.dockerignore excludes ${installer}`);
-    assert.ok(containerfile.includes(`COPY ${installer} `), `the image does not copy ${installer}`);
-    assert.ok(publishImage.includes(`- '${installer}'`), `editing ${installer} does not rebuild the image`);
   }
 });
 
@@ -154,7 +151,7 @@ for (const { label, publishLatest, extraTags, expectedTags, absentTags } of [
     absentTags: ['latest'],
   },
 ]) {
-  test(`agent-dev manifest tags when ${label}`, t => {
+  test(`daemon manifest tags when ${label}`, t => {
     const dir = fixture(t);
     // The per-arch jobs upload bare digest-file names; the merge step prefixes
     // each with `sha256:`.
@@ -177,7 +174,7 @@ esac
         ...process.env,
         PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
         FIXTURE: dir,
-        IMAGE: 'ghcr.io/test/mjolnir/agent-dev',
+        IMAGE: 'ghcr.io/test/mjolnir/daemon',
         EXTRA_TAGS: extraTags,
         PUBLISH_LATEST: publishLatest,
         GITHUB_SHA: 'abcdef1234567890',
@@ -189,10 +186,10 @@ esac
       .split('\n')
       .find(line => line.includes('imagetools create'));
     for (const tag of expectedTags) {
-      assert.ok(create.includes(`--tag ghcr.io/test/mjolnir/agent-dev:${tag}`), create);
+      assert.ok(create.includes(`--tag ghcr.io/test/mjolnir/daemon:${tag}`), create);
     }
     for (const tag of absentTags) {
-      assert.ok(!create.includes(`--tag ghcr.io/test/mjolnir/agent-dev:${tag}`), create);
+      assert.ok(!create.includes(`--tag ghcr.io/test/mjolnir/daemon:${tag}`), create);
     }
     assert.match(readFileSync(output, 'utf8'), /digest=sha256:deadbeef/);
   });
@@ -214,11 +211,11 @@ test('npm downloads assets when the release lookup omits its embedded asset list
       assets.push({ id, name, size: data.length });
     }
   }
-  // The release also carries the agent-dev image pointer alongside the archives.
-  const pointerData = Buffer.from('ghcr.io/test/mjolnir/agent-dev:v1.2.3\n');
+  // The release also carries the daemon image pointer alongside the archives.
+  const pointerData = Buffer.from('ghcr.io/test/mjolnir/daemon:v1.2.3\n');
   const pointerId = assets.length + 1;
   writeFileSync(join(dir, String(pointerId)), pointerData);
-  assets.push({ id: pointerId, name: 'agent-dev-image.txt', size: pointerData.length });
+  assets.push({ id: pointerId, name: 'daemon-image.txt', size: pointerData.length });
   writeFileSync(join(dir, 'assets.json'), JSON.stringify(assets));
   writeFileSync(join(dir, 'bin/gh'), `#!/bin/bash
 set -euo pipefail
@@ -236,7 +233,7 @@ esac
   const result = run();
   assert.equal(result.status, 0, result.stderr);
   // npm ships no Windows package and needs no image pointer, so it leaves both behind.
-  const npmAssets = assets.filter(asset => !asset.name.includes('-windows-msvc.') && asset.name !== 'agent-dev-image.txt');
+  const npmAssets = assets.filter(asset => !asset.name.includes('-windows-msvc.') && asset.name !== 'daemon-image.txt');
   assert.deepEqual(readdirSync(join(work, 'release-assets')).sort(), npmAssets.map(asset => asset.name).sort());
   for (const asset of npmAssets) {
     assert.deepEqual(readFileSync(join(work, 'release-assets', asset.name)), readFileSync(join(dir, String(asset.id))));

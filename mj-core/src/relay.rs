@@ -214,8 +214,10 @@ pub const RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL: u32 = 85;
 pub const RELAY_CANCEL_TURN_TARGET_PROTOCOL: u32 = 86;
 /// 87 includes trusted user inputs, prior reviews, and retry context in guardian requests.
 pub const RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL: u32 = 87;
-/// 88 includes verified delegated parent instructions in guardian requests.
-pub const RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL: u32 = 88;
+/// 88 records typed manual permission decisions in Guardian inputs and relay events.
+pub const RELAY_GUARDIAN_PERMISSION_DECISION_PROTOCOL: u32 = 88;
+/// 89 includes verified delegated parent instructions in guardian requests.
+pub const RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL: u32 = 89;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
