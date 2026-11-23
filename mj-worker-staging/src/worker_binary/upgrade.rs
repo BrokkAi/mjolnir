@@ -623,8 +623,8 @@ pub(super) fn binary_upload_plan(
             ],
         });
     };
-    let commands = match locator {
-        targets::TargetLocator::LocalBare { .. } => vec![
+    let commands = if matches!(locator, targets::TargetLocator::LocalBare { .. }) {
+        vec![
             CommandSpec::new(
                 "cp",
                 [worker_binary.to_string_lossy().into_owned(), staged.clone()],
@@ -634,140 +634,71 @@ pub(super) fn binary_upload_plan(
                 .purpose("replace installed Mjolnir worker"),
             CommandSpec::new("chmod", ["700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
-        ],
-        targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id, .. }
-        | targets::TargetLocator::AppleContainer { container_id, .. } => {
-            let engine = match locator {
-                targets::TargetLocator::LocalPodman { .. } => "podman",
-                targets::TargetLocator::LocalDocker { .. } => "docker",
-                targets::TargetLocator::AppleContainer { .. } => "container",
-                _ => unreachable!("matched local container target"),
-            };
-            vec![
-                CommandSpec::new(
-                    engine,
-                    [
-                        "cp".into(),
-                        worker_binary.to_string_lossy().into_owned(),
-                        format!("{container_id}:{staged}"),
-                    ],
-                )
-                .purpose("stage replacement Mjolnir worker"),
-                CommandSpec::new(
-                    engine,
-                    container_upload_ownership_args(engine, container_id, &worker_root, &[&staged]),
-                )
-                .purpose("match replacement worker to the worker directory owner"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "exec".into(),
-                        container_id.clone(),
-                        "mv".into(),
-                        "-f".into(),
-                        staged,
-                        installed.clone(),
-                    ],
-                )
-                .purpose("replace installed Mjolnir worker"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "exec".into(),
-                        container_id.clone(),
-                        "chmod".into(),
-                        "700".into(),
-                        installed,
-                    ],
-                )
+        ]
+    } else {
+        let targets::ContainerEndpoint {
+            engine,
+            ssh,
+            container_id,
+        } = locator
+            .container_endpoint()
+            .context("SSH host worker uploads must stream to the private worker store")?;
+        let upload = match ssh {
+            Some(_) => remote_source
+                .context("remote container worker copy needs its host store pin")?
+                .into(),
+            None => worker_binary.to_string_lossy(),
+        };
+        let commands = vec![
+            CommandSpec::new(
+                engine,
+                [
+                    "cp".into(),
+                    upload.to_string(),
+                    format!("{container_id}:{staged}"),
+                ],
+            )
+            .purpose("stage replacement Mjolnir worker"),
+            CommandSpec::new(
+                engine,
+                container_upload_ownership_args(engine, container_id, &worker_root, &[&staged]),
+            )
+            .purpose("match replacement worker to the worker directory owner"),
+            CommandSpec::new(
+                engine,
+                ["exec", container_id, "mv", "-f"]
+                    .into_iter()
+                    .chain(ssh.is_some().then_some("--"))
+                    .chain([staged.as_str(), installed.as_str()]),
+            )
+            .purpose("replace installed Mjolnir worker"),
+            CommandSpec::new(engine, ["exec", container_id, "chmod", "700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
-            ]
-        }
-        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            bail!("SSH host worker uploads must stream to the private worker store")
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshAppleContainer {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshNitro {
-            ssh, container_id, ..
-        } => {
-            let engine = locator
-                .container_engine()
-                .expect("matched a remote container target");
-            let upload =
-                remote_source.context("remote container worker copy needs its host store pin")?;
-            let mut steps = Vec::new();
-            for (purpose, args) in [
-                (
-                    "stage replacement Mjolnir worker",
-                    vec![
-                        engine.into(),
-                        "cp".into(),
-                        upload.to_owned(),
-                        format!("{container_id}:{staged}"),
-                    ],
-                ),
-                (
-                    "match replacement worker to the worker directory owner",
-                    std::iter::once(engine.to_owned())
-                        .chain(container_upload_ownership_args(
-                            engine,
-                            container_id,
-                            &worker_root,
-                            &[&staged],
-                        ))
-                        .collect(),
-                ),
-                (
-                    "replace installed Mjolnir worker",
-                    vec![
-                        engine.into(),
-                        "exec".into(),
-                        container_id.clone(),
-                        "mv".into(),
-                        "-f".into(),
-                        "--".into(),
-                        staged,
-                        installed.clone(),
-                    ],
-                ),
-                (
-                    "make replaced Mjolnir worker executable",
-                    vec![
-                        engine.into(),
-                        "exec".into(),
-                        container_id.clone(),
-                        "chmod".into(),
-                        "700".into(),
-                        installed,
-                    ],
-                ),
-            ] {
-                steps.push(targets::CommandStep::new(
-                    purpose,
-                    targets::with_engine_argv(args),
-                ));
-            }
+        ];
+        if let Some(ssh) = ssh {
+            let mut steps: Vec<_> = commands
+                .into_iter()
+                .map(|command| {
+                    targets::CommandStep::new(
+                        command.purpose,
+                        targets::with_engine_argv(
+                            std::iter::once(command.program)
+                                .chain(command.args)
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect();
             steps.push(targets::CommandStep::new(
                 "remove remote replacement worker staging",
-                ["rm", "-f", "--", upload],
+                ["rm", "-f", "--", &upload],
             ));
             vec![
-                crate::targets::ssh_command_owned(
-                    SshTrafficClass::Bulk,
-                    ssh,
-                    targets::step_script(steps),
-                )
-                .purpose("stage replacement Mjolnir worker"),
+                targets::ssh_command_owned(SshTrafficClass::Bulk, ssh, targets::step_script(steps))
+                    .purpose("stage replacement Mjolnir worker"),
             ]
+        } else {
+            commands
         }
     };
     Ok(CommandPlan {

@@ -3623,7 +3623,70 @@ impl TargetTemplate {
     }
 }
 
+/// The engine and host holding a container, borrowed from its locator.
+#[derive(Clone, Copy)]
+pub struct ContainerEndpoint<'a> {
+    pub engine: &'static str,
+    pub ssh: Option<&'a SshTarget>,
+    pub container_id: &'a str,
+}
+
+impl ContainerEndpoint<'_> {
+    /// Run a command on the engine's host.
+    pub fn host_command(self, class: SshTrafficClass, command: CommandSpec) -> CommandSpec {
+        match self.ssh {
+            Some(ssh) => command_over_ssh(class, command, ssh),
+            None => command,
+        }
+    }
+}
+
+/// Move a command to the remote host without losing its input or lifecycle metadata.
+pub fn command_over_ssh(
+    class: SshTrafficClass,
+    mut command: CommandSpec,
+    ssh: &SshTarget,
+) -> CommandSpec {
+    let remote = std::iter::once(command.program)
+        .chain(command.args)
+        .collect();
+    let wrapped = ssh_command_owned(class, ssh, remote);
+    command.program = wrapped.program;
+    command.args = wrapped.args;
+    // The wrapped command now opens an SSH session, so it is admitted and
+    // placed on a shared connection like any other.
+    command.ssh_destination = wrapped.ssh_destination;
+    command.ssh_session = wrapped.ssh_session;
+    command
+}
+
 impl TargetLocator {
+    pub fn container_endpoint(&self) -> Option<ContainerEndpoint<'_>> {
+        let (ssh, container_id) = match self {
+            Self::LocalPodman { container_id, .. }
+            | Self::LocalDocker { container_id, .. }
+            | Self::AppleContainer { container_id, .. } => (None, container_id),
+            Self::SshPodman {
+                ssh, container_id, ..
+            }
+            | Self::SshDocker {
+                ssh, container_id, ..
+            }
+            | Self::SshAppleContainer {
+                ssh, container_id, ..
+            }
+            | Self::SshNitro {
+                ssh, container_id, ..
+            } => (Some(ssh), container_id),
+            _ => return None,
+        };
+        Some(ContainerEndpoint {
+            engine: self.container_engine().expect("container locator"),
+            ssh,
+            container_id,
+        })
+    }
+
     /// Container placement includes borrowed workers: each can survive its owner moving.
     pub fn cpu_accounting(&self) -> crate::cpu_usage::CpuAccountingMode {
         if self.container_engine().is_some() {

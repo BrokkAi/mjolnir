@@ -58,57 +58,8 @@ pub fn provision_plan_named(
         )).into());
     }
     let workspace = container_workspace_root(container_workspace);
-    if !additional_mounts.is_empty()
-        && !matches!(
-            template,
-            TargetTemplate::LocalPodman(_)
-                | TargetTemplate::LocalDocker(_)
-                | TargetTemplate::AppleContainer(_)
-                | TargetTemplate::SshPodman { .. }
-                | TargetTemplate::SshDocker { .. }
-                | TargetTemplate::SshAppleContainer { .. }
-                | TargetTemplate::SshNitro { .. }
-        )
-    {
+    if !additional_mounts.is_empty() && template.container_engine().is_none() {
         bail!("additional mounts require a container-backed target");
-    }
-    // Apple's `container` CLI drives the host's own VM disk image, so the
-    // remote plan is the local one with every command run over SSH.
-    if let TargetTemplate::SshAppleContainer { ssh, container } = template {
-        validate_ssh(ssh)?;
-        let mut plan = provision_plan_named(
-            &TargetTemplate::AppleContainer(container.clone()),
-            session_id,
-            bundle,
-            additional_mounts,
-            container_workspace,
-            name,
-            options,
-        )?;
-        plan.commands = plan
-            .commands
-            .into_iter()
-            .map(|command| command_over_ssh(SshTrafficClass::Bulk, command, ssh))
-            .collect();
-        return Ok(plan);
-    }
-    if let TargetTemplate::SshDocker { ssh, container } = template {
-        validate_ssh(ssh)?;
-        let mut plan = provision_plan_named(
-            &TargetTemplate::LocalDocker(container.clone()),
-            session_id,
-            bundle,
-            additional_mounts,
-            container_workspace,
-            name,
-            options,
-        )?;
-        plan.commands = plan
-            .commands
-            .into_iter()
-            .map(|command| command_over_ssh(SshTrafficClass::Bulk, command, ssh))
-            .collect();
-        return Ok(plan);
     }
     let mut commands = Vec::new();
     match template {
@@ -136,47 +87,52 @@ pub fn provision_plan_named(
                 container_exec("podman", name, args)
             }));
         }
-        TargetTemplate::LocalDocker(container) => {
+        TargetTemplate::LocalDocker(container)
+        | TargetTemplate::SshDocker { container, .. }
+        | TargetTemplate::AppleContainer(container)
+        | TargetTemplate::SshAppleContainer { container, .. } => {
+            let ssh = match template {
+                TargetTemplate::SshDocker { ssh, .. }
+                | TargetTemplate::SshAppleContainer { ssh, .. } => {
+                    validate_ssh(ssh)?;
+                    Some(ssh)
+                }
+                _ => None,
+            };
             validate_container_template(container)?;
-            commands.push(docker_container_run(
-                container,
-                name,
-                session_id,
-                additional_mounts,
-                &workspace,
-            )?);
+            let engine = template
+                .container_engine()
+                .expect("Docker or Apple container");
+            let run = if engine == "container" {
+                commands.extend(apple_image_prepare_commands(container));
+                container_run(
+                    engine,
+                    container,
+                    name,
+                    session_id,
+                    additional_mounts,
+                    &workspace,
+                )?
+            } else {
+                docker_container_run(container, name, session_id, additional_mounts, &workspace)?
+            };
+            commands.push(run);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
-                    engine: "docker",
+                    engine,
                     container_id: name,
                 })
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
-                container_exec("docker", name, args)
+                container_exec(engine, name, args)
             }));
-        }
-        TargetTemplate::AppleContainer(container) => {
-            validate_container_template(container)?;
-            commands.extend(apple_image_prepare_commands(container));
-            commands.push(container_run(
-                "container",
-                container,
-                name,
-                session_id,
-                additional_mounts,
-                &workspace,
-            )?);
-            commands.extend(
-                install_git_plan(ExecutionBoundary::Container {
-                    engine: "container",
-                    container_id: name,
-                })
-                .commands,
-            );
-            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
-                container_exec("container", name, args)
-            }));
+            if let Some(ssh) = ssh {
+                commands = commands
+                    .into_iter()
+                    .map(|command| command_over_ssh(SshTrafficClass::Bulk, command, ssh))
+                    .collect();
+            }
         }
         TargetTemplate::SshBare {
             ssh,
@@ -194,9 +150,6 @@ pub fn provision_plan_named(
             commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 ssh_command_owned(SshTrafficClass::Bulk, ssh, args)
             }));
-        }
-        TargetTemplate::SshDocker { .. } | TargetTemplate::SshAppleContainer { .. } => {
-            unreachable!("handled above")
         }
         TargetTemplate::SshNitro { ssh, container } => {
             validate_ssh(ssh)?;
