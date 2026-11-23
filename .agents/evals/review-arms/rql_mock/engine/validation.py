@@ -12,6 +12,23 @@ EXECUTION_LIMIT = re.compile(
     r"(?<![a-z0-9])(?:budget|exhaust(?:ion|ed)|cancel(?:led|ed|lation)|timeout|timed out|truncat(?:ion|ed))(?![a-z0-9])",
     re.I,
 )
+PARTIAL_ENUMERATION = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"(?:not|never)\s+(?:been\s+)?(?:(?:exhaustively|fully|completely|thoroughly)\s+)?"
+    r"(?:enumerat(?:ed|ing)|evaluat(?:ed|ing)|analy[sz](?:ed|ing)|trac(?:ed|ing)|scann(?:ed|ing)|inspect(?:ed|ing)|walk(?:ed|ing)|cover(?:ed|ing))"
+    r"|(?:not|never)\s+(?:been\s+)?(?:exhaustively|fully|completely)\s+(?:resolved|checked|examined|established)"
+    r"|not\s+resolved\s+sufficiently\s+to\s+enumerate"
+    r"|full\s+(?:[a-z0-9_-]+\s+){0,5}(?:enumeration|relation|paths?|cases?|transfers?|events?|set)\b[^.;]{0,250}\b"
+    r"(?:not\s+(?:been\s+)?(?:established|resolved|computed|completed)|remain(?:s|ing)?\s+(?:un)?(?:enumerated|resolved|evaluated|traced))"
+    r"|require(?:s|d)?\s+further\s+(?:analysis|tracing|enumeration|evaluation|inspection|investigation)"
+    r"|partial\s+(?:proofs?|outputs?|results?|enumeration|coverage|subset|sample)"
+    r"|only\s+(?:a\s+)?(?:subset|sample|representative|partial|few|portion)"
+    r"|remain(?:s|ing)?\s+(?:unenumerated|unevaluated|untraced|unanaly[sz]ed)"
+    r"|omitted\s+(?:for|due\s+to|because\s+of)\s+(?:size|volume|length|brevity|count)"
+    r"|too\s+(?:many|large)\s+to\s+(?:enumerate|list|evaluate|trace|analy[sz]e)"
+    r")(?![a-z0-9])",
+    re.I,
+)
 PRIMARY = {"contract_case": ("site",), "value_transfer": ("sink", "site"),
            "guarded_path": ("event", "site")}
 
@@ -212,6 +229,13 @@ def validate_answer(answer, source):
             continue
         if EXECUTION_LIMIT.search(frontier["reason"]):
             report("frontier-reason", label, "coverage may describe only semantic boundaries")
+        elif PARTIAL_ENUMERATION.search(frontier["reason"]):
+            report(
+                "frontier-partial-enumeration",
+                label,
+                "coverage.open cannot excuse incomplete or partial enumeration; "
+                "enumerate every qualifying in-scope row and report open only for genuine semantic boundaries",
+            )
         site(frontier["site"], label + ".site")
     exclusion_fields = {"candidate_site", "reason", "detail"}
     for index, item in enumerate(answer["excluded"]):

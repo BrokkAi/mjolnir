@@ -1752,6 +1752,9 @@ func NewDashboardState(config core.Config, state core.StateState, quotas map[str
 	if testing.Testing() {
 		versionLabel = testVersionLabel
 	}
+	// Rust moves the map into the dashboard; clone so a caller's map never
+	// aliases the dashboard's quotas, which ApplyQuota mutates.
+	quotas = maps.Clone(quotas)
 	if quotas == nil {
 		quotas = map[string]client.ProfileQuota{}
 	}

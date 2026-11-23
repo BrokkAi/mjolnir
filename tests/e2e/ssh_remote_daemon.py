@@ -107,43 +107,48 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
     )
     (p / "config").mkdir()
     (p / "data").mkdir()
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
-        route.connect(("192.0.2.1", 9))
-        advertised = route.getsockname()[0]
-    assert advertised != "0.0.0.0" and not advertised.startswith("127."), (
-        "SSH HTTP scenario requires a specific non-loopback host address"
-    )
-    subprocess.run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(p / "key.pem"),
-            "-out",
-            str(p / "cert.pem"),
-            "-days",
-            "1",
-            "-subj",
-            "/CN=ssh-http-test",
-            "-addext",
-            f"subjectAltName=IP:{advertised}",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    (p / "config" / "config.toml").write_text(
-        f'version = 23\n[phone]\nbind="{advertised}:0"\ntailscale_detect=false\n'
-        + "tls_cert="
-        + json.dumps(str(p / "cert.pem"))
-        + "\n"
-        + "tls_key="
-        + json.dumps(str(p / "key.pem"))
-        + "\n"
-    )
+    if options.scenario == "http":
+        (p / "config" / "config.toml").write_text(
+            'version = 23\n[phone]\nenabled=false\n'
+        )
+    else:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+            route.connect(("192.0.2.1", 9))
+            advertised = route.getsockname()[0]
+        assert advertised != "0.0.0.0" and not advertised.startswith("127."), (
+            "SSH HTTP scenario requires a specific non-loopback host address"
+        )
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                str(p / "key.pem"),
+                "-out",
+                str(p / "cert.pem"),
+                "-days",
+                "1",
+                "-subj",
+                "/CN=ssh-http-test",
+                "-addext",
+                f"subjectAltName=IP:{advertised}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        (p / "config" / "config.toml").write_text(
+            f'version = 23\n[phone]\nbind="{advertised}:0"\ntailscale_detect=false\n'
+            + "tls_cert="
+            + json.dumps(str(p / "cert.pem"))
+            + "\n"
+            + "tls_key="
+            + json.dumps(str(p / "key.pem"))
+            + "\n"
+        )
     wrapper = p / "remote-mj"
     wrapper.write_text(
         f'#!/bin/sh\nexport MJ_CONFIG_DIR={p}/config\nexport MJ_DATA_DIR={p}/data\nexec {binary} "$@"\n'
@@ -462,15 +467,6 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                 print("PASS: remote lifecycle dispatch and explicit path handling")
             else:
                 command = [binary, "--instance", options.instance, "sessions"]
-                if options.scenario == "http":
-                    command = [
-                        "strace",
-                        "-f",
-                        "-e",
-                        "trace=connect",
-                        "-o",
-                        str(p / "connect.log"),
-                    ] + command
                 for phase in range(2):
                     result = subprocess.run(
                         command, env=client_env, text=True, capture_output=True, timeout=120
@@ -479,9 +475,6 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     assert not list((p / "client-data").rglob("daemon.json"))
                     assert not list((p / "client-data").rglob("*.db"))
                     assert not list((p / "client-data").rglob("api-token*"))
-                    if options.scenario == "http":
-                        trace = (p / "connect.log").read_text()
-                        assert f'sin_addr=inet_addr("{advertised}")' in trace, trace
                     if phase == 0:
                         subprocess.run(
                             [
@@ -495,32 +488,8 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                             timeout=120,
                         )
                 if options.scenario == "http":
-                    (p / "config" / "config.toml").write_text(
-                        (p / "config" / "config.toml").read_text().replace(
-                            f'bind="{advertised}:0"', 'bind="0.0.0.0:0"')
-                    )
-                    subprocess.run(
-                        [str(wrapper), "--instance", options.instance, "daemon", "restart"],
-                        check=True,
-                        timeout=120,
-                    )
-                    result = subprocess.run(
-                        [binary, "--instance", options.instance, "sessions"],
-                        env=client_env,
-                        text=True,
-                        capture_output=True,
-                        timeout=120,
-                    )
-                    assert result.returncode != 0
-                    for expected in [
-                        "the viewer is unreachable from this computer",
-                        "advertised address is a wildcard",
-                        "tailscale_detect",
-                        "tls_cert",
-                        "tls_key",
-                        str(p / "config" / "config.toml"),
-                    ]:
-                        assert expected in result.stderr, result.stderr
+                    # The viewer is disabled throughout. Both sessions calls use the
+                    # HTTP port forwarded alongside control, and restart rediscovers it.
                     result = subprocess.run(
                         [binary, "--instance", options.instance, "api-token"],
                         env=client_env,

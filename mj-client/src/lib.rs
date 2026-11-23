@@ -21,6 +21,7 @@ pub mod operations;
 
 pub mod daemon;
 pub mod executable;
+pub mod http;
 
 pub mod availability;
 

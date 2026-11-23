@@ -59,13 +59,15 @@ User-visible output must match the Rust build. Prove it with golden files captur
 
 ## Resume here
 
-State on 2026-11-20: mj-core and layer 1 are fully ported (all ported tests pass). Layer 2 (mj-client, mj-worker) has merged declarations only. Every phase so far ran as a Workflow script that fans out one agent per module group, each in a git worktree, then merges with cherry-picks: declarations, merge, bodies and tests, merge, then up to two fix rounds for failing tests. The script and the layer-2 group list (which Rust files each of the 14 groups owns) are in the session that ran it; to restart without it, rerun the bodies phase only: one agent per group with the prompt "BODIES phase" described in `.agents/docs/go-port/core-brief.md`, then a merge agent that cherry-picks, builds, runs `go test ./...` and reports failures by group. Layer 2's groups split mj-worker by area: acp (drive, features, tests.rs), relay (core, verdict and journal, tests.rs), worker_runtime (unix, core, relay_tests.rs), microvm, services (subagent_mcp, review, work_facts, stand_in_relay, move_workspace), misc (the rest); mj-client into daemon and the rest.
+State on 2026-11-23 (evening), all pushed to origin/master (5bd893ef9):
 
-Cost measured so far: about 100 subagent tokens per Rust line (mj-core 8.4M tokens for 93k lines; layer 1 4.8M for 40k). The remaining ~730k lines, layer 2 included, are on that basis roughly 70M tokens.
+- Done, all tests passing: mj-core, mj-transcript, mj-checkpoint, mj-review, mj-build-id, mj-client, mj-worker, mj-harness-install, mj-microvm, mj-worker-mcp, mj-worker-review (synced to Rust 3dde0c11b), then layer 1 (mj-chat, mj-targets, mj-github-relevance, voice-worker) and layer 2 (mj-session-types, mj-store, mj-tui on Charm, mj-worker-bin as go/cmd/mj-worker).
+- Layer 3 (mj-accounts, mj-build-cache, mj-github-watch): declarations merged and pushed (05163526b); bodies stopped mid-way at the owner's request. One agent's partial work is saved as a local WIP commit (pinned under refs/go-port/wip/); the bodies phase should be rerun.
+- Remaining after layer 3, in order: L4 mj-import, mj-worker-staging; L5 mj-profile-catalog, mj-sessionwiki, mj-worker-launch; L6 mj-session-runtime; L7 mj-controller, mj-review-host, mj-server; L8 mj-setup; L9 mj-daemon; L10 mj-cli (extends go/internal/cli and go/cmd/mj).
 
-After layer 2: the sync pass (`go/scripts/rust-changes.sh` per crate in `go/PORTED_FROM`), then the next layers in dependency order: mj-targets and mj-session-types; mj-store; mj-accounts, mj-import, mj-sessionwiki, mj-build-cache, mj-worker-staging, mj-worker-launch, mj-profile-catalog; mj-session-runtime, mj-review-host, mj-github-relevance; mj-controller; mj-server, mj-setup; mj-daemon; mj-chat, mj-tui (Charm); mj-cli and mj-worker-bin.
+How the remaining crates are ported (owner's direction, 2026-11-23): every crate from the pinned Rust snapshot 3dde0c11b, read only from a read-only checkout of it (see the brief), with no tracking of later Rust changes until the owner has tested the Go build; then one sync pass. Each layer runs declarations, merge, bodies and tests, merge, and up to two fix rounds, one agent per group of about 10k Rust lines, each in its own git worktree. Launch worktree workflows only with the session's working directory at the repository root. Groups were generated with a small script that bin-packs each crate's modules into about 10k-line groups. Push after every merge, not only at the end of a layer.
 
-Stale worktrees from the stopped run may remain under `.claude/worktrees/`; they hold only uncommitted partial work and can be removed with `git worktree remove --force`.
+Cost so far: about 100 agent tokens per Rust line.
 
 
 ## Surprises & Discoveries

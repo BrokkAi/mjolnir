@@ -1,3 +1,97 @@
+=== new_session_remembers_provider_expansion (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │                 │
+│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│  │ No messages  │                                                                                  │                 │
+│  │              │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+action: None
+=== new_session_remembers_provider_expansion (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│  Idle  podman   │                claude-1  refreshing                                              │                 │
+│  │ No messages  │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│  │              │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== new_session_remembers_provider_expansion (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │                 │
+│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│  │ No messages  │                                                                                  │                 │
+│  │              │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 action: None
 === new_session_profile_step_aligns_its_columns (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -40,9 +134,9 @@ action: None
 │hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
 │› · ACP pretty   │   ▾ ANTHROPIC  claude-1  63%         40%                                         │                 │
 │  Idle  podman   │                claude-1  63%         40%                                         │                 │
-│  │ No messages  │   ▾ OPENAI     codex-1   refreshing                                              │                 │
-│  │              │                codex-1   refreshing                                              │                 │
-│                 │                codex-2   refreshing                                              │                 │
+│  │ No messages  │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│  │              │                                                                                  │                 │
+│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -87,6 +181,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / s                                                                                        / ? palette
+action: None
 === a_missing_profile_is_left_out_of_the_profile_step_and_named (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │

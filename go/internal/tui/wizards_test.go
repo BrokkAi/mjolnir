@@ -138,10 +138,13 @@ func (t *wizardsTerminal) lines() []string {
 
 // wzEqual is Rust's derived PartialEq over Go values: structs field by
 // field (unexported fields included), pointers and interfaces by what they
-// hold, and nil slices and maps equal to empty ones.
+// hold, nil slices and maps equal to empty ones, and a SubagentPolicy by
+// the Rust variant it stands for (wzPolicyValuesEqual).
 func wzEqual(a, b any) bool {
 	return wzEqualValues(reflect.ValueOf(a), reflect.ValueOf(b))
 }
+
+var wzSubagentPolicyType = reflect.TypeFor[core.SubagentPolicy]()
 
 func wzEqualValues(a, b reflect.Value) bool {
 	if !a.IsValid() || !b.IsValid() {
@@ -149,6 +152,9 @@ func wzEqualValues(a, b reflect.Value) bool {
 	}
 	if a.Type() != b.Type() {
 		return false
+	}
+	if a.Type() == wzSubagentPolicyType {
+		return wzPolicyValuesEqual(a, b)
 	}
 	switch a.Kind() {
 	case reflect.Pointer:
@@ -209,6 +215,28 @@ func wzEqualValues(a, b reflect.Value) bool {
 		return a.Pointer() == b.Pointer()
 	}
 	panic(fmt.Sprintf("wzEqual: unsupported kind %v", a.Kind()))
+}
+
+// wzPolicyValuesEqual is SubagentPolicy's derived PartialEq on values that
+// reflection may have reached through unexported fields. Go spells Native
+// as the zero mode as well as "native", and only Mjolnir carries choices,
+// so the variant decides first (subagentPolicyEqual) and Mjolnir's fields
+// compare after.
+func wzPolicyValuesEqual(a, b reflect.Value) bool {
+	left := core.SubagentPolicy{Mode: core.SubagentPolicyMode(a.FieldByName("Mode").String())}
+	right := core.SubagentPolicy{Mode: core.SubagentPolicyMode(b.FieldByName("Mode").String())}
+	if !subagentPolicyEqual(&left, &right) {
+		return false
+	}
+	if !left.UsesMjolnir() {
+		return true
+	}
+	for _, field := range []string{"Straightforward", "Subtle", "Orchestrators"} {
+		if !wzEqualValues(a.FieldByName(field), b.FieldByName(field)) {
+			return false
+		}
+	}
+	return true
 }
 
 // wzAction fails t unless got is want.
