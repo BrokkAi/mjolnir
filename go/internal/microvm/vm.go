@@ -262,6 +262,7 @@ type MicrovmRunSpec struct {
 	CPUs        *float64
 	MemoryBytes uint64
 	Env         []string
+	MbxRemote   *MicrovmMbxRemote
 	User        *string
 	Workdir     *string
 	Volumes     []MicrovmVolumeArg
@@ -404,6 +405,11 @@ func MicrovmBuildState(layout MicrovmLayout, spec MicrovmRunSpec, imageID string
 			Chown:       volume.Chown,
 		})
 	}
+	var mbxRemote *MicrovmMbxRemote
+	if spec.MbxRemote != nil {
+		remote := *spec.MbxRemote
+		mbxRemote = &remote
+	}
 	return MicrovmVmState{
 		Format:         MicrovmStateFormat,
 		ID:             id,
@@ -416,6 +422,7 @@ func MicrovmBuildState(layout MicrovmLayout, spec MicrovmRunSpec, imageID string
 		NanoCPUs:       int64(math.Round(cpus * 1e9)),
 		MemoryBytes:    spec.MemoryBytes,
 		Env:            env,
+		MbxRemote:      mbxRemote,
 		User:           user,
 		WorkingDir:     workingDir,
 		Entrypoint:     image.Entrypoint,
@@ -948,6 +955,34 @@ func microvmLaunch(layout MicrovmLayout, state *MicrovmVmState) error {
 	if started != nil {
 		return started
 	}
+	env := append([]string{}, state.Env...)
+	if state.MbxRemote != nil {
+		kept := env[:0]
+		for _, entry := range env {
+			if !strings.HasPrefix(entry, core.MbxRemoteEnvPrefix) {
+				kept = append(kept, entry)
+			}
+		}
+		env = kept
+	}
+	// The remote cache is optional: a proxy that cannot start leaves the VM
+	// with its guest-local cache and no remote settings, and says so.
+	if remote := state.MbxRemote; remote != nil {
+		if err := microvmMbxProxyStartUnit(layout, *state, link, boot); err != nil {
+			// The provisioning controller reads this warning as one line.
+			lines := microvmLines(err.Error())
+			for i, line := range lines {
+				lines[i] = strings.TrimSpace(line)
+			}
+			fmt.Fprintf(os.Stderr, "warning: %s starts without the remote mbx cache: %s\n", state.Name, strings.Join(lines, " "))
+		} else {
+			env = append(env,
+				fmt.Sprintf("MBX_REMOTE_URL=http://%s:%d", link.Host, microvmMbxProxyPort),
+				"MBX_REMOTE_NAMESPACE="+remote.Namespaces[0],
+				"MBX_REMOTE_MODE=read-only",
+			)
+		}
+	}
 	client, err := microvmWaitForAgent(state.Name, MicrovmAgentSocket(layout, *state))
 	if err != nil {
 		return err
@@ -986,7 +1021,7 @@ func microvmLaunch(layout MicrovmLayout, state *MicrovmVmState) error {
 	}
 	if _, err := client.Start(MicrovmStartRequest{
 		Argv:    argv,
-		Env:     append([]string{}, state.Env...),
+		Env:     env,
 		Cwd:     cwd,
 		User:    state.User,
 		Volumes: volumes,
@@ -1008,7 +1043,7 @@ func microvmWaitForAgent(name string, socket string) (*MicrovmClient, error) {
 			return nil, err
 		}
 		if activity == MicrovmActivityStopped {
-			return nil, fmt.Errorf("the VM stopped before its guest agent answered:\n%s", microvmJournalTail(name))
+			return nil, fmt.Errorf("the VM stopped before its guest agent answered:\n%s", microvmUnitJournal(MicrovmUnitName(name)))
 		}
 		if microvmExists(socket) {
 			if client, err := MicrovmOpenAgent(socket); err == nil {
@@ -1019,11 +1054,12 @@ func microvmWaitForAgent(name string, socket string) (*MicrovmClient, error) {
 	}
 }
 
-func microvmJournalTail(name string) string {
+// microvmUnitJournal is the last lines a systemd unit logged.
+func microvmUnitJournal(unit string) string {
 	journalctl, err := MicrovmFindTool("journalctl")
 	if err == nil {
 		var output core.ProcessOutput
-		output, err = MicrovmRunUnchecked(journalctl, []string{"-u", MicrovmUnitName(name), "-n", "30", "--no-pager", "-o", "cat"})
+		output, err = MicrovmRunUnchecked(journalctl, []string{"-u", unit, "-n", "30", "--no-pager", "-o", "cat"})
 		if err == nil {
 			return microvmLossy(output.Stdout)
 		}
@@ -1366,6 +1402,15 @@ func MicrovmVMInfo(layout MicrovmLayout) (jsonvalue.Object, error) {
 			}
 		}
 	}
+	var crane, craneVersion any
+	if path, err := MicrovmFindTool("crane"); err == nil {
+		crane = path
+		if output, err := MicrovmRunChecked(path, []string{"version"}); err == nil {
+			if lines := microvmLines(microvmLossy(output.Stdout)); len(lines) > 0 {
+				craneVersion = strings.TrimSpace(lines[0])
+			}
+		}
+	}
 	running := uint32(0)
 	committed := uint64(0)
 	states, err := MicrovmVmStateList(layout)
@@ -1415,7 +1460,8 @@ func MicrovmVMInfo(layout MicrovmLayout) (jsonvalue.Object, error) {
 		{Key: "slots_enabled", Value: uint64(slotsEnabled)},
 		{Key: "firecracker_path", Value: toolPath("firecracker")},
 		{Key: "firecracker_version", Value: firecrackerVersion},
-		{Key: "crane_path", Value: toolPath("crane")},
+		{Key: "crane_path", Value: crane},
+		{Key: "crane_version", Value: craneVersion},
 		{Key: "jailer_path", Value: toolPath("jailer")},
 		{Key: "notes", Value: []any{
 			"--cap-add, --cap-drop and --security-opt are accepted and have no effect: the VM is the isolation boundary",

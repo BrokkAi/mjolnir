@@ -64,6 +64,8 @@ func (l MicrovmLayout) ImageRefs() string { return filepath.Join(l.Images(), "re
 
 func (l MicrovmLayout) VMs() string { return filepath.Join(l.root, "vms") }
 
+func (l MicrovmLayout) MbxCache() string { return filepath.Join(l.root, "mbx-cache") }
+
 func (l MicrovmLayout) VM(name string) string { return filepath.Join(l.VMs(), name) }
 
 func (l MicrovmLayout) Volumes() string { return filepath.Join(l.root, "volumes") }
@@ -337,6 +339,34 @@ func (v *MicrovmVmVolume) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(v))
 }
 
+// MicrovmMbxRemote is the S3 remote a VM's read-only mbx cache proxy reads.
+type MicrovmMbxRemote struct {
+	Bucket string  `json:"bucket"`
+	Prefix string  `json:"prefix"`
+	Region *string `json:"region"`
+	Budget *uint64 `json:"budget,omitempty"`
+	// Namespaces is non-empty. The first namespace is the guest client's
+	// default.
+	Namespaces []string `json:"namespaces"`
+}
+
+// MarshalJSON writes empty namespaces as `[]`, as serde does.
+func (r MicrovmMbxRemote) MarshalJSON() ([]byte, error) {
+	type plain MicrovmMbxRemote
+	p := plain(r)
+	p.Namespaces = microvmNonNil(p.Namespaces)
+	return microvmMarshalJSON(p)
+}
+
+// UnmarshalJSON requires the members serde requires.
+func (r *MicrovmMbxRemote) UnmarshalJSON(data []byte) error {
+	if err := microvmRequireFields(data, "bucket", "prefix", "namespaces"); err != nil {
+		return err
+	}
+	type plain MicrovmMbxRemote
+	return json.Unmarshal(data, (*plain)(r))
+}
+
 // MicrovmVmState is everything the engine remembers about a VM. Fields
 // added in later formats default when absent so older files still load.
 type MicrovmVmState struct {
@@ -352,6 +382,7 @@ type MicrovmVmState struct {
 	MemoryBytes    uint64            `json:"memory_bytes"`
 	// Env is the environment of the container: the image's plus `--env`.
 	Env        []string          `json:"env"`
+	MbxRemote  *MicrovmMbxRemote `json:"mbx_remote,omitempty"`
 	User       string            `json:"user"`
 	WorkingDir string            `json:"working_dir"`
 	Entrypoint []string          `json:"entrypoint"`
@@ -378,7 +409,8 @@ func (s MicrovmVmState) MarshalJSON() ([]byte, error) {
 	return microvmMarshalJSON(p)
 }
 
-// UnmarshalJSON requires every member but `jailed`, as serde does.
+// UnmarshalJSON requires every member but `mbx_remote` and `jailed`, as
+// serde does.
 func (s *MicrovmVmState) UnmarshalJSON(data []byte) error {
 	if err := microvmRequireFields(data, "format", "id", "name", "created", "image_reference",
 		"image_id", "labels", "vcpus", "nano_cpus", "memory_bytes", "env", "user", "working_dir",

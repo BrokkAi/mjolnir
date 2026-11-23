@@ -69,6 +69,14 @@ func TestStateWrittenByThisBuildReadsBackAndANewerFormatIsRefused(t *testing.T) 
 	}
 	microvmMustMkdirAll(t, layout.VM("t1"))
 	state := microvmSampleState("t1")
+	budget := uint64(20 << 30)
+	state.MbxRemote = &MicrovmMbxRemote{
+		Bucket:     "ci-builds",
+		Prefix:     "mbx",
+		Region:     nil,
+		Budget:     &budget,
+		Namespaces: []string{"org/repo"},
+	}
 	if err := state.Write(layout); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +95,7 @@ func TestStateWrittenByThisBuildReadsBackAndANewerFormatIsRefused(t *testing.T) 
 	older := microvmStateObject(t, state)
 	older.Set("format", int64(1))
 	older.Delete("jailed")
+	older.Delete("mbx_remote")
 	encoded, err := jsonvalue.Marshal(older)
 	if err != nil {
 		t.Fatal(err)
@@ -95,8 +104,8 @@ func TestStateWrittenByThisBuildReadsBackAndANewerFormatIsRefused(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Format != 1 || parsed.Jailed {
-		t.Fatalf("format %d, jailed %v", parsed.Format, parsed.Jailed)
+	if parsed.Format != 1 || parsed.Jailed || parsed.MbxRemote != nil {
+		t.Fatalf("format %d, jailed %v, mbx_remote %+v", parsed.Format, parsed.Jailed, parsed.MbxRemote)
 	}
 
 	// A file from a future engine: unknown fields are not ours to drop.

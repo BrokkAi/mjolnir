@@ -8,10 +8,12 @@ Commands:
   pull       Fetch an image and flatten it into a bootable disk
   image      Image commands
   run        Create and start a VM
+  mbx-check  Probe the configured S3 remote with the host's instance role
   exec       Run a command in a running VM
   cp         Copy files between the host and a running VM
   container  Container (VM) commands
   ps         List VMs
+  maintain   Reconcile the host's images with the wanted set and trim the mbx cache
   start      Start stopped VMs from their retained disks
   stop       Stop VMs
   rm         Remove VMs
@@ -32,10 +34,12 @@ Commands:
   pull       Fetch an image and flatten it into a bootable disk
   image      Image commands
   run        Create and start a VM
+  mbx-check  Probe the configured S3 remote with the host's instance role
   exec       Run a command in a running VM
   cp         Copy files between the host and a running VM
   container  Container (VM) commands
   ps         List VMs
+  maintain   Reconcile the host's images with the wanted set and trim the mbx cache
   start      Start stopped VMs from their retained disks
   stop       Stop VMs
   rm         Remove VMs
@@ -56,10 +60,12 @@ Commands:
   pull       Fetch an image and flatten it into a bootable disk
   image      Image commands
   run        Create and start a VM
+  mbx-check  Probe the configured S3 remote with the host's instance role
   exec       Run a command in a running VM
   cp         Copy files between the host and a running VM
   container  Container (VM) commands
   ps         List VMs
+  maintain   Reconcile the host's images with the wanted set and trim the mbx cache
   start      Start stopped VMs from their retained disks
   stop       Stop VMs
   rm         Remove VMs
@@ -80,10 +86,12 @@ Commands:
   pull       Fetch an image and flatten it into a bootable disk
   image      Image commands
   run        Create and start a VM
+  mbx-check  Probe the configured S3 remote with the host's instance role
   exec       Run a command in a running VM
   cp         Copy files between the host and a running VM
   container  Container (VM) commands
   ps         List VMs
+  maintain   Reconcile the host's images with the wanted set and trim the mbx cache
   start      Start stopped VMs from their retained disks
   stop       Stop VMs
   rm         Remove VMs
@@ -175,24 +183,50 @@ Arguments:
   [COMMAND]...  
 
 Options:
-  -d, --detach                       
-      --name <NAME>                  
-  -l, --label <LABELS>               
-      --cpus <CPUS>                  
-  -m, --memory <MEMORY>              
-  -e, --env <ENV>                    
-  -v, --volume <VOLUMES>             
-  -u, --user <USER>                  
-  -w, --workdir <WORKDIR>            
-      --pull <PULL>                  
-      --platform <PLATFORM>          
-      --init                         Accepted: the guest agent is always an init
-      --stop-signal <STOP_SIGNAL>    Accepted when KILL: stopping a VM always kills it
-      --cap-add <CAP_ADD>            Accepted with no effect: the VM is the isolation boundary
-      --cap-drop <CAP_DROP>          
-      --security-opt <SECURITY_OPT>  
-      --pids-limit <PIDS_LIMIT>      Accepted with no effect: each VM has its own kernel and process table
-  -h, --help                         Print help
+  -d, --detach
+          
+      --name <NAME>
+          
+  -l, --label <LABELS>
+          
+      --cpus <CPUS>
+          
+  -m, --memory <MEMORY>
+          
+  -e, --env <ENV>
+          
+  -v, --volume <VOLUMES>
+          
+  -u, --user <USER>
+          
+  -w, --workdir <WORKDIR>
+          
+      --pull <PULL>
+          
+      --platform <PLATFORM>
+          
+      --mbx-remote <MBX_REMOTE>
+          
+      --mbx-remote-region <MBX_REMOTE_REGION>
+          
+      --mbx-cache-budget <MBX_CACHE_BUDGET>
+          
+      --mbx-namespace <MBX_NAMESPACES>
+          
+      --init
+          Accepted: the guest agent is always an init
+      --stop-signal <STOP_SIGNAL>
+          Accepted when KILL: stopping a VM always kills it
+      --cap-add <CAP_ADD>
+          Accepted with no effect: the VM is the isolation boundary
+      --cap-drop <CAP_DROP>
+          
+      --security-opt <SECURITY_OPT>
+          
+      --pids-limit <PIDS_LIMIT>
+          Accepted with no effect: each VM has its own kernel and process table
+  -h, --help
+          Print help
 exit=0
 === help run extra
 error: unrecognized subcommand 'extra'
@@ -306,24 +340,50 @@ Arguments:
   [COMMAND]...  
 
 Options:
-  -d, --detach                       
-      --name <NAME>                  
-  -l, --label <LABELS>               
-      --cpus <CPUS>                  
-  -m, --memory <MEMORY>              
-  -e, --env <ENV>                    
-  -v, --volume <VOLUMES>             
-  -u, --user <USER>                  
-  -w, --workdir <WORKDIR>            
-      --pull <PULL>                  
-      --platform <PLATFORM>          
-      --init                         Accepted: the guest agent is always an init
-      --stop-signal <STOP_SIGNAL>    Accepted when KILL: stopping a VM always kills it
-      --cap-add <CAP_ADD>            Accepted with no effect: the VM is the isolation boundary
-      --cap-drop <CAP_DROP>          
-      --security-opt <SECURITY_OPT>  
-      --pids-limit <PIDS_LIMIT>      Accepted with no effect: each VM has its own kernel and process table
-  -h, --help                         Print help
+  -d, --detach
+          
+      --name <NAME>
+          
+  -l, --label <LABELS>
+          
+      --cpus <CPUS>
+          
+  -m, --memory <MEMORY>
+          
+  -e, --env <ENV>
+          
+  -v, --volume <VOLUMES>
+          
+  -u, --user <USER>
+          
+  -w, --workdir <WORKDIR>
+          
+      --pull <PULL>
+          
+      --platform <PLATFORM>
+          
+      --mbx-remote <MBX_REMOTE>
+          
+      --mbx-remote-region <MBX_REMOTE_REGION>
+          
+      --mbx-cache-budget <MBX_CACHE_BUDGET>
+          
+      --mbx-namespace <MBX_NAMESPACES>
+          
+      --init
+          Accepted: the guest agent is always an init
+      --stop-signal <STOP_SIGNAL>
+          Accepted when KILL: stopping a VM always kills it
+      --cap-add <CAP_ADD>
+          Accepted with no effect: the VM is the isolation boundary
+      --cap-drop <CAP_DROP>
+          
+      --security-opt <SECURITY_OPT>
+          
+      --pids-limit <PIDS_LIMIT>
+          Accepted with no effect: each VM has its own kernel and process table
+  -h, --help
+          Print help
 exit=0
 === run -h
 Create and start a VM
@@ -335,24 +395,50 @@ Arguments:
   [COMMAND]...  
 
 Options:
-  -d, --detach                       
-      --name <NAME>                  
-  -l, --label <LABELS>               
-      --cpus <CPUS>                  
-  -m, --memory <MEMORY>              
-  -e, --env <ENV>                    
-  -v, --volume <VOLUMES>             
-  -u, --user <USER>                  
-  -w, --workdir <WORKDIR>            
-      --pull <PULL>                  
-      --platform <PLATFORM>          
-      --init                         Accepted: the guest agent is always an init
-      --stop-signal <STOP_SIGNAL>    Accepted when KILL: stopping a VM always kills it
-      --cap-add <CAP_ADD>            Accepted with no effect: the VM is the isolation boundary
-      --cap-drop <CAP_DROP>          
-      --security-opt <SECURITY_OPT>  
-      --pids-limit <PIDS_LIMIT>      Accepted with no effect: each VM has its own kernel and process table
-  -h, --help                         Print help
+  -d, --detach
+          
+      --name <NAME>
+          
+  -l, --label <LABELS>
+          
+      --cpus <CPUS>
+          
+  -m, --memory <MEMORY>
+          
+  -e, --env <ENV>
+          
+  -v, --volume <VOLUMES>
+          
+  -u, --user <USER>
+          
+  -w, --workdir <WORKDIR>
+          
+      --pull <PULL>
+          
+      --platform <PLATFORM>
+          
+      --mbx-remote <MBX_REMOTE>
+          
+      --mbx-remote-region <MBX_REMOTE_REGION>
+          
+      --mbx-cache-budget <MBX_CACHE_BUDGET>
+          
+      --mbx-namespace <MBX_NAMESPACES>
+          
+      --init
+          Accepted: the guest agent is always an init
+      --stop-signal <STOP_SIGNAL>
+          Accepted when KILL: stopping a VM always kills it
+      --cap-add <CAP_ADD>
+          Accepted with no effect: the VM is the isolation boundary
+      --cap-drop <CAP_DROP>
+          
+      --security-opt <SECURITY_OPT>
+          
+      --pids-limit <PIDS_LIMIT>
+          Accepted with no effect: each VM has its own kernel and process table
+  -h, --help
+          Print help
 exit=0
 === run --help extra
 Create and start a VM
@@ -364,24 +450,50 @@ Arguments:
   [COMMAND]...  
 
 Options:
-  -d, --detach                       
-      --name <NAME>                  
-  -l, --label <LABELS>               
-      --cpus <CPUS>                  
-  -m, --memory <MEMORY>              
-  -e, --env <ENV>                    
-  -v, --volume <VOLUMES>             
-  -u, --user <USER>                  
-  -w, --workdir <WORKDIR>            
-      --pull <PULL>                  
-      --platform <PLATFORM>          
-      --init                         Accepted: the guest agent is always an init
-      --stop-signal <STOP_SIGNAL>    Accepted when KILL: stopping a VM always kills it
-      --cap-add <CAP_ADD>            Accepted with no effect: the VM is the isolation boundary
-      --cap-drop <CAP_DROP>          
-      --security-opt <SECURITY_OPT>  
-      --pids-limit <PIDS_LIMIT>      Accepted with no effect: each VM has its own kernel and process table
-  -h, --help                         Print help
+  -d, --detach
+          
+      --name <NAME>
+          
+  -l, --label <LABELS>
+          
+      --cpus <CPUS>
+          
+  -m, --memory <MEMORY>
+          
+  -e, --env <ENV>
+          
+  -v, --volume <VOLUMES>
+          
+  -u, --user <USER>
+          
+  -w, --workdir <WORKDIR>
+          
+      --pull <PULL>
+          
+      --platform <PLATFORM>
+          
+      --mbx-remote <MBX_REMOTE>
+          
+      --mbx-remote-region <MBX_REMOTE_REGION>
+          
+      --mbx-cache-budget <MBX_CACHE_BUDGET>
+          
+      --mbx-namespace <MBX_NAMESPACES>
+          
+      --init
+          Accepted: the guest agent is always an init
+      --stop-signal <STOP_SIGNAL>
+          Accepted when KILL: stopping a VM always kills it
+      --cap-add <CAP_ADD>
+          Accepted with no effect: the VM is the isolation boundary
+      --cap-drop <CAP_DROP>
+          
+      --security-opt <SECURITY_OPT>
+          
+      --pids-limit <PIDS_LIMIT>
+          Accepted with no effect: each VM has its own kernel and process table
+  -h, --help
+          Print help
 exit=0
 === exec --help
 Run a command in a running VM
@@ -1092,6 +1204,275 @@ exit=125
 error: unexpected argument 'extra' found
 
 Usage: mj-worker microvm guest-agent
+
+For more information, try '--help'.
+exit=125
+=== maintain --help
+Reconcile the host's images with the wanted set and trim the mbx cache
+
+Usage: mj-worker microvm maintain [OPTIONS]
+
+Options:
+      --keep-image <KEEP_IMAGE>
+          Image references the host must retain. Without any, images are left alone
+      --mbx-cache-budget <MBX_CACHE_BUDGET>
+          Total size of the remote mbx cache, for example 20GiB. Defaults to mbx's automatic budget
+  -h, --help
+          Print help
+exit=0
+=== mbx-check --help
+Probe the configured S3 remote with the host's instance role
+
+Usage: mj-worker microvm mbx-check [OPTIONS] --bucket <BUCKET> --namespace <NAMESPACE>
+
+Options:
+      --bucket <BUCKET>        
+      --prefix <PREFIX>        [default: ""]
+      --region <REGION>        
+      --namespace <NAMESPACE>  
+  -h, --help                   Print help
+exit=0
+=== mbx-proxy --help
+Serve the read-only cache for one VM
+
+Usage: mj-worker microvm mbx-proxy [OPTIONS] --device <DEVICE> --listen <LISTEN> --bucket <BUCKET> --namespace <NAMESPACES> --cache-dir <CACHE_DIR>
+
+Options:
+      --device <DEVICE>              
+      --listen <LISTEN>              
+      --bucket <BUCKET>              
+      --prefix <PREFIX>              [default: ""]
+      --region <REGION>              
+      --namespace <NAMESPACES>       
+      --cache-dir <CACHE_DIR>        
+      --cache-budget <CACHE_BUDGET>  
+  -h, --help                         Print help
+exit=0
+=== help maintain
+Reconcile the host's images with the wanted set and trim the mbx cache
+
+Usage: mj-worker microvm maintain [OPTIONS]
+
+Options:
+      --keep-image <KEEP_IMAGE>
+          Image references the host must retain. Without any, images are left alone
+      --mbx-cache-budget <MBX_CACHE_BUDGET>
+          Total size of the remote mbx cache, for example 20GiB. Defaults to mbx's automatic budget
+  -h, --help
+          Print help
+exit=0
+=== maintain --mbx-cache-budget 20Q
+error: invalid value '20Q' for '--mbx-cache-budget <MBX_CACHE_BUDGET>': invalid --mbx-cache-budget "20Q": use a size such as 20GiB
+
+For more information, try '--help'.
+exit=125
+=== maintain --mbx-cache-budget
+error: a value is required for '--mbx-cache-budget <MBX_CACHE_BUDGET>' but none was supplied
+
+For more information, try '--help'.
+exit=125
+=== maintain --keep-image
+error: a value is required for '--keep-image <KEEP_IMAGE>' but none was supplied
+
+For more information, try '--help'.
+exit=125
+=== maintain extra
+error: unexpected argument 'extra' found
+
+Usage: mj-worker microvm maintain [OPTIONS]
+
+For more information, try '--help'.
+exit=125
+=== mbx-check
+error: the following required arguments were not provided:
+  --bucket <BUCKET>
+  --namespace <NAMESPACE>
+
+Usage: mj-worker microvm mbx-check --bucket <BUCKET> --namespace <NAMESPACE>
+
+For more information, try '--help'.
+exit=125
+=== mbx-check --bucket b
+error: the following required arguments were not provided:
+  --namespace <NAMESPACE>
+
+Usage: mj-worker microvm mbx-check --bucket <BUCKET> --namespace <NAMESPACE>
+
+For more information, try '--help'.
+exit=125
+=== mbx-check --namespace n --prefix
+error: a value is required for '--prefix <PREFIX>' but none was supplied
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy
+error: the following required arguments were not provided:
+  --device <DEVICE>
+  --listen <LISTEN>
+  --bucket <BUCKET>
+  --namespace <NAMESPACES>
+  --cache-dir <CACHE_DIR>
+
+Usage: mj-worker microvm mbx-proxy --device <DEVICE> --listen <LISTEN> --bucket <BUCKET> --namespace <NAMESPACES> --cache-dir <CACHE_DIR>
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy --device mjt0 --bucket b
+error: the following required arguments were not provided:
+  --listen <LISTEN>
+  --namespace <NAMESPACES>
+  --cache-dir <CACHE_DIR>
+
+Usage: mj-worker microvm mbx-proxy --device <DEVICE> --listen <LISTEN> --bucket <BUCKET> --namespace <NAMESPACES> --cache-dir <CACHE_DIR>
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy --device mjt0 --listen 10.200.0.1 --bucket b --namespace n --cache-dir /c
+error: invalid value '10.200.0.1' for '--listen <LISTEN>': invalid IPv4 socket address syntax
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy --device mjt0 --listen 10.200.0.01:7461 --bucket b --namespace n --cache-dir /c
+error: invalid value '10.200.0.01:7461' for '--listen <LISTEN>': invalid IPv4 socket address syntax
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy --device mjt0 --listen 10.200.0.1:99999 --bucket b --namespace n --cache-dir /c
+error: invalid value '10.200.0.1:99999' for '--listen <LISTEN>': invalid IPv4 socket address syntax
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy --device mjt0 --listen 10.200.0.1:7461 --bucket b --namespace n --cache-dir /c --cache-budget 1x
+error: invalid value '1x' for '--cache-budget <CACHE_BUDGET>': invalid digit found in string
+
+For more information, try '--help'.
+exit=125
+=== run --mbx-remote s3://bucket/prefix
+error: the following required arguments were not provided:
+  --name <NAME>
+  --mbx-namespace <MBX_NAMESPACES>
+  <IMAGE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-remote <MBX_REMOTE> --mbx-namespace <MBX_NAMESPACES> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --name x --mbx-remote s3://bucket/prefix img
+error: the following required arguments were not provided:
+  --mbx-namespace <MBX_NAMESPACES>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-remote <MBX_REMOTE> --mbx-namespace <MBX_NAMESPACES> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --mbx-remote s3://b/p --name x img
+error: the following required arguments were not provided:
+  --mbx-namespace <MBX_NAMESPACES>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-remote <MBX_REMOTE> --mbx-namespace <MBX_NAMESPACES> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --name x --mbx-namespace org/repo img
+error: the following required arguments were not provided:
+  --mbx-remote <MBX_REMOTE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-namespace <MBX_NAMESPACES> --mbx-remote <MBX_REMOTE> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --name x --mbx-remote-region us-east-1 img
+error: the following required arguments were not provided:
+  --mbx-namespace <MBX_NAMESPACES>
+  --mbx-remote <MBX_REMOTE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-namespace <MBX_NAMESPACES> --mbx-remote <MBX_REMOTE> --mbx-remote-region <MBX_REMOTE_REGION> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --name x --mbx-cache-budget 20GiB img
+error: the following required arguments were not provided:
+  --mbx-namespace <MBX_NAMESPACES>
+  --mbx-remote <MBX_REMOTE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-namespace <MBX_NAMESPACES> --mbx-remote <MBX_REMOTE> --mbx-cache-budget <MBX_CACHE_BUDGET> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --name x --mbx-cache-budget 20Q --mbx-remote s3://b/p img
+error: invalid value '20Q' for '--mbx-cache-budget <MBX_CACHE_BUDGET>': invalid --mbx-cache-budget "20Q": use a size such as 20GiB
+
+For more information, try '--help'.
+exit=125
+=== run --name x --mbx-namespace a --mbx-remote-region r img
+error: the following required arguments were not provided:
+  --mbx-remote <MBX_REMOTE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-namespace <MBX_NAMESPACES> --mbx-remote <MBX_REMOTE> --mbx-remote-region <MBX_REMOTE_REGION> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --mbx-namespace a img
+error: the following required arguments were not provided:
+  --name <NAME>
+  --mbx-remote <MBX_REMOTE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-namespace <MBX_NAMESPACES> --mbx-remote <MBX_REMOTE> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --mbx-namespace a
+error: the following required arguments were not provided:
+  --name <NAME>
+  --mbx-remote <MBX_REMOTE>
+  <IMAGE>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-namespace <MBX_NAMESPACES> --mbx-remote <MBX_REMOTE> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --mbx-remote s3://b/p --mbx-namespace a img
+error: the following required arguments were not provided:
+  --name <NAME>
+
+Usage: mj-worker microvm run --name <NAME> --mbx-remote <MBX_REMOTE> --mbx-namespace <MBX_NAMESPACES> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== run --mbx-remote s3://b/p --mbx-remote s3://c/d --mbx-namespace a --name x img
+error: the argument '--mbx-remote <MBX_REMOTE>' cannot be used multiple times
+
+Usage: mj-worker microvm run [OPTIONS] --name <NAME> <IMAGE> [COMMAND]...
+
+For more information, try '--help'.
+exit=125
+=== mbx-proxy --device mjt0 --listen 10.200.0.1:7461 --bucket b --namespace n --cache-dir=
+error: a value is required for '--cache-dir <CACHE_DIR>' but none was supplied
+
+For more information, try '--help'.
+exit=125
+=== help mbx-proxy
+Serve the read-only cache for one VM
+
+Usage: mj-worker microvm mbx-proxy [OPTIONS] --device <DEVICE> --listen <LISTEN> --bucket <BUCKET> --namespace <NAMESPACES> --cache-dir <CACHE_DIR>
+
+Options:
+      --device <DEVICE>              
+      --listen <LISTEN>              
+      --bucket <BUCKET>              
+      --prefix <PREFIX>              [default: ""]
+      --region <REGION>              
+      --namespace <NAMESPACES>       
+      --cache-dir <CACHE_DIR>        
+      --cache-budget <CACHE_BUDGET>  
+  -h, --help                         Print help
+exit=0
+=== mbx-chek
+error: unrecognized subcommand 'mbx-chek'
+
+  tip: a similar subcommand exists: 'mbx-check'
+
+Usage: mj-worker microvm <COMMAND>
 
 For more information, try '--help'.
 exit=125

@@ -12,4 +12,4 @@ mj-worker 4273087e6464a9dd6e90baba0a662afabaa58579
 # These crates were ported while their files were still in mj-core and
 # mj-worker; rust-changes.sh follows them from those paths.
 mj-harness-install 8d8e2db10a8602307d2cbabff3adfcfa258f0939
-mj-microvm 4273087e6464a9dd6e90baba0a662afabaa58579
+mj-microvm 3dde0c11b5832be0a9d810662216d82f9d7e9696

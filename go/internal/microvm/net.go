@@ -140,7 +140,16 @@ func MicrovmTapExists(tap string) bool {
 // microvmNetRuleset is the nftables ruleset, applied as one atomic
 // replacement.
 func microvmNetRuleset() string {
-	return strings.NewReplacer("{TABLE}", microvmTable, "{TAP_PREFIX}", microvmTapPrefix).Replace(`add table ip6 {TABLE}
+	base := microvmBlockBase
+	block := netip.AddrFrom4([4]byte{byte(base >> 24), byte(base >> 16), byte(base >> 8), byte(base)})
+	return strings.NewReplacer(
+		"{TABLE}", microvmTable,
+		"{TAP_PREFIX}", microvmTapPrefix,
+		"{mbx_port}", strconv.Itoa(microvmMbxProxyPort),
+		// Only the TAP gateways, never the host's VPC or loopback addresses.
+		"{block}", block.String(),
+		"{BLOCK_PREFIX}", strconv.FormatUint(uint64(microvmBlockPrefix), 10),
+	).Replace(`add table ip6 {TABLE}
 delete table ip6 {TABLE}
 table ip6 {TABLE} {
     chain input {
@@ -159,6 +168,7 @@ table ip {TABLE} {
         type filter hook input priority filter; policy accept;
         iifname "{TAP_PREFIX}*" ct state established,related accept
         iifname "{TAP_PREFIX}*" icmp type echo-request accept
+        iifname "{TAP_PREFIX}*" ip daddr {block}/{BLOCK_PREFIX} tcp dport {mbx_port} accept
         iifname "{TAP_PREFIX}*" drop
     }
     chain forward {

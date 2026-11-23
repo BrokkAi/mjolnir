@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -90,7 +91,26 @@ func MicrovmEnsureImage(layout MicrovmLayout, reference string, platform *string
 				return "", nil, err
 			}
 			if microvmIsFile(filepath.Join(layout.Image(id), "config.json")) {
-				return id, lock, nil
+				config, err := MicrovmImageConfigRead(layout, id)
+				if err != nil {
+					lock.Drop()
+					return "", nil, err
+				}
+				host, err := MicrovmHostArchitecture()
+				if err != nil {
+					lock.Drop()
+					return "", nil, err
+				}
+				if config.Architecture == host {
+					return id, lock, nil
+				}
+				// A copy an older engine cached for another architecture is
+				// unusable; pull again in case the tag has been corrected.
+				lock.Drop()
+				if policy == MicrovmPullPolicyNever {
+					return "", nil, fmt.Errorf("image %s is linux/%s, but this Nitro host runs linux/%s; assign an image built for linux/%s", reference, config.Architecture, host, host)
+				}
+				return microvmImagePullReserved(layout, reference, platform)
 			}
 			// Pruned while we waited for the lock.
 			err = layout.ForgetImageLock(id, lock)
@@ -187,7 +207,7 @@ func microvmImagePullReserved(layout MicrovmLayout, reference string, platform *
 	// image's configuration with another's files.
 	digest, err := MicrovmRunChecked(crane, []string{"digest", "--full-ref", reference})
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve %s: %w", reference, err)
+		return "", nil, fmt.Errorf("resolve %s; if this is a private registry, authorize crane on the host with `ssh <host> sudo crane auth login <registry> -u <user> --password-stdin` (token on stdin) and retry: %w", reference, err)
 	}
 	if !utf8.Valid(digest.Stdout) {
 		return "", nil, errors.New("crane printed a digest that is not UTF-8")
@@ -202,6 +222,16 @@ func microvmImagePullReserved(layout MicrovmLayout, reference string, platform *
 	config, err := jsonvalue.Parse(configuration.Stdout)
 	if err != nil {
 		return "", nil, fmt.Errorf("decode the OCI image configuration: %w", err)
+	}
+	// Crane applies `--platform` only to multi-platform indexes, so a
+	// single-platform image for another architecture arrives here unchecked.
+	actualOS, actualArchitecture := microvmImageString(config, "os"), microvmImageString(config, "architecture")
+	host, err := MicrovmHostArchitecture()
+	if err != nil {
+		return "", nil, err
+	}
+	if actualOS != "linux" || actualArchitecture != host {
+		return "", nil, fmt.Errorf("image %s is %s/%s, but this Nitro host runs %s; assign an image built for %s", reference, actualOS, actualArchitecture, resolvedPlatform, resolvedPlatform)
 	}
 	// The image lock covers flattening and recording the reference, so a
 	// prune (which decides under the same lock) never sees the image between
@@ -239,6 +269,56 @@ func microvmImagePullReserved(layout MicrovmLayout, reference string, platform *
 		return "", nil, recorded
 	}
 	return id, imageLock, nil
+}
+
+// MicrovmImageReconcileReferences removes references outside the wanted set
+// while serializing against image use and prune; it returns the removed
+// references in order.
+func MicrovmImageReconcileReferences(layout MicrovmLayout, wanted []string) ([]string, error) {
+	if err := layout.Ensure(); err != nil {
+		return nil, err
+	}
+	global, err := layout.LockGlobal()
+	if err != nil {
+		return nil, err
+	}
+	defer global.Drop()
+	refs, err := MicrovmImageRefsRead(layout)
+	if err != nil {
+		return nil, err
+	}
+	// A selector can be a tag or a local image id (or unambiguous prefix);
+	// keep every reference to an image a selector names.
+	wantedIDs := map[string]bool{}
+	for _, selector := range wanted {
+		id, ok, err := MicrovmImageLookup(layout, selector)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			wantedIDs[id] = true
+		}
+	}
+	wantedReferences := map[string]bool{}
+	for _, reference := range wanted {
+		wantedReferences[MicrovmNormalizeReference(reference)] = true
+	}
+	references := make([]string, 0, len(refs.Refs))
+	for reference := range refs.Refs {
+		references = append(references, reference)
+	}
+	sort.Strings(references)
+	removed := []string{}
+	for _, reference := range references {
+		if !wantedReferences[reference] && !wantedIDs[refs.Refs[reference]] {
+			removed = append(removed, reference)
+			delete(refs.Refs, reference)
+		}
+	}
+	if err := refs.Write(layout); err != nil {
+		return nil, err
+	}
+	return removed, nil
 }
 
 func microvmImageFirstNumber(output []byte) (uint64, bool) {

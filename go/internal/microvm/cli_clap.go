@@ -18,6 +18,7 @@ package microvm
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -53,6 +54,40 @@ type microvmClapArg struct {
 	action   microvmClapAction
 	// parse is the value parser; nil keeps the text.
 	parse func(string) (any, error)
+	// requires is clap's `requires`: the ids of the arguments that must be
+	// given with this one.
+	requires []string
+	// defaultValue is clap's `default_value`, which help shows.
+	defaultValue *string
+}
+
+// microvmClapEmptyValue is a value parser's refusal of an empty value
+// (clap's PathBuf parser), which clap reports as a missing value.
+var microvmClapEmptyValue = errors.New("empty value")
+
+// specVals is clap's spec_vals: the `[default: ...]` help adds.
+func (a *microvmClapArg) specVals() string {
+	if a.defaultValue == nil || !a.takesValue() {
+		return ""
+	}
+	value := *a.defaultValue
+	if value == "" || strings.ContainsFunc(value, unicode.IsSpace) {
+		value = microvmDebugString(value)
+	}
+	return "[default: " + value + "]"
+}
+
+// helpText is the help column of the argument: its help, then its spec
+// values.
+func (a *microvmClapArg) helpText() string {
+	specs := a.specVals()
+	switch {
+	case specs == "":
+		return a.help
+	case a.help == "":
+		return specs
+	}
+	return a.help + " " + specs
 }
 
 func (a *microvmClapArg) takesValue() bool {
@@ -198,10 +233,64 @@ func (c *microvmClapCommand) needsOptionsTag() bool {
 	return false
 }
 
+// requiredIDs is clap's required graph: the required arguments, in
+// declaration order.
+func (c *microvmClapCommand) requiredIDs() []string {
+	var ids []string
+	for _, arg := range c.args {
+		if arg.required {
+			ids = append(ids, arg.id)
+		}
+	}
+	return ids
+}
+
+// unrollRequires is clap's Command::unroll_arg_requires for presence: the
+// arguments id requires, transitively, in clap's order (repeats included).
+func (c *microvmClapCommand) unrollRequires(id string) []string {
+	var processed, unrolled []string
+	pending := []string{id}
+	for len(pending) > 0 {
+		next := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if slices.Contains(processed, next) {
+			continue
+		}
+		processed = append(processed, next)
+		arg := c.find(next)
+		if arg == nil {
+			continue
+		}
+		for _, required := range arg.requires {
+			if requiredArg := c.find(required); requiredArg != nil && len(requiredArg.requires) > 0 {
+				pending = append(pending, requiredArg.id)
+			}
+			unrolled = append(unrolled, required)
+		}
+	}
+	return unrolled
+}
+
+// unrolledRequired is the required set with what each member requires
+// before it, as clap's usage builders walk it.
+func (c *microvmClapCommand) unrolledRequired(required []string) []string {
+	var unrolled []string
+	for _, id := range required {
+		unrolled = append(unrolled, c.unrollRequires(id)...)
+		unrolled = append(unrolled, id)
+	}
+	return unrolled
+}
+
 // usage is clap's usage line without its title: the help form when used is
 // empty, otherwise the "smart" form that names the required arguments and
 // the ones used.
 func (c *microvmClapCommand) usage(used []string) string {
+	return c.usageFor(c.requiredIDs(), used)
+}
+
+// usageFor is usage over the required set clap's validator has gathered.
+func (c *microvmClapCommand) usageFor(required []string, used []string) string {
 	parts := []string{c.binName}
 	if len(used) == 0 && c.needsOptionsTag() {
 		parts = append(parts, "[OPTIONS]")
@@ -219,12 +308,7 @@ func (c *microvmClapCommand) usage(used []string) string {
 			options = append(options, text)
 		}
 	}
-	for _, arg := range c.args {
-		if arg.required {
-			include(arg)
-		}
-	}
-	for _, id := range used {
+	for _, id := range append(c.unrolledRequired(required), used...) {
 		if arg := c.find(id); arg != nil {
 			include(arg)
 		}
@@ -248,11 +332,12 @@ func (c *microvmClapCommand) usage(used []string) string {
 const microvmClapTermWidth = 100
 
 // microvmClapNextLine is clap's test for putting help on the line after
-// the argument: the column is wide and the text would not fit beside it.
-func microvmClapNextLine(longest int, helps []string) bool {
+// the argument: the column is wide and some help (widths, in characters)
+// would not fit beside it.
+func microvmClapNextLine(longest int, widths []int) bool {
 	taken := longest + 4
-	for _, help := range helps {
-		if microvmClapTermWidth >= taken && float32(taken)/float32(microvmClapTermWidth) > 0.40 && utf8.RuneCountInString(help) > microvmClapTermWidth-taken {
+	for _, width := range widths {
+		if microvmClapTermWidth >= taken && float32(taken)/float32(microvmClapTermWidth) > 0.40 && width > microvmClapTermWidth-taken {
 			return true
 		}
 	}
@@ -270,21 +355,23 @@ func microvmClapRow(spec string, padding int, help string, nextLine bool) string
 
 func microvmClapArgRows(args []*microvmClapArg) string {
 	longest := 2
-	helps := make([]string, len(args))
+	widths := make([]int, len(args))
 	for i, arg := range args {
 		width := utf8.RuneCountInString(arg.display())
 		if arg.long != "" {
 			width += 4
 		}
 		longest = max(longest, width)
-		helps[i] = arg.help
+		// clap measures the help and its spec values without the space
+		// between them.
+		widths[i] = utf8.RuneCountInString(arg.help) + utf8.RuneCountInString(arg.specVals())
 	}
-	nextLine := microvmClapNextLine(longest, helps)
+	nextLine := microvmClapNextLine(longest, widths)
 	rows := make([]string, len(args))
 	for i, arg := range args {
 		if arg.positional {
 			spec := arg.display()
-			rows[i] = microvmClapRow(spec, longest+2-utf8.RuneCountInString(spec), arg.help, nextLine)
+			rows[i] = microvmClapRow(spec, longest+2-utf8.RuneCountInString(spec), arg.helpText(), nextLine)
 			continue
 		}
 		spec := ""
@@ -304,7 +391,7 @@ func microvmClapArgRows(args []*microvmClapArg) string {
 		if arg.long == "" {
 			padding = longest + 2 + 4 - selfWidth
 		}
-		rows[i] = microvmClapRow(spec, padding, arg.help, nextLine)
+		rows[i] = microvmClapRow(spec, padding, arg.helpText(), nextLine)
 	}
 	return strings.Join(rows, "\n")
 }
@@ -318,9 +405,9 @@ func (c *microvmClapCommand) subcommandRows() string {
 			longest = max(longest, utf8.RuneCountInString(sub.name))
 		}
 	}
-	abouts := make([]string, len(visible))
+	abouts := make([]int, len(visible))
 	for i, sub := range visible {
-		abouts[i] = sub.about
+		abouts[i] = utf8.RuneCountInString(sub.about)
 	}
 	nextLine := microvmClapNextLine(longest, abouts)
 	rows := make([]string, len(visible))
@@ -587,6 +674,9 @@ func (p *microvmClapParser) apply(arg *microvmClapArg, values []string) error {
 	for _, value := range values {
 		if arg.parse != nil {
 			parsed, err := arg.parse(value)
+			if errors.Is(err, microvmClapEmptyValue) {
+				return p.cmd.fail(microvmClapErrorText{message: fmt.Sprintf("a value is required for '%s' but none was supplied", arg.display())})
+			}
 			if err != nil {
 				return p.cmd.fail(microvmClapErrorText{message: fmt.Sprintf("invalid value '%s' for '%s': %s", value, arg.display(), err)})
 			}
@@ -897,6 +987,16 @@ func (p *microvmClapParser) validate() error {
 	if len(c.subcommands) > 0 && p.matches.sub == nil && len(p.matches.order) == 0 {
 		return &microvmCLIError{text: c.helpText(), useStderr: true}
 	}
+	// clap's required set: the required arguments, then what each given
+	// argument requires.
+	required := c.requiredIDs()
+	for _, id := range p.matches.order {
+		for _, needed := range c.unrollRequires(id) {
+			if !slices.Contains(required, needed) {
+				required = append(required, needed)
+			}
+		}
+	}
 	positionals := c.positionals()
 	indexOf := func(arg *microvmClapArg) int {
 		for i, positional := range positionals {
@@ -906,20 +1006,21 @@ func (p *microvmClapParser) validate() error {
 		}
 		return -1
 	}
-	var missing []*microvmClapArg
+	var missing []string
 	highest := -1
-	for _, arg := range c.args {
-		if arg.required && !p.matches.present[arg.id] {
-			missing = append(missing, arg)
-			if arg.positional {
-				highest = max(highest, indexOf(arg))
-			}
+	for _, id := range required {
+		if p.matches.present[id] {
+			continue
+		}
+		missing = append(missing, id)
+		if arg := c.find(id); arg != nil && arg.positional {
+			highest = max(highest, indexOf(arg))
 		}
 	}
 	// For display, every preceding positional that is absent is named too.
 	for i, positional := range positionals {
 		if i < highest && !p.matches.present[positional.id] {
-			missing = append(missing, positional)
+			missing = append(missing, positional.id)
 		}
 	}
 	if len(missing) == 0 {
@@ -929,9 +1030,10 @@ func (p *microvmClapParser) validate() error {
 	var options []string
 	seen := map[string]bool{}
 	slots := map[*microvmClapArg]bool{}
-	consider := func(arg *microvmClapArg) {
-		if p.matches.present[arg.id] {
-			return
+	for _, id := range append(c.unrolledRequired(required), missing...) {
+		arg := c.find(id)
+		if arg == nil || p.matches.present[arg.id] {
+			continue
 		}
 		if arg.positional {
 			slots[arg] = true
@@ -939,14 +1041,6 @@ func (p *microvmClapParser) validate() error {
 			seen[text] = true
 			options = append(options, text)
 		}
-	}
-	for _, arg := range c.args {
-		if arg.required {
-			consider(arg)
-		}
-	}
-	for _, arg := range missing {
-		consider(arg)
 	}
 	message := "the following required arguments were not provided:"
 	for _, option := range options {
@@ -957,11 +1051,8 @@ func (p *microvmClapParser) validate() error {
 			message += "\n  " + positional.stylized(true)
 		}
 	}
-	used := p.used()
-	for _, arg := range missing {
-		used = append(used, arg.id)
-	}
-	return c.fail(microvmClapErrorText{message: message, usage: c.usage(used)})
+	used := append(p.used(), missing...)
+	return c.fail(microvmClapErrorText{message: message, usage: c.usageFor(required, used)})
 }
 
 // ---------------------------------------------------------------------------

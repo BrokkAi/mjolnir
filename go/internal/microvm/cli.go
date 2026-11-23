@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
@@ -76,6 +78,13 @@ type microvmCommandImage struct{ command microvmImageCommand }
 // microvmCommandRun creates and starts a VM.
 type microvmCommandRun struct{ args *microvmRunArgs }
 
+// microvmCommandMbxCheck probes the configured S3 remote with the host's
+// instance role.
+type microvmCommandMbxCheck struct{ args microvmMbxCheckArgs }
+
+// microvmCommandMbxProxy serves the read-only cache for one VM. Hidden.
+type microvmCommandMbxProxy struct{ args microvmMbxProxyArgs }
+
 // microvmCommandExec runs a command in a running VM.
 type microvmCommandExec struct{ args microvmExecArgs }
 
@@ -87,6 +96,10 @@ type microvmCommandContainer struct{ command microvmContainerCommand }
 
 // microvmCommandPs lists VMs.
 type microvmCommandPs struct{ args microvmPsArgs }
+
+// microvmCommandMaintain reconciles the host's images with the wanted set
+// and trims the mbx cache.
+type microvmCommandMaintain struct{ args microvmMaintainArgs }
 
 // microvmCommandStart starts stopped VMs from their retained disks.
 type microvmCommandStart struct{ args microvmNamesArgs }
@@ -123,6 +136,9 @@ func (microvmCommandInfo) isMicrovmCommand()           {}
 func (microvmCommandPull) isMicrovmCommand()           {}
 func (microvmCommandImage) isMicrovmCommand()          {}
 func (microvmCommandRun) isMicrovmCommand()            {}
+func (microvmCommandMbxCheck) isMicrovmCommand()       {}
+func (microvmCommandMbxProxy) isMicrovmCommand()       {}
+func (microvmCommandMaintain) isMicrovmCommand()       {}
 func (microvmCommandExec) isMicrovmCommand()           {}
 func (microvmCommandCp) isMicrovmCommand()             {}
 func (microvmCommandContainer) isMicrovmCommand()      {}
@@ -135,6 +151,24 @@ func (microvmCommandGuestAgent) isMicrovmCommand()     {}
 func (microvmCommandRootCheckInner) isMicrovmCommand() {}
 func (microvmCommandHostTapDown) isMicrovmCommand()    {}
 func (microvmCommandHostJailDown) isMicrovmCommand()   {}
+
+type microvmMaintainArgs struct {
+	// keepImage is the image references the host must retain. Without any,
+	// images are left alone.
+	keepImage []string
+	// mbxCacheBudget is the total size of the remote mbx cache, for example
+	// 20GiB. Defaults to mbx's automatic budget.
+	mbxCacheBudget *uint64
+}
+
+// microvmCLIParseMbxCacheBudget is the value parser of --mbx-cache-budget.
+func microvmCLIParseMbxCacheBudget(value string) (any, error) {
+	size, ok := core.ParseBuildCacheSize(value)
+	if !ok {
+		return nil, fmt.Errorf("invalid --mbx-cache-budget %s: use a size such as 20GiB", microvmDebugString(value))
+	}
+	return size, nil
+}
 
 type microvmInfoArgs struct {
 	// format: only `json` is supported.
@@ -182,6 +216,12 @@ type microvmRunArgs struct {
 	pull    *string
 	// platform, as for pull.
 	platform *string
+	// mbxRemote, mbxRemoteRegion, mbxCacheBudget and mbxNamespaces give the
+	// VM a read-only remote mbx cache.
+	mbxRemote       *string
+	mbxRemoteRegion *string
+	mbxCacheBudget  *uint64
+	mbxNamespaces   []string
 	// init is accepted: the guest agent is always an init.
 	init bool
 	// stopSignal is accepted when KILL: stopping a VM always kills it.
@@ -361,6 +401,14 @@ func microvmCLISpec() *microvmClapCommand {
 		arg.required = true
 		return arg
 	}
+	requires := func(arg *microvmClapArg, ids ...string) *microvmClapArg {
+		arg.requires = ids
+		return arg
+	}
+	defaulted := func(arg *microvmClapArg, value string) *microvmClapArg {
+		arg.defaultValue = &value
+		return arg
+	}
 	parsed := func(arg *microvmClapArg, parse func(string) (any, error)) *microvmClapArg {
 		arg.parse = parse
 		return arg
@@ -401,6 +449,10 @@ func microvmCLISpec() *microvmClapCommand {
 			option("workdir", 'w', "workdir", ""),
 			option("pull", 0, "pull", ""),
 			option("platform", 0, "platform", ""),
+			requires(option("mbx_remote", 0, "mbx-remote", ""), "mbx_namespaces"),
+			requires(option("mbx_remote_region", 0, "mbx-remote-region", ""), "mbx_remote"),
+			requires(parsed(option("mbx_cache_budget", 0, "mbx-cache-budget", ""), microvmCLIParseMbxCacheBudget), "mbx_remote"),
+			requires(repeated("mbx_namespaces", 0, "mbx-namespace", ""), "mbx_remote"),
 			flag("init", 0, "init", "Accepted: the guest agent is always an init"),
 			option("stop_signal", 0, "stop-signal", "Accepted when KILL: stopping a VM always kills it"),
 			repeated("cap_add", 0, "cap-add", "Accepted with no effect: the VM is the isolation boundary"),
@@ -410,6 +462,22 @@ func microvmCLISpec() *microvmClapCommand {
 			positional("image", ""),
 			trailing(false),
 		}),
+		command("mbx-check", "Probe the configured S3 remote with the host's instance role", []*microvmClapArg{
+			required(option("bucket", 0, "bucket", "")),
+			defaulted(option("prefix", 0, "prefix", ""), ""),
+			option("region", 0, "region", ""),
+			required(option("namespace", 0, "namespace", "")),
+		}),
+		hidden(command("mbx-proxy", "Serve the read-only cache for one VM", []*microvmClapArg{
+			required(option("device", 0, "device", "")),
+			required(parsed(option("listen", 0, "listen", ""), microvmCLIParseSocketAddrV4)),
+			required(option("bucket", 0, "bucket", "")),
+			defaulted(option("prefix", 0, "prefix", ""), ""),
+			option("region", 0, "region", ""),
+			required(repeated("namespaces", 0, "namespace", "")),
+			required(parsed(option("cache_dir", 0, "cache-dir", ""), microvmCLIParsePath)),
+			parsed(option("cache_budget", 0, "cache-budget", ""), microvmClapParseU64),
+		})),
 		command("exec", "Run a command in a running VM", []*microvmClapArg{
 			flag("interactive", 'i', "interactive", ""),
 			flag("detach", 'd', "detach", ""),
@@ -448,6 +516,10 @@ func microvmCLISpec() *microvmClapCommand {
 			repeated("filters", 0, "filter", "`label=KEY` or `label=KEY=VALUE`; repeated filters must all match"),
 			format("`json`, or a template applied to each VM"),
 		}),
+		command("maintain", "Reconcile the host's images with the wanted set and trim the mbx cache", []*microvmClapArg{
+			repeated("keep_image", 0, "keep-image", "Image references the host must retain. Without any, images are left alone"),
+			parsed(option("mbx_cache_budget", 0, "mbx-cache-budget", "Total size of the remote mbx cache, for example 20GiB. Defaults to mbx's automatic budget"), microvmCLIParseMbxCacheBudget),
+		}),
 		command("start", "Start stopped VMs from their retained disks", []*microvmClapArg{names()}),
 		command("stop", "Stop VMs", []*microvmClapArg{
 			parsed(option("time", 't', "time", "Seconds the guest has to flush and power off before the VM is killed"), microvmClapParseU64),
@@ -469,7 +541,7 @@ func microvmCLISpec() *microvmClapCommand {
 		),
 		hidden(command("guest-agent", "The guest agent. Runs as PID 1 inside a VM", nil)),
 		hidden(command("root-check-inner", "Inside a private mount namespace: check an image mounted at ROOT; run by `container replace-root stage`", []*microvmClapArg{
-			positional("root", ""),
+			parsed(positional("root", ""), microvmCLIParsePath),
 			positional("path", ""),
 		})),
 		hidden(command("host-tap-down", "Remove a TAP device; run by the VM's systemd unit when it stops", []*microvmClapArg{positional("tap", "")})),
@@ -480,6 +552,45 @@ func microvmCLISpec() *microvmClapCommand {
 	root.version = "mj-worker microvm " + core.PackageVersion + "\n"
 	root.build(root.name)
 	return root
+}
+
+// microvmCLIParsePath is clap's PathBuf value parser: any value but an
+// empty one.
+func microvmCLIParsePath(text string) (any, error) {
+	if text == "" {
+		return nil, microvmClapEmptyValue
+	}
+	return text, nil
+}
+
+// microvmCLIParseSocketAddrV4 is Rust's `SocketAddrV4::from_str`: four
+// decimal octets without leading zeros, `:`, and a port.
+func microvmCLIParseSocketAddrV4(text string) (any, error) {
+	invalid := errors.New("invalid IPv4 socket address syntax")
+	address, port, ok := strings.Cut(text, ":")
+	if !ok {
+		return nil, invalid
+	}
+	octets := strings.Split(address, ".")
+	if len(octets) != 4 {
+		return nil, invalid
+	}
+	var bytes [4]byte
+	for i, octet := range octets {
+		if octet == "" || len(octet) > 3 || len(octet) > 1 && octet[0] == '0' {
+			return nil, invalid
+		}
+		value, err := microvmParseUint(octet, 8)
+		if err != nil || octet[0] == '+' {
+			return nil, invalid
+		}
+		bytes[i] = byte(value)
+	}
+	number, err := microvmParseUint(port, 16)
+	if err != nil || port == "" || port[0] == '+' {
+		return nil, invalid
+	}
+	return netip.AddrPortFrom(netip.AddrFrom4(bytes), uint16(number)), nil
 }
 
 // microvmCLIParse parses args (the words after `microvm`) as clap parses
@@ -495,6 +606,15 @@ func microvmCLIParse(args []string) (*microvmCLI, error) {
 		return nil, err
 	}
 	return &microvmCLI{command: command}, nil
+}
+
+// microvmCLIDefaulted is an option with `default_value = ""`: its value, or
+// the default when it was not given.
+func microvmCLIDefaulted(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // microvmCLICommandFrom builds a subcommand from its matches, as clap's
@@ -517,30 +637,66 @@ func microvmCLICommandFrom(name string, m *microvmClapMatches) (microvmCommand, 
 		}
 	case "run":
 		args := &microvmRunArgs{
-			detach:      m.flag("detach"),
-			name:        *m.one("name"),
-			labels:      m.many("labels"),
-			memory:      m.one("memory"),
-			env:         m.many("env"),
-			volumes:     m.many("volumes"),
-			user:        m.one("user"),
-			workdir:     m.one("workdir"),
-			pull:        m.one("pull"),
-			platform:    m.one("platform"),
-			init:        m.flag("init"),
-			stopSignal:  m.one("stop_signal"),
-			capAdd:      m.many("cap_add"),
-			capDrop:     m.many("cap_drop"),
-			securityOpt: m.many("security_opt"),
-			pidsLimit:   m.one("pids_limit"),
-			image:       *m.one("image"),
-			command:     m.many("command"),
+			detach:          m.flag("detach"),
+			name:            *m.one("name"),
+			labels:          m.many("labels"),
+			memory:          m.one("memory"),
+			env:             m.many("env"),
+			volumes:         m.many("volumes"),
+			user:            m.one("user"),
+			workdir:         m.one("workdir"),
+			pull:            m.one("pull"),
+			platform:        m.one("platform"),
+			mbxRemote:       m.one("mbx_remote"),
+			mbxRemoteRegion: m.one("mbx_remote_region"),
+			mbxNamespaces:   m.many("mbx_namespaces"),
+			init:            m.flag("init"),
+			stopSignal:      m.one("stop_signal"),
+			capAdd:          m.many("cap_add"),
+			capDrop:         m.many("cap_drop"),
+			securityOpt:     m.many("security_opt"),
+			pidsLimit:       m.one("pids_limit"),
+			image:           *m.one("image"),
+			command:         m.many("command"),
 		}
 		if cpus, ok := m.parsed["cpus"]; ok {
 			value := cpus.(float64)
 			args.cpus = &value
 		}
+		if budget, ok := m.parsed["mbx_cache_budget"]; ok {
+			value := budget.(uint64)
+			args.mbxCacheBudget = &value
+		}
 		return microvmCommandRun{args: args}, nil
+	case "mbx-check":
+		return microvmCommandMbxCheck{args: microvmMbxCheckArgs{
+			bucket:    *m.one("bucket"),
+			prefix:    microvmCLIDefaulted(m.one("prefix")),
+			region:    m.one("region"),
+			namespace: *m.one("namespace"),
+		}}, nil
+	case "mbx-proxy":
+		args := microvmMbxProxyArgs{
+			device:     *m.one("device"),
+			listen:     m.parsed["listen"].(netip.AddrPort),
+			bucket:     *m.one("bucket"),
+			prefix:     microvmCLIDefaulted(m.one("prefix")),
+			region:     m.one("region"),
+			namespaces: m.many("namespaces"),
+			cacheDir:   *m.one("cache_dir"),
+		}
+		if budget, ok := m.parsed["cache_budget"]; ok {
+			value := budget.(uint64)
+			args.cacheBudget = &value
+		}
+		return microvmCommandMbxProxy{args: args}, nil
+	case "maintain":
+		args := microvmMaintainArgs{keepImage: m.many("keep_image")}
+		if budget, ok := m.parsed["mbx_cache_budget"]; ok {
+			value := budget.(uint64)
+			args.mbxCacheBudget = &value
+		}
+		return microvmCommandMaintain{args: args}, nil
 	case "exec":
 		return microvmCommandExec{args: microvmExecArgs{
 			interactive: m.flag("interactive"),
@@ -684,6 +840,10 @@ func microvmCLIDispatch(layout MicrovmLayout, command microvmCommand) (int, erro
 		return microvmCLIImageCommand(layout, command.command)
 	case microvmCommandRun:
 		return microvmCLIRun(layout, *command.args)
+	case microvmCommandMbxCheck:
+		return microvmMbxCheck(command.args)
+	case microvmCommandMbxProxy:
+		return microvmMbxProxyRun(command.args)
 	case microvmCommandExec:
 		return microvmCLIExec(layout, command.args)
 	case microvmCommandCp:
@@ -713,6 +873,8 @@ func microvmCLIDispatch(layout MicrovmLayout, command microvmCommand) (int, erro
 		}
 	case microvmCommandPs:
 		return microvmCLIList(layout, command.args)
+	case microvmCommandMaintain:
+		return microvmCLIMaintain(layout, command.args)
 	case microvmCommandStart:
 		for _, name := range command.args.names {
 			if err := MicrovmVMStart(layout, name); err != nil {
@@ -903,32 +1065,63 @@ func microvmCLIImageCommand(layout MicrovmLayout, command microvmImageCommand) (
 	return 0, fmt.Errorf("unknown image command %T", command)
 }
 
-func microvmCLIParseMemory(text string) (uint64, error) {
-	lower := []byte(text)
-	for i, b := range lower {
-		if b >= 'A' && b <= 'Z' {
-			lower[i] = b + ('a' - 'A')
+func microvmCLIMaintain(layout MicrovmLayout, args microvmMaintainArgs) (int, error) {
+	if err := layout.Ensure(); err != nil {
+		return 0, err
+	}
+	// Trim first: a full filesystem must not stop the trim that frees it,
+	// and rewriting the image references needs space for a temporary file.
+	if err := func() error {
+		global, err := layout.LockGlobal()
+		if err != nil {
+			return err
 		}
+		defer global.Drop()
+		freed, err := microvmMbxTrimCache(layout, args.mbxCacheBudget)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Reclaimed %d bytes from the mbx cache\n", freed)
+		return nil
+	}(); err != nil {
+		return 0, err
 	}
-	value := strings.TrimRight(string(lower), "b")
-	digits, factor := value, uint64(1)
-	switch {
-	case strings.HasSuffix(value, "k"):
-		digits, factor = value[:len(value)-1], 1<<10
-	case strings.HasSuffix(value, "m"):
-		digits, factor = value[:len(value)-1], 1<<20
-	case strings.HasSuffix(value, "g"):
-		digits, factor = value[:len(value)-1], 1<<30
+	// An empty keep set would remove every reference; only a caller that
+	// names the host's wanted images reconciles them.
+	if len(args.keepImage) > 0 {
+		removedRefs, err := MicrovmImageReconcileReferences(layout, args.keepImage)
+		if err != nil {
+			return 0, err
+		}
+		// Root disks are sparse, so their nominal size says nothing about
+		// the space a prune frees; count the blocks they actually hold.
+		allocated := map[string]uint64{}
+		entries, err := os.ReadDir(layout.Images())
+		if err != nil {
+			return 0, microvmIOError(err)
+		}
+		for _, entry := range entries {
+			id := microvmLossy([]byte(entry.Name()))
+			if info, err := os.Stat(MicrovmRootImage(layout, id)); err == nil {
+				if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+					allocated[id] = uint64(stat.Blocks) * 512
+				}
+			}
+		}
+		removed, err := MicrovmImagePrune(layout)
+		if err != nil {
+			return 0, err
+		}
+		var reclaimed uint64
+		for _, id := range removed {
+			reclaimed += allocated[id]
+		}
+		for _, reference := range removedRefs {
+			fmt.Println(reference)
+		}
+		fmt.Printf("bytes reclaimed: %d\n", reclaimed)
 	}
-	amount, err := microvmParseUint(digits, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid --memory %s: use a number with an optional b, k, m or g suffix: %w", microvmDebugString(text), err)
-	}
-	hi, product := bits.Mul64(amount, factor)
-	if hi != 0 {
-		return 0, fmt.Errorf("--memory %s is too large", microvmDebugString(text))
-	}
-	return product, nil
+	return 0, nil
 }
 
 func microvmCLIParseVolume(text string) (MicrovmVolumeArg, error) {
@@ -1101,7 +1294,7 @@ func microvmCLIRun(layout MicrovmLayout, args microvmRunArgs) (int, error) {
 	if args.memory == nil {
 		return 0, errors.New("--memory is required: a microVM's memory is reserved from the Nitro pool")
 	}
-	memory, err := microvmCLIParseMemory(*args.memory)
+	memory, err := core.ParseContainerMemory(*args.memory)
 	if err != nil {
 		return 0, err
 	}
@@ -1116,6 +1309,14 @@ func microvmCLIRun(layout MicrovmLayout, args microvmRunArgs) (int, error) {
 		return 0, err
 	}
 	env := microvmCLIResolveEnv(args.env)
+	var mbxRemote *MicrovmMbxRemote
+	if args.mbxRemote != nil {
+		remote, err := microvmMbxParseRemote(*args.mbxRemote, args.mbxRemoteRegion, args.mbxNamespaces, args.mbxCacheBudget)
+		if err != nil {
+			return 0, err
+		}
+		mbxRemote = &remote
+	}
 	volumes := []MicrovmVolumeArg{}
 	for _, text := range args.volumes {
 		volume, err := microvmCLIParseVolume(text)
@@ -1133,6 +1334,7 @@ func microvmCLIRun(layout MicrovmLayout, args microvmRunArgs) (int, error) {
 		CPUs:        args.cpus,
 		MemoryBytes: memory,
 		Env:         env,
+		MbxRemote:   mbxRemote,
 		User:        args.user,
 		Workdir:     args.workdir,
 		Volumes:     volumes,
