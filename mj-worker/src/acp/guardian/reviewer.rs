@@ -19,7 +19,7 @@ use super::*;
 use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
 use mj_core::guardian::{
     DaemonGuardianFailure, GUARDIAN_DISABLED_REASON, GuardianReviewOutcome,
-    collect_project_instructions,
+    collect_project_instructions, compact_action_summary,
 };
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
@@ -60,6 +60,8 @@ impl AcpReviewError {
 /// Codex's `MAX_REVIEW_ATTEMPTS`: reviewer prompts per review, counting a
 /// retry on a fresh reviewer and a reminder for a reply without a verdict.
 const MAX_REVIEW_ATTEMPTS: usize = 3;
+const STALE_AUTHORIZATION_RETRY_REASON: &str =
+    "New user authorization arrived while the previous review was in flight.";
 /// How long a retiring reviewer bridge gets to reap its process group after
 /// its stdin closes, the grace `run_bridge` gives the session's own bridge.
 #[cfg(not(test))]
@@ -155,9 +157,27 @@ impl Guardian {
                 .await
             {
                 Ok(GuardianReviewOutcome::UseAcpFallback { .. }) => {}
-                Ok(GuardianReviewOutcome::Allow { .. }) => return self.record_verdict(None),
-                Ok(GuardianReviewOutcome::Deny { rationale, .. }) => {
-                    return self.record_verdict(Some(rationale));
+                Ok(GuardianReviewOutcome::Allow { .. }) => {
+                    return GuardianDecision::Allow {
+                        review: Self::prior_review(&action, Outcome::Allow, None, None, None),
+                    };
+                }
+                Ok(GuardianReviewOutcome::Deny {
+                    rationale,
+                    risk_level,
+                    user_authorization,
+                    ..
+                }) => {
+                    return GuardianDecision::Deny {
+                        review: Self::prior_review(
+                            &action,
+                            Outcome::Deny,
+                            Some(risk_level),
+                            Some(user_authorization),
+                            Some(&rationale),
+                        ),
+                        rationale,
+                    };
                 }
                 Ok(GuardianReviewOutcome::AskPerson { reason })
                     if reason == GUARDIAN_DISABLED_REASON =>
@@ -205,6 +225,7 @@ impl Guardian {
                 return Ok(result.decision);
             }
             evidence = current;
+            evidence.request.retry_reason = Some(STALE_AUTHORIZATION_RETRY_REASON.into());
             tracing::info!(target: "mj_guardian", "the person wrote during a guardian review; reviewing again");
         }
     }
@@ -267,23 +288,47 @@ impl Guardian {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "guardian reviewed a permission request"
         );
-        self.record_verdict((outcome == Outcome::Deny).then_some(assessment.rationale))
+        let review = Self::prior_review(
+            action,
+            outcome,
+            Some(assessment.risk_level),
+            Some(assessment.user_authorization),
+            Some(&assessment.rationale),
+        );
+        match outcome {
+            Outcome::Allow => GuardianDecision::Allow { review },
+            Outcome::Deny => GuardianDecision::Deny {
+                rationale: assessment.rationale,
+                review,
+            },
+        }
     }
 
-    fn record_verdict(&self, rationale: Option<String>) -> GuardianDecision {
-        let tripped = self
-            .spec
-            .turn_context
-            .record_guardian_review(rationale.is_some());
-        let Some(mut rationale) = rationale else {
-            return GuardianDecision::Allow;
-        };
-        if tripped {
-            rationale.push_str(
-                " The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.",
-            );
+    fn prior_review(
+        action: &serde_json::Value,
+        outcome: Outcome,
+        risk_level: Option<mj_core::guardian::RiskLevel>,
+        user_authorization: Option<mj_core::guardian::UserAuthorization>,
+        rationale: Option<&str>,
+    ) -> PriorGuardianReview {
+        use mj_core::assessment::trim_middle;
+
+        PriorGuardianReview {
+            tool: trim_middle(action["tool"].as_str().unwrap_or("tool")),
+            action_summary: compact_action_summary(action),
+            outcome,
+            risk_level,
+            user_authorization,
+            rationale: rationale
+                .filter(|reason| !reason.trim().is_empty())
+                .map(trim_middle),
         }
-        GuardianDecision::Deny { rationale }
+    }
+
+    pub(in crate::acp) fn record_settled_review(&self, review: PriorGuardianReview) -> bool {
+        let denied = review.outcome == Outcome::Deny;
+        self.spec.turn_context.record_prior_guardian_review(review);
+        self.spec.turn_context.record_guardian_review(denied)
     }
 
     fn collect_evidence(
@@ -315,8 +360,8 @@ impl Guardian {
     ) -> Result<Assessment, AcpReviewError> {
         let mut slot = Some(first);
         let mut attempts = 0;
+        let mut evidence = self.collect_evidence(tool_call_id, action, project_instructions);
         loop {
-            let evidence = self.collect_evidence(tool_call_id, action, project_instructions);
             let prompt = vec![
                 ContentBlock::Text(TextContent::new(reviewer_instructions_acp())),
                 ContentBlock::Text(TextContent::new(evidence.request.request_text())),
@@ -326,6 +371,8 @@ impl Guardian {
             if !current.person_wrote_since(&evidence) {
                 return Ok(assessment);
             }
+            evidence = current;
+            evidence.request.retry_reason = Some(STALE_AUTHORIZATION_RETRY_REASON.into());
             tracing::info!(
                 target: "mj_guardian",
                 "the person wrote during a guardian review; reviewing again"

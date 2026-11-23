@@ -168,10 +168,8 @@ where
     let permission_elicitations = pending_elicitations.clone();
     // A bridge-local counter alone repeats after reload (and worker restart).
     // Use the same unique identity source as sessions, keeping the namespace.
-    let permission_id_prefix = format!(
-        "{TOOL_PERMISSION_ID_PREFIX}{}-",
-        mj_core::state::new_session_id()?
-    );
+    let bridge_elicitation_id = mj_core::state::new_session_id()?;
+    let permission_id_prefix = format!("{TOOL_PERMISSION_ID_PREFIX}{bridge_elicitation_id}-");
     let permission_review_ids = Arc::new(AtomicU64::new(1));
     let ext_review_ids = Arc::new(AtomicU64::new(1));
     let session_elicitations = pending_elicitations.clone();
@@ -516,25 +514,41 @@ where
                             }
                             // Once only: an allow the harness remembers would let
                             // later calls skip review.
-                            Some(guardian::GuardianDecision::Allow) => match guardian::allow_once_response(&request) {
+                            Some(guardian::GuardianDecision::Allow { review }) => match guardian::allow_once_response(&request) {
                                 // Settled under the withdrawal lock: a verdict
                                 // never follows a cancel the agent was told of.
-                                Some(response) => return ticket.settle(|withdrawn| responder.respond(if withdrawn {
-                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                } else {
-                                    response
-                                })),
+                                Some(response) => return ticket.settle(|withdrawn| {
+                                    let withdrawn = withdrawn || cancellation.is_cancelled();
+                                    let answered = responder.respond(if withdrawn {
+                                        RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                    } else {
+                                        response
+                                    });
+                                    if !withdrawn && answered.is_ok() {
+                                        guardian.record_settled_review(review);
+                                    }
+                                    answered
+                                }),
                                 None => guardian_preface = Some(guardian::ask_person_preface(
                                     "the guardian allowed it, but the harness offered no way to allow it once",
                                 )),
                             },
-                            Some(guardian::GuardianDecision::Deny { rationale }) => {
-                                let (withdrawn, answered) = ticket.settle(|withdrawn| (withdrawn, responder.respond(if withdrawn {
-                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                } else {
-                                    guardian::rejection_response(&request)
-                                })));
-                                if !withdrawn {
+                            Some(guardian::GuardianDecision::Deny { mut rationale, review }) => {
+                                let (settled, tripped, answered) = ticket.settle(|withdrawn| {
+                                    let withdrawn = withdrawn || cancellation.is_cancelled();
+                                    let answered = responder.respond(if withdrawn {
+                                        RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                    } else {
+                                        guardian::rejection_response(&request)
+                                    });
+                                    let settled = !withdrawn && answered.is_ok();
+                                    let tripped = settled && guardian.record_settled_review(review);
+                                    (settled, tripped, answered)
+                                });
+                                if settled {
+                                    if tripped {
+                                        rationale.push_str(" The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.");
+                                    }
                                     permission_events
                                         .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
                                         .await
@@ -960,7 +974,7 @@ where
                 let method = request.method().to_owned();
                 if method == "elicitation/create" {
                     let id = format!(
-                        "elicitation-{}",
+                        "elicitation-{bridge_elicitation_id}-{}",
                         next_elicitation_id.fetch_add(1, Ordering::Relaxed)
                     );
                     let child = request.params().get("sessionId").and_then(serde_json::Value::as_str)
@@ -1082,7 +1096,7 @@ where
                     return Ok(());
                 }
                 if grok::handles_exit_plan_mode(ext_harness, &method) {
-                    let id = grok::plan_review_id(ext_review_ids.fetch_add(1, Ordering::Relaxed));
+                    let id = grok::plan_review_id(&bridge_elicitation_id, ext_review_ids.fetch_add(1, Ordering::Relaxed));
                     let review = normalized_plan_review(id.clone(), request.params());
                     let requesting_agent = request.params().get("sessionId")
                         .and_then(serde_json::Value::as_str)

@@ -8781,8 +8781,9 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     })
     .await
     .expect("a withdrawn form resolves");
-    assert_eq!(requested.as_deref(), Some("elicitation-1"));
-    assert_eq!(resolved, ("elicitation-1".to_owned(), "cancel".to_owned()));
+    let requested = requested.expect("the runtime published the form");
+    assert!(requested.starts_with("elicitation-"));
+    assert_eq!(resolved, (requested, "cancel".to_owned()));
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
     bridge.abort();

@@ -1230,6 +1230,9 @@ impl DurableRelay {
         relay
             .turn_context
             .set_authorization_context(relay.snapshot.authorization_context());
+        relay
+            .turn_context
+            .set_trusted_user_inputs(relay.snapshot.trusted_user_inputs());
         // Live-only work cannot be reconstructed on reopen. Nor can replay
         // prove an idle transition that was not yet saved with the snapshot.
         let replayed = relay.snapshot.latest_ordinal > snapshot_ordinal;

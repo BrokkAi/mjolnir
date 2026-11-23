@@ -3,6 +3,8 @@ use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use mj_core::activity::ActivityFacts;
 use mj_core::activity::verdict::*;
 use mj_core::config::HarnessKind;
+use mj_core::guardian::{PriorGuardianReview, TrustedUserInput};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Default)]
@@ -24,6 +26,8 @@ struct TurnContextState {
     /// Mjolnir guardian reviews in this request. A new request starts with
     /// none; a recovery continues the same request and keeps them.
     guardian_reviews: GuardianReviews,
+    trusted_user_inputs: Vec<TrustedUserInput>,
+    prior_guardian_reviews: VecDeque<PriorGuardianReview>,
 }
 
 /// Codex's per-turn guardian denial circuit breaker
@@ -32,7 +36,7 @@ struct TurnContextState {
 #[derive(Debug, Default)]
 struct GuardianReviews {
     consecutive_denials: u32,
-    recent: std::collections::VecDeque<bool>,
+    recent: VecDeque<bool>,
     tripped: bool,
 }
 
@@ -140,6 +144,8 @@ impl TurnContext {
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
+            trusted_user_inputs: std::mem::take(&mut state.trusted_user_inputs),
+            prior_guardian_reviews: std::mem::take(&mut state.prior_guardian_reviews),
             user_prompt_tail,
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
@@ -397,6 +403,48 @@ impl TurnContext {
             .render(limit)
     }
 
+    pub fn set_trusted_user_inputs(&self, inputs: Vec<TrustedUserInput>) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .trusted_user_inputs = inputs;
+    }
+
+    pub fn trusted_user_inputs(&self) -> Vec<TrustedUserInput> {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .trusted_user_inputs
+            .clone()
+    }
+
+    pub fn record_prior_guardian_review(&self, review: PriorGuardianReview) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        let reviews = &mut state.prior_guardian_reviews;
+        if reviews.len() == GUARDIAN_DENIAL_WINDOW {
+            reviews.pop_front();
+        }
+        reviews.push_back(review);
+    }
+
+    pub fn prior_guardian_reviews(&self) -> Vec<PriorGuardianReview> {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .prior_guardian_reviews
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn clear_prior_guardian_reviews(&self) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .prior_guardian_reviews
+            .clear();
+    }
+
     /// Whether the guardian's denials tripped the breaker in this request, so
     /// its remaining approvals go to the person.
     pub fn guardian_tripped(&self) -> bool {
@@ -547,6 +595,36 @@ mod tests {
     use super::*;
     use mj_core::activity::InFlightToolCall;
     use serde_json::json;
+
+    #[test]
+    fn guardian_alignment_keeps_bounded_review_history_across_turns() {
+        let context = TurnContext::default();
+        assert!(!context.record_guardian_review(true));
+        assert!(!context.record_guardian_review(true));
+        assert!(context.record_guardian_review(true));
+        for index in 0..=GUARDIAN_DENIAL_WINDOW {
+            context.record_prior_guardian_review(PriorGuardianReview {
+                tool: "shell".into(),
+                action_summary: index.to_string(),
+                outcome: mj_core::guardian::Outcome::Deny,
+                risk_level: None,
+                user_authorization: None,
+                rationale: None,
+            });
+        }
+        context.reset(Some("next"), "Next turn");
+        assert!(!context.guardian_tripped());
+        let reviews = context.prior_guardian_reviews();
+        assert_eq!(reviews.len(), GUARDIAN_DENIAL_WINDOW);
+        assert_eq!(reviews[0].action_summary, "1");
+        assert_eq!(
+            reviews.last().unwrap().action_summary,
+            GUARDIAN_DENIAL_WINDOW.to_string()
+        );
+        context.clear_prior_guardian_reviews();
+        assert!(context.prior_guardian_reviews().is_empty());
+    }
+
     fn message(id: &str, text: &str) -> SessionUpdate {
         serde_json::from_value(json!({"sessionUpdate":"agent_message_chunk","messageId":id,"content":{"type":"text","text":text}})).unwrap()
     }

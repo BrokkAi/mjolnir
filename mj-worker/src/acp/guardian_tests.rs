@@ -467,6 +467,10 @@ async fn a_verdict_reached_while_the_person_wrote_again_is_reviewed_again() {
     );
     let prompts = recorded(temp.path(), "reviewer_prompts");
     assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].as_str().unwrap().contains(
+        "Retry reason:\nNew user authorization arrived while the previous review was in flight."
+    ));
+    assert_eq!(context.prior_guardian_reviews().len(), 1);
     assert!(
         prompts[1]
             .as_str()
@@ -549,11 +553,17 @@ async fn native_guardian_harnesses_send_surfaced_requests_to_the_daemon_only_wit
 
 #[tokio::test]
 async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_pending_entry() {
+    use crate::relay::DurableRelay;
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{
-        GuardianReviewOutcome, GuardianReviewResult, RiskLevel, UserAuthorization,
+        GuardianReviewOutcome, GuardianReviewResult, RiskLevel, TrustedUserInputKind,
+        UserAuthorization,
     };
+    use mj_core::relay::RelayObservation;
+
     let temp = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(relay_dir.path(), "guardian-authorization", "test").unwrap();
     let endpoint = Arc::new(GuardianEndpoint::default());
     let (requests, _events, runtime, context) = start_scripted_harness(
         temp.path(),
@@ -565,13 +575,30 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
             spec.harness = HarnessKind::Kimi;
             spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
             spec.approval_choices = Default::default();
+            spec.turn_context = relay.turn_context();
         },
     );
     let old = wait_for_guardian_request(&endpoint).await;
-    context.set_authorization_context(Some(person_wrote(&[
-        "Tidy the repository.",
-        "Then deploy.",
-    ])));
+    let elicitation_id = "tool-permission-deploy";
+    relay
+        .record_observation(RelayObservation::ElicitationRequested {
+            request: ElicitationRequest {
+                id: elicitation_id.into(),
+                message: "Deploy to staging?".into(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+                tool_permission: None,
+            },
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationResolved {
+            elicitation_id: elicitation_id.into(),
+            action: "accept".into(),
+            reply: Some("Only to staging.".into()),
+        })
+        .unwrap();
     endpoint.complete(GuardianReviewResult {
         request_id: old.request_id.clone(),
         decision: GuardianReviewOutcome::Deny {
@@ -584,7 +611,17 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
     });
     let fresh = wait_for_guardian_request(&endpoint).await;
     assert_ne!(fresh.request_id, old.request_id);
-    assert_eq!(fresh.user_instructions.last().unwrap(), "Then deploy.");
+    let [answer] = fresh.trusted_user_inputs.as_slice() else {
+        panic!("expected one human permission answer");
+    };
+    assert_eq!(answer.kind, TrustedUserInputKind::ManualPermission);
+    assert_eq!(answer.prompt, "Deploy to staging?");
+    assert_eq!(answer.reply, "Only to staging.");
+    assert_eq!(
+        fresh.retry_reason.as_deref(),
+        Some("New user authorization arrived while the previous review was in flight.")
+    );
+    assert!(fresh.prior_reviews.is_empty());
     requests
         .send(CommandRequest::Cancel {
             request_id: "cancel".into(),
@@ -597,7 +634,64 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
         [json!({"command": "make deploy", "outcome": {"outcome": "cancelled"}})]
     );
     assert!(endpoint.requests().is_empty());
+    assert!(context.prior_guardian_reviews().is_empty());
     assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+    runtime.abort();
+}
+
+#[tokio::test]
+async fn guardian_alignment_sends_settled_denial_on_the_next_turn() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{
+        GuardianReviewOutcome, GuardianReviewResult, Outcome, RiskLevel, UserAuthorization,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (requests, mut events, runtime, context) = start_scripted_harness(
+        temp.path(),
+        &["make deploy"],
+        &[],
+        &["Tidy the repository."],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Kimi;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+        },
+    );
+    let first = wait_for_guardian_request(&endpoint).await;
+    assert!(first.prior_reviews.is_empty());
+    endpoint.complete(GuardianReviewResult {
+        request_id: first.request_id,
+        decision: GuardianReviewOutcome::Deny {
+            rationale: "Nobody asked to deploy".into(),
+            risk_level: RiskLevel::High,
+            user_authorization: UserAuthorization::Unknown,
+            stage: "utility_llm".into(),
+            stage1_score: None,
+        },
+    });
+    while !matches!(
+        next_event(&mut events).await,
+        RuntimeEvent::PromptFinished { .. }
+    ) {}
+    // The coordinator starts the next turn on prompt delivery.
+    context.reset(Some("turn-2"), "Keep working");
+    requests
+        .send(CommandRequest::Prompt {
+            request_id: "turn-2".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("Keep working"))],
+        })
+        .await
+        .unwrap();
+    let next = wait_for_guardian_request(&endpoint).await;
+    let [denial] = next.prior_reviews.as_slice() else {
+        panic!("expected one prior denial")
+    };
+    assert_eq!(denial.outcome, Outcome::Deny);
+    assert_eq!(denial.risk_level, Some(RiskLevel::High));
+    assert_eq!(denial.rationale.as_deref(), Some("Nobody asked to deploy"));
+    assert!(denial.action_summary.contains("make deploy"));
     runtime.abort();
 }
 

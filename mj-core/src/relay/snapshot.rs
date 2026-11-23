@@ -1813,6 +1813,8 @@ pub struct RelaySnapshot {
     pub person_input_through: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_user_inputs: Vec<crate::guardian::TrustedUserInput>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1996,6 +1998,10 @@ impl RelaySnapshot {
             .map(crate::assessment::ContextHistory::reader_view)
     }
 
+    pub fn trusted_user_inputs(&self) -> Vec<crate::guardian::TrustedUserInput> {
+        self.trusted_user_inputs.clone()
+    }
+
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
         self.harness_turn.filter(|turn| turn.autonomous)
@@ -2016,6 +2022,7 @@ impl RelaySnapshot {
             notifications_read_through: 0,
             person_input_through: 0,
             assessment_context: Some(Default::default()),
+            trusted_user_inputs: Vec::new(),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
             continuation: Default::default(),

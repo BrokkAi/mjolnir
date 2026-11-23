@@ -2405,7 +2405,56 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                     .as_ref()
                     .map(|prompt| prompt.command_id.clone());
             }
-            snapshot.pending_elicitations.remove(elicitation_id);
+            let pending_request = snapshot
+                .pending_elicitations
+                .remove(elicitation_id)
+                .flatten();
+            if action != "cancel"
+                && let Some(reply) = reply
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reply| !reply.is_empty())
+            {
+                use crate::assessment::{MAX_MESSAGES, trim_middle};
+                use crate::guardian::{TrustedUserInput, TrustedUserInputKind};
+                let kind = if pending_request
+                    .as_ref()
+                    .is_some_and(|r| r.tool_permission.is_some())
+                    || elicitation_id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX)
+                {
+                    TrustedUserInputKind::ManualPermission
+                } else {
+                    TrustedUserInputKind::UserAnswer
+                };
+                let prompt = pending_request.as_ref().map_or("", |r| r.message.trim());
+                // Journal replies can repeat the form's message above the answer.
+                let reply = reply
+                    .strip_prefix(prompt)
+                    .filter(|_| !prompt.is_empty())
+                    .map(str::trim)
+                    .filter(|rest| !rest.is_empty())
+                    .unwrap_or(reply);
+                let inputs = &mut snapshot.trusted_user_inputs;
+                inputs.push(TrustedUserInput {
+                    // Older bridges could reuse a form ID after reload.
+                    // Each durable resolution has a unique, replay-stable ordinal.
+                    id: format!("elicitation:{}:{elicitation_id}", event.ordinal),
+                    kind,
+                    prompt: trim_middle(prompt),
+                    reply: trim_middle(reply),
+                });
+                let mut bytes = 0;
+                let retained = inputs
+                    .iter()
+                    .rev()
+                    .take(MAX_MESSAGES)
+                    .take_while(|input| {
+                        bytes += input.id.len() + input.prompt.len() + input.reply.len();
+                        bytes <= crate::continuation::USER_BYTES
+                    })
+                    .count();
+                inputs.drain(..inputs.len() - retained);
+            }
             if reply.is_some() {
                 clear_notifications(snapshot, event.ordinal);
                 if let Some(context) = &mut snapshot.assessment_context {
@@ -2503,6 +2552,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ..
         } => {
             snapshot.assessment_context = Some(Default::default());
+            snapshot.trusted_user_inputs.clear();
             snapshot.assessment = None;
             // The conversation that held any open request is gone, so fence it
             // like person input; a fresh conversation inherits no question.
@@ -2596,6 +2646,128 @@ fn begin_delivered_message_turn(
 #[cfg(test)]
 mod open_request_tests {
     use super::*;
+
+    #[test]
+    fn guardian_alignment_replays_human_form_answers_until_context_is_cleared() {
+        use crate::elicitation::{
+            ElicitationRequest, ElicitationResponse, TOOL_PERMISSION_ID_PREFIX, ToolPermissionForm,
+        };
+        use crate::guardian::TrustedUserInputKind;
+
+        let mut snapshot = RelaySnapshot::new("forms".into());
+        let mut replay = snapshot.clone();
+        let apply = |snapshot: &mut RelaySnapshot, replay: &mut RelaySnapshot, observation| {
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V2,
+                ordinal: snapshot.latest_ordinal + 1,
+                previous_digest: String::new(),
+                digest: String::new(),
+                recorded_at_ms: 1,
+                command_id: None,
+                observation,
+            };
+            event.digest = relay_event_digest(&event).unwrap();
+            apply_relay_event(snapshot, &event).unwrap();
+            let wire = serde_json::to_vec(&event).unwrap();
+            apply_relay_event(replay, &serde_json::from_slice(&wire).unwrap()).unwrap();
+        };
+
+        for (id, permission, action, reply) in [
+            ("ask", false, "accept", Some("  Keep it local.  ")),
+            ("permission", true, "decline", None),
+            ("automatic", false, "away", None),
+            ("cancellation", false, "cancel", Some("Cancelled")),
+        ] {
+            let request = ElicitationRequest {
+                id: id.into(),
+                message: "  Proceed?  ".into(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+                tool_permission: permission.then_some(ToolPermissionForm {
+                    skip: true,
+                    tool_call_id: None,
+                }),
+            };
+            let reply = if permission {
+                Some(request.reply_text(&ElicitationResponse::Decline))
+            } else {
+                reply.map(str::to_owned)
+            };
+            apply(
+                &mut snapshot,
+                &mut replay,
+                RelayObservation::ElicitationRequested { request },
+            );
+            apply(
+                &mut snapshot,
+                &mut replay,
+                RelayObservation::ElicitationResolved {
+                    elicitation_id: id.into(),
+                    action: action.into(),
+                    reply,
+                },
+            );
+        }
+        for id in [
+            "ask".to_owned(),
+            format!("{TOOL_PERMISSION_ID_PREFIX}missing-request"),
+        ] {
+            apply(
+                &mut snapshot,
+                &mut replay,
+                RelayObservation::ElicitationResolved {
+                    elicitation_id: id,
+                    action: "accept".into(),
+                    reply: Some("Yes".into()),
+                },
+            );
+        }
+
+        let inputs = snapshot.trusted_user_inputs();
+        assert_eq!(inputs, replay.trusted_user_inputs());
+        let restored: RelaySnapshot =
+            serde_json::from_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
+        assert_eq!(inputs, restored.trusted_user_inputs());
+        assert_eq!(inputs.len(), 4);
+        assert_ne!(inputs[0].id, inputs[2].id, "a legacy form ID can be reused");
+        assert_eq!(inputs[0].kind, TrustedUserInputKind::UserAnswer);
+        assert_eq!(inputs[0].prompt, "Proceed?");
+        assert_eq!(inputs[0].reply, "Keep it local.");
+        assert_eq!(inputs[1].kind, TrustedUserInputKind::ManualPermission);
+        assert_eq!(inputs[1].prompt, "Proceed?");
+        assert_eq!(inputs[1].reply, "Skipped");
+        assert_eq!(inputs[2].kind, TrustedUserInputKind::UserAnswer);
+        assert_eq!(inputs[2].reply, "Yes");
+        assert_eq!(inputs[3].kind, TrustedUserInputKind::ManualPermission);
+        assert!(inputs[3].prompt.is_empty());
+
+        apply(
+            &mut snapshot,
+            &mut replay,
+            RelayObservation::CommandQueued {
+                command_id: "clear".into(),
+                command: RelayCommand::ClearContext,
+                created_at_ms: 1,
+                insert_at_front: false,
+            },
+        );
+        apply(
+            &mut snapshot,
+            &mut replay,
+            RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: None,
+                command_id: "clear".into(),
+                outcome: RelayCommandOutcome::ContextCleared {
+                    native_session_id: "new".into(),
+                    memory: None,
+                },
+            },
+        );
+        assert!(snapshot.trusted_user_inputs().is_empty());
+        assert!(replay.trusted_user_inputs().is_empty());
+    }
 
     #[test]
     fn automatic_form_resolution_preserves_request_but_person_answer_clears_it() {
