@@ -59,6 +59,9 @@ pub struct ViewerSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<ViewerWorkspace>,
     pub sessions: ViewerSessions,
+    /// Controller-private IDs that can still be destroyed through the API.
+    #[serde(skip)]
+    pub retired_session_ids: mj_core::snapshot_map::SharedSnapshot<BTreeSet<String>>,
     pub profiles: Vec<ViewerProfile>,
     /// Configured profiles left out of `profiles` because they are disabled.
     /// Pickers never offer them, but a request that names one explicitly may
@@ -579,6 +582,7 @@ impl ViewerSnapshot {
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
             workspaces: Vec::new(),
             sessions,
+            retired_session_ids: Default::default(),
             profiles,
             disabled_profile_ids,
             targets,

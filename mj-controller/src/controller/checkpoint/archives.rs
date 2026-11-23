@@ -30,9 +30,10 @@ pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
             .map(|(_, op)| op)
             .collect();
     let restarts = crate::database::load_session_restarts()?;
+    let checkpoints = crate::database::load_session_checkpoints()?;
     let removed = reconcile_managed_checkpoint_archives_in(
         &sessions_dir(),
-        &state,
+        checkpoints.iter().map(|(_, checkpoint)| checkpoint),
         &operations,
         &legacy_operations,
         &restarts,
@@ -51,9 +52,9 @@ pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
 /// Every archive a session record or an unfinished Move or Restart refers to
 /// is kept. Move references come from [`MoveOperation::retained_archives`], the
 /// same answer the superseded-checkpoint prune reads.
-pub(super) fn reconcile_managed_checkpoint_archives_in(
+pub(super) fn reconcile_managed_checkpoint_archives_in<'a>(
     directory: &Path,
-    state: &State,
+    checkpoints: impl IntoIterator<Item = &'a CheckpointMetadata>,
     operations: &[mj_core::state::MoveOperation],
     legacy_operations: &[mj_core::state::LegacyMoveOperation],
     restarts: &[crate::database::SessionRestartIntent],
@@ -64,10 +65,8 @@ pub(super) fn reconcile_managed_checkpoint_archives_in(
     let mut referenced_names =
         recovery_referenced_archive_names(operations, legacy_operations, restarts);
     referenced_names.extend(
-        state
-            .sessions
-            .values()
-            .filter_map(|session| session.checkpoint.as_deref())
+        checkpoints
+            .into_iter()
             .filter_map(|checkpoint| checkpoint.archive_path.file_name())
             .map(ToOwned::to_owned),
     );

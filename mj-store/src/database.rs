@@ -39,6 +39,9 @@ pub use web_push::*;
 mod ec2_grants;
 pub use ec2_grants::*;
 
+mod retired_harnesses;
+pub use retired_harnesses::*;
+
 mod environments;
 pub use environments::*;
 

@@ -152,6 +152,9 @@ pub struct ProviderTurnUsage {
     pub model_usage: std::collections::BTreeMap<String, TokenUsage>,
 }
 
+/// Exact tick scale for provider and estimated turn costs: 10^10 ticks per USD.
+pub const USD_TICKS_PER_DOLLAR: u64 = 10_000_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderTurnCost {
     pub usd_ticks: u64,
@@ -166,8 +169,8 @@ impl ProviderTurnCost {
             usd_ticks,
             usd: format!(
                 "{}.{:010}",
-                usd_ticks / 10_000_000_000,
-                usd_ticks % 10_000_000_000
+                usd_ticks / USD_TICKS_PER_DOLLAR,
+                usd_ticks % USD_TICKS_PER_DOLLAR
             ),
             is_partial,
         }
