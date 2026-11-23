@@ -1379,7 +1379,7 @@ impl DurableRelay {
             self.record_command_interrupted(
                 &command_id,
                 mj_core::event_outcome::OutcomeReason::WorkerRestarted,
-                "relay restarted while the ACP command was in flight; it was not replayed",
+                "worker restarted while the ACP command was in flight; it was not replayed",
             )?;
         }
         if restored_close {

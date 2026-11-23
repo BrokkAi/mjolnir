@@ -4272,6 +4272,7 @@ async fn cancel_turn_is_refused_when_there_is_no_turn_to_cancel() {
 async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(MaterializedTurnOutcome {
@@ -4327,6 +4328,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     turn.answered_through = Some(9);
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(turn),
@@ -4374,6 +4376,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
 async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "prompt-1".into(),
@@ -4416,6 +4419,7 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
     for handoff in [true, false] {
         let backend = Arc::new(FakeBackend {
             turn_states: Mutex::new(vec![Some(TurnState {
+                queued_command_ids: Vec::new(),
                 execution: MaterializedExecutionState::Running { started_at_ms: 10 },
                 active_turn: Some(MaterializedTurn {
                     command_id: "prompt-1".into(),
@@ -4475,6 +4479,7 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
 async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "prompt-1".into(),
@@ -4669,6 +4674,7 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
         Some(1),
     ));
     let durable = TurnState {
+        queued_command_ids: Vec::new(),
         execution: MaterializedExecutionState::Running { started_at_ms: 1 },
         active_turn: Some(MaterializedTurn {
             command_id: "api-1".into(),
@@ -4751,6 +4757,7 @@ fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
 async fn a_wait_right_after_creating_with_a_prompt_waits_for_that_prompt() {
     let idle_session = || {
         Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: None,
@@ -5183,6 +5190,49 @@ fn a_wait_on_a_turn_follows_the_workers_retry_of_it() {
             },
             ..refused.clone()
         };
+        if restarting {
+            let (config, state) = sample_config_state();
+            let viewer = ViewerSnapshot::from_config_state(&config, &state, 1);
+            let session = &viewer.sessions[0];
+            let mut durable = TurnState {
+                execution: MaterializedExecutionState::Idle,
+                active_turn: None,
+                last_turn_outcome: Some(refused.clone()),
+                queued_command_ids: vec![retried.command_id.clone()],
+            };
+            let observe =
+                |turn: &TurnState| build_observation(&viewer, session, None, Some(turn), None);
+            assert_eq!(
+                resolve_wait(&observe(&durable), &on_turn_10),
+                None,
+                "a committed queued continuation holds the original turn without a worker snapshot"
+            );
+            durable.queued_command_ids.clear();
+            let decision = resolve_wait(&observe(&durable), &on_turn_10)
+                .expect("an interruption without a continuation ends the wait");
+            assert_eq!(decision.outcome, WaitOutcome::Error);
+            assert_eq!(decision.turn_id, Some(10));
+
+            for (outcome, expected) in [
+                (retried.outcome.clone(), WaitOutcome::Finished),
+                (
+                    TurnOutcomeKind::Interrupted {
+                        reason: Some(mj_core::event_outcome::OutcomeReason::RequestedCancellation),
+                        message: "cancelled".into(),
+                    },
+                    WaitOutcome::Cancelled,
+                ),
+            ] {
+                durable.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    outcome,
+                    ..retried.clone()
+                });
+                let decision = resolve_wait(&observe(&durable), &on_turn_10)
+                    .expect("the committed continuation outcome ends the wait");
+                assert_eq!(decision.outcome, expected);
+                assert_eq!(decision.turn_id, Some(10));
+            }
+        }
         let settled = live_observation(
             projection_with(retried),
             worker_state(ActivityState::Idle { since_ms: None }),
@@ -7735,6 +7785,7 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     let backend = Arc::new(FakeBackend {
         live_view: Some(actor_without_projection()),
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "prompt-1".into(),
@@ -7825,6 +7876,7 @@ async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() 
     let backend = Arc::new(FakeBackend {
         live_view: Some(actor_without_projection()),
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "task".into(),
@@ -7849,6 +7901,7 @@ async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() 
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(!waiter.is_finished());
     *backend.turn_states.lock().unwrap() = vec![Some(TurnState {
+        queued_command_ids: Vec::new(),
         execution: MaterializedExecutionState::Idle,
         active_turn: None,
         last_turn_outcome: Some(finished_child_turn("task")),
@@ -7879,6 +7932,7 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
     let backend = Arc::new(FakeBackend {
         live_view: Some(actor_without_projection()),
         turn_states: Mutex::new(vec![Some(TurnState {
+            queued_command_ids: Vec::new(),
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(finished_child_turn("task")),
@@ -8512,6 +8566,7 @@ fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let durable = TurnState {
+        queued_command_ids: Vec::new(),
         execution: MaterializedExecutionState::Idle,
         active_turn: None,
         last_turn_outcome: observation.last_turn_outcome.clone(),

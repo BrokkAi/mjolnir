@@ -1631,6 +1631,7 @@ mod tests {
         committed.turns.insert_shared(
             "child".into(),
             mj_controller::database::CommittedTurn {
+                queued_command_ids: Vec::new(),
                 state: (
                     mj_core::state::MaterializedExecutionState::Idle,
                     None,

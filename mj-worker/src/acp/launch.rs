@@ -272,16 +272,20 @@ pub(super) fn project_history_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
 pub(super) fn session_request_meta(
     spec: &LaunchSpec,
     include_history_tools: bool,
+    reopening: bool,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     if spec.harness == HarnessKind::Codex {
-        let asking = spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .asking();
+        // Codex can start an active stored goal during native open, before
+        // Mjolnir can deliver its queued prompts.
+        let pause_goal = reopening
+            || spec
+                .goal_recovery
+                .lock()
+                .expect("goal lock poisoned")
+                .asking();
         let mut meta = serde_json::Map::from_iter([(
             "jetbrains".into(),
-            serde_json::json!({"air":{"goal":{"resumePolicy": if asking {"pause"} else {"preserve"}}}}),
+            serde_json::json!({"air":{"goal":{"resumePolicy": if pause_goal {"pause"} else {"preserve"}}}}),
         )]);
         // The launch policy owns suppression independently of MCP exposure:
         // None and children suppress native delegation without a parent socket.
@@ -796,7 +800,7 @@ pub(super) fn new_session_request(
     system_prompt: Option<SystemPromptAppend>,
 ) -> NewSessionRequest {
     let (meta, system_prompt) = system_prompt_parameters(
-        session_request_meta(spec, include_history_tools),
+        session_request_meta(spec, include_history_tools, false),
         system_prompt,
     );
     let request = NewSessionRequest::new(spec.cwd.clone())
@@ -813,7 +817,7 @@ pub(super) fn load_session_request(
     system_prompt: Option<SystemPromptAppend>,
 ) -> LoadSessionRequest {
     let (meta, system_prompt) =
-        system_prompt_parameters(session_request_meta(spec, true), system_prompt);
+        system_prompt_parameters(session_request_meta(spec, true, true), system_prompt);
     LoadSessionRequest::new(session_id, spec.cwd.clone())
         .system_prompt(system_prompt)
         .additional_directories(directories.to_vec())
@@ -833,7 +837,7 @@ pub(super) fn resume_session_request(
     system_prompt: Option<SystemPromptAppend>,
 ) -> ResumeSessionRequest {
     let (meta, system_prompt) =
-        system_prompt_parameters(session_request_meta(spec, true), system_prompt);
+        system_prompt_parameters(session_request_meta(spec, true, true), system_prompt);
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
         .system_prompt(system_prompt)
         .additional_directories(directories.to_vec())
