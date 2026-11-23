@@ -9155,7 +9155,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
     assert!(!response.is_error, "{}", response.message);
     let value: serde_json::Value = serde_json::from_str(&response.message).unwrap();
     let agents = value["agents"].as_array().unwrap();
-    assert_eq!(agents.len(), 5);
+    assert_eq!(agents.len(), 3);
     let current = &agents[0];
     assert_eq!(current["child_session_id"], "child-1");
     assert_eq!(current["task_name"], "audit deps");
@@ -9174,6 +9174,4 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
     assert_eq!(agents[1]["effort"], "low");
     assert_eq!(agents[2]["role"], "orchestrator");
     assert_eq!(agents[2]["active_children"], 1);
-    assert_eq!(agents[3]["role"], "oracle");
-    assert_eq!(agents[4]["role"], "reviewer");
 }

@@ -1495,7 +1495,10 @@ impl ApiBackend {
                     let parent = parent_session_id.to_owned();
                     move || mj_controller::database::list_subagent_details(&parent)
                 })
-                .await?;
+                .await?
+                .into_iter()
+                .filter(|detail| detail.relation.kind == mj_core::subagent::SubagentKind::Worker)
+                .collect::<Vec<_>>();
                 let child_ids = details
                     .iter()
                     .map(|detail| detail.relation.child_session_id.clone())
@@ -1562,9 +1565,7 @@ impl ApiBackend {
                         entry["effort"] = serde_json::json!(selection.effort);
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
-                        if relation.kind == mj_core::subagent::SubagentKind::Worker {
-                            mark_promptable(&mut entry, &state, progress, record.as_ref());
-                        }
+                        mark_promptable(&mut entry, &state, progress, record.as_ref());
                         if let ReportState::Held {
                             since_ms,
                             give_up_at_ms,
@@ -3660,17 +3661,12 @@ fn listed_agent_role(
     relation: &mj_core::subagent::SubagentRecord,
     category: Option<&str>,
 ) -> &'static str {
-    use mj_core::subagent::SubagentKind;
-    match relation.kind {
-        SubagentKind::Reviewer => "reviewer",
-        SubagentKind::Oracle => "oracle",
-        SubagentKind::Worker
-            if relation.supervisor || matches!(category, Some("supervisor" | "orchestrator")) =>
-        {
-            "orchestrator"
-        }
-        SubagentKind::Worker if category == Some("subtle") => "subtle",
-        SubagentKind::Worker => "straightforward",
+    if relation.supervisor || matches!(category, Some("supervisor" | "orchestrator")) {
+        "orchestrator"
+    } else if category == Some("subtle") {
+        "subtle"
+    } else {
+        "straightforward"
     }
 }
 
@@ -3678,10 +3674,11 @@ fn live_direct_children(projection: &RuntimeProjection) -> BTreeMap<&str, usize>
     let mut counts = BTreeMap::new();
     for relation in projection.subagents.values() {
         // Use the same live-worker states that count against delegation slots.
-        if projection
-            .records
-            .get(&relation.child_session_id)
-            .is_some_and(|record| record.state.has_live_worker())
+        if relation.kind == mj_core::subagent::SubagentKind::Worker
+            && projection
+                .records
+                .get(&relation.child_session_id)
+                .is_some_and(|record| record.state.has_live_worker())
         {
             *counts
                 .entry(relation.parent_session_id.as_str())
