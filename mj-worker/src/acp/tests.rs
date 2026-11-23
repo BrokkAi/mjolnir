@@ -8759,6 +8759,7 @@ fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
     // The marker supplies the first line even when cleanup also reported
     // an error. The bridge stderr remains available below that cause.
     let error = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+        kind: None,
         message: "load ACP session failed".to_owned(),
     })
     .context(format!("{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic"))

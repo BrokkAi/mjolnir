@@ -1536,7 +1536,7 @@ impl ApiBackend {
                             .map_or((None, &unknown), |(summary, progress)| {
                                 (summary.as_ref(), progress)
                             });
-                        let (state, _, _) = inputs.status(
+                        let (state, output, _) = inputs.status(
                             &relation.child_session_id,
                             record.as_ref(),
                             subagent_status(
@@ -1564,6 +1564,12 @@ impl ApiBackend {
                         entry["model"] = serde_json::json!(selection.model);
                         entry["effort"] = serde_json::json!(selection.effort);
                         inputs.annotate(&relation.child_session_id, &mut entry);
+                        if state == "error"
+                            && let Some(cause) = output
+                        {
+                            entry["error"] = cause.into();
+                            entry["next_action"] = mj_core::subagent::FAILED_CHILD_CLOSE_GUIDANCE.into();
+                        }
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
                         if let ReportState::Held {
@@ -1828,8 +1834,7 @@ impl ApiBackend {
     /// Start a parked child's worker again and wait until its session can
     /// take a prompt. Returns whether there was a park to wait for or undo; a
     /// running child with no park in progress needs nothing and returns
-    /// false. A proved dead wake returns its failure and leaves the child
-    /// parked for another send; uncertain liveness remains recoverable.
+    /// false. A failed wake reports the outcome of the lifecycle operation.
     async fn unpark_child(&self, child_id: &str) -> Result<bool> {
         let parked = self
             .exports
@@ -1858,12 +1863,14 @@ impl ApiBackend {
             .unpark_subagent(child_id.to_owned())
             .await
             .map_err(|error| {
-                let detail = if self.exports.session_record(child_id)
-                    .is_some_and(|record| record.state == SessionState::Parked)
-                {
-                    "could not start the parked sub-agent again; it is still parked, so you can retry"
-                } else {
-                    "could not finish starting the sub-agent; an accepted wake remains recoverable"
+                let detail = match self.exports.session_record(child_id).map(|record| record.state) {
+                    Some(SessionState::Parked) => {
+                        "could not start the parked sub-agent again; it is still parked, so you can retry"
+                    }
+                    Some(SessionState::Running) => {
+                        "could not finish starting the sub-agent; an accepted wake remains recoverable"
+                    }
+                    _ => "could not start the parked sub-agent again",
                 };
                 error.context(detail)
             })?;

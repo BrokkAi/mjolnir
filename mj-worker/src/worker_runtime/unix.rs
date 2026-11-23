@@ -1693,6 +1693,32 @@ pub async fn run_daemon_owned(
         remove_control_socket(&socket, "startup")
             .with_context(|| format!("remove stale socket {}", socket.display()))?;
     }
+    // Check the target directory before serving any relay requests. Otherwise
+    // a child process can fail to spawn with ENOENT for its cwd, and a caller
+    // that already attached can see only the ensuing relay disconnect.
+    if !checkpoint_only {
+        const STEP: &str = "working-directory";
+        super::record_startup_step(&root, STEP);
+        let problem = match std::fs::metadata(&config.cwd) {
+            Ok(metadata) if metadata.is_dir() => None,
+            Ok(_) => Some("path is not a directory".to_owned()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(problem) = problem {
+            let message = format!(
+                "worker working directory {} is unavailable: {problem}",
+                config.cwd.display()
+            );
+            super::record_startup_failure(&root, STEP, &message);
+            return Err(mj_core::relay::WorkerHarnessStartupFailure {
+                message,
+                kind: Some(
+                    mj_core::relay::WorkerHarnessStartupFailureKind::WorkingDirectoryUnavailable,
+                ),
+            }
+            .into());
+        }
+    }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
     let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
     // Validate and recover durable state before publishing a socket. A
@@ -2418,7 +2444,10 @@ async fn supervise_preparation<T>(
         tracing::warn!(%step, "a preparation thread was still running when preparation failed");
     }
     Err(PreparationStop::Failed(anyhow::Error::new(
-        mj_core::relay::WorkerHarnessStartupFailure { message },
+        mj_core::relay::WorkerHarnessStartupFailure {
+            message,
+            kind: None,
+        },
     )))
 }
 
