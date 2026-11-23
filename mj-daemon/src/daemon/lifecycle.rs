@@ -196,7 +196,8 @@ impl RuntimeState {
                 control,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: None,
-                deferrable_admission: None,
+                deferrable_admission: (kind == LifecycleKind::ArchiveStopped)
+                    .then_some("archive stopped session"),
                 holds_through_drain: false,
             },
             work,
@@ -470,8 +471,18 @@ impl RuntimeState {
             mut phase,
             move_operation_id,
             deferrable_admission,
-            holds_through_drain: _,
+            holds_through_drain,
         } = start;
+        // Shutdown closes the session gate before snapshotting this registry
+        // under the same owner lock. Cleanup must be registered before that
+        // snapshot or stay pending for the replacement daemon.
+        if kind == LifecycleKind::Cleanup && self.session_gate.is_closed() {
+            return Err(Refusal::precondition(
+                "daemon is shutting down; deferred cleanup remains pending",
+            )
+            .with_code(mj_controller::upgrade::HANDOFF_REFUSAL_CODE)
+            .into());
+        }
         let mut work = Some(work);
         let mut superseded_restart_intent = None;
         let (result, receipt, acceptance) = {
@@ -575,11 +586,9 @@ impl RuntimeState {
                         operation_id: operation_reference.clone(),
                         kind,
                     });
-                // A create is safe to stop and starts again under the next
-                // daemon from its durable create intent, so it does not hold
-                // the handoff: the handoff stops it. Only its short commit
-                // write takes admission, under its own label.
-                let resumable = kind == LifecycleKind::Create;
+                // Create and deferred cleanup restart from durable state.
+                // They take short admission only to settle their records.
+                let resumable = matches!(kind, LifecycleKind::Create | LifecycleKind::Cleanup);
                 let admit = || -> Result<mj_controller::upgrade::Work> {
                     Ok(if let Some(label) = deferrable_admission {
                         mj_controller::upgrade::activity_unless_draining_described(
@@ -591,7 +600,7 @@ impl RuntimeState {
                             describer,
                         )?
                     } else if kind == LifecycleKind::ForceDestroy {
-                        if queued {
+                        if queued || (origin == LifecycleOrigin::Person && !holds_through_drain) {
                             mj_controller::upgrade::destroy_activity_unless_draining(&session_id)?
                         } else {
                             mj_controller::upgrade::destroy_activity(&session_id)?
@@ -616,7 +625,7 @@ impl RuntimeState {
                         }
                     })
                 };
-                let _queued_create_admission = if resumable && queued {
+                let _queued_create_admission = if kind == LifecycleKind::Create && queued {
                     Some(mj_controller::upgrade::activity_unless_draining(
                         "queued create admission",
                     )?)
@@ -886,11 +895,17 @@ impl RuntimeState {
                             | LifecycleKind::Restart
                             | LifecycleKind::UpgradeContainer
                             | LifecycleKind::Create
+                            | LifecycleKind::Cleanup
                     ) && state
                         .owner()
                         .lifecycle
                         .get(&operation_session_id)
                         .is_some_and(|active| active.control.stopped_for_shutdown());
+                    if handed_off_lifecycle && kind == LifecycleKind::Cleanup {
+                        // The replacement owns the retained locator. This is
+                        // neither a teardown failure nor a caller refusal.
+                        result = Ok(DaemonLifecycleResult::Done);
+                    }
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"
@@ -1069,8 +1084,10 @@ impl RuntimeState {
                             .start_deferred_cleanup(operation_session_id.clone())
                             .await
                     {
-                        tracing::warn!(session_id = %operation_session_id, %error, "could not start retained cleanup");
-                        state.push_notice(&operation_session_id, "Container cleanup could not start; retry cleanup from the stopped session.");
+                        if !super::actions::is_upgrade_handoff_refusal(&error) {
+                            tracing::warn!(session_id = %operation_session_id, %error, "could not start retained cleanup");
+                            state.push_notice(&operation_session_id, "Container cleanup could not start; retry cleanup from the stopped session.");
+                        }
                         state
                             .owner()
                             .lifecycle

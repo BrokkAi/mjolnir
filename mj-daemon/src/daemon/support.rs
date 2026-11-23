@@ -276,11 +276,26 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
-        // Synchronous callers include workspace copies. Hand the wait off
-        // async workers, and let the gate wake it on closure or drain lapse.
-        let admitted = mj_core::runtime::off_async_worker(|| {
-            mj_controller::upgrade::gate().enter_after_draining(label)
-        });
+        let settling_cleanup = self
+            .state
+            .owner()
+            .lifecycle
+            .get(&self.session_id)
+            .is_some_and(|active| {
+                self.operation_id.as_ref() == Some(&active.operation_id)
+                    && active.kind == LifecycleKind::Cleanup
+            });
+        let admitted = if settling_cleanup {
+            // An accepted Destroy may already hold admission while it waits
+            // for this cleanup. The short settlement write must be able to
+            // finish while that hold is draining.
+            mj_controller::upgrade::activity(label)
+        } else {
+            // Workspace copies can wait for the drain to lapse or close.
+            mj_core::runtime::off_async_worker(|| {
+                mj_controller::upgrade::gate().enter_after_draining(label)
+            })
+        };
         if admitted.is_err() {
             let mut owner = self.state.owner();
             if let Some(active) = owner.lifecycle.get_mut(&self.session_id)

@@ -513,7 +513,7 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// before this daemon started: its checkpoint is sealed, or a child's final
 /// conversation is durable, and stopping cleanup now only strands the target.
 fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    kind == LifecycleKind::StartupCleanup
+    matches!(kind, LifecycleKind::Cleanup | LifecycleKind::StartupCleanup)
         || matches!(
             kind,
             LifecycleKind::Suspend | LifecycleKind::Restart | LifecycleKind::UpgradeContainer

@@ -1180,27 +1180,20 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 }
 
 pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
-    let remote = spawn_remote_session_manager().unwrap();
-    let recovery = remote.control.session_gate.clone();
-    let upgrades =
-        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
-    Arc::new(RuntimeState::new_with_controller_loader(
-        remote.control,
-        controller,
-        recovery.clone(),
-        upgrades.observer(),
-        Vec::new(),
-        || {
-            Ok(Controller {
-                config: Config::default(),
-                state: mj_core::state::State::default(),
-            })
-        },
-    ))
+    test_runtime_state_with_live_recovery(controller, empty_test_controller).0
 }
 
-#[cfg(unix)]
-pub(super) fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+fn empty_test_controller() -> Result<Controller> {
+    Ok(Controller {
+        config: Config::default(),
+        state: mj_core::state::State::default(),
+    })
+}
+
+fn test_runtime_state_with_live_recovery(
+    controller: Controller,
+    controller_loader: fn() -> Result<Controller>,
+) -> (
     Arc<RuntimeState>,
     Arc<RecoveryGate>,
     crate::worker_upgrade::WorkerUpgradeCoordinator,
@@ -1211,13 +1204,22 @@ pub(super) fn test_runtime_state_loading_the_store_with_live_recovery() -> (
         crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
-        Controller::load().unwrap(),
+        controller,
         recovery.clone(),
         upgrades.observer(),
         Vec::new(),
-        Controller::load,
+        controller_loader,
     ));
     (state, recovery, upgrades)
+}
+
+#[cfg(unix)]
+pub(super) fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+    Arc<RuntimeState>,
+    Arc<RecoveryGate>,
+    crate::worker_upgrade::WorkerUpgradeCoordinator,
+) {
+    test_runtime_state_with_live_recovery(Controller::load().unwrap(), Controller::load)
 }
 
 /// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
@@ -2964,44 +2966,316 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
     ));
 }
 
-#[tokio::test]
-async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
-    let state = test_runtime_state();
-    let saw_early_cancellation = Arc::new(AtomicBool::new(false));
-    let result = state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Cleanup, {
-            let saw_early_cancellation = saw_early_cancellation.clone();
-            move |state, session_id, cancelled, _session_admission| async move {
-                let executor = DaemonStageReportingExecutor::new(
-                    mj_controller::targets::ProcessExecutor,
-                    state,
-                    session_id,
-                );
-                executor.stage_started(ProvisionStage::RemovingStorage);
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                saw_early_cancellation.store(cancelled.load(Ordering::Acquire), Ordering::Release);
-                executor.stage_finished(ProvisionStage::RemovingStorage);
-                Ok(DaemonLifecycleResult::Done)
+#[cfg(unix)]
+const DEFERRED_CLEANUP_TEST_SESSION: &str = "0123456789abcdef0123456789abcdef";
+
+#[cfg(unix)]
+fn deferred_cleanup_test(name: &str, phases: &[&str]) -> Option<(PathBuf, String)> {
+    use mj_controller::controller::test_support::{IsolatedTest, test_name};
+
+    const ROOT: &str = "MJ_DEFERRED_CLEANUP_TEST_ROOT";
+    const PHASE: &str = "MJ_DEFERRED_CLEANUP_TEST_PHASE";
+    if let Some(root) = std::env::var_os(ROOT) {
+        return Some((root.into(), std::env::var(PHASE).unwrap()));
+    }
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let session = DEFERRED_CLEANUP_TEST_SESSION;
+    let container = mj_controller::targets::resource_name(session).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+case "$1 ${{2-}}" in
+    'container inspect'|'container exists') exit 1 ;;
+    'rm --force'|'info ') exit 0 ;;
+    'volume inspect')
+        case "$5" in
+            '{container}-workspace') file=volume ;;
+            '{container}-replacement') file=replacement-volume ;;
+            *) exit 1 ;;
+        esac
+        [ -f "$MJ_DEFERRED_CLEANUP_TEST_ROOT/$file" ] || exit 1
+        printf '%s\n' 'true|{session}'
+        ;;
+    'volume rm')
+        echo "$4" >> "$MJ_DEFERRED_CLEANUP_TEST_ROOT/removals"
+        case "$4" in
+            '{container}-workspace') ;;
+            '{container}-replacement') rm "$MJ_DEFERRED_CLEANUP_TEST_ROOT/replacement-volume"; exit ;;
+            *) exit 125 ;;
+        esac
+        if test "$MJ_DEFERRED_CLEANUP_TEST_PHASE" != recovery; then
+            head -c 131072 /dev/zero >&2
+            printf '%s %s\n' "$PPID" "$$" > "$MJ_DEFERRED_CLEANUP_TEST_ROOT/removal-started.pending"
+            mv "$MJ_DEFERRED_CLEANUP_TEST_ROOT/removal-started.pending" "$MJ_DEFERRED_CLEANUP_TEST_ROOT/removal-started"
+            exec /bin/sleep 60
+        fi
+        rm "$MJ_DEFERRED_CLEANUP_TEST_ROOT/volume"
+        ;;
+    *) exit 125 ;;
+esac
+"#,
+    );
+    mj_core::test_hooks::install_fake_command(&bin, "podman", &script);
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let home = root.path().join("home");
+    fs::create_dir(&home).unwrap();
+    for phase in phases {
+        IsolatedTest::new(test_name(module_path!(), name))
+            .env(ROOT, root.path())
+            .env(PHASE, phase)
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env(
+                mj_core::config::SESSION_INDEX_ENV,
+                root.path().join("sessionwiki"),
+            )
+            .isolated_store(root.path())
+            .run();
+    }
+    None
+}
+
+#[cfg(unix)]
+fn start_deferred_cleanup_test(
+    root: &Path,
+) -> (
+    Arc<RuntimeState>,
+    crate::worker_upgrade::WorkerUpgradeCoordinator,
+) {
+    use mj_controller::controller::lifecycle::test_fixtures::{
+        persist_controller_fixture, stopped_podman_cleanup_controller,
+    };
+    let controller = stopped_podman_cleanup_controller(DEFERRED_CLEANUP_TEST_SESSION);
+    controller.config.save().unwrap();
+    persist_controller_fixture(&controller);
+    fs::write(root.join("volume"), "").unwrap();
+    fs::write(root.join("replacement-volume"), "").unwrap();
+    let (state, _, upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
+    (state, upgrades)
+}
+
+#[cfg(unix)]
+async fn wait_for_cleanup_removal(root: &Path, result: LifecycleWatch) -> Vec<u32> {
+    tokio::select! {
+        pids = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pids) = fs::read_to_string(root.join("removal-started")) {
+                    return pids.split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }) => pids.expect("deferred cleanup reached its exact removal command"),
+        outcome = RuntimeState::wait_lifecycle_result(result) => {
+            panic!("deferred cleanup settled before its held removal command: {outcome:?}");
+        }
+    }
+}
+
+#[cfg(unix)]
+// Hard-won: #1628: daemon handoff waited for deferred storage removal before cancelling it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_cleanup_yields_handoff_reaps_removal_and_retries_on_startup() {
+    const NAME: &str = "deferred_cleanup_yields_handoff_reaps_removal_and_retries_on_startup";
+    let Some((root, phase)) = deferred_cleanup_test(NAME, &["handoff", "recovery"]) else {
+        return;
+    };
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let id = DEFERRED_CLEANUP_TEST_SESSION;
+    if phase == "recovery" {
+        let (state, _, mut upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
+        state.resume_retained_cleanups().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while mj_controller::database::read_durable_session_record(id)
+                .unwrap()
+                .unwrap()
+                .target
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .unwrap();
-    tokio::task::yield_now().await;
+        .expect("startup must finish cleaning the retained locator");
+        upgrades.shutdown().await.unwrap();
+        state.cancel_and_wait_lifecycles().await.unwrap();
+        assert!(!root.join("volume").exists());
+        assert!(root.join("replacement-volume").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("removals"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        return;
+    }
 
-    let visible = state.active_lifecycles();
-    assert_eq!(visible.len(), 1);
-    assert_eq!(visible[0].kind, RuntimeLifecycleKind::Cleanup);
+    let (state, mut upgrades) = start_deferred_cleanup_test(&root);
+    let result = state.start_deferred_cleanup(id.to_owned()).await.unwrap();
+    let pids = wait_for_cleanup_removal(&root, result.clone()).await;
+    assert!(state.active_lifecycles().iter().any(|active| {
+        active.kind == RuntimeLifecycleKind::Cleanup
+            && active
+                .active_stages
+                .iter()
+                .any(|(stage, _)| *stage == ProvisionStage::RemovingStorage)
+    }));
+    let metadata = test_metadata("127.0.0.1:0".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    assert!(matches!(
+        handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+        DaemonReply::Done
+    ));
+    assert!(shutdown.is_cancelled());
+    upgrades.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), state.cancel_and_wait_lifecycles())
+        .await
+        .expect("shutdown must interrupt the command without a cleanup drain")
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    assert!(
+        pids.iter()
+            .all(|&pid| !mj_client::daemon::process_is_alive(pid))
+    );
+    // SAFETY: signal zero is an existence probe. The recorded parent is the
+    // local removal command owned by the cancellable executor.
+    assert_eq!(unsafe { libc::kill(pids[0].try_into().unwrap(), 0) }, -1);
     assert_eq!(
-        visible[0].active_stages[0].0,
-        ProvisionStage::RemovingStorage
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    let stopped = mj_controller::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.state, SessionState::Stopped);
+    assert!(stopped.target.is_some());
+    assert!(stopped.last_error.is_none());
+    assert!(root.join("volume").exists());
+}
+
+#[cfg(unix)]
+// Hard-won: #1628: pre-admission teardown could make handoff wait on automatic cleanup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_cleanup_serializes_queued_destroy_and_archive_without_holding_handoff() {
+    use mj_controller::recovery_gate::LifecycleOrigin;
+
+    const NAME: &str =
+        "deferred_cleanup_serializes_queued_destroy_and_archive_without_holding_handoff";
+    let Some((root, _)) = deferred_cleanup_test(NAME, &["queue"]) else {
+        return;
+    };
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let id = DEFERRED_CLEANUP_TEST_SESSION;
+    let (state, mut upgrades) = start_deferred_cleanup_test(&root);
+    let mut stopped = mj_controller::database::read_durable_session_record(id)
+        .unwrap()
+        .unwrap();
+    let mut input = mj_controller::controller::test_support::checkpoint_archive_input(
+        id,
+        1,
+        Vec::new(),
+        Vec::new(),
+    );
+    input
+        .canonical_session
+        .transcript
+        .push(mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "prompt".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_700_000_000_000,
+            last_changed_at_ms: 1_700_000_000_000,
+            body: mj_core::archive::CanonicalTranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "archive this session"})],
+            },
+        });
+    let archives = mj_core::config::sessions_dir();
+    fs::create_dir_all(&archives).unwrap();
+    stopped.checkpoint = Some(Box::new(
+        mj_controller::controller::test_support::write_checkpoint_archive_input(
+            &archives, id, &input,
+        ),
+    ));
+    let repository = mj_controller::controller::test_support::committed_repository();
+    stopped.project_directory = Some(repository.path().to_owned());
+    stopped.updated_at = "2000-01-01T00:00:00Z".into();
+    mj_controller::database::save_session(&stopped).unwrap();
+    let foreground = state
+        .session_gate
+        .try_enter_foreground(id, "replacement", LifecycleOrigin::Person)
+        .unwrap();
+    let cleanup = state.start_deferred_cleanup(id.into()).await.unwrap();
+    assert!(mj_controller::upgrade::active_labels().is_empty());
+    assert!(!root.join("removal-started").exists());
+    drop(foreground);
+    wait_for_cleanup_removal(&root, cleanup.clone()).await;
+    assert!(
+        state
+            .session_gate
+            .try_enter_foreground(id, "replacement", LifecycleOrigin::Person)
+            .is_err()
     );
 
-    state.cancel_and_wait_lifecycles().await.unwrap();
-    assert!(!saw_early_cancellation.load(Ordering::Acquire));
+    let metadata = test_metadata("127.0.0.1:0".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    let destroy = handle_action(
+        DaemonAction::DestroyStoppedSession {
+            session_id: id.into(),
+        },
+        &metadata,
+        &state,
+        &shutdown,
+    );
+    let archive = state.archive_aged_sessions(1);
+    tokio::pin!(destroy, archive);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures::poll!(&mut destroy).is_pending());
+            assert!(futures::poll!(&mut archive).is_pending());
+            if state
+                .owner()
+                .lifecycle_intents
+                .get(id)
+                .is_some_and(|queue| queue.len() == 2)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both teardown requests enter the same lifecycle queue");
+    assert!(state.owner().lifecycle[id].result.same_channel(&cleanup));
     assert!(matches!(
-        RuntimeState::wait_lifecycle_result(result).await.unwrap(),
-        DaemonLifecycleResult::Done
+        handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+        DaemonReply::Done
     ));
+    assert!(matches!(
+        destroy.await.unwrap(),
+        DaemonReply::UpgradePending
+    ));
+    assert_eq!(archive.await.unwrap(), 0);
+    upgrades.shutdown().await.unwrap();
+    state.cancel_and_wait_lifecycles().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("removals"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert!(root.join("replacement-volume").exists());
 }
 
 #[test]
@@ -3101,7 +3375,10 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
 
 #[tokio::test]
 async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
-    let state = test_runtime_state();
+    let (state, _, _upgrades) = test_runtime_state_with_live_recovery(
+        empty_test_controller().unwrap(),
+        empty_test_controller,
+    );
     let (complete, result) = tokio::sync::watch::channel(None);
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
@@ -6650,8 +6927,11 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     mj_controller::database::save_session(&session).unwrap();
     state.push_notice(&session.id, "private diagnostic /secret/path");
     // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
-    state
-        .destroy_stopped_session(session.id.clone(), BranchDisposition::Keep)
+    let started = state
+        .start_destroy_stopped_session(session.id.clone(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(started.result)
         .await
         .unwrap();
     assert!(

@@ -2533,6 +2533,23 @@ impl Controller {
         )
     }
 
+    /// Deferred cleanup can restart from the stopped locator. Only the final
+    /// session-record write needs daemon admission.
+    pub fn cleanup_stopped_target_resumable(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        self.cleanup_stopped_target_with(session_id, executor, |record| {
+            executor.end_resumable_work("settle deferred cleanup")?;
+            ensure!(
+                !executor.shutdown_interrupted(),
+                "deferred cleanup interrupted"
+            );
+            crate::database::save_lifecycle_session(record)
+        })
+    }
+
     fn cleanup_stopped_target_with(
         &mut self,
         session_id: &str,
