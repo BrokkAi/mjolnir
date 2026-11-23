@@ -144,8 +144,12 @@ fn project_session(session: Session, source: &Path) -> Result<ClaudeTranscript> 
         .map(|(index, (body, time))| {
             clock = clock.max(time.unwrap_or(clock));
             let position = index as u64 + 1;
+            let stable_id = match &body {
+                TranscriptBody::User { .. } => format!("user-import-{position}"),
+                _ => format!("import-{position}"),
+            };
             Arc::new(TranscriptItem {
-                stable_id: format!("import-{position}"),
+                stable_id,
                 position,
                 latest_content_event_ordinal: matches!(body, TranscriptBody::Agent { .. })
                     .then_some(position),

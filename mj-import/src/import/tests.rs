@@ -962,6 +962,10 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     );
     assert_eq!(verified.canonical_session.transcript.len(), 2);
     assert_eq!(
+        verified.canonical_session.transcript[0].stable_id,
+        "user-import-1"
+    );
+    assert_eq!(
         verified.canonical_session.transcript[0].created_at_ms,
         expected_user_time
     );

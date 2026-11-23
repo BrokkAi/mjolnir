@@ -9553,3 +9553,78 @@ fn unsettled_fallback_terminal_defers_spilling_settled_tools() {
     assert_eq!(spilled[0].0, provider_tool.stable_id);
     assert!(spilled[0].1.detail_trimmed());
 }
+
+#[test]
+fn load_tool_call_detail_joins_spilled_referenced_standalone_terminal() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "session-referenced-terminal-detail";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+
+    let mut projection = MaterializedSession::empty(session_id);
+    projection.applied_event_ordinal = 10;
+    projection.applied_event_digest = event_digest(10);
+
+    let full_terminal_output = format!("authoritative stdout\n{}", "line\n".repeat(4_000));
+    let tool = Arc::new(TranscriptItem {
+        stable_id: "tool:cmd-1".into(),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_000,
+        last_changed_at_ms: 1_000,
+        body: TranscriptBody::Tool {
+            call: serde_json::json!({
+                "toolCallId": "cmd-1",
+                "title": "Run command",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "command": "cargo test", "padding": "x".repeat(8_000) }
+            })
+            .into(),
+            terminal_outputs: vec![mj_core::transcript::TerminalOutputRecord {
+                terminal_id: "term-1".into(),
+                output: "stale embedded output\n".into(),
+                truncated: false,
+                exit_code: None,
+                signal: None,
+            }],
+            terminal_refs: vec!["term-1".into()],
+            presentation: None,
+        },
+    });
+    let standalone = Arc::new(TranscriptItem {
+        stable_id: "terminal:term-1".into(),
+        position: 3,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_001,
+        last_changed_at_ms: 1_001,
+        body: TranscriptBody::terminal_output(mj_core::transcript::TerminalOutputRecord {
+            terminal_id: "term-1".into(),
+            output: full_terminal_output.clone().into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        }),
+    });
+    projection.transcript = vec![tool, standalone];
+    save_materialized_session_to(&path, &projection).unwrap();
+
+    let spilled = spill_and_trim_settled_tools_through_from(&path, session_id, 10).unwrap();
+    assert_eq!(spilled.len(), 2);
+
+    let detail = load_tool_call_detail_from(&path, session_id, "tool:cmd-1")
+        .unwrap()
+        .unwrap();
+    let mj_core::transcript::ToolCallDetailResult::Full {
+        body: TranscriptBody::Tool {
+            terminal_outputs, ..
+        },
+    } = detail
+    else {
+        panic!("expected hydrated tool detail with joined terminal output, got {detail:?}");
+    };
+    assert_eq!(terminal_outputs.len(), 1);
+    assert_eq!(terminal_outputs[0].terminal_id, "term-1");
+    assert_eq!(terminal_outputs[0].output.text(), full_terminal_output);
+    assert_eq!(terminal_outputs[0].exit_code, Some(0));
+}

@@ -1318,7 +1318,8 @@ pub fn load_tool_call_detail_from(
 ) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
     use mj_core::transcript::ToolCallDetailResult;
 
-    let row = open_reader(path)?
+    let connection = open_reader(path)?;
+    let row = connection
         .query_row(
             "SELECT body_json, detail_offset, detail_len FROM materialized_transcript_items
              WHERE session_id = ?1 AND stable_id = ?2",
@@ -1329,28 +1330,129 @@ pub fn load_tool_call_detail_from(
     let Some((json, offset, len)) = row else {
         return Ok(None);
     };
-    let body: TranscriptBody = serde_json::from_str(&json)?;
-    let result = match (offset, len) {
-        (Some(offset), Some(len)) => match tool_details::read_tool_detail(
-            tool_details::data_dir_from(path),
-            session_id,
-            stable_id,
-            offset,
-            len,
-        ) {
-            Ok(body) => ToolCallDetailResult::Full { body },
-            Err(error) => ToolCallDetailResult::Unavailable {
-                summary: Some(body),
-                reason: format!("{error:#}"),
-            },
-        },
-        (None, _) if !body.has_trimmed_detail() => ToolCallDetailResult::Full { body },
-        _ => ToolCallDetailResult::Unavailable {
-            summary: Some(body),
-            reason: "full tool detail is not stored locally".into(),
-        },
+    let data_dir = tool_details::data_dir_from(path);
+    let summary: TranscriptBody = serde_json::from_str(&json)?;
+    let mut body = match (offset, len) {
+        (Some(offset), Some(len)) => {
+            match tool_details::read_tool_detail(data_dir, session_id, stable_id, offset, len) {
+                Ok(body) => body,
+                Err(error) => {
+                    return Ok(Some(ToolCallDetailResult::Unavailable {
+                        summary: Some(summary),
+                        reason: format!("{error:#}"),
+                    }));
+                }
+            }
+        }
+        (None, _) if !summary.has_trimmed_detail() => summary.clone(),
+        _ => {
+            return Ok(Some(ToolCallDetailResult::Unavailable {
+                summary: Some(summary),
+                reason: "full tool detail is not stored locally".into(),
+            }));
+        }
     };
-    Ok(Some(result))
+    if let Err(reason) =
+        hydrate_full_tool_terminal_outputs(&connection, data_dir, session_id, stable_id, &mut body)?
+    {
+        return Ok(Some(ToolCallDetailResult::Unavailable {
+            summary: Some(summary),
+            reason,
+        }));
+    }
+    Ok(Some(ToolCallDetailResult::Full { body }))
+}
+
+/// Join authoritative standalone terminal rows referenced by a full tool detail,
+/// resolving their `.mjtd` cold frames when spilled independently.
+fn hydrate_full_tool_terminal_outputs(
+    connection: &Connection,
+    data_dir: &Path,
+    session_id: &str,
+    stable_id: &str,
+    body: &mut TranscriptBody,
+) -> Result<std::result::Result<(), String>> {
+    let TranscriptBody::Tool {
+        terminal_outputs,
+        terminal_refs,
+        ..
+    } = body
+    else {
+        return Ok(Ok(()));
+    };
+    let ids = terminal_refs
+        .iter()
+        .chain(terminal_outputs.iter().map(|record| &record.terminal_id))
+        .map(|id| format!("terminal:{id}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.is_empty() {
+        return Ok(Ok(()));
+    }
+    let mut context = Vec::new();
+    let mut statement = connection.prepare(
+        "SELECT body_json, detail_offset, detail_len FROM materialized_transcript_items
+         WHERE session_id = ?1 AND stable_id = ?2",
+    )?;
+    for id in ids {
+        let row = statement
+            .query_row(params![session_id, &id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<u64>>(1)?,
+                    row.get::<_, Option<u32>>(2)?,
+                ))
+            })
+            .optional()?;
+        let Some((json, offset, len)) = row else {
+            continue;
+        };
+        let terminal_body = match (offset, len) {
+            (Some(offset), Some(len)) => {
+                match tool_details::read_tool_detail(data_dir, session_id, &id, offset, len) {
+                    Ok(body) => body,
+                    Err(error) => return Ok(Err(format!("{error:#}"))),
+                }
+            }
+            _ => {
+                let inline = decode_transcript_body(&json, session_id)?;
+                if inline.has_trimmed_detail() {
+                    return Ok(Err(
+                        "full referenced terminal detail is not stored locally".into()
+                    ));
+                }
+                inline
+            }
+        };
+        context.push(TranscriptItem {
+            stable_id: id,
+            position: 0,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: terminal_body,
+        });
+    }
+    if context.is_empty() {
+        return Ok(Ok(()));
+    }
+    let tool_item = TranscriptItem {
+        stable_id: stable_id.to_owned(),
+        position: 0,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: body.clone(),
+    };
+    let outputs =
+        mj_core::transcript::TerminalOutputs::of(std::iter::once(&tool_item).chain(context.iter()));
+    let joined = outputs.for_tool(stable_id).into_owned();
+    if let TranscriptBody::Tool {
+        terminal_outputs, ..
+    } = body
+    {
+        *terminal_outputs = joined;
+    }
+    Ok(Ok(()))
 }
 
 /// Read the spill associated with a specific projected revision. A newer
