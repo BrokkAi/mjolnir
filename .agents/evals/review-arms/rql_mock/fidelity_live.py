@@ -924,7 +924,14 @@ def _load_measurement(path, query, models):
         if (bifrost_answer.get("timed_out")
                 and getattr(runner, "query_timeout_s", None) is not None
                 and bifrost_answer.get("query_timeout_s") != runner.query_timeout_s):
-            raise ValueError(f"saved measurement at {path} timed out under a different Bifrost query timeout")
+            # Archive the stale adjudication receipts so the query retries under the new timeout.
+            adjudicator_dir = path.parent / "adjudicator"
+            if adjudicator_dir.exists():
+                adjudicator_dir.rename(path.parent / f"adjudicator-timeout-retry-{uuid4().hex[:8]}")
+                sync_directory(path.parent)
+            path.unlink()
+            sync_directory(path.parent)
+            return None
     return record
 
 
@@ -948,9 +955,13 @@ def _run_sample_concurrent(run, queries, fresh, engine, models, *, stop_request,
         path = run / query.key / "measurement.json"
         if path.exists():
             if models is not None:
-                records[query.key] = _load_measurement(path, query, models)
-        else:
-            pending.append(query)
+                loaded = _load_measurement(path, query, models)
+                if loaded is not None:
+                    records[query.key] = loaded
+                    continue
+            else:
+                continue
+        pending.append(query)
     if not pending:
         return records
 
@@ -1175,8 +1186,12 @@ def run_sample(run, queries, fresh, engine, models, *, stop_request, concurrency
         path = directory / "measurement.json"
         if path.exists():
             if models is not None:
-                records[query.key] = _load_measurement(path, query, models)
-            continue
+                loaded = _load_measurement(path, query, models)
+                if loaded is not None:
+                    records[query.key] = loaded
+                    continue
+            else:
+                continue
         answer = partial(checkpointed_answer, engine, directory)
         reask = query.key in fresh
         if models is None:

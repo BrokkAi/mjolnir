@@ -519,8 +519,8 @@ def gate_report(manifest_hash, served, queries, records, seed):
             "total_rows": sum(len(row["bifrost_answer"].get("rows", ())) for row in bifrost_completed),
             "gold_rows_found": b_tp,
             "gold_rows_outside_engine": b_outside_eng,
-            "precision": fraction(b_tp, b_ret),
-            "recall": fraction(b_tp, b_gold),
+            "precision": fraction(b_tp, b_ret) if bifrost_completed else None,
+            "recall": fraction(b_tp, b_gold) if bifrost_completed else None,
             "binary_sha256": sorted({
                 row["bifrost_answer"]["bifrost_binary_sha256"]
                 for row in bifrost_records if row["bifrost_answer"].get("bifrost_binary_sha256")
