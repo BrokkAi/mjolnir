@@ -33,6 +33,7 @@ const HOMEBREW_FORMULA_URL: &str =
 const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
+const UPDATE_LOCK_NAME: &str = ".mj-self-update.lock";
 // Shared with install.ps1, which also sweeps these files.
 const REPLACED_PREFIX: &str = ".mj-replaced-";
 const NPM_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPM";
@@ -914,6 +915,17 @@ fn install_release_archive(
     let parent = target_exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", target_exe.display()))?;
+    // Keep the lock file in place so every updater locks the same file.
+    let lock_path = parent.join(UPDATE_LOCK_NAME);
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open update lock {}", lock_path.display()))?;
+    let _lock = mj_core::file_lock::FileLock::acquire_cancellable(lock_file, &|| false)
+        .with_context(|| format!("acquire update lock {}", lock_path.display()))?;
     sweep_replaced_files(parent);
     // Keep staging on the destination filesystem for the final renames.
     let staging = tempfile::Builder::new()

@@ -417,7 +417,7 @@ fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files(
     );
     assert_eq!(
         std::fs::read_dir(root.path()).unwrap().count(),
-        entries.len() + 2
+        entries.len() + 3
     );
 }
 
@@ -451,7 +451,7 @@ fn malformed_release_leaves_installed_binaries_unchanged() {
             assert!(install_release_archive(&executable, archive_name, &archive(entries)).is_err());
             assert_eq!(std::fs::read(&executable).unwrap(), b"old controller");
             assert_eq!(std::fs::read(&worker).unwrap(), b"old worker");
-            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
         }
     }
 }
@@ -514,6 +514,56 @@ fn zip_release_replaces_application_binaries_and_sweeps_only_replaced_files() {
     assert!(directory.is_dir());
     #[cfg(unix)]
     assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn release_upgrade_waits_for_installation_lock_before_sweeping_or_replacing_files() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+
+    let root = tempfile::tempdir().expect("install directory");
+    let executable = fake_update_executable(&root.path().join(WINDOWS_BIN_NAME));
+    let worker = fake_update_executable(&root.path().join("mj-worker-x86_64-unknown-linux-musl"));
+    let aside = fake_update_executable(&root.path().join(".mj-replaced-mj-worker-old"));
+    let lock_path = root.path().join(".mj-self-update.lock");
+    let owner = std::fs::File::create(&lock_path).expect("create update lock");
+    owner.lock().expect("hold update lock");
+    let archive = release_zip(&[
+        ("mj.exe", b"new controller"),
+        ("mj-worker-x86_64-unknown-linux-musl", b"new worker"),
+    ]);
+    let (started_tx, started_rx) = channel();
+    let (finished_tx, finished_rx) = channel();
+    let (premature, old_executable, old_worker, old_aside) = std::thread::scope(|scope| {
+        let target = &executable;
+        let archive = &archive;
+        let waiting = scope.spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx
+                .send(install_release_archive(target, "release.zip", archive))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        let premature = finished_rx.recv_timeout(Duration::from_millis(100));
+        let before_unlock = (
+            premature,
+            std::fs::read(&executable),
+            std::fs::read(&worker),
+            std::fs::read(&aside),
+        );
+        drop(owner);
+        waiting.join().unwrap();
+        before_unlock
+    });
+
+    assert!(matches!(premature, Err(RecvTimeoutError::Timeout)));
+    assert_eq!(old_executable.unwrap(), b"test executable");
+    assert_eq!(old_worker.unwrap(), b"test executable");
+    assert_eq!(old_aside.unwrap(), b"test executable");
+    finished_rx.recv().unwrap().expect("install after unlock");
+    assert_eq!(std::fs::read(&executable).unwrap(), b"new controller");
+    assert_eq!(std::fs::read(&worker).unwrap(), b"new worker");
+    assert!(!aside.exists());
+    assert!(lock_path.is_file());
 }
 
 #[test]
@@ -603,7 +653,7 @@ async fn zip_release_replaces_a_running_windows_executable() {
         .expect("stop and reap installed executable");
     drop(lock);
     sweep_replaced_files(root.path());
-    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 }
 
 /// Serves canned bodies per path prefix from a loopback port and returns
