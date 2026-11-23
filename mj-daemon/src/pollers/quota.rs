@@ -183,11 +183,16 @@ pub(super) fn spawn_quota_refresher_with(
         // batch retains its requests, so comparing sequences instead of
         // clearing a flag survives the channel coalescing rapid publishes.
         let mut consumed_forced: std::collections::BTreeMap<String, u64> = Default::default();
+        // Each profile's check is its own task, so a slow one holds up only
+        // its own profile (#1595). This loop alone starts checks and applies
+        // their results, and runs at most one check per profile.
+        let mut checks = ProfileChecks::default();
         loop {
             let now = epoch_seconds();
             let wake = batch
                 .profiles
                 .iter()
+                .filter(|request| !checks.runs(&request.profile_id))
                 .map(|request| next_probe_at(quotas.report(&request.profile_id)))
                 .min()
                 .map(|due| Duration::from_secs(due.saturating_sub(now).max(5)));
@@ -203,8 +208,55 @@ pub(super) fn spawn_quota_refresher_with(
                         break;
                     }
                 }
+                Some(finished) = checks.tasks.join_next_with_id(), if !checks.tasks.is_empty() => {
+                    if !checks.finish(finished, &mut quotas, &batch, &updates_tx).await {
+                        break;
+                    }
+                }
             }
             let now = epoch_seconds();
+            // Re-checks a refresh-all owes, now that their check has ended:
+            // started for the cycle that asked, or settled when the profile
+            // is on hold or gone.
+            let owed = checks
+                .owed
+                .keys()
+                .filter(|profile_id| !checks.runs(profile_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut owed_starts = Vec::new();
+            let mut owed_extra = Vec::new();
+            for profile_id in owed {
+                let Some(cycles) = checks.owed.remove(&profile_id) else {
+                    continue;
+                };
+                // A profile on hold or gone settles what it owed.
+                if on_hold(quotas.report(&profile_id), now) {
+                    continue;
+                }
+                match batch
+                    .profiles
+                    .iter()
+                    .find(|request| request.profile_id == profile_id)
+                {
+                    Some(request) => owed_starts.push((request.clone(), cycles)),
+                    // A one-shot extra goes through the extras below.
+                    None => owed_extra.push(profile_id),
+                }
+            }
+            let starting_owed = |profile_id: &str| {
+                owed_starts
+                    .iter()
+                    .any(|(request, _)| request.profile_id == profile_id)
+            };
+            let forced_pending = |request: &QuotaRefreshRequest| {
+                batch
+                    .forced_probes
+                    .get(&request.profile_id)
+                    .is_some_and(|sequence| {
+                        consumed_forced.get(&request.profile_id) < Some(sequence)
+                    })
+            };
             let due = batch
                 .profiles
                 .iter()
@@ -212,13 +264,11 @@ pub(super) fn spawn_quota_refresher_with(
                     let report = quotas.report(&request.profile_id);
                     // A hold outranks even an explicit refresh: probing an
                     // endpoint that just said 429 only extends the limit.
-                    !on_hold(report, now)
+                    !checks.runs(&request.profile_id)
+                        && !starting_owed(&request.profile_id)
+                        && !on_hold(report, now)
                         && (batch.refresh
-                            || batch.forced_probes.get(&request.profile_id).is_some_and(
-                                |sequence| {
-                                    consumed_forced.get(&request.profile_id) < Some(sequence)
-                                },
-                            )
+                            || forced_pending(request)
                             || next_probe_at(report) <= now)
                 })
                 .cloned()
@@ -227,14 +277,12 @@ pub(super) fn spawn_quota_refresher_with(
                 .extra
                 .iter()
                 .filter(|request| {
-                    batch.refresh
-                        || batch
-                            .forced_probes
-                            .get(&request.profile_id)
-                            .is_some_and(|sequence| {
-                                consumed_forced.get(&request.profile_id) < Some(sequence)
-                            })
-                        || probed_extra.get(&request.profile_id) != Some(&request.cache_identity())
+                    !checks.runs(&request.profile_id)
+                        && (batch.refresh
+                            || forced_pending(request)
+                            || owed_extra.contains(&request.profile_id)
+                            || probed_extra.get(&request.profile_id)
+                                != Some(&request.cache_identity()))
                 })
                 .filter(|request| !on_hold(quotas.report(&request.profile_id), now))
                 .cloned()
@@ -242,56 +290,92 @@ pub(super) fn spawn_quota_refresher_with(
             // A batch that only changed the profile set and finds nothing due
             // is not a cycle. A requested refresh always is, so the person's
             // notice can end.
-            if due.is_empty() && !batch.refresh && fresh_extra.is_empty() {
+            if due.is_empty() && !batch.refresh && fresh_extra.is_empty() && owed_starts.is_empty()
+            {
+                if !checks.report_finished(&updates_tx).await {
+                    break;
+                }
                 continue;
             }
             let generation = batch.generation;
             let forced = batch.refresh;
             batch.refresh = false;
-            for (profile_id, sequence) in std::mem::take(&mut batch.forced_probes) {
-                consumed_forced.insert(profile_id, sequence);
+            // A running check may predate the request that asks for a new
+            // one, so that request waits for the check after it: a named
+            // request stays unanswered, and a refresh-all owes the profile a
+            // re-check, outside any cycle for a one-shot extra.
+            for (profile_id, sequence) in &batch.forced_probes {
+                if !checks.runs(profile_id) {
+                    consumed_forced.insert(profile_id.clone(), *sequence);
+                }
             }
-            if (!due.is_empty() || forced)
-                && !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await
-            {
-                break;
-            }
-            if !fresh_extra.is_empty() {
-                for request in &fresh_extra {
-                    // A changed identity is a different account: its cached
-                    // client and report belong to the old one.
-                    let identity = request.cache_identity();
-                    if probed_extra
-                        .insert(request.profile_id.clone(), identity.clone())
-                        .is_some_and(|previous| previous != identity)
-                    {
-                        quotas.forget(&request.profile_id).await;
+            if forced {
+                for request in &batch.extra {
+                    if checks.runs(&request.profile_id) {
+                        checks.owed.entry(request.profile_id.clone()).or_default();
                     }
                 }
-                // One-shot probes report individually; they are not a cycle.
-                let updates = &updates_tx;
-                let delivered = std::sync::atomic::AtomicBool::new(true);
-                quotas
-                    .probe(fresh_extra, |quota| {
-                        let delivered = &delivered;
-                        async move {
-                            if delivered.load(std::sync::atomic::Ordering::Acquire)
-                                && updates.send(QuotaUpdate::Report(quota)).await.is_err()
-                            {
-                                tracing::debug!(
-                                    "quota update consumer closed while reporting a profile"
-                                );
-                                delivered.store(false, std::sync::atomic::Ordering::Release);
-                            }
-                        }
-                    })
-                    .await;
-                if !delivered.into_inner() {
+            }
+            let owed_now = if forced {
+                batch
+                    .profiles
+                    .iter()
+                    .filter(|request| checks.runs(&request.profile_id))
+                    .map(|request| request.profile_id.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let cycle = !due.is_empty() || forced;
+            if cycle || !owed_starts.is_empty() {
+                let profile_ids = owed_starts
+                    .iter()
+                    .map(|(request, _)| request)
+                    .chain(&due)
+                    .map(|request| request.profile_id.clone())
+                    .collect::<Vec<_>>();
+                if updates_tx
+                    .send(QuotaUpdate::Refreshing { profile_ids })
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("quota update consumer closed before refresh started");
                     break;
                 }
             }
+            for (request, cycles) in owed_starts {
+                checks.start(&mut quotas, request, cycles);
+            }
+            if cycle {
+                let number = checks.open_cycle(generation, owed_now);
+                for request in due {
+                    checks.start(&mut quotas, request, [number].into());
+                }
+            }
+            for request in fresh_extra {
+                // A changed identity is a different account: its cached
+                // client and report belong to the old one.
+                let identity = request.cache_identity();
+                let previous = probed_extra.insert(request.profile_id.clone(), identity.clone());
+                // A profile listed both ways is checked once, by its cycle.
+                if checks.runs(&request.profile_id) {
+                    continue;
+                }
+                if previous.is_some_and(|previous| previous != identity) {
+                    quotas.forget(&request.profile_id).await;
+                }
+                // One-shot probes report individually; they are not a cycle.
+                checks.start(&mut quotas, request, Default::default());
+            }
+            // Only after this round started what it owed: a check that just
+            // finished may have released a request its cycle waits for.
+            if !checks.report_finished(&updates_tx).await {
+                break;
+            }
         }
+        // Stop the idle clients first: a hung check must not keep them alive.
         quotas.shutdown().await;
+        checks.drain().await;
     });
     (profiles_tx, updates_rx)
 }
@@ -544,55 +628,173 @@ async fn adopt_profiles(
     true
 }
 
-pub(super) async fn refresh_profile_quotas(
-    quotas: &mut QuotaManager,
-    generation: u64,
-    profiles: &[QuotaRefreshRequest],
-    updates: &tokio::sync::mpsc::Sender<QuotaUpdate>,
-) -> bool {
-    let ids = profiles
-        .iter()
-        .map(|profile| profile.profile_id.clone())
-        .collect::<Vec<_>>();
-    if updates
-        .send(QuotaUpdate::Refreshing { profile_ids: ids })
-        .await
-        .is_err()
-    {
-        tracing::debug!("quota update consumer closed before refresh started");
-        return false;
+/// The quota checks the poller has started, and the cycles waiting on them.
+///
+/// Which cycles wait for which profile lives only on the checks: a cycle is
+/// finished once no running or owed check names it.
+#[derive(Default)]
+struct ProfileChecks {
+    tasks: tokio::task::JoinSet<mj_controller::quota::ProbeResult>,
+    /// Each running check, by profile: the map holds one per profile.
+    running: std::collections::BTreeMap<String, RunningCheck>,
+    /// Profiles a refresh-all asked for while their check ran, which may
+    /// predate the request: the cycles that wait for the check after it,
+    /// none for a one-shot extra.
+    owed: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>>,
+    /// Cycles not reported finished yet, oldest first: each by its own
+    /// number (several can share a batch generation) and its generation.
+    open: std::collections::VecDeque<(u64, u64)>,
+    next_cycle: u64,
+}
+
+struct RunningCheck {
+    task: tokio::task::Id,
+    request: QuotaRefreshRequest,
+    /// The cycles this check answers, by number.
+    cycles: std::collections::BTreeSet<u64>,
+}
+
+impl ProfileChecks {
+    fn runs(&self, profile_id: &str) -> bool {
+        self.running.contains_key(profile_id)
     }
-    // Keep draining even if the UI is gone so codex clients return to the
-    // manager for a clean shutdown; just stop sending.
-    let delivered = AtomicBool::new(true);
-    quotas
-        .probe(profiles.to_vec(), |quota| {
-            let delivered = &delivered;
-            async move {
-                if delivered.load(Ordering::Acquire)
-                    && updates.send(QuotaUpdate::Report(quota)).await.is_err()
-                {
-                    tracing::debug!("quota update consumer closed while reporting a profile");
-                    delivered.store(false, Ordering::Release);
-                }
+
+    /// Start a check for a profile with none running, answering `cycles`.
+    fn start(
+        &mut self,
+        quotas: &mut QuotaManager,
+        request: QuotaRefreshRequest,
+        cycles: std::collections::BTreeSet<u64>,
+    ) {
+        let std::collections::btree_map::Entry::Vacant(slot) =
+            self.running.entry(request.profile_id.clone())
+        else {
+            // Callers start only profiles with no check running.
+            debug_assert!(false, "a second quota check for {}", request.profile_id);
+            tracing::error!(profile_id = %request.profile_id, "refusing a second concurrent quota check");
+            return;
+        };
+        let task = self.tasks.spawn(quotas.start_probe(request.clone())).id();
+        slot.insert(RunningCheck {
+            task,
+            request,
+            cycles,
+        });
+    }
+
+    /// Open a cycle for `generation` that waits on `owed`: running checks it
+    /// repeats once they end. Returns its number, which its own checks name.
+    fn open_cycle(&mut self, generation: u64, owed: Vec<String>) -> u64 {
+        let cycle = self.next_cycle;
+        self.next_cycle += 1;
+        for profile_id in owed {
+            self.owed.entry(profile_id).or_default().insert(cycle);
+        }
+        self.open.push_back((cycle, generation));
+        cycle
+    }
+
+    /// Apply one finished check. Every check ends in a report, recorded only
+    /// for a profile whose identity is still the one checked, so the
+    /// consumer's probing set follows reports alone. Reports whether the
+    /// consumer is still listening.
+    async fn finish(
+        &mut self,
+        joined: Result<
+            (tokio::task::Id, mj_controller::quota::ProbeResult),
+            tokio::task::JoinError,
+        >,
+        quotas: &mut QuotaManager,
+        batch: &QuotaRefreshBatch,
+        updates: &tokio::sync::mpsc::Sender<QuotaUpdate>,
+    ) -> bool {
+        let (task, result) = match joined {
+            Ok((task, result)) => (task, Ok(result)),
+            Err(error) => {
+                tracing::warn!(%error, "quota refresh task failed");
+                let message = format!("the quota check failed: {error}");
+                (error.id(), Err(message))
             }
-        })
-        .await;
-    if !delivered.into_inner() {
-        return false;
-    }
-    if updates
-        .send(QuotaUpdate::Finished { generation })
-        .await
-        .is_err()
-    {
-        tracing::debug!(
-            generation,
-            "quota update consumer closed before refresh completed"
-        );
-        false
-    } else {
+        };
+        // A handful of profiles: a scan is the simplest lookup.
+        let Some(profile_id) = self
+            .running
+            .iter()
+            .find(|(_, check)| check.task == task)
+            .map(|(profile_id, _)| profile_id.clone())
+        else {
+            // Every started task is in `running` until it is joined here.
+            debug_assert!(false, "a quota check finished that was never started");
+            tracing::error!("a quota check finished that the poller never started");
+            if let Ok(result) = result {
+                drop(result.discard().await);
+            }
+            return true;
+        };
+        let RunningCheck { request, .. } = self
+            .running
+            .remove(&profile_id)
+            .expect("the check was found running above");
+        // A profile that changed or left while its check ran gets nothing
+        // recorded from it; its current identity is checked once this ends.
+        let current = batch.profiles.iter().chain(&batch.extra).any(|current| {
+            current.profile_id == profile_id && current.cache_identity() == request.cache_identity()
+        });
+        let outcome = match (result, current) {
+            (Ok(result), true) => quotas.finish_probe(result),
+            (Ok(result), false) => {
+                tracing::debug!(%profile_id, "a quota check finished for a changed profile");
+                result.discard().await
+            }
+            (Err(message), true) => quotas.fail_probe(&request, &message),
+            (Err(message), false) => mj_controller::quota::failed_check(&request, &message),
+        };
+        if updates.send(QuotaUpdate::Report(outcome)).await.is_err() {
+            tracing::debug!("quota update consumer closed while reporting a profile");
+            return false;
+        }
         true
+    }
+
+    /// Report the open cycles that no running or owed check names any more,
+    /// in the order they opened, as the serial poller did: a cycle that opened
+    /// after a refresh's cannot end its notice first. Reports whether the
+    /// consumer is still listening.
+    async fn report_finished(&mut self, updates: &tokio::sync::mpsc::Sender<QuotaUpdate>) -> bool {
+        while let Some(&(cycle, generation)) = self.open.front() {
+            let waits = self
+                .running
+                .values()
+                .any(|check| check.cycles.contains(&cycle))
+                || self.owed.values().any(|cycles| cycles.contains(&cycle));
+            if waits {
+                break;
+            }
+            self.open.pop_front();
+            if updates
+                .send(QuotaUpdate::Finished { generation })
+                .await
+                .is_err()
+            {
+                tracing::debug!(
+                    generation,
+                    "quota update consumer closed before refresh completed"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Let every running check end, so a login it is rotating is written
+    /// before its client stops.
+    async fn drain(&mut self) {
+        while let Some(joined) = self.tasks.join_next().await {
+            match joined {
+                Ok(result) => drop(result.discard().await),
+                Err(error) => tracing::warn!(%error, "quota refresh task failed"),
+            }
+        }
     }
 }
 
@@ -1087,9 +1289,9 @@ pub(super) fn run_refresh_command(
 
 /// Whether a refresh the person asked for is over. `pending_cycles` is the
 /// daemon's finished-cycle count at the moment of the request, and
-/// `finished_cycles` is its count now. A cycle already running when the
-/// request arrived can end first and complete the notice a few seconds early;
-/// the report itself is what the row shows, so that is harmless.
+/// `finished_cycles` is its count now. A cycle that began before the request
+/// can end first and complete the notice early; the report itself is what the
+/// row shows, so that is harmless.
 pub fn complete_manual_quota_refresh(
     pending_cycles: &mut Option<u64>,
     finished_cycles: u64,

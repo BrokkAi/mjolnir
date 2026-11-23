@@ -578,6 +578,10 @@ fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
     assert!(state.has_work_in_flight());
     assert!(!state.safe_to_replace(harness));
     assert!(!state.safe_to_replace_for(harness, WorkerReplacement::AutomaticUpgrade));
+    // The daemon's quota check is published over the worker's state.
+    state.activity = Some(ActivityState::CheckingQuota);
+    // Hard-won: #1643: the native-task override hid the daemon's CheckingQuota behind Background.
+    assert_eq!(state.activity_state(), ActivityState::CheckingQuota);
 
     // Losing the observation is not evidence that the task finished.
     state.background_commands.truncate(1);
