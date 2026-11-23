@@ -540,6 +540,7 @@ impl RuntimeState {
             .subagents
             .unwrap_or_else(|| match delegation_default {
                 CreateDelegationDefault::Mjolnir => SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -1258,6 +1259,7 @@ mod delegation_replay_tests {
             }
         };
         let mjolnir = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };
@@ -1619,6 +1621,7 @@ mod delegation_replay_tests {
             mj_core::state::SessionState::Running,
         );
         legacy.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         });
@@ -1641,6 +1644,7 @@ mod delegation_replay_tests {
             base: None,
             no_later_history: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             }),

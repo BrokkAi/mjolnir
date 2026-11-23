@@ -1130,6 +1130,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session.subagents = choice.map(|enabled| {
             if enabled {
                 mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }
@@ -1153,6 +1154,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
     codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -6444,11 +6446,13 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         for policy in [
             SubagentPolicy::Native,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
             SubagentPolicy::None,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -6660,6 +6664,7 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
                 harness,
                 stage.path(),
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },

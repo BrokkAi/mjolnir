@@ -1212,6 +1212,7 @@ pub(crate) fn subagent_policy(
             );
         }
         return Ok(Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: straightforward.map(|model| {
                 Box::new(mj_core::config::SubagentChoice {
                     model: model.to_owned(),
@@ -1229,6 +1230,7 @@ pub(crate) fn subagent_policy(
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
         Some("mjolnir") => Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         }),
@@ -4712,6 +4714,7 @@ mod tests {
             assert_eq!(
                 parse(&["--subagents", "mjolnir"]).unwrap(),
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None
                 })
@@ -4733,6 +4736,7 @@ mod tests {
                 assert_eq!(
                     parse(&args).unwrap(),
                     Some(SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: Some(Box::new(mj_core::config::SubagentChoice {
                             model: "gpt-6-luna".into(),

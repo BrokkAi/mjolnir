@@ -1271,6 +1271,7 @@ impl Controller {
                     .insert(profile_id.to_owned(), record.supervisors);
             }
         }
+        self.state.environment_owners.insert(id.clone(), id.clone());
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {
             self.state.remember_container_size(&host, size);

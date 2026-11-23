@@ -2353,6 +2353,7 @@ mod tests {
             &backend,
             "parent",
             &SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -2760,6 +2761,7 @@ mod tests {
                 &backend,
                 "parent",
                 &SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -2802,6 +2804,7 @@ mod tests {
             },
         });
         let policy = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };
@@ -2858,6 +2861,7 @@ mod tests {
                 &backend,
                 "parent",
                 &SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -2904,6 +2908,7 @@ mod tests {
             })
         };
         let any_policy = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };
@@ -2942,6 +2947,7 @@ mod tests {
             candidates,
         });
         let mixed_policy = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: Some(Box::new(SubagentChoice {
                 model: "fixed".into(),
@@ -2974,6 +2980,7 @@ mod tests {
             &unconfigured,
             "parent",
             &SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -3005,6 +3012,7 @@ mod tests {
             },
         });
         let policy = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };
@@ -3074,6 +3082,7 @@ mod tests {
             &backend,
             "parent",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },

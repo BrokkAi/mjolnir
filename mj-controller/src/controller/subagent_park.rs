@@ -712,6 +712,7 @@ mod tests {
         crate::database::save_subagent_session(
             &child,
             &mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: LATCH_RELAY_SESSION.into(),
@@ -1608,6 +1609,7 @@ mod tests {
         crate::database::save_subagent_session(
             &child,
             &mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: LATCH_RELAY_SESSION.into(),

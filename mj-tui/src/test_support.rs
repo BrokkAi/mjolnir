@@ -603,6 +603,9 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: [(session_id.clone(), session_id.clone())]
+                .into_iter()
+                .collect(),
             version: STATE_VERSION,
             sessions: [(session.id.clone(), session)].into_iter().collect(),
             mount_history: Default::default(),

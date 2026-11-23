@@ -470,14 +470,68 @@ pub fn prepare_container_upgrade(
 /// parked child's stale target cannot be woken after replacement commits.
 pub(super) fn ensure_container_parent_available(
     connection: &Connection,
-    parent: &str,
+    member: &str,
 ) -> Result<()> {
-    let replacing: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_restart_intents WHERE session_id=?1 AND phase='recreating_container' AND container_upgrade_json IS NOT NULL)", [parent], |row| row.get(0))?;
     ensure!(
-        !replacing,
+        !environment_peers(connection, member)?
+            .iter()
+            .any(|peer| peer.upgrade_phase.as_deref() == Some("recreating_container")),
         "the parent container is being upgraded; retry after it reconnects"
     );
     Ok(())
+}
+
+/// An environment replacement may boot its own worker before releasing its
+/// intent. Other members of the environment must wait for that release.
+pub(super) fn ensure_no_peer_container_upgrade(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<()> {
+    ensure!(
+        !environment_peers(connection, session_id)?
+            .iter()
+            .any(|peer| peer.id != session_id && peer.upgrade_phase.is_some()),
+        "the container is being upgraded; retry after it reconnects"
+    );
+    Ok(())
+}
+
+struct EnvironmentPeer {
+    id: String,
+    state: SessionState,
+    has_target: bool,
+    restarting_worker: bool,
+    kind: Option<String>,
+    upgrade_phase: Option<String>,
+}
+
+fn environment_peers(connection: &Connection, member: &str) -> Result<Vec<EnvironmentPeer>> {
+    let mut peers = connection.prepare(
+        "SELECT s.session_id, s.state, t.session_id IS NOT NULL,
+                json_extract(c.record_json, '$.kind'), r.phase, w.session_id IS NOT NULL
+         FROM environment_bindings b
+         JOIN environment_bindings p ON p.environment_id = b.environment_id
+         JOIN sessions s ON s.session_id = p.session_id
+         LEFT JOIN session_targets t ON t.session_id = p.session_id
+         LEFT JOIN subagent_sessions c ON c.child_session_id = p.session_id
+         LEFT JOIN session_restart_intents r
+             ON r.session_id = p.session_id AND r.container_upgrade_json IS NOT NULL
+         LEFT JOIN worker_restart_intents w ON w.session_id = p.session_id
+         WHERE b.session_id = ?1
+         ORDER BY p.session_id",
+    )?;
+    Ok(peers
+        .query_map([member], |row| {
+            Ok(EnvironmentPeer {
+                id: row.get(0)?,
+                state: stored_session_state(&row.get::<_, String>(1)?),
+                has_target: row.get(2)?,
+                kind: row.get(3)?,
+                upgrade_phase: row.get(4)?,
+                restarting_worker: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -513,24 +567,22 @@ pub fn try_commit_container_upgrade(
                 ),
             "container upgrade ownership changed or cancellation was accepted"
         );
-        let children = tx.prepare("SELECT s.session_id,s.state,t.session_id IS NOT NULL,json_extract(c.record_json,'$.kind') FROM subagent_sessions c JOIN sessions s ON s.session_id=c.child_session_id LEFT JOIN session_targets t ON t.session_id=s.session_id WHERE c.parent_session_id=?1 ORDER BY s.session_id")?
-            .query_map([&session_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<String>>(3)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut blockers: Vec<_> = children
-            .into_iter()
-            .filter_map(|(id, state, has_target, kind)| {
-                let state = stored_session_state(&state);
-                (state != SessionState::Parked && (state.has_live_worker() || has_target)).then(
-                    || {
-                        format!(
-                            "{} session {id} ({state:?})",
-                            kind.as_deref().unwrap_or("child")
-                        )
-                    },
-                )
-            })
-            .collect();
-        if super::delegation::has_pending_mutating_delegations_with(&tx, &session_id)? {
+        let peers = environment_peers(&tx, &session_id)?;
+        let mut blockers = Vec::new();
+        let mut pending_delegation = false;
+        for peer in peers {
+            if peer.id != session_id
+                && (peer.restarting_worker
+                    || (peer.state != SessionState::Parked
+                        && (peer.state.has_live_worker() || peer.has_target)))
+            {
+                let kind = peer.kind.as_deref().unwrap_or("child");
+                blockers.push(format!("{kind} session {} ({:?})", peer.id, peer.state));
+            }
+            pending_delegation |=
+                super::delegation::has_pending_mutating_delegations_with(&tx, &peer.id)?;
+        }
+        if pending_delegation {
             blockers.push("accepted delegation requests".into());
         }
         if !blockers.is_empty() {
@@ -553,7 +605,9 @@ pub(super) fn container_upgrade_owns_target_with(
     connection: &Connection,
     session_id: &str,
 ) -> Result<bool> {
-    Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM session_restart_intents WHERE session_id=?1 AND container_upgrade_json IS NOT NULL)", [session_id], |row| row.get(0))?)
+    Ok(environment_peers(connection, session_id)?
+        .iter()
+        .any(|peer| peer.upgrade_phase.is_some()))
 }
 
 /// The Restart owns its handoff before the relay can be sealed. Its digest and

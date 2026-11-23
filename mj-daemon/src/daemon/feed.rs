@@ -341,6 +341,7 @@ impl RuntimeState {
                     revision: self.revisions.current(),
                     records,
                     subagents: controller.state.subagents.clone(),
+                    environment_owners: controller.state.environment_owners.clone(),
                     sessions: owner.sessions.clone(),
                     transcripts: owner.transcripts.clone(),
                     session_cpu: self.session_manager.session_cpu.borrow().clone(),

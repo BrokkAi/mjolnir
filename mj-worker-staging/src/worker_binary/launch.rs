@@ -120,6 +120,7 @@ pub fn apply_jev_settings(launch: &mut WorkerLaunchConfig, config: &mj_core::con
 #[cfg(test)]
 pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
     let child = is_child.then(|| mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: session.id.clone(),

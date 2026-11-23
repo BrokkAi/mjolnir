@@ -3364,12 +3364,14 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
     config.validate().unwrap();
     assert!(config.subagents.is_configured());
     let policy = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
     assert!(!config.subagents.offers_subtle(&policy));
     // A session override can add the subtle type for one session.
     let with_subtle = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: Some(Box::new(choice("smart"))),
     };

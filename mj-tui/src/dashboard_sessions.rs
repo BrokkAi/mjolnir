@@ -718,7 +718,7 @@ impl DashboardState {
     }
 
     pub fn set_project_source(&mut self, session_id: &str, source: ProjectSourceIdentity) {
-        if self.state.sessions.contains_key(session_id) {
+        if self.state.owns_environment(session_id) == Some(true) {
             self.project_sources.insert(session_id.to_owned(), source);
             self.clamp_selections();
         }

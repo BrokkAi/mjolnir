@@ -212,6 +212,7 @@ fn documentation_dashboard() -> DashboardState {
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),

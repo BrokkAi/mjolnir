@@ -1773,6 +1773,7 @@ pub(super) fn runtime_test_subagent(
     parent_session_id: &str,
 ) -> SubagentRecord {
     SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: child_session_id.into(),
@@ -1845,6 +1846,11 @@ fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
     state.subagents = [sup_record, d2_record]
         .into_iter()
         .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
+        .collect();
+    state.environment_owners = state
+        .sessions
+        .keys()
+        .map(|id| (id.clone(), primary.id.clone()))
         .collect();
 
     let children = state.active_child_session_ids(&primary.id);
@@ -12602,8 +12608,10 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             },
         )
         .collect();
-    mj_controller::database::register_subagent_with_startup(&child, &relation, rows, None, None)
-        .unwrap();
+    mj_controller::database::register_subagent_with_startup(
+        &child, &relation, rows, None, None, false,
+    )
+    .unwrap();
     let root = tempfile::tempdir().unwrap();
     let model_id = format!("{group_id}-model");
     let prompt_id = format!("{group_id}-prompt");
@@ -14659,6 +14667,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });

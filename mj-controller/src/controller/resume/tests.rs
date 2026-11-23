@@ -47,6 +47,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let parent_id = "0123456789abcdef0123456789abcdef";
     let mut parent = checkpoint_test_session(parent_id);
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -59,6 +60,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         worker_root: child_directory.path().join(&child.id),
     }));
     let relation = mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: child.id.clone(),
@@ -2402,6 +2404,7 @@ exit 0
     // when the archive holds that session's conversation.
     let mut session = checkpoint_test_session(session_id);
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2524,6 +2527,7 @@ exit 0
             assert_eq!(
                 durable.sessions[session_id].subagents,
                 Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None
                 }),

@@ -403,6 +403,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     }
 
     spec.subagent_policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -1338,6 +1339,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         );
 
         spec.subagent_policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };
@@ -1357,6 +1359,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         for policy in [
             mj_core::subagent::SubagentPolicy::None,
             mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },

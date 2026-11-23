@@ -840,6 +840,7 @@ mod tests {
             worker_root: directory.path().join(&child.id),
         }));
         let relation = mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child.id.clone(),

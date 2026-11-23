@@ -228,6 +228,7 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
     assert!(super::move_needs_fresh_capture(&failed, &reopened));
     let mut retry = failed.selection.clone();
     retry.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "available-model".into(),
             effort: None,

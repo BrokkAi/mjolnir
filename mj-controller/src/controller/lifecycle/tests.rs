@@ -670,6 +670,7 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
 /// failed on a bare target, with its worker stopped.
 fn failed_subagent_relation(session_id: &str) -> mj_core::subagent::SubagentRecord {
     mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: session_id.into(),
