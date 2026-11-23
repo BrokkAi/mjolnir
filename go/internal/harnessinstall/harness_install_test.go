@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -46,6 +48,10 @@ func harnessTestCompleteFake(t *testing.T, root string, harness core.HarnessKind
 		t.Fatal(err)
 	}
 	harnessTestExecutable(t, filepath.Join(install, entrypoint), "#!/bin/sh\nexit 0\n")
+	selected := core.Pin(harness)
+	if entrypoint == selected.Entrypoint && selected.CLIEntrypoint != entrypoint {
+		harnessTestExecutable(t, filepath.Join(install, selected.CLIEntrypoint), "#!/bin/sh\nexit 0\n")
+	}
 	lease, err := openLock(filepath.Join(install, core.LeaseFile))
 	if err != nil {
 		t.Fatal(err)
@@ -65,9 +71,36 @@ func harnessTestFakeNodeTools(t *testing.T, root, installs string) map[string]st
 	bin := filepath.Join(root, "bin")
 	harnessTestExecutable(t, filepath.Join(bin, "node"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n")
 	harnessTestExecutable(t, filepath.Join(bin, "npx"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n")
-	harnessTestExecutable(t, filepath.Join(bin, "npm"), fmt.Sprintf(
-		"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\nif [ \"$1\" = install-scripts ]; then printf '{\"allowScripts\":[]}'; exit 0; fi\nprintf x >> '%s'\nmkdir -p node_modules/.bin node_modules/@openai/codex/bin\nprintf '#!/bin/sh\\nexit 0\\n' > node_modules/.bin/codex-acp\nchmod 755 node_modules/.bin/codex-acp\nprintf '// managed codex' > node_modules/@openai/codex/bin/codex.js\n",
-		installs))
+	codex, claude := core.Pin(core.HarnessKindCodex), core.Pin(core.HarnessKindClaude)
+	harnessTestExecutable(t, filepath.Join(bin, "npm"), fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$1" = --version ]; then echo 12.0.0; exit 0; fi
+if [ "$1" = install-scripts ]; then printf '{"allowScripts":[]}'; exit 0; fi
+printf x >> '%[1]s'
+mkdir -p node_modules/.bin
+if grep -q 'mjolnir-managed-codex' package.json; then
+    bridge=%[3]s
+    cli=%[4]s
+else
+    bridge=%[5]s
+    cli=%[6]s
+fi
+printf '#!/bin/sh\nexit 0\n' > "$bridge.script"
+cat > "$cli.script" <<'CLI'
+#!/bin/sh
+if [ "$1" != --version ]; then exit 2; fi
+if [ -n "$MJ_TEST_CLI_PROBES" ]; then printf x >> "$MJ_TEST_CLI_PROBES"; fi
+if [ -n "$MJ_TEST_CLI_MISSING_NATIVE" ]; then
+    echo 'missing native platform package' >&2
+    exit 1
+fi
+echo 'installed CLI version'
+CLI
+ln -s '%[2]s' "$bridge"
+ln -s '%[2]s' "$cli"
+`,
+		installs, core.FakeCommandDispatcher(),
+		codex.Entrypoint, codex.CLIEntrypoint, claude.Entrypoint, claude.CLIEntrypoint))
 	return map[string]string{"PATH": bin + ":/usr/bin:/bin"}
 }
 
@@ -720,8 +753,6 @@ func TestAnOlderContainerClaudeBridgeSelectsTheManagedPinWithoutReplacingIt(t *t
 	root := filepath.Join(cache, core.HarnessKindClaude.ID())
 	harnessTestCompleteFake(t, root, core.HarnessKindClaude, selected.InstallID, selected.Entrypoint)
 	install := filepath.Join(root, selected.InstallID)
-	extra, _ := core.HarnessKindClaude.ExtraManagedEntrypoint()
-	harnessTestExecutable(t, filepath.Join(install, extra), "#!/bin/sh\nexit 0\n")
 	environment := harnessTestFakeNodeTools(t, temp, filepath.Join(temp, "unused"))
 	environment["XDG_CACHE_HOME"] = cacheHome
 	environment["HOME"] = temp
@@ -762,6 +793,94 @@ func TestAnOlderContainerClaudeBridgeSelectsTheManagedPinWithoutReplacingIt(t *t
 	}
 	if located.Managed != nil || located.Command != canonical {
 		t.Fatalf("located %q", located.Command)
+	}
+}
+
+// Hard-won: #1392: an ambient bridge selected from PATH could fail to spawn with ENOENT.
+func TestAnUnspawnableAmbientBridgeSelectsTheManagedPin(t *testing.T) {
+	skipHarnessInstallOnWindows(t)
+	temp := t.TempDir()
+	cacheHome := filepath.Join(temp, "cache")
+	cache, err := core.ManagedHarnessCacheRoot(cacheHome, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installs := filepath.Join(temp, "installs")
+	environment := harnessTestFakeNodeTools(t, temp, installs)
+	environment["XDG_CACHE_HOME"] = cacheHome
+	environment["HOME"] = filepath.Join(temp, "absent-home")
+	harness := core.HarnessKindCodex
+	bridge, _ := core.NpmBridgeFor(harness)
+	environment["MJ_TEST_BRIDGE_VERSION"] = bridge.Package + " " + bridge.Version
+	approvals := core.ExecutionPolicyConfiguredApprovals
+	command, args := core.FallbackLaunch(harness, approvals)
+	launcher := filepath.Join(temp, "bin/codex-acp")
+	fixtures, err := filepath.Abs(filepath.Join("testdata", "harness_install"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	locate := func(policy core.HarnessRuntimePolicy) (Located, error) {
+		return Locate(context.Background(), policy, harness, approvals, command, args, environment)
+	}
+
+	if err := os.Symlink(filepath.Join(fixtures, "bridge-version.sh"), launcher); err != nil {
+		t.Fatal(err)
+	}
+	harnessTestExecutable(t, filepath.Join(temp, "bin/codex"), "#!/bin/sh\nexit 0\n")
+	located, err := locate(core.HarnessRuntimePolicyImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := canonicalizePath(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if located.Command != canonical {
+		t.Fatalf("located %q, want %q", located.Command, canonical)
+	}
+
+	if err := os.Remove(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fixtures, "bridge-missing-interpreter.sh"), launcher); err != nil {
+		t.Fatal(err)
+	}
+	_, err = locate(core.HarnessRuntimePolicyImage)
+	if err == nil {
+		t.Fatal("an image bridge that cannot start must be an error")
+	}
+	var cause syscall.Errno
+	if !errors.As(err, &cause) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("not a NotFound cause: %v", err)
+	}
+	message := err.Error()
+	canonical, err = canonicalizePath(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, detail := range []string{canonical, "working directory /:", cause.Error()} {
+		if !strings.Contains(message, detail) {
+			t.Fatalf("%q missing from %s", detail, message)
+		}
+	}
+	if _, err := os.Stat(cache); err == nil {
+		t.Fatal("the image source must not create a managed cache")
+	}
+
+	located, err = locate(core.HarnessRuntimePolicyAmbient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if located.Managed == nil {
+		t.Fatal("an unspawnable ambient bridge must select the managed pin")
+	}
+	defer located.Managed.Release()
+	install := core.ManagedHarnessInstallDir(cache, harness)
+	if want := filepath.Join(install, core.Pin(harness).Entrypoint); located.Command != want {
+		t.Fatalf("located %q, want %q", located.Command, want)
+	}
+	if body, err := os.ReadFile(installs); err != nil || string(body) != "x" {
+		t.Fatalf("installs %q %v", body, err)
 	}
 }
 
@@ -1153,6 +1272,77 @@ func TestConcurrentFirstUsePublishesOneManagedNodeInstall(t *testing.T) {
 	}
 }
 
+// Hard-won: #1605: npm success could publish a receipt for a CLI missing its native package.
+func TestNpmInstallRetriesAfterThePinnedCLICannotRun(t *testing.T) {
+	skipHarnessInstallOnWindows(t)
+	for _, harness := range []core.HarnessKind{core.HarnessKindCodex, core.HarnessKindClaude} {
+		temp := t.TempDir()
+		cache := filepath.Join(temp, "cache")
+		installs := filepath.Join(temp, "installs")
+		probes := filepath.Join(temp, "probes")
+		environment := harnessTestFakeNodeTools(t, temp, installs)
+		environment["MJ_TEST_CLI_MISSING_NATIVE"] = "1"
+		environment["MJ_TEST_CLI_PROBES"] = probes
+		install := core.ManagedHarnessInstallDir(cache, harness)
+		resolve := func() (*ManagedHarness, error) {
+			return resolveAt(cache, harness, core.ExecutionPolicyConfiguredApprovals, environment)
+		}
+		counts := func(want string) {
+			t.Helper()
+			for _, path := range []string{installs, probes} {
+				if body, err := os.ReadFile(path); err != nil || string(body) != want {
+					t.Fatalf("%s: %s: %q %v, want %q", harness.DisplayName(), path, body, err, want)
+				}
+			}
+		}
+
+		_, err := resolve()
+		if err == nil {
+			t.Fatalf("%s: a CLI that cannot run must fail the installation", harness.DisplayName())
+		}
+		message := err.Error()
+		for _, detail := range []string{
+			harness.DisplayName(),
+			core.Pin(harness).CLIEntrypoint,
+			"npm package installation",
+			"missing native platform package",
+		} {
+			if !strings.Contains(message, detail) {
+				t.Fatalf("%q missing from %s", detail, message)
+			}
+		}
+		if _, err := os.Lstat(install); err == nil {
+			t.Fatalf("%s: a failed installation was published", harness.DisplayName())
+		}
+		counts("x")
+
+		delete(environment, "MJ_TEST_CLI_MISSING_NATIVE")
+		managed, err := resolve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(filepath.Join(install, core.ManifestFile)); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("%s: no receipt: %v", harness.DisplayName(), err)
+		}
+		if want := filepath.Join(install, core.Pin(harness).CLIEntrypoint); managed.CLIEntrypoint != want {
+			t.Fatalf("%s: CLI %q, want %q", harness.DisplayName(), managed.CLIEntrypoint, want)
+		}
+		counts("xx")
+
+		environment["MJ_TEST_CLI_MISSING_NATIVE"] = "1"
+		reused, err := resolve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reused.Command != managed.Command {
+			t.Fatalf("%s: reused %q, want %q", harness.DisplayName(), reused.Command, managed.Command)
+		}
+		counts("xx")
+		reused.Release()
+		managed.Release()
+	}
+}
+
 func TestConcurrentFirstUsePublishesOneCompleteInstall(t *testing.T) {
 	skipHarnessInstallOnWindows(t)
 	temp := t.TempDir()
@@ -1491,6 +1681,7 @@ func TestReleasedManagedInstallIsCollectedWhileAnUnrelatedChildWaitsToExec(t *te
 		t.Fatal(err)
 	}
 	harnessTestCompleteFake(t, root, core.HarnessKindGrok, selected.InstallID, selected.Entrypoint)
+	harnessTestExecutable(t, filepath.Join(root, selected.InstallID, "bin/agent"), "#!/bin/sh\nexit 0\n")
 	managed, err := resolveAt(cache, core.HarnessKindGrok, core.ExecutionPolicyConfiguredApprovals, map[string]string{})
 	if err != nil {
 		t.Fatal(err)
@@ -1578,11 +1769,10 @@ func harnessTestCheckCompleteCacheHit(t *testing.T, harness core.HarnessKind) {
 	}
 	harnessTestCompleteFake(t, root, harness, selected.InstallID, selected.Entrypoint)
 	install := filepath.Join(root, selected.InstallID)
-	if entry, ok := harness.ExtraManagedEntrypoint(); ok {
-		harnessTestExecutable(t, filepath.Join(install, entry), "#!/bin/sh\nexit 0\n")
-	}
 	marker := filepath.Join(temp, "executed")
-	harnessTestExecutable(t, filepath.Join(install, selected.Entrypoint), fmt.Sprintf("#!/bin/sh\ntouch '%s'\n", marker))
+	for _, entry := range []string{selected.Entrypoint, selected.CLIEntrypoint} {
+		harnessTestExecutable(t, filepath.Join(install, entry), fmt.Sprintf("#!/bin/sh\ntouch '%s'\n", marker))
+	}
 	environment := harnessTestFakeNodeTools(t, temp, filepath.Join(temp, "unused"))
 
 	managed, err := resolveAt(cache, harness, core.ExecutionPolicyConfiguredApprovals, environment)
@@ -1594,21 +1784,24 @@ func harnessTestCheckCompleteCacheHit(t *testing.T, harness core.HarnessKind) {
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("the entrypoint ran")
 	}
-	providerEnv, entry := "CODEX_PATH", "node_modules/@openai/codex/bin/codex.js"
-	if harness == core.HarnessKindClaude {
+	var providerEnv string
+	switch harness {
+	case core.HarnessKindCodex:
+		providerEnv = "CODEX_PATH"
+	case core.HarnessKindClaude:
 		providerEnv = "CLAUDE_CODE_EXECUTABLE"
-		entry, _ = harness.ExtraManagedEntrypoint()
+	default:
+		panic("unreachable")
 	}
-	if got := managed.Environment[providerEnv]; got != filepath.Join(install, entry) {
+	cli := filepath.Join(install, selected.CLIEntrypoint)
+	if got, ok := managed.Environment[providerEnv]; !ok || got != cli {
 		t.Fatalf("%s = %q", providerEnv, got)
 	}
-	if harness == core.HarnessKindClaude {
-		if err := os.Remove(filepath.Join(install, entry)); err != nil {
-			t.Fatal(err)
-		}
-		if complete, err := completeInstall(install, harness, selected); err != nil || complete {
-			t.Fatal("a cache without the pinned Claude Code must not launch the SDK's bundled CLI")
-		}
+	if err := os.Remove(cli); err != nil {
+		t.Fatal(err)
+	}
+	if complete, err := completeInstall(install, harness, selected); err != nil || complete {
+		t.Fatalf("a complete cache must contain the pinned CLI: %v", err)
 	}
 }
 

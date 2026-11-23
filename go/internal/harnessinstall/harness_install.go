@@ -301,12 +301,34 @@ func Locate(ctx context.Context, policy core.HarnessRuntimePolicy, harness core.
 		return managed()
 	}
 	if hasBridge {
-		selected, ok, err := compatibleBridge(ctx, harness, bridge, environment)
-		if err != nil {
-			return Located{}, err
+		search := maps2Clone(environment)
+		type lookup struct {
+			path string
+			ok   bool
+			err  error
 		}
-		if ok {
-			return locatedUnchosen(selected, nil), nil
+		found, err := core.SpawnBlocking(func() lookup {
+			path, ok, err := FindCommand(bridge.Command, search)
+			return lookup{path, ok, err}
+		}).Join(ctx)
+		if err != nil {
+			return Located{}, fmt.Errorf("find target bridge task failed: %w", err)
+		}
+		if found.err != nil {
+			if !isNotFound(found.err) {
+				return Located{}, found.err
+			}
+			slog.Info("target bridge disappeared during selection", "harness", harness.ID(), "error", found.err.Error())
+			found.ok = false
+		}
+		if found.ok {
+			compatible, err := compatibleBridge(ctx, harness, bridge, found.path, environment, policy)
+			if err != nil {
+				return Located{}, err
+			}
+			if compatible {
+				return locatedUnchosen(found.path, nil), nil
+			}
 		}
 		slog.Info("target bridge is missing or incompatible; preparing the pinned installation", "harness", harness.ID())
 	} else {
@@ -426,13 +448,13 @@ func locateInImage(ctx context.Context, harness core.HarnessKind, executionPolic
 	}
 	bridge, entrypoint, cli := result.paths[0], result.paths[1], result.paths[2]
 	if npm, ok := core.NpmBridgeFor(harness); ok {
-		_, compatible, err := compatibleBridge(ctx, harness, npm, environment)
+		compatible, err := compatibleBridge(ctx, harness, npm, bridge, environment, core.HarnessRuntimePolicyImage)
 		if err != nil {
 			return Located{}, err
 		}
 		if !compatible {
-			return Located{}, fmt.Errorf("the daemon's image carries an incompatible %s for %s; it needs %s %s",
-				npm.Command, harness.DisplayName(), npm.Package, npm.Version)
+			return Located{}, fmt.Errorf("the daemon's image carries an incompatible bridge %s for %s; it needs %s %s",
+				bridge, harness.DisplayName(), npm.Package, npm.Version)
 		}
 	}
 	var command string
@@ -490,51 +512,41 @@ func locateInImage(ctx context.Context, harness core.HarnessKind, executionPolic
 	}, nil
 }
 
-// compatibleBridge is the target's bridge on `PATH` when it is usable:
-// present, and for Codex and Claude, the pinned version their worker-side
-// protocol handling requires.
-func compatibleBridge(ctx context.Context, harness core.HarnessKind, bridge core.NpmBridge, environment map[string]string) (string, bool, error) {
-	search := maps2Clone(environment)
-	type lookup struct {
-		path string
-		ok   bool
-		err  error
-	}
-	found, err := core.SpawnBlocking(func() lookup {
-		path, ok, err := FindCommand(bridge.Command, search)
-		return lookup{path, ok, err}
-	}).Join(ctx)
-	if err != nil {
-		return "", false, fmt.Errorf("find target bridge task failed: %w", err)
-	}
-	if found.err != nil {
-		return "", false, found.err
-	}
-	if !found.ok {
-		return "", false, nil
-	}
+// compatibleBridge checks the selected bridge version where worker-side
+// protocol handling requires the exact pin.
+func compatibleBridge(ctx context.Context, harness core.HarnessKind, bridge core.NpmBridge, selected string, environment map[string]string, policy core.HarnessRuntimePolicy) (bool, error) {
 	if harness != core.HarnessKindCodex && harness != core.HarnessKindClaude {
-		return found.path, true, nil
+		return true, nil
 	}
-	probe := exec.Command(found.path, "--version")
+	// The version probe needs no session or home files. Use a stable cwd so
+	// a missing HOME cannot look like a missing executable or interpreter.
+	cwd := "/"
+	probe := exec.Command(selected, "--version")
+	probe.Dir = cwd
 	probe.Env = harnessEnvironmentList(environment)
-	if home, ok := environment["HOME"]; ok {
-		probe.Dir = home
-	}
-	output, err := core.RunBounded(ctx, probe, 64*1024, harnessCommandTimeout)
+	spawned := false
+	output, err := core.RunBoundedObserved(ctx, probe, 64*1024, harnessCommandTimeout, func(int) { spawned = true })
 	if err != nil {
-		return "", false, fmt.Errorf("check installed %s bridge version: %w", harness.DisplayName(), err)
+		err = fmt.Errorf("check installed %s bridge version at %s in working directory %s: %w",
+			harness.DisplayName(), selected, cwd, err)
+		if policy == core.HarnessRuntimePolicyAmbient && !spawned && isNotFound(err) {
+			slog.Info("target bridge could not start", "error", err.Error())
+			return false, nil
+		}
+		return false, err
 	}
 	expected := bridge.Package + " " + bridge.Version
 	if harness == core.HarnessKindClaude {
 		expected = bridge.Version
 	}
-	compatible := output.Status != nil && output.Status.Success() &&
-		strings.TrimRight(strings.ToValidUTF8(string(output.Stdout), "�"), "\n") == expected
-	if !compatible {
-		return "", false, nil
-	}
-	return found.path, true, nil
+	return output.Status != nil && output.Status.Success() &&
+		strings.TrimRight(strings.ToValidUTF8(string(output.Stdout), "�"), "\n") == expected, nil
+}
+
+// isNotFound reports whether err carries an operating-system "not found"
+// error (Rust's io::ErrorKind::NotFound).
+func isNotFound(err error) bool {
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // targetNativeHarnessIsAvailable reports whether the target carries the
@@ -594,9 +606,13 @@ func FindCommand(command string, environment map[string]string) (string, bool, e
 	if err != nil || !ok {
 		return "", false, err
 	}
-	resolved, err := canonicalizePath(selected)
+	absolute, err := absolutePath(selected)
 	if err != nil {
-		return "", false, fmt.Errorf("resolve selected runtime command: %w", err)
+		return "", false, fmt.Errorf("make runtime command %s absolute: %w", selected, err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve selected runtime command %s: %w", absolute, err)
 	}
 	return resolved, true, nil
 }
@@ -741,12 +757,13 @@ func resolveAtAsync(ctx context.Context, root string, harness core.HarnessKind, 
 	if harness == core.HarnessKindMuse {
 		launchEnvironment["MUSE_CLI"] = filepath.Join(install, selected.Entrypoint)
 	}
-	if harness == core.HarnessKindCodex {
-		launchEnvironment["CODEX_PATH"] = filepath.Join(install, "node_modules/@openai/codex/bin/codex.js")
-	}
-	// The bridge's SDK bundles an older CLI; select our separately pinned Code.
-	if entry, ok := harness.ExtraManagedEntrypoint(); harness == core.HarnessKindClaude && ok {
-		launchEnvironment["CLAUDE_CODE_EXECUTABLE"] = filepath.Join(install, entry)
+	cliEntrypoint := filepath.Join(install, selected.CLIEntrypoint)
+	// Point each bridge at the separately pinned CLI.
+	switch harness {
+	case core.HarnessKindCodex:
+		launchEnvironment["CODEX_PATH"] = cliEntrypoint
+	case core.HarnessKindClaude:
+		launchEnvironment["CLAUDE_CODE_EXECUTABLE"] = cliEntrypoint
 	}
 	// The pinned installation is not the release channel, so its downloader
 	// must never fetch a replacement under a running session.
@@ -785,7 +802,7 @@ func resolveAtAsync(ctx context.Context, root string, harness core.HarnessKind, 
 		Args:          args,
 		Environment:   launchEnvironment,
 		Entrypoint:    filepath.Join(install, selected.Entrypoint),
-		CLIEntrypoint: filepath.Join(install, selected.CLIEntrypoint),
+		CLIEntrypoint: cliEntrypoint,
 		LeasePath:     leasePath,
 		CacheRoot:     root,
 		lease:         lease,
@@ -924,7 +941,18 @@ func installInto(ctx context.Context, harnessRoot, finalPath string, harness cor
 		return err
 	}
 	if err := validateEntrypoint(staging, selected, harness); err != nil {
-		return err
+		return fmt.Errorf("install managed %s package: %w", harness.DisplayName(), err)
+	}
+	if harness == core.HarnessKindCodex || harness == core.HarnessKindClaude {
+		cli := filepath.Join(staging, selected.CLIEntrypoint)
+		probe := exec.Command(cli, "--version")
+		probe.Dir = staging
+		probe.Env = harnessEnvironmentList(environment)
+		if err := runBoundedCommandChecked(ctx, probe,
+			fmt.Sprintf("verify pinned %s CLI %s after npm package installation", harness.DisplayName(), cli),
+			harnessCommandTimeout); err != nil {
+			return err
+		}
 	}
 	leaseFile, err := openLock(filepath.Join(staging, core.LeaseFile))
 	if err != nil {
@@ -1053,10 +1081,8 @@ func installNpm(ctx context.Context, staging string, packageJSON, packageLock []
 
 // verifyInstallScriptsRan: npm 12 and later refuse dependency install scripts
 // unless the package is listed in the root `allowScripts` field. A refused
-// script is only a warning, so the install would otherwise publish a harness
-// whose entrypoint is the package's "not installed" stub. Report that here,
-// where the message can say which asset to edit, instead of letting the
-// bridge fail to start later.
+// script is only a warning, so report it before probing the CLI, which may
+// still be the package's "not installed" stub.
 func verifyInstallScriptsRan(ctx context.Context, staging string, harness core.HarnessKind, environment map[string]string) error {
 	command := harnessCommand("npm", []string{"install-scripts", "ls", "--json"}, environment)
 	command.Dir = staging
@@ -1080,10 +1106,8 @@ func verifyInstallScriptsRan(ctx context.Context, staging string, harness core.H
 	if len(pending) == 0 {
 		return nil
 	}
-	return fmt.Errorf("managed %s harness install skipped install scripts for %s. npm gates dependency install "+
-		"scripts, so add each package to allowScripts in "+
-		"mj-harness-install/assets/harnesses/%s/package.json and reinstall.",
-		harness.DisplayName(), strings.Join(pending, ", "), harness.ID())
+	return fmt.Errorf("managed %s npm package installation skipped install scripts for %s because the bundled allowScripts policy did not approve them",
+		harness.DisplayName(), strings.Join(pending, ", "))
 }
 
 // pendingInstallScripts collects the `pkg@version` keys npm reports as
@@ -2448,8 +2472,12 @@ func completeInstall(path string, harness core.HarnessKind, selected core.Harnes
 
 func validateEntrypoint(path string, selected core.HarnessPin, harness core.HarnessKind) error {
 	entries := []string{selected.Entrypoint}
-	if extra, ok := harness.ExtraManagedEntrypoint(); ok {
-		entries = append(entries, extra)
+	if selected.CLIEntrypoint != selected.Entrypoint {
+		entries = append(entries, selected.CLIEntrypoint)
+	}
+	// Grok's launcher also needs the separate agent executable.
+	if harness == core.HarnessKindGrok {
+		entries = append(entries, "bin/agent")
 	}
 	for _, entry := range entries {
 		entrypoint := filepath.Join(path, entry)

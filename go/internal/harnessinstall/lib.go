@@ -9,8 +9,11 @@
 package harnessinstall
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode"
 )
@@ -48,11 +51,42 @@ func debugString(value string) string {
 // canonicalizePath is Rust's `fs::canonicalize`: an absolute path with every
 // link resolved, which must exist.
 func canonicalizePath(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
+	absolute, err := absolutePath(path)
 	if err != nil {
 		return "", err
 	}
 	return filepath.EvalSymlinks(absolute)
+}
+
+// absolutePath is Rust's `std::path::absolute`: path made absolute against
+// the current directory without touching the file system. On Unix it drops
+// `.` components and repeated separators but keeps `..`, so EvalSymlinks
+// afterwards resolves each `..` after the links before it, as realpath does.
+func absolutePath(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("cannot make an empty path absolute")
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Abs(path)
+	}
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		path = cwd + "/" + path
+	}
+	parts := []string{}
+	for _, part := range strings.Split(path, "/") {
+		if part != "" && part != "." {
+			parts = append(parts, part)
+		}
+	}
+	absolute := "/" + strings.Join(parts, "/")
+	if strings.HasSuffix(path, "/") && len(parts) > 0 {
+		absolute += "/"
+	}
+	return absolute, nil
 }
 
 // isASCIIAlphanumeric is Rust's `u8::is_ascii_alphanumeric`.

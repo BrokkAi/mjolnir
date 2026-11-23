@@ -9,7 +9,7 @@
 # This file is checked in and never written at run time. A test's temporary home
 # links to it instead of writing a copy, because a sibling thread that forks
 # while the write descriptor is open leaves a child holding it and the exec
-# fails with ETXTBSY -- see loginEnvironmentFixture in go/internal/core/login_environment_test.go.
+# fails with ETXTBSY -- see loginEnvironmentFixture in go/internal/harnessinstall/login_environment_test.go.
 [ "$1" = -l ] && [ "$2" = -i ] && [ "$3" = -c ] || exit 80
 . "$HOME/.profile"
 [ -f "$HOME/.shellrc" ] && . "$HOME/.shellrc"

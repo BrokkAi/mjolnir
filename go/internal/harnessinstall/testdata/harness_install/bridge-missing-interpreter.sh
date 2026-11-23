@@ -1,0 +1,1 @@
+#!/__mjolnir_test_missing_shebang_interpreter__
