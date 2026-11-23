@@ -1287,6 +1287,56 @@ fn spill_tool_detail_batch(
     Ok(batch)
 }
 
+/// Read the current detail by stable identity without paging the transcript.
+pub fn load_tool_call_detail(
+    session_id: &str,
+    stable_id: &str,
+) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+    load_tool_call_detail_from(&database_path(), session_id, stable_id)
+}
+
+pub fn load_tool_call_detail_from(
+    path: &Path,
+    session_id: &str,
+    stable_id: &str,
+) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+    use mj_core::transcript::ToolCallDetailResult;
+
+    let row = open_reader(path)?
+        .query_row(
+            "SELECT body_json, detail_offset, detail_len FROM materialized_transcript_items
+             WHERE session_id = ?1 AND stable_id = ?2",
+            params![session_id, stable_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((json, offset, len)) = row else {
+        return Ok(None);
+    };
+    let body: TranscriptBody = serde_json::from_str(&json)?;
+    let result = match (offset, len) {
+        (Some(offset), Some(len)) => match tool_details::read_tool_detail(
+            tool_details::data_dir_from(path),
+            session_id,
+            stable_id,
+            offset,
+            len,
+        ) {
+            Ok(body) => ToolCallDetailResult::Full { body },
+            Err(error) => ToolCallDetailResult::Unavailable {
+                summary: Some(body),
+                reason: format!("{error:#}"),
+            },
+        },
+        (None, _) if !body.detail_trimmed() => ToolCallDetailResult::Full { body },
+        _ => ToolCallDetailResult::Unavailable {
+            summary: Some(body),
+            reason: "full tool detail is not stored locally".into(),
+        },
+    };
+    Ok(Some(result))
+}
+
 /// Read the spill associated with a specific projected revision. A newer
 /// inline update or an already-trimmed legacy row has no matching detail.
 pub fn read_stored_tool_detail(
@@ -2924,5 +2974,67 @@ mod query_plan_tests {
             "{ranges}"
         );
         assert!(!ranges.contains("TEMP B-TREE"), "{ranges}");
+    }
+}
+
+#[cfg(test)]
+mod tool_detail_tests {
+    use super::*;
+    use mj_core::transcript::{TerminalOutputRecord, ToolCallDetailResult};
+
+    #[test]
+    fn load_tool_call_detail_reads_inline_spills_and_reports_missing_or_corrupt_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hel.sqlite3");
+        let session_id = "session-detail";
+        let stable_id = "terminal:parked";
+        save_session_to(&path, &test_session(session_id, "project")).unwrap();
+        let full = TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: "parked".into(),
+            output: "captured output\n".repeat(8192).into(),
+            truncated: false,
+            exit_code: Some(1),
+            signal: None,
+        });
+        let mut projection = MaterializedSession::empty(session_id);
+        projection.applied_event_ordinal = 1;
+        projection.applied_event_digest = "a".repeat(64);
+        projection.transcript.push(Arc::new(TranscriptItem {
+            stable_id: stable_id.into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 100,
+            last_changed_at_ms: 100,
+            body: full.clone(),
+        }));
+        save_materialized_session_to(&path, &projection).unwrap();
+        let lookup = || load_tool_call_detail_from(&path, session_id, stable_id).unwrap();
+        assert!(
+            load_tool_call_detail_from(&path, session_id, "missing")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            lookup(),
+            Some(ToolCallDetailResult::Full { body: full.clone() })
+        );
+
+        let spilled = spill_and_trim_settled_tools_through_from(&path, session_id, 1).unwrap();
+        let [(id, summary)] = spilled.as_slice() else {
+            panic!("expected one spill")
+        };
+        assert_eq!(id, stable_id);
+        assert!(summary.detail_trimmed());
+        assert_eq!(lookup(), Some(ToolCallDetailResult::Full { body: full }));
+        let frame_path = directory.path().join("tool-details/session-detail.mjtd");
+        std::fs::write(&frame_path, b"corrupt spill").unwrap();
+        let unavailable = lookup();
+        assert!(
+            matches!(unavailable, Some(ToolCallDetailResult::Unavailable { summary: Some(body), .. }) if body == *summary)
+        );
+        std::fs::remove_file(frame_path).unwrap();
+        assert!(
+            matches!(lookup(), Some(ToolCallDetailResult::Unavailable { summary: Some(body), reason }) if body == *summary && reason.contains(".mjtd"))
+        );
     }
 }

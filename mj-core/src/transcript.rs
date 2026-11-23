@@ -439,6 +439,19 @@ pub enum TranscriptBody {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolCallDetailResult {
+    Full {
+        body: TranscriptBody,
+    },
+    Unavailable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<TranscriptBody>,
+        reason: String,
+    },
+}
+
 impl TranscriptBody {
     pub fn role(&self) -> TranscriptRole {
         match self {
@@ -791,6 +804,10 @@ pub struct ChatEntry {
     pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incoming_message: Option<Box<crate::mailbox::MailboxEvent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tool_detail_trimmed: bool,
     pub tool_call_id: Option<String>,
     pub tool_status: Option<ToolStatus>,
     /// Compact label used by Rich and browser projections. `text` remains the
@@ -911,6 +928,8 @@ impl ChatEntry {
             revision: 0,
             message_id: None,
             incoming_message: None,
+            stable_id: None,
+            tool_detail_trimmed: false,
             tool_call_id: None,
             tool_status: None,
             tool_summary: None,
@@ -1001,6 +1020,8 @@ impl ChatEntry {
             revision: 0,
             message_id: None,
             incoming_message: None,
+            stable_id: None,
+            tool_detail_trimmed: false,
             tool_call_id: None,
             tool_status: None,
             tool_summary: None,
@@ -1035,6 +1056,8 @@ impl ChatEntry {
             revision: 0,
             message_id: None,
             incoming_message: None,
+            stable_id: None,
+            tool_detail_trimmed: false,
             tool_call_id,
             tool_status: Some(tool_status),
             tool_summary: None,

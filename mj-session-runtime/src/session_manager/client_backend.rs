@@ -4,6 +4,24 @@ use super::*;
 pub struct ClientSessionHandle(pub ManagedSessionHandle);
 
 impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
+    fn tool_call_detail(
+        &self,
+        stable_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<Option<mj_core::transcript::ToolCallDetailResult>>>
+    {
+        let session_id = self.0.session_id().to_owned();
+        Box::pin(async move {
+            mj_core::runtime::spawn_blocking(move || {
+                crate::tool_detail::load_tool_call_detail_with_checkpoint_fallback(
+                    &session_id,
+                    &stable_id,
+                )
+            })
+            .await
+            .context("tool detail lookup task failed")?
+        })
+    }
+
     fn transcript_history(
         &self,
         before: Option<mj_core::storage::TranscriptCursor>,

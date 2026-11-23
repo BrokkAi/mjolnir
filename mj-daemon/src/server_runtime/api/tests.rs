@@ -823,6 +823,16 @@ struct FakeSession {
 }
 
 impl SessionHandleBackend for FakeSession {
+    fn tool_call_detail(
+        &self,
+        _stable_id: String,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        anyhow::Result<Option<mj_core::transcript::ToolCallDetailResult>>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     fn search_prompts(
         &self,
         _bundle_id: String,
@@ -1278,6 +1288,16 @@ struct ConfigSession {
 }
 
 impl SessionHandleBackend for ConfigSession {
+    fn tool_call_detail(
+        &self,
+        _stable_id: String,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        anyhow::Result<Option<mj_core::transcript::ToolCallDetailResult>>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     fn search_prompts(
         &self,
         bundle: String,
@@ -3347,6 +3367,16 @@ struct ScriptedSession {
 }
 
 impl SessionHandleBackend for ScriptedSession {
+    fn tool_call_detail(
+        &self,
+        _stable_id: String,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        anyhow::Result<Option<mj_core::transcript::ToolCallDetailResult>>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     fn search_prompts(
         &self,
         bundle_id: String,

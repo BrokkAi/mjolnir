@@ -3861,6 +3861,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
         reset: false,
         entries: vec![
             BrowserTranscriptEntry {
+                tool_detail_trimmed: false,
                 stable_id: None,
                 command_id: None,
                 id: 3,
@@ -3878,6 +3879,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 diffstats: Vec::new(),
             },
             BrowserTranscriptEntry {
+                tool_detail_trimmed: false,
                 stable_id: None,
                 command_id: None,
                 id: 7,
@@ -3964,6 +3966,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
         window_start_seq: 1,
         reset: false,
         entries: vec![BrowserTranscriptEntry {
+            tool_detail_trimmed: false,
             stable_id: None,
             command_id: None,
             id: 1,
@@ -6103,4 +6106,78 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         body["sessions"][0]["notification_card"]["entries"][0]["message"]["found"],
         "agent:1"
     );
+}
+
+#[test]
+fn viewer_tool_detail_fold_caches_full_details_and_retries_unavailable() {
+    let source = viewer_source(
+        "let toolDetailSession = null;",
+        "/// Rewrite one entry's row.",
+    );
+    let setup = r#"
+import assert from 'node:assert/strict';
+const el = (tag, className, value = '') => ({
+  tag, className, value, children: [], dataset: {},
+  append(...children) { this.children.push(...children); },
+  replaceChildren(...children) { this.children = children; },
+  addEventListener(name, listener) { this[name] = listener; },
+  text() { return [this.value, ...this.children.map(child => child.text())].join('\n'); }
+});
+const renderToolOutput = text => el('pre', '', text);
+const calls = [];
+const replies = [];
+const request = url => {
+  calls.push(url);
+  return new Promise((resolve, reject) => replies.push({ resolve, reject }));
+};
+const open = fold => {
+  fold.open = true;
+  return fold.toggle();
+};
+const close = fold => {
+  fold.open = false;
+  return fold.toggle();
+};
+"#;
+    let checks = r#"
+const fold = toolDetailFold('session one', 'tool:/edit');
+assert.equal(fold.dataset.foldKey, 'tool-detail-tool:/edit');
+assert.deepEqual(calls, []);
+const first = open(fold);
+assert.match(fold.text(), /Loading tool details…/);
+assert.deepEqual(calls, ['/api/sessions/session%20one/items/tool%3A%2Fedit/detail']);
+replies.shift().resolve({ status: 'unavailable', unavailable_reason: 'The spill is missing' });
+await first;
+assert.match(fold.text(), /The spill is missing/);
+
+await close(fold);
+const retry = open(fold);
+replies.shift().reject(new Error('HTTP 503'));
+await retry;
+assert.match(fold.text(), /HTTP 503/);
+await close(fold);
+const succeed = open(fold);
+const replacement = toolDetailFold('session one', 'tool:/edit');
+const shared = open(replacement);
+assert.equal(calls.length, 3);
+replies.shift().resolve({
+  status: 'full',
+  entry: { tool_input: { path: 'notes' }, tool_error: 'failed', tool_content: ['terminal output'] },
+  diffs: [{ text: '-old\n+new' }],
+});
+await Promise.all([succeed, shared]);
+assert.match(replacement.text(), /notes[\s\S]+failed[\s\S]+terminal output[\s\S]+\+new/);
+await close(replacement);
+await open(replacement);
+assert.equal(calls.length, 3);
+
+const other = toolDetailFold('session two', 'tool:/edit');
+const switched = open(other);
+assert.equal(calls.length, 4);
+assert.match(calls[3], /session%20two/);
+replies.shift().resolve({ status: 'full', body: { kind: 'terminal_output' }, entry: { text: 'standalone output' } });
+await switched;
+assert.match(other.text(), /standalone output/);
+"#;
+    run_viewer_script("tool-detail-fold", &format!("{setup}\n{source}\n{checks}"));
 }

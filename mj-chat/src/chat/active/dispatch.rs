@@ -44,6 +44,7 @@ impl ActiveChat {
         let dispatched = self.dispatch(action);
         self.dispatch_composer_requests();
         self.dispatch_earlier_history();
+        self.dispatch_tool_details();
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
             consumed: consumed || action.is_some(),
@@ -72,6 +73,54 @@ impl ActiveChat {
             },
             &mut self.state,
         );
+    }
+
+    pub(super) fn dispatch_tool_details(&mut self) {
+        use mj_core::transcript::ToolCallDetailResult;
+
+        let generation = self.state.tool_detail_generation;
+        for entry in self.state.pending_tool_detail_requests.drain(..) {
+            let Some(stable_id) = entry.stable_id.clone() else {
+                continue;
+            };
+            let session = self.session.clone();
+            let updates = self.chat_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    match session.tool_call_detail(stable_id.clone()).await? {
+                        Some(ToolCallDetailResult::Full { body }) => {
+                            mj_core::runtime::spawn_blocking(move || {
+                                let original =
+                                    entry.source.0.as_ref().expect("materialized tool row");
+                                let mut full = mj_client::transcript::tool_detail_chat_entry(
+                                    original, entry.seq, body,
+                                );
+                                full.ended_after_interrupt = entry.ended_after_interrupt;
+                                full.awaiting_approval = entry.awaiting_approval;
+                                Box::new(full)
+                            })
+                            .await
+                            .context("render tool call detail")
+                        }
+                        Some(ToolCallDetailResult::Unavailable { reason, .. }) => {
+                            Err(anyhow::anyhow!(reason))
+                        }
+                        None => Err(anyhow::anyhow!(
+                            "the transcript item is no longer available"
+                        )),
+                    }
+                }
+                .await
+                .map_err(|error| format!("{error:#}"));
+                if let Err(error) = updates.send(ChatIoUpdate::ToolCallDetail {
+                    generation,
+                    stable_id,
+                    result,
+                }) {
+                    tracing::debug!(%error, "chat closed while loading tool details");
+                }
+            });
+        }
     }
 
     fn dispatch_earlier_history(&mut self) {

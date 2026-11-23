@@ -6773,6 +6773,7 @@ function showLogin() {
   conversationGeneration += 1;
   draftWriters.clear();
   currentSession = null;
+  syncToolDetailSession(null);
   if (eventSource) {
     eventSource.close();
     eventSource = undefined;
@@ -9393,6 +9394,69 @@ function entryTimestamp(entry) {
   return node;
 }
 
+let toolDetailSession = null;
+let toolDetailCache = new Map();
+
+function toolDetailBody(detail) {
+  const body = el('div', 'entry-body');
+  if (detail.status !== 'full') {
+    body.append(el('p', 'dim', detail.unavailable_reason || 'Tool details unavailable.'));
+    return body;
+  }
+  const entry = detail.entry;
+  if (entry.tool_input != null) {
+    body.append(renderToolOutput(JSON.stringify(entry.tool_input, null, 2)));
+  }
+  if (entry.tool_error) body.append(renderToolOutput(entry.tool_error));
+  if (entry.tool_content?.length) body.append(renderToolOutput(entry.tool_content.join('\n')));
+  if (!entry.tool_content?.length && entry.text) {
+    body.append(renderToolOutput(entry.text));
+  }
+  for (const diff of detail.diffs || []) {
+    body.append(renderToolOutput(diff.text));
+  }
+  return body;
+}
+
+function syncToolDetailSession(sessionId) {
+  if (toolDetailSession === sessionId) return;
+  toolDetailSession = sessionId;
+  toolDetailCache.clear();
+  toolDetailCache = new Map();
+}
+
+function toolDetailFold(sessionId, stableId) {
+  syncToolDetailSession(sessionId);
+  const cache = toolDetailCache;
+  const fold = el('details', 'block-fold tool-detail-fold');
+  fold.dataset.foldKey = `tool-detail-${stableId}`;
+  const content = el('div');
+  fold.append(el('summary', '', 'Tool details'), content);
+  fold.addEventListener('toggle', async () => {
+    let load = cache.get(stableId);
+    if (!fold.open) {
+      if (load?.result?.status === 'unavailable') cache.delete(stableId);
+      return;
+    }
+    if (!load) {
+      load = {};
+      load.pending = request(`/api/sessions/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(stableId)}/detail`)
+        .catch(error => ({ status: 'unavailable', unavailable_reason: error.message }))
+        .then(result => {
+          load.result = result;
+          return result;
+        });
+      cache.set(stableId, load);
+    }
+    if (!load.result) content.replaceChildren(el('p', 'dim', 'Loading tool details…'));
+    const detail = await load.pending;
+    if (fold.open && cache.get(stableId) === load) {
+      content.replaceChildren(toolDetailBody(detail));
+    }
+  });
+  return fold;
+}
+
 /// Rewrite one entry's row.
 ///
 /// Thinking and mailbox events are collapsed by default, and which folds the
@@ -9436,6 +9500,9 @@ function paintEntry(node, entry, unansweredPrompt) {
     node.replaceChildren(heading, fold);
   } else {
     node.replaceChildren(heading, entryBody(entry));
+    if (entry.tool_detail_trimmed && entry.stable_id && currentSession) {
+      node.append(toolDetailFold(currentSession, entry.stable_id));
+    }
   }
   if (unansweredPrompt) {
     const controls = el('div', 'row');
@@ -9547,6 +9614,7 @@ function retireConversationRequest() {
 }
 
 function clearConversationContents() {
+  syncToolDetailSession(currentSession);
   entryNodes.clear();
   feed.replaceChildren();
   jumpToLatest.classList.add('hidden');

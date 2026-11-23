@@ -78,6 +78,8 @@ pub struct HistoryEntry {
     /// matches it against live rows, whose ids are these positions.
     pub position: u64,
     pub role: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tool_detail_trimmed: bool,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -92,6 +94,7 @@ pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<Hi
             stable_id: item.stable_id.clone(),
             position: item.position,
             role: mj_core::transcript::transcript_item_role(&item.body),
+            tool_detail_trimmed: item.body.detail_trimmed(),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
                     event.message_text().expect("message entry metadata"),
@@ -116,11 +119,18 @@ pub fn browser_transcript(
 ) -> BrowserTranscript {
     let collapsed_restarts =
         collapsed_session_restart_states(source_entries, TranscriptRenderMode::Rich);
+    // A disclosure needs the identity of a single stored tool. Keep these
+    // rows outside the browser's synthetic groups.
+    let detail_rows = source_entries
+        .iter()
+        .filter(|entry| entry.tool_detail_trimmed)
+        .map(|entry| entry.start_seq)
+        .collect();
     let collapse = entry_collapse_states(
         source_entries,
         TranscriptRenderMode::Rich,
         ToolOutput::Grouped,
-        &BTreeSet::new(),
+        &detail_rows,
     );
     let restart_collapse_window_start = restart_collapse_window_start_seq(
         source_entries,
@@ -276,6 +286,8 @@ pub fn materialized_chat_entries_reusing(
             }
             if entry_matches_transcript_item(&entry, item) {
                 entry.seq = item_update_ordinal(item, session.applied_event_ordinal);
+                entry.stable_id = Some(item.stable_id.clone());
+                entry.tool_detail_trimmed = item.body.detail_trimmed();
                 entry.source = TranscriptSource(Some(item.clone()));
                 return entry;
             }
@@ -577,12 +589,17 @@ pub fn materialized_chat_entry_with_outputs(
             }
             entry
         }
-        TranscriptBody::TerminalOutput { record, .. } => {
-            let mut entry = ChatEntry::plain(
-                item.position,
-                ChatRole::System,
-                sanitize_terminal_text(&terminal_output_detail(record)),
-            );
+        TranscriptBody::TerminalOutput {
+            record,
+            first_error_line,
+            ..
+        } => {
+            let detail = terminal_output_detail(record);
+            let text = match first_error_line {
+                Some(error) => format!("{error}\n{detail}"),
+                None => detail,
+            };
+            let mut entry = ChatEntry::plain(item.position, ChatRole::System, text);
             // Output no tool call refers to is a whole block per command. A
             // command that ended cleanly says nothing the decluttered feed
             // needs, so only the raw transcript carries it; anything abnormal
@@ -632,8 +649,43 @@ pub fn materialized_chat_entry_with_outputs(
     ) {
         entry.message_id = Some(item.stable_id.clone());
     }
+    entry.stable_id = Some(item.stable_id.clone());
+    entry.tool_detail_trimmed = item.body.detail_trimmed();
     entry.source = TranscriptSource(Some(item.clone()));
     entry
+}
+
+/// Render a reloaded body with the same identity and timestamps as its row.
+pub fn tool_detail_chat_entry(
+    original: &Arc<TranscriptItem>,
+    frontier: u64,
+    body: TranscriptBody,
+) -> ChatEntry {
+    let item = Arc::new(TranscriptItem {
+        body,
+        ..original.as_ref().clone()
+    });
+    let diffstats = materialized_tool_diffstats(&item);
+    materialized_chat_entry_with_diffstats(&item, frontier, diffstats.as_ref())
+}
+
+pub fn tool_detail_patches(
+    call: &mj_core::transcript::OpaqueToolCall,
+) -> Vec<mj_core::diff::DiffPatch> {
+    use agent_client_protocol::v1::schema::ToolCallContent;
+
+    call.decode()
+        .map(|decoded| {
+            decoded
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ToolCallContent::Diff(diff) => Some(mj_core::diff::patch_of(diff)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn user_label(entry: &ChatEntry) -> &'static str {
@@ -713,8 +765,20 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
                 .or_else(|| item.stable_id.strip_prefix("shell:"))
                 .map(str::to_owned)
         }),
-        stable_id: (entry.role == ChatRole::Message)
-            .then(|| entry.message_id.clone().expect("message identity")),
+        stable_id: match entry.role {
+            ChatRole::Message => entry.message_id.clone(),
+            ChatRole::Tool => entry.stable_id.clone(),
+            _ if entry
+                .source
+                .0
+                .as_ref()
+                .is_some_and(|item| matches!(item.body, TranscriptBody::TerminalOutput { .. })) =>
+            {
+                entry.stable_id.clone()
+            }
+            _ => None,
+        },
+        tool_detail_trimmed: entry.tool_detail_trimmed,
         id: entry.start_seq,
         updated_seq: entry.seq,
         role,
@@ -953,6 +1017,7 @@ pub fn entry_render_fingerprint(entry: &ChatEntry) -> u64 {
         entry.revision,
         entry.raw_only,
         entry.leading_omitted,
+        entry.tool_detail_trimmed,
         entry.ended_after_interrupt,
         entry.awaiting_approval,
     )
@@ -1050,7 +1115,8 @@ pub fn entry_collapse_states(
         for (index, entry) in entries.iter().enumerate() {
             if entry.raw_only {
                 states[index] = EntryCollapse::Omitted;
-            } else if entry.role == ChatRole::Tool && expanded_tool_calls.contains(&entry.start_seq)
+            } else if (entry.role == ChatRole::Tool || entry.tool_detail_trimmed)
+                && expanded_tool_calls.contains(&entry.start_seq)
             {
                 states[index] = EntryCollapse::Expanded;
             }
@@ -1314,6 +1380,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         glyph,
         tone,
         tool_status,
+        tool_detail_trimmed,
         diffstats,
     } = next;
     previous.stable_id == *stable_id
@@ -1329,6 +1396,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         && previous.glyph == *glyph
         && previous.tone == *tone
         && previous.tool_status == *tool_status
+        && previous.tool_detail_trimmed == *tool_detail_trimmed
         && previous.diffstats == *diffstats
 }
 

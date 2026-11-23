@@ -81,6 +81,11 @@ const SESSION_ACTOR_RECONNECT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 enum ChatIoUpdate {
+    ToolCallDetail {
+        generation: u64,
+        stable_id: String,
+        result: Result<Box<ChatEntry>, String>,
+    },
     EarlierMessages {
         generation: u64,
         result: std::result::Result<
@@ -202,6 +207,13 @@ enum PrefixRebuild {
 
 fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixRebuild {
     match update {
+        ChatIoUpdate::ToolCallDetail {
+            generation,
+            stable_id,
+            result,
+        } => {
+            chat.apply_tool_detail(generation, stable_id, result);
+        }
         ChatIoUpdate::EarlierMessages { generation, result } => {
             if let Some(reader) = chat.earlier.as_mut().filter(|r| r.generation == generation) {
                 reader.loading = false;

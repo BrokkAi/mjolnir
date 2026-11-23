@@ -704,6 +704,8 @@ impl<'de> serde::Deserialize<'de> for TranscriptQuery {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptItemView {
     pub stable_id: String,
+    #[serde(default)]
+    pub tool_detail_trimmed: bool,
     pub position: u64,
     /// What to pass as the next `after_seq`. It is the position for everything
     /// but an agent message, which carries the ordinal of its latest content.

@@ -176,6 +176,10 @@ impl PendingRelaySync {
 }
 
 pub trait SessionHandleBackend: Send + Sync {
+    fn tool_call_detail(
+        &self,
+        stable_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::transcript::ToolCallDetailResult>>>;
     fn transcript_history(
         &self,
         _before: Option<mj_core::storage::TranscriptCursor>,
@@ -230,6 +234,13 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    pub async fn tool_call_detail(
+        &self,
+        stable_id: String,
+    ) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+        self.backend.tool_call_detail(stable_id).await
+    }
+
     pub async fn transcript_history(
         &self,
         before: Option<mj_core::storage::TranscriptCursor>,
@@ -563,6 +574,13 @@ struct ReplacementTestSession {
 }
 
 impl SessionHandleBackend for ReplacementTestSession {
+    fn tool_call_detail(
+        &self,
+        _stable_id: String,
+    ) -> BoxFuture<'_, anyhow::Result<Option<mj_core::transcript::ToolCallDetailResult>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn search_prompts(
         &self,
         _bundle_id: String,

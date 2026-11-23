@@ -1764,6 +1764,16 @@ pub(crate) mod tests {
         }
     }
     impl SessionHandleBackend for HistoryBackend {
+        fn tool_call_detail(
+            &self,
+            _stable_id: String,
+        ) -> mj_client::session::BoxFuture<
+            '_,
+            anyhow::Result<Option<mj_core::transcript::ToolCallDetailResult>>,
+        > {
+            Box::pin(async { Ok(None) })
+        }
+
         fn search_prompts(
             &self,
             project: String,

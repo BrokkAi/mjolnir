@@ -1405,6 +1405,7 @@ mod tests {
             window_start_seq: 0,
             reset: false,
             entries: vec![Arc::new(BrowserTranscriptEntry {
+                tool_detail_trimmed: false,
                 command_id: None,
                 stable_id: None,
                 id: seq,
