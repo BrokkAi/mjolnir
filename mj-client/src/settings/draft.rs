@@ -94,6 +94,19 @@ pub fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> 
             entries.remove(key);
         }
     }
+    if let Some(targets) = draft["targets"].as_object_mut() {
+        for target in targets.values_mut() {
+            let default = target["kind"]
+                .as_str()
+                .and_then(super::schema::target_memory_hard_limit_default);
+            if let Some(default) = default
+                && let Some(fields) = target.as_object_mut()
+                && fields.get("memory_hard_limit").and_then(Value::as_bool) == Some(default)
+            {
+                fields.remove("memory_hard_limit");
+            }
+        }
+    }
     // UI projections inspect sources only. Saving/warming serializes those
     // sources for credential resolution in the background request.
     mj_core::config::with_environment_sources_only(|| serde_json::from_value(draft))

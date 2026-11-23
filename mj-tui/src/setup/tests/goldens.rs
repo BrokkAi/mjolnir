@@ -132,6 +132,13 @@ fn golden_settings_root() {
         append_setup_state(&mut output, label, &mut page, 100, 30);
     }
 
+    append_setup_state(
+        &mut output,
+        "Podman runtime RAM admission",
+        &mut setup_at(&["targets", "podman"]),
+        120,
+        30,
+    );
     let mut runtime_actions = setup_at(&["targets"]);
     append_setup_state(
         &mut output,
@@ -806,6 +813,7 @@ fn golden_machines_without_runtimes() {
                                 TargetTemplate::SshDocker {
                                     ssh: builder.clone(),
                                     container: mj_core::config::ContainerTemplate {
+                                        memory_hard_limit: None,
                                         build_cache: None,
                                         image: mj_client::target::DEFAULT_IMAGE.into(),
                                         pull_policy: Default::default(),

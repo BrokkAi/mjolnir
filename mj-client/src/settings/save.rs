@@ -145,6 +145,86 @@ impl std::error::Error for EditConflict {}
 mod tests {
     use super::*;
 
+    #[test]
+    fn runtime_ram_budget_round_trips_overrides_and_prunes_defaults() {
+        use crate::settings::{draft, edit, view};
+        use serde_json::json;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config: Config = serde_json::from_value(json!({
+            "version": mj_core::config::CONFIG_VERSION,
+            "machines": {"remote": {"kind": "ssh", "host": "example.test"}},
+            "targets": {
+                "docker": {"kind": "docker", "machine": "remote"},
+                "podman": {"kind": "podman"},
+                "apple": {"kind": "apple-container"},
+                "nitro": {"kind": "nitro", "machine": "remote", "memory_hard_limit": true},
+                "bare": {"kind": "bare"},
+            }
+        }))
+        .unwrap();
+        config.save_to(&path).unwrap();
+        let runtimes = [("docker", false), ("podman", false), ("apple", true)];
+        for use_overrides in [true, false] {
+            let (original, mut draft) = draft::open(&Config::load_from(&path).unwrap());
+            for (id, default) in runtimes {
+                let row = ["targets", id, "memory_hard_limit"].map(str::to_owned);
+                let page = view::render_page(&draft, &row[..2]).unwrap();
+                let control = &page
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.rows)
+                    .find(|item| item.path == row)
+                    .unwrap()
+                    .control;
+                assert_eq!(
+                    *control,
+                    view::SettingsControl::Checkbox {
+                        checked: if use_overrides { default } else { !default },
+                    }
+                );
+                edit::toggle(&mut draft, &row).unwrap();
+            }
+            for id in ["nitro", "bare"] {
+                let page = view::render_page(&draft, &["targets", id].map(str::to_owned)).unwrap();
+                assert!(!page.groups.iter().flat_map(|g| &g.rows).any(|row| {
+                    row.path
+                        .last()
+                        .is_some_and(|key| key == "memory_hard_limit")
+                }));
+            }
+            let updated = draft::config_from_draft(draft).unwrap();
+            save_at(
+                &path,
+                &original.to_string(),
+                &serde_json::to_string(&updated).unwrap(),
+                &State::default(),
+            )
+            .unwrap();
+
+            let reloaded = Config::load_from(&path).unwrap();
+            for (id, default) in runtimes {
+                let target = &reloaded.targets[id];
+                assert_eq!(
+                    target.container().unwrap().memory_hard_limit,
+                    use_overrides.then_some(!default)
+                );
+                assert_eq!(
+                    mj_core::config::container_memory_is_hard_limit(target),
+                    default != use_overrides
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .matches("memory_hard_limit")
+                    .count(),
+                if use_overrides { 4 } else { 1 }
+            );
+        }
+    }
+
     /// A client older than the daemon sends neither side of a settings edit
     /// with the fields it does not know. Those must neither conflict with nor
     /// replace what the file holds.

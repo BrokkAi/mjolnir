@@ -409,6 +409,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
 
 fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {
     ConfigContainer {
+        memory_hard_limit: None,
         build_cache: None,
         image: image.into(),
         pull_policy,
@@ -630,6 +631,7 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
                 extra_args: Vec::new(),
             },
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ghcr.io/example/dev:latest".into(),
                 pull_policy: ImagePullPolicy::Auto,
@@ -678,6 +680,7 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
 #[test]
 fn deployment_capacity_groups_local_and_same_host_targets() {
     let container = || ConfigContainer {
+        memory_hard_limit: None,
         build_cache: None,
         image: "dev:1".into(),
         pull_policy: Default::default(),
@@ -795,6 +798,7 @@ fn nitro_host_with_only_a_disabled_sibling_samples_its_sandbox_pool() {
                 TargetTemplate::SshNitro {
                     ssh: ssh.clone(),
                     container: ConfigContainer {
+                        memory_hard_limit: None,
                         build_cache: None,
                         image: "dev:1".into(),
                         pull_policy: Default::default(),
@@ -880,6 +884,7 @@ impl CommandExecutor for PreflightExecutor {
 fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
     let template = TargetTemplate::LocalPodman {
         container: ConfigContainer {
+            memory_hard_limit: None,
             build_cache: None,
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
@@ -917,6 +922,7 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
             extra_args: vec![],
         },
         container: ConfigContainer {
+            memory_hard_limit: None,
             build_cache: None,
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
@@ -993,6 +999,7 @@ fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
         extra_args: vec![],
     };
     let container = ConfigContainer {
+        memory_hard_limit: None,
         build_cache: None,
         image: "ubuntu:24.04".into(),
         pull_policy: Default::default(),
@@ -1185,6 +1192,7 @@ fn apple_container_readiness_observes_the_service_and_never_starts_it() {
 fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
     let template = TargetTemplate::LocalDocker {
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: "example.invalid/dev:latest".into(),
             pull_policy: Default::default(),

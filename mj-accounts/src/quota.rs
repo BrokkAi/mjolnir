@@ -304,6 +304,64 @@ impl QuotaReportPublication {
 
 pub type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
 
+/// One finished check from [`QuotaManager::start_probe`]. It still owns the
+/// profile's cached client: hand it to [`QuotaManager::finish_probe`], or
+/// [`Self::discard`] it when the check no longer applies.
+pub struct ProbeResult {
+    outcome: QuotaRefreshOutcome,
+    client: Option<CodexUsageClient>,
+}
+
+impl ProbeResult {
+    /// Set aside a result whose profile changed or left while it ran: stop
+    /// the client it was made with and return its outcome unrecorded.
+    pub async fn discard(self) -> QuotaRefreshOutcome {
+        if let Some(client) = self.client {
+            client.shutdown().await;
+        }
+        self.outcome
+    }
+}
+
+/// The outcome of a check whose task ended without a result.
+pub fn failed_check(request: &QuotaRefreshRequest, error: &str) -> QuotaRefreshOutcome {
+    QuotaRefreshOutcome {
+        cache_identity: request.cache_identity(),
+        report: failure_report(
+            request.profile_id.clone(),
+            request.harness,
+            error.to_owned(),
+            mj_core::clock::epoch_seconds(),
+            None,
+        ),
+        credentials_changed: false,
+    }
+}
+
+/// The report of a check that failed with `error`. `schedule` is the hold
+/// and next check of a check the provider refused.
+fn failure_report(
+    profile_id: String,
+    harness: HarnessKind,
+    error: String,
+    refreshed_at_epoch_seconds: u64,
+    schedule: Option<(u64, u64)>,
+) -> ProfileQuota {
+    ProfileQuota {
+        paid_credits: None,
+        monthly_price_usd: None,
+        banked_resets: None,
+        profile_id,
+        harness,
+        windows: Vec::new(),
+        extra: None,
+        error: Some(error),
+        refreshed_at_epoch_seconds,
+        rate_limited_until_epoch_seconds: schedule.map(|(until, _)| until),
+        next_check_at_epoch_seconds: schedule.map(|(_, next_check)| next_check),
+    }
+}
+
 #[derive(Default)]
 pub struct QuotaManager {
     codex_clients: HashMap<String, CodexUsageClient>,
@@ -349,6 +407,8 @@ impl QuotaManager {
     /// others. `on_report` runs per profile in completion order, so fast
     /// harnesses report without waiting for the slowest one in the batch.
     /// The batch is the whole configured set: profiles outside it are dropped.
+    /// The daemon's poller runs each check as its own task instead (#1595).
+    #[cfg(test)]
     pub async fn refresh_profiles<F, Fut>(
         &mut self,
         requests: Vec<QuotaRefreshRequest>,
@@ -368,52 +428,79 @@ impl QuotaManager {
     }
 
     /// Probe exactly these profiles and leave every other report alone.
+    #[cfg(test)]
     pub async fn probe<F, Fut>(&mut self, requests: Vec<QuotaRefreshRequest>, mut on_report: F)
     where
         F: FnMut(QuotaRefreshOutcome) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
-        let cache_root = self.cache_root.clone();
-
         let mut tasks = tokio::task::JoinSet::new();
         for request in requests {
-            let client = self.codex_clients.remove(&request.profile_id);
-            // Probes run concurrently, so the span is what ties a quota
-            // client's log lines to its profile.
-            let span = tracing::info_span!("quota_probe", profile_id = %request.profile_id);
-            tasks.spawn(
-                refresh_profile_with_cache_root(request, client, cache_root.clone())
-                    .instrument(span),
-            );
+            tasks.spawn(self.start_probe(request));
         }
-
         while let Some(result) = tasks.join_next().await {
-            let (outcome, client) = match result {
-                Ok(output) => output,
-                Err(error) => {
-                    tracing::warn!(%error, "quota refresh task failed");
-                    continue;
-                }
-            };
-            if let Some(client) = client {
-                self.codex_clients
-                    .insert(outcome.report.profile_id.clone(), client);
-            }
-            let previous = self.reports.get(&outcome.report.profile_id);
-            let outcome = if outcome.report.rate_limited_until_epoch_seconds.is_some() {
-                QuotaRefreshOutcome {
-                    cache_identity: outcome.cache_identity,
-                    report: hold_report(previous, outcome.report),
-                    credentials_changed: outcome.credentials_changed,
-                }
-            } else {
-                outcome
-            };
-            log_quota_change(previous, &outcome.report);
-            self.reports
-                .insert(outcome.report.profile_id.clone(), outcome.report.clone());
+            let outcome = self.finish_probe(result.expect("a quota check task panicked"));
             on_report(outcome).await;
         }
+    }
+
+    /// Start one profile's check without holding the manager. The returned
+    /// future owns the profile's cached client until [`Self::finish_probe`]
+    /// takes it back, so the caller keeps one check per profile at a time.
+    pub fn start_probe(
+        &mut self,
+        request: QuotaRefreshRequest,
+    ) -> impl Future<Output = ProbeResult> + Send + 'static {
+        let client = self.codex_clients.remove(&request.profile_id);
+        // Probes run concurrently, so the span is what ties a quota client's
+        // log lines to its profile.
+        let span = tracing::info_span!("quota_probe", profile_id = %request.profile_id);
+        let cache_root = self.cache_root.clone();
+        async move {
+            let (outcome, client) =
+                refresh_profile_with_cache_root(request, client, cache_root).await;
+            ProbeResult { outcome, client }
+        }
+        .instrument(span)
+    }
+
+    /// Apply a check [`Self::start_probe`] started: keep its client, hold a
+    /// rate-limited profile at its last reading, and record the report.
+    pub fn finish_probe(&mut self, result: ProbeResult) -> QuotaRefreshOutcome {
+        let ProbeResult { outcome, client } = result;
+        if let Some(client) = client {
+            self.codex_clients
+                .insert(outcome.report.profile_id.clone(), client);
+        }
+        let previous = self.reports.get(&outcome.report.profile_id);
+        let outcome = if outcome.report.rate_limited_until_epoch_seconds.is_some() {
+            QuotaRefreshOutcome {
+                cache_identity: outcome.cache_identity,
+                report: hold_report(previous, outcome.report),
+                credentials_changed: outcome.credentials_changed,
+            }
+        } else {
+            outcome
+        };
+        log_quota_change(previous, &outcome.report);
+        self.reports
+            .insert(outcome.report.profile_id.clone(), outcome.report.clone());
+        outcome
+    }
+
+    /// Record a check whose task ended without a result, so its profile shows
+    /// the failure instead of a check that never ends. The client it held is
+    /// gone with the task.
+    pub fn fail_probe(
+        &mut self,
+        request: &QuotaRefreshRequest,
+        error: &str,
+    ) -> QuotaRefreshOutcome {
+        let outcome = failed_check(request, error);
+        log_quota_change(self.reports.get(&request.profile_id), &outcome.report);
+        self.reports
+            .insert(request.profile_id.clone(), outcome.report.clone());
+        outcome
     }
 
     /// Stop the cached clients whose profiles are not in `keep`. Every batch
@@ -1062,19 +1149,13 @@ async fn refresh_profile_with_cache_root(
         let schedule = error
             .downcast_ref::<RateLimited>()
             .map(|limited| refused_check_schedule(refreshed_at_epoch_seconds, limited.retry_after));
-        ProfileQuota {
-            paid_credits: None,
-            monthly_price_usd: None,
-            banked_resets: None,
+        failure_report(
             profile_id,
             harness,
-            windows: Vec::new(),
-            extra: None,
-            error: Some(format!("{error:#}")),
+            format!("{error:#}"),
             refreshed_at_epoch_seconds,
-            rate_limited_until_epoch_seconds: schedule.map(|(until, _)| until),
-            next_check_at_epoch_seconds: schedule.map(|(_, next_check)| next_check),
-        }
+            schedule,
+        )
     });
     // Only refresh attempts reach this point, not reports adopted from the
     // daemon's reset cache. A reader can still reuse its recent provider data.
