@@ -6,11 +6,10 @@ description: Set up a disposable container target for Mjolnir and start your fir
 ## What container targets give you
 
 Each session on a container target runs in its own disposable, labeled
-container: local Podman on Linux, WSL2, or macOS with a rootless
-`podman machine`, Docker with a reachable Linux daemon (including a VM on
-macOS), Apple's `container` runtime on macOS 26 or newer on Apple silicon, or
-Podman or Docker over SSH. Container
-isolation always
+container with one of these runtimes: Podman on Linux or WSL2, Docker with
+a reachable Linux daemon (including a VM on macOS), or Apple's `container`
+runtime on macOS 26 or newer on Apple silicon. These runtimes can run on the
+controller host or on a supported host over SSH. Container isolation always
 selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
@@ -74,9 +73,8 @@ the workspace volume are not checkpointed.
 
 Install each runtime you want to use as a target:
 
-- **Rootless Podman 4.0 or newer** on Linux, WSL2, or macOS with a rootless
-  `podman machine`. See [Podman for Mjolnir](/podman/) for installation and
-  verification steps.
+- **Rootless Podman 4.0 or newer** on Linux or WSL2. See
+  [Podman for Mjolnir](/podman/) for installation and verification steps.
 - **Docker with a reachable Linux daemon**, including Colima on macOS. See
   [Docker for Mjolnir](/docker/) for its OverlayFS and lifecycle contract.
 - **Apple's `container` CLI** on macOS 26 or newer on Apple silicon.
@@ -259,8 +257,9 @@ authoritative rather than checking for specific check names.
 
 Once every check passes, run the same command with `--smoke` for an
 end-to-end test: it creates and removes a disposable container, confirming
-the full path works beyond static prerequisite checks. For Docker, this also verifies that a temporary writable
-attachment is copy-on-write and that its managed OverlayFS volume cleans up.
+the full path works beyond static prerequisite checks. For Docker, this also
+verifies a temporary directory attachment. It checks copy-on-write and volume
+cleanup on native Linux Docker, and read-only access on VM-backed Docker.
 
 ```console
 mj doctor --json --smoke
@@ -314,7 +313,9 @@ Podman and Docker build `cow` from OverlayFS, which some filesystems cannot
 host. When Mjolnir finds a source on NFS, SMB, FUSE, a FAT-family filesystem,
 or another overlay, the wizard doesn't offer `cow` for it, and an existing
 `cow` attachment is mounted read-only instead, with a notice while the
-session launches.
+session launches. Apple container and Docker through a VM file share also
+mount `cow` attachments read-only, on both local and SSH hosts. Explicit
+`rw` attachments stay writable.
 
 New rootless Podman session containers run as uid and gid `0:0` in Podman's
 default user namespace. Container uid 0 maps to the account running Mjolnir,

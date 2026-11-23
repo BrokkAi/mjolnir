@@ -1900,76 +1900,41 @@ pub(super) fn drop_nitro_host_directories(
 /// overlay alone: a failed probe is no evidence of an unsupported filesystem,
 /// and refusing to provision over one would cost the user their session.
 ///
-/// Apple's `container` engine already mounts every extra directory read-only,
-/// and EC2 copies the directory instead of mounting it, so neither is probed.
 pub(super) fn enforce_overlay_capable_mounts(
     target: &targets::TargetTemplate,
     mounts: &mut [targets::AdditionalMount],
     executor: &impl CommandExecutor,
 ) -> Vec<String> {
-    let ssh = match target {
-        targets::TargetTemplate::LocalPodman(_) | targets::TargetTemplate::LocalDocker(_) => None,
-        targets::TargetTemplate::SshPodman { ssh, .. }
-        | targets::TargetTemplate::SshDocker { ssh, .. } => Some(ssh),
-        _ => return Vec::new(),
-    };
     let overlaid = mounts
         .iter()
         .filter(|mount| mount.access == targets::MountAccess::Cow)
         .map(|mount| mount.source.clone())
         .collect::<Vec<_>>();
-    if overlaid.is_empty() {
-        return Vec::new();
-    }
-    // `stat` on this host cannot see what a VM-hosted Docker daemon mounts.
-    if matches!(target, targets::TargetTemplate::LocalDocker(_)) {
-        match targets::local_docker_vm_share(executor) {
-            Ok(Some(reason)) => {
-                return mounts
-                    .iter_mut()
-                    .filter(|mount| mount.access == targets::MountAccess::Cow)
-                    .map(|mount| {
-                        mount.access = mount.access.without_overlay();
-                        format!(
-                            "Mounted {} read-only: {reason}, which cannot back the \
-                             copy-on-write overlay.",
-                            mount.source.display()
-                        )
-                    })
-                    .collect();
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                error = format!("{error:#}"),
-                "could not identify the Docker daemon platform; probing this host's filesystems"
-            ),
-        }
-    }
-    let filesystems = match targets::probe_filesystem_types(ssh, &overlaid, executor) {
-        Ok(filesystems) => filesystems,
+    let reasons = match targets::overlay_read_only_reasons(target, &overlaid, executor) {
+        Ok(reasons) => reasons,
         Err(error) => {
             tracing::warn!(
                 error = format!("{error:#}"),
-                "could not probe attached-directory filesystems; preserving overlay mounts"
+                "could not determine attachment overlay support; preserving overlay mounts"
             );
             return vec![format!(
-                "Could not read the filesystem under the attached directories, so they keep the \
+                "Could not determine overlay support for the attached directories, so they keep the \
                  copy-on-write overlay: {error:#}"
             )];
         }
     };
     let mut notices = Vec::new();
-    for (mount, filesystem) in mounts
+    for (mount, reason) in mounts
         .iter_mut()
         .filter(|mount| mount.access == targets::MountAccess::Cow)
-        .zip(filesystems)
+        .zip(reasons)
     {
-        let Some(reason) = targets::overlay_unsupported_filesystem(&filesystem) else {
+        let Some(reason) = reason else {
             continue;
         };
         mount.access = mount.access.without_overlay();
         notices.push(format!(
-            "Mounted {} read-only: the overlay is unreliable on {filesystem} ({reason}).",
+            "Mounted {} read-only: {reason}.",
             mount.source.display()
         ));
     }

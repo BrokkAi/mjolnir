@@ -2,11 +2,10 @@
 
 This is the operational contract for a host that runs Mjolnir Podman
 targets. For a coding-agent handoff, run `mj doctor instructions --platform
-linux` (or `macos`) and `mj doctor --json`, then give the instructions page
+linux` and `mj doctor --json`, then give the instructions page
 plus the output of `mj doctor --json` to the coding agent. The host is ready
 only when every postcondition in the Verification section below passes: for
-the same unprivileged user that will run `mj` on Linux or WSL2, or for the
-rootless Podman machine on macOS.
+the same unprivileged user that will run the container on Linux or WSL2.
 
 Mjolnir supports rootless Podman **4.0.0 or newer**. Podman 4 is the minimum
 because Mjolnir relies on the rootless user-namespace behavior and CLI
@@ -15,19 +14,10 @@ Mjolnir runtime.
 
 ## Platforms
 
-Mjolnir's local Podman target runs rootless Podman on Linux, WSL2, or macOS
-with a `podman machine`. On macOS the `podman` CLI is a remote client for the
-machine's Linux VM; that is expected and supported. Rootful machines are not
-supported. A manually configured remote Podman connection is not supported; on
-macOS use the connection created by `podman machine`. Use the Podman `ssh`
-target for a container engine on another machine ([SSH and SSH
-Podman](/ssh/)).
-
-The machine shares `$HOME:$HOME` by default, so keep projects under your home
-directory or add the needed directory when creating the machine. Writable
-attached directories use Podman's copy-on-write overlay, which depends on the
-machine's shared filesystem; verify attachments with `mj doctor --json --smoke`
-before relying on them.
+Mjolnir runs rootless Podman on Linux hosts, including WSL2 and remote Linux
+hosts reached over SSH. Use a Podman runtime on an SSH machine to run its
+engine directly ([SSH and SSH Podman](/ssh/)). On macOS, use Docker or Apple
+container.
 
 New session containers run as uid and gid `0:0` in Podman's default rootless
 mapping. Container uid 0 maps to the account running Mjolnir, so files written
@@ -70,13 +60,9 @@ podman info --format json
 ```
 
 The second check reads `host.security.rootless` and `host.idMappings.uidmap`.
-It works through a remote client, so the same check covers local rootless
-Podman on Linux, a rootless `podman machine` on macOS, and a Podman host
-reached over SSH. On Linux, a `serviceIsRemote` engine is rejected because the
-target would otherwise record containers on another host. A Mac, local or
-reached over SSH, always reports a remote service for its Podman machine, which
-is that Mac's own engine, so it is accepted there; the SSH preflight learns the
-host is a Mac from `uname -s`.
+Mjolnir rejects an engine that reports `serviceIsRemote` because the target
+would record containers on another host. SSH preflight checks for Linux
+before it runs the Podman commands.
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
@@ -345,16 +331,8 @@ grep -E "^$(id -un):" /etc/subgid
 podman info --format json
 ```
 
-On macOS:
-
-```console
-podman machine inspect --format '{{.Rootful}}'
-podman info --format json
-```
-
 Expected:
 
-- `Rootful` prints `false` on macOS.
 - `podman info` reports `"rootless": true` under `host.security`.
 - The `host.idMappings.uidmap` entries map container ID `0` and at least one
   additional ID (normally a first entry for ID `0` followed by an entry
@@ -460,16 +438,8 @@ unused range instead. Do not edit mappings for another account.
 
 ### Podman reports rootful mode or cannot connect
 
-`podman info` reports `"rootless": false` when Podman runs as root or when a
-macOS machine was created with `--rootful`. Mjolnir requires a rootless engine.
-
-On macOS, switch the machine back to rootless and restart it:
-
-```console
-podman machine set --rootful=false
-podman machine stop
-podman machine start
-```
+`podman info` reports `"rootless": false` when Podman runs as root.
+Mjolnir requires a rootless engine.
 
 On Linux and WSL2, run Mjolnir as the ordinary user without `sudo`. If a remote
 connection is selected, unset it and check the local engine:
@@ -477,14 +447,6 @@ connection is selected, unset it and check the local engine:
 ```console
 unset CONTAINER_HOST CONTAINER_CONNECTION
 podman info --format json
-```
-
-On macOS, `podman info` normally uses the machine connection. If it cannot
-connect, start the machine and check the selected connection:
-
-```console
-podman machine start
-podman system connection list
 ```
 
 Mjolnir rejects a `serviceIsRemote` engine on Linux because the local target

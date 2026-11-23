@@ -2285,6 +2285,7 @@ impl Config {
         if crate::targets::HOST_RUNS_WORKERS {
             defaults.push(("localhost", TargetTemplate::LocalBare));
         }
+        #[cfg(not(target_os = "macos"))]
         defaults.push((
             "podman",
             TargetTemplate::LocalPodman {

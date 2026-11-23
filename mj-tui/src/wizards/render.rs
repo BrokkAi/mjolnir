@@ -1499,9 +1499,9 @@ pub(crate) fn render_mount_wizard(
         .targets
         .get(&target_id)
         .expect("selected target index is present in config");
-    let protection = match target {
+    let protection = mounts.overlay_unavailable().unwrap_or(match target {
         TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. } => {
-            "Apple Container has no :O overlay mode; each extra bind is read-only."
+            "Apple container mounts copy-on-write attachments read-only. Read-write is available."
         }
         TargetTemplate::LocalPodman { .. } | TargetTemplate::SshPodman { .. } => {
             "Podman uses :O copy-on-write overlays; read-only skips the overlay."
@@ -1520,7 +1520,7 @@ pub(crate) fn render_mount_wizard(
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
             unreachable!("bare targets do not attach resources")
         }
-    };
+    });
     let mut lines = vec![
         Line::raw(format!("Target: {target_id} ({})", target_label(target))),
         Line::raw(""),

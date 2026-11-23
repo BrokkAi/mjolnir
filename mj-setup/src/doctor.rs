@@ -21,10 +21,10 @@ use crate::targets::{
     MICROVM_ENGINE, PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor,
     SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate, current_apple_platform,
     effective_target_images, ensure_apple_container_runtime, failed_podman_postcondition,
-    local_docker_vm_share, observe_apple_container, observe_ssh_apple_container,
-    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
-    ssh_engine_command, ssh_validation_command, verify_local_docker, verify_local_podman,
-    verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
+    observe_apple_container, observe_ssh_apple_container, podman_probe_observation,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_engine_command,
+    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_docker,
+    verify_ssh_nitro, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -871,7 +871,7 @@ Run these commands as the user who will run `mj`:\n\n\
    no check is `fixable`. Review warnings for any target you intend to use;\n\
    `unsupported` runtimes are unavailable, not ready.\n\
 3. If you intend to use containers, start the runtime and run\n\
-   `mj doctor --json --smoke`. Do this for Podman, Docker Desktop, and Apple\n\
+   `mj doctor --json --smoke`. Do this for Docker Desktop or Apple\n\
    container. Resolve failures for the target you intend to use.\n\
 4. Run `mj` and choose Create session (Ctrl-B then c by default).\n\
    If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
@@ -899,23 +899,6 @@ then send SSH GitHub URLs over HTTPS:\n\n\
 ```\n\n\
 `mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
 GitHub can ignore them.\n\n\
-## Podman\n\n\
-A local Podman target on macOS uses a rootless `podman machine`. Install\n\
-Podman and create the machine:\n\n\
-```console\n\
-brew install podman\n\
-podman machine init --now\n\
-```\n\n\
-Ensure the machine is rootless:\n\n\
-```console\n\
-podman machine set --rootful=false\n\
-podman machine stop\n\
-podman machine start\n\
-```\n\n\
-Mjolnir checks `podman info` for rootless mode and a UID map covering\n\
-container IDs 0 and 1. The machine shares `$HOME:$HOME` by default, so keep\n\
-projects under your home directory or add the directory when creating the\n\
-machine. Finish with `mj doctor --json --smoke`.\n\n\
 ## Docker Desktop\n\n\
 Start Docker Desktop and wait for its Linux daemon to be ready before setup\n\
 or the smoke test. `mj doctor --json --smoke` checks the container image and\n\
@@ -1707,7 +1690,7 @@ fn podman_check(
             );
         }
     };
-    if local_podman_targets(config).is_empty() {
+    if !matches!(platform, ApplePlatform::Macos { .. }) && local_podman_targets(config).is_empty() {
         return DoctorCheck::unsupported(
             "runtime.podman",
             "Rootless Podman",
@@ -1727,11 +1710,18 @@ pub fn local_podman_runtime_check(
     executor: &impl CommandExecutor,
     platform: &ApplePlatform,
 ) -> DoctorCheck {
-    if !matches!(platform, ApplePlatform::Linux | ApplePlatform::Macos { .. }) {
+    if matches!(platform, ApplePlatform::Macos { .. }) {
+        return DoctorCheck::unsupported(
+            "runtime.podman",
+            "Podman",
+            crate::targets::PODMAN_UNSUPPORTED_ON_MACOS,
+        );
+    }
+    if !matches!(platform, ApplePlatform::Linux) {
         return DoctorCheck::unsupported(
             "runtime.podman",
             "Rootless Podman",
-            "Mjolnir's local Podman target requires Linux, WSL2, or macOS with a rootless Podman machine.",
+            "Mjolnir's local Podman target requires Linux or WSL2.",
         );
     }
     match verify_local_podman(executor) {
@@ -1806,7 +1796,7 @@ fn podman_image_check(
             workspace_storage: Default::default(),
         });
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
+            Ok(_) => DoctorCheck::ready(
                 check_id,
                 title,
                 format!("Disposable run/exec/remove smoke test passed for image {image}."),
@@ -1999,12 +1989,12 @@ fn docker_image_check(
             workspace_storage: Default::default(),
         });
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
+            Ok(mode) => DoctorCheck::ready(
                 check_id,
                 title,
-                match local_docker_vm_share(executor) {
-                    Ok(Some(reason)) => format!(
-                        "Disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}, so attached directories mount read-only instead of copy-on-write."
+                match mode {
+                    Some(crate::targets::DockerAttachmentMode::ReadOnly { reason }) => format!(
+                        "Disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}."
                     ),
                     _ => format!(
                         "Disposable run/exec/remove and OverlayFS attachment smoke test passed for image {image}."
@@ -2337,9 +2327,9 @@ fn ssh_podman_checks(
                 let ssh = RuntimeSshTarget::from(ssh);
                 let (check, reachable) =
                     ssh_podman_check(id, &ssh, &container.image, executor, smoke);
+                let probe_limits = reachable && check.status != CheckStatus::Unsupported;
                 let mut checks = vec![check];
-                // An unreachable host has one problem, not two.
-                if reachable {
+                if probe_limits {
                     checks.push(ssh_podman_limits_check(id, &ssh, executor));
                 }
                 checks
@@ -2409,6 +2399,9 @@ fn ssh_podman_runtime_check(
     let destination = &ssh.destination;
     let preflight = match verify_ssh_podman(ssh, executor) {
         Ok(preflight) => preflight,
+        Err(error) if error.is::<crate::targets::PodmanUnsupportedOnMacos>() => {
+            return DoctorCheck::unsupported(check_id, title, error.to_string());
+        }
         Err(error) => {
             let (detail, remediation) = ssh_podman_failure(destination, &error);
             return DoctorCheck::fixable(check_id, title, detail, remediation);
@@ -2448,7 +2441,7 @@ fn ssh_podman_runtime_check(
         },
     };
     match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-        Ok(()) if !preflight.warnings.is_empty() => DoctorCheck::warning(
+        Ok(_) if !preflight.warnings.is_empty() => DoctorCheck::warning(
             check_id,
             title,
             format!(
@@ -2457,7 +2450,7 @@ fn ssh_podman_runtime_check(
             ),
             preflight_warning_remediations(&preflight.warnings),
         ),
-        Ok(()) => DoctorCheck::ready(
+        Ok(_) => DoctorCheck::ready(
             check_id,
             title,
             format!(
@@ -2975,13 +2968,19 @@ fn ssh_docker_check(
             },
         };
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
+            Ok(mode) => DoctorCheck::ready(
                 check_id,
                 title,
-                format!(
-                    "Remote Docker {} is available via {destination}; disposable run/exec/remove and remote OverlayFS attachment smoke test passed for image {image}.",
-                    preflight.version
-                ),
+                match mode {
+                    Some(crate::targets::DockerAttachmentMode::ReadOnly { reason }) => format!(
+                        "Remote Docker {} is available via {destination}; disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}.",
+                        preflight.version
+                    ),
+                    _ => format!(
+                        "Remote Docker {} is available via {destination}; disposable run/exec/remove and remote OverlayFS attachment smoke test passed for image {image}.",
+                        preflight.version
+                    ),
+                },
             ),
             Err(error) => DoctorCheck::fixable(
                 check_id,
@@ -3013,7 +3012,7 @@ fn ssh_docker_check(
             check_id,
             title,
             format!(
-                "Remote Docker {} is available via {destination}; image {image} is present.{} Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.",
+                "Remote Docker {} is available via {destination}; image {image} is present.{} Run `mj doctor --json --smoke` to verify remote attachments.",
                 preflight.version,
                 image_worker_summary(&output.stdout)
             ),
@@ -3922,7 +3921,7 @@ fn apple_container_smoke_test(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     ensure_apple_container_runtime(ssh, executor)?;
-    run_setup_smoke_test(target, &doctor_smoke_id(), executor)
+    run_setup_smoke_test(target, &doctor_smoke_id(), executor).map(|_| ())
 }
 
 #[cfg(test)]

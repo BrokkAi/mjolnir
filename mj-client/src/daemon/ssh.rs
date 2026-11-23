@@ -13,6 +13,78 @@ pub enum DiscoveryIntent {
     Existing,
 }
 
+#[cfg(any(windows, test))]
+fn has_log_option(args: &[String]) -> bool {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let Some(options) = arg.strip_prefix('-') else {
+            break;
+        };
+        if options.is_empty() || options.starts_with('-') {
+            break;
+        }
+        let mut options = options.chars();
+        while let Some(option) = options.next() {
+            if option == 'E' {
+                return true;
+            }
+            // OpenSSH consumes the rest of the option group or the next
+            // argument as the value of these options.
+            if "BbcDeFIiJLlmOoPpQRSWw".contains(option) {
+                if options.as_str().is_empty() {
+                    args.next();
+                }
+                break;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn redirect_client_log(
+    command: &mut tokio::process::Command,
+    ssh_args: &[String],
+) -> Result<Option<tempfile::TempPath>> {
+    if has_log_option(ssh_args) {
+        return Ok(None);
+    }
+    // Inbox Win32 OpenSSH 9.5p2 can hang logging a connection error to
+    // piped stderr (PowerShell/Win32-OpenSSH#2448). Close the temporary
+    // file handle before ssh opens it with -E.
+    let path = tempfile::Builder::new()
+        .prefix("mj-ssh-")
+        .suffix(".log")
+        .tempfile()
+        .context("create OpenSSH client log")?
+        .into_temp_path();
+    command
+        .arg("-E")
+        .arg(mj_core::targets::openssh_local_path(&path));
+    Ok(Some(path))
+}
+
+#[cfg(any(windows, test))]
+fn merge_diagnostics(stderr: &str, client_log: &str) -> String {
+    [stderr.trim(), client_log.trim()]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(windows)]
+async fn diagnostics(stderr: &[u8], client_log: Option<&tempfile::TempPath>) -> String {
+    let log = match client_log {
+        Some(path) => tokio::fs::read(path).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    merge_diagnostics(
+        &String::from_utf8_lossy(stderr),
+        &String::from_utf8_lossy(&log),
+    )
+}
+
 /// Discover process-private remote credentials. No client-side daemon or store
 /// is consulted. Dropping this future cancels the SSH process group.
 pub async fn discover(
@@ -37,6 +109,8 @@ pub async fn discover(
         args.push("--existing".into());
     }
     let mut command = tokio::process::Command::new("ssh");
+    #[cfg(windows)]
+    let client_log = redirect_client_log(&mut command, &placement.ssh_args)?;
     command
         .args(["-o", "BatchMode=yes"])
         .args(&placement.ssh_args)
@@ -45,19 +119,24 @@ pub async fn discover(
     let output = mj_core::subprocess::capture(&mut command)
         .await
         .context("discover SSH daemon")?;
-    if output.status.code() == Some(127) {
+    if !output.status.success() {
+        #[cfg(not(windows))]
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        #[cfg(windows)]
+        let stderr = diagnostics(&output.stderr, client_log.as_ref()).await;
+        if output.status.code() == Some(127) {
+            bail!(
+                "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release). SSH: {}",
+                placement.remote_command(),
+                stderr.trim()
+            );
+        }
         bail!(
-            "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release). SSH: {}",
-            placement.remote_command(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "SSH daemon discovery failed ({}): {}",
+            output.status,
+            stderr.trim()
         );
     }
-    ensure!(
-        output.status.success(),
-        "SSH daemon discovery failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
     let endpoint: DaemonEndpoint =
         serde_json::from_slice(&output.stdout).context("parse SSH daemon endpoint JSON")?;
     let remote = BuildIdentity::parse(&endpoint.build_version)?;
@@ -76,6 +155,8 @@ pub struct SshLease {
     pub local_addr: std::net::SocketAddr,
     pub endpoint: DaemonEndpoint,
     child: mj_core::subprocess::SupervisedChild,
+    #[cfg(windows)]
+    client_log: Option<tempfile::TempPath>,
 }
 
 impl SshLease {
@@ -145,35 +226,40 @@ async fn open_with_port(
     loop {
         let local_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port()?));
         let mut command = tokio::process::Command::new("ssh");
+        #[cfg(windows)]
+        let client_log = redirect_client_log(&mut command, &placement.ssh_args)?;
         // The tunnel needs its own connection. Through a shared ControlMaster
         // connection the master would own the listener, and stopping this child would
         // not remove the forward. OpenSSH keeps the first value of an option,
         // so these override the user's `ssh_args` and ssh_config.
-        command
-            .args([
-                "-N",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPath=none",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "BatchMode=yes",
-            ])
-            .args(&placement.ssh_args)
-            .arg("-L")
-            .arg(format!(
-                "127.0.0.1:{}:{}",
-                local_addr.port(),
-                forward_destination(endpoint.control_address)
-            ))
-            .arg(placement.host.as_deref().context("missing SSH host")?);
+        command.args([
+            "-N",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "BatchMode=yes",
+        ]);
+        #[cfg(not(windows))]
+        command.args(&placement.ssh_args);
+        command.arg("-L").arg(format!(
+            "127.0.0.1:{}:{}",
+            local_addr.port(),
+            forward_destination(endpoint.control_address)
+        ));
+        #[cfg(windows)]
+        command.args(&placement.ssh_args);
+        command.arg(placement.host.as_deref().context("missing SSH host")?);
         let child = mj_core::subprocess::SupervisedChild::spawn(&mut command)?;
         let mut lease = SshLease {
             local_addr,
             endpoint: endpoint.clone(),
             child,
+            #[cfg(windows)]
+            client_log,
         };
         // Readiness sends no token: `prove_listener` sends only a nonce and
         // checks the daemon's HMAC over it. There is no deadline. A silent
@@ -223,7 +309,10 @@ async fn open_with_port(
             }
             status = lease.child.wait() => {
                 let status = status?;
+                #[cfg(not(windows))]
                 let stderr = String::from_utf8_lossy(&lease.child.stderr()).into_owned();
+                #[cfg(windows)]
+                let stderr = diagnostics(&lease.child.stderr(), lease.client_log.as_ref()).await;
                 let collision = stderr.lines().any(|line|
                     (line.contains("bind") && line.contains("Address already in use"))
                     || line.contains("cannot listen to port"));
@@ -268,6 +357,40 @@ pub(super) async fn prove_stream(stream: &mut tokio::net::TcpStream, token: &str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detects_log_options_without_matching_option_values() {
+        for (args, expected) in [
+            (&["-E", "user.log"][..], true),
+            (&["-Euser.log"][..], true),
+            (&["-p", "2222", "-vE", "user.log"][..], true),
+            (&["-o", "-Evalue", "-E", "user.log"][..], true),
+            (&["-o", "-Evalue", "-i", "-Eidentity"][..], false),
+            (&["-vo-Evalue", "-p22"][..], false),
+            (&["-p", "2222", "--", "-E"][..], false),
+            (&["host", "-E"][..], false),
+            (&[][..], false),
+        ] {
+            let owned = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+            assert_eq!(super::has_log_option(&owned), expected, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn merges_client_log_with_remote_stderr() {
+        for (stderr, log, expected) in [
+            ("", " \r\n", ""),
+            ("", "connection refused\r\n", "connection refused"),
+            ("remote error\n", "", "remote error"),
+            (
+                " remote error\r\n",
+                " connection refused\r\n",
+                "remote error\nconnection refused",
+            ),
+        ] {
+            assert_eq!(super::merge_diagnostics(stderr, log), expected);
+        }
+    }
+
     // Hard-won: 5159ed294: a forwarding diagnostic printed before bind() released the token to another listener
     #[tokio::test]
     async fn competing_listener_never_receives_control_token() {
