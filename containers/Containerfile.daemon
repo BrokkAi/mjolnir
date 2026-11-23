@@ -1,0 +1,136 @@
+ARG RUST_IMAGE=docker.io/library/rust:1.99.1-trixie
+ARG BASE_IMAGE=docker.io/library/debian:trixie-slim
+
+# The session worker, compiled from the same commit as the image, so a release's
+# `mj` and its image agree on the worker by construction. Git is not in the build
+# context, so the caller supplies the identities mj-core/build.rs would otherwise
+# read from it: scripts/build-daemon-image.sh and the publish workflow compute
+# them. MJ_WORKER_BUILD_ID is also the image's worker-build label, and the build
+# fails unless the compiled worker reports exactly that build.
+FROM ${RUST_IMAGE} AS worker
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+# Cargo resolves the whole workspace, so every member's sources come along;
+# .dockerignore admits exactly these paths.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY mj-core/ mj-core/
+COPY mj-harness-install/ mj-harness-install/
+COPY mj-review/ mj-review/
+COPY mj-checkpoint/ mj-checkpoint/
+COPY mj-transcript/ mj-transcript/
+COPY mj-build-id/ mj-build-id/
+COPY mj-microvm/ mj-microvm/
+COPY mj-worker-mcp/ mj-worker-mcp/
+COPY mj-worker-review/ mj-worker-review/
+COPY mj-worker/ mj-worker/
+COPY mj-worker-bin/ mj-worker-bin/
+COPY mj-client/ mj-client/
+COPY mj-targets/ mj-targets/
+COPY mj-session-types/ mj-session-types/
+COPY mj-store/ mj-store/
+COPY mj-accounts/ mj-accounts/
+COPY mj-import/ mj-import/
+COPY mj-sessionwiki/ mj-sessionwiki/
+COPY mj-build-cache/ mj-build-cache/
+COPY mj-worker-staging/ mj-worker-staging/
+COPY mj-worker-launch/ mj-worker-launch/
+COPY mj-session-runtime/ mj-session-runtime/
+COPY mj-review-host/ mj-review-host/
+COPY mj-profile-catalog/ mj-profile-catalog/
+COPY mj-github-relevance/ mj-github-relevance/
+COPY mj-github-watch/ mj-github-watch/
+COPY mj-controller/ mj-controller/
+COPY mj-setup/ mj-setup/
+COPY mj-server/ mj-server/
+COPY mj-daemon/ mj-daemon/
+COPY mj-chat/ mj-chat/
+COPY mj-tui/ mj-tui/
+COPY mj-cli/ mj-cli/
+COPY voice-worker/ voice-worker/
+ARG MJ_BUILD_REVISION
+ARG MJ_WORKER_INPUTS_ID
+ARG MJ_WORKER_BUILD_ID
+RUN set -eu \
+    && for value in "$MJ_BUILD_REVISION" "$MJ_WORKER_INPUTS_ID" "$MJ_WORKER_BUILD_ID"; do \
+        if [ -z "$value" ]; then \
+            echo 'MJ_BUILD_REVISION, MJ_WORKER_INPUTS_ID and MJ_WORKER_BUILD_ID are required; build with scripts/build-daemon-image.sh' >&2; \
+            exit 1; \
+        fi; \
+    done \
+    && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) MUSL=x86_64-unknown-linux-musl ;; \
+        arm64) MUSL=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && rustup target add "$MUSL" \
+    && CC_x86_64_unknown_linux_musl=musl-gcc CC_aarch64_unknown_linux_musl=musl-gcc \
+        cargo build --release --locked --target "$MUSL" -p brokk-mj-worker --bin mj-worker \
+    && binary="target/$MUSL/release/mj-worker" \
+    && if readelf -lW "$binary" | grep -q 'Requesting program interpreter'; then \
+        echo 'the worker unexpectedly needs a dynamic loader' >&2; \
+        exit 1; \
+    fi \
+    && built="$("$binary" worker build-id)" \
+    && if [ "$built" != "$MJ_WORKER_BUILD_ID" ]; then \
+        echo "the worker reports build $built, but the image is labelled $MJ_WORKER_BUILD_ID" >&2; \
+        exit 1; \
+    fi \
+    && install -D -m 0755 "$binary" /out/opt/mjolnir/mj-worker \
+    && cargo build --release --locked -p brokk-mjolnir --bin mj \
+    && install -D -m 0755 target/release/mj /out/opt/mjolnir/mj \
+    && ln -s mj-worker "/out/opt/mjolnir/mj-worker-$MUSL" \
+    && rm -rf target
+
+FROM ${BASE_IMAGE}
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        awscli \
+        bash \
+        ca-certificates \
+        curl \
+        docker-cli \
+        gh \
+        git \
+        gzip \
+        libatomic1 \
+        libgcc-s1 \
+        libstdc++6 \
+        openssh-client \
+        podman-remote \
+        procps \
+        rsync \
+        tar \
+        tmux \
+        unzip \
+        xz-utils \
+        zstd \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman
+
+RUN useradd --create-home --shell /bin/bash hel \
+    && install -d -o hel -g hel -m 0755 /workspace /var/lib/hel /var/lib/mjolnir \
+        /var/lib/mjolnir/home /var/lib/mjolnir/data /var/lib/mjolnir/config
+
+USER hel
+ENV HOME=/home/hel \
+    SHELL=/bin/bash
+WORKDIR /workspace
+
+COPY --from=worker /out/opt/mjolnir/ /opt/mjolnir/
+RUN /opt/mjolnir/mj --version && /opt/mjolnir/mj-worker --version
+
+# Declare build identity metadata after all filesystem layers to preserve their cache.
+ARG MJ_WORKER_BUILD_ID
+ARG MJ_BUILD_REVISION
+LABEL org.opencontainers.image.title="Mjolnir daemon" \
+      org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
+      org.opencontainers.image.description="Mjolnir daemon and portable session worker" \
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}" \
+      org.brokk.mjolnir.revision="${MJ_BUILD_REVISION}"
+
+STOPSIGNAL SIGKILL
+CMD ["sleep", "infinity"]

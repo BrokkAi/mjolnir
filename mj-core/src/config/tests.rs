@@ -3277,7 +3277,7 @@ fn the_current_version_refuses_the_old_fused_kinds() {
 /// follow is checked directly here, and the baked value is checked against it.
 #[test]
 fn the_baked_release_image_agrees_with_the_channel_rule() {
-    let release = env!("MJ_AGENT_DEV_IMAGE_RELEASE") == "1";
+    let release = env!("MJ_DAEMON_IMAGE_RELEASE") == "1";
     assert_eq!(
         RELEASE_CONTAINER_IMAGE,
         container_image_for(env!("CARGO_PKG_VERSION"), release)
@@ -3293,7 +3293,7 @@ fn a_release_pins_its_version_and_a_development_build_uses_latest() {
     );
     assert_eq!(
         container_image_for(version, false),
-        LEGACY_DEFAULT_CONTAINER_IMAGE
+        "ghcr.io/brokkai/mjolnir/daemon:latest"
     );
 }
 

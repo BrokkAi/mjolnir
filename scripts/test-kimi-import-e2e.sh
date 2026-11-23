@@ -15,7 +15,7 @@ export KIMI_CODE_HOME="$kimi_home"
 export MJ_IMPORT_E2E_ROOT="$test_root"
 export MJ_IMPORT_E2E_KIMI_SESSION="${MJ_IMPORT_E2E_KIMI_SESSION:-session_1b6c3192-2480-48e0-8f49-4b8a1572f5b2}"
 export MJ_IMPORT_E2E_KIMI_REPOSITORY="${MJ_IMPORT_E2E_KIMI_REPOSITORY:-MoonshotAI/kimi-code}"
-export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-localhost/mjolnir/agent-dev:latest}"
+export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-docker.io/library/buildpack-deps:noble}"
 # Keep the test's imported state and archive separate from the user's Mjolnir data.
 export MJ_CONFIG_DIR="$test_root/config/mjolnir"
 export MJ_DATA_DIR="$test_root/data/mjolnir"

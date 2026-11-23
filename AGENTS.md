@@ -253,16 +253,11 @@ the next night's run.
 
 ## Harness pins
 
-Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you
-change a pin, update the agent-dev container image in the same commit, so
-container sessions run the same harness versions as managed bare workers:
+Harness versions are pinned in `mj-core/src/harness_runtime.rs`. Update the
+corresponding managed-install assets when changing a pin.
 
-- Codex and Claude bridges, Kimi Code, Grok, and OpenCode: update the
-  `npm install --global` line in
-  `containers/Containerfile.agent-dev`, as well as the package files in
-  `mj-harness-install/assets/harnesses/`. The test
-  `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
-  Containerfile and the pins disagree.
+- Codex and Claude bridges, Kimi Code, Grok, and OpenCode: update the applicable
+  package files in `mj-harness-install/assets/harnesses/`.
 - Claude Code or its bridge: run `python3 tests/e2e/claude_stripped_credentials.py`
   against the new pin on Linux and on a Mac. Sessions hold a login without a
   refresh token and rely on Claude Code never refreshing it and rereading a
@@ -272,24 +267,16 @@ container sessions run the same harness versions as managed bare workers:
   against the new pin. Sessions trust Mjolnir's MCP servers through agy's
   undocumented project grant file; the script checks that agy still reads it
   and still matches a grant to the owning server rather than the call title.
-- Muse: update `mj-harness-install/assets/muse/runtime.json`. The image installs Muse
-  from that file.
-- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
-  the `npm install --global` line in `containers/Containerfile.agent-dev`. DSH
-  has no managed installation; outside the image, sessions and the model
-  discovery probe launch it through `npx -y @brokkai/dsh-acp@<version>` from
-  `dsh_acp_launch_script()`. The test
-  `bridge_fallback_pins_match_the_agent_dev_containerfile` asserts both name
-  the pinned version.
+- Muse: update `mj-harness-install/assets/muse/runtime.json`, which the managed
+  installer uses to verify the native binary.
+- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs`.
+  Sessions and the model discovery probe use `dsh_acp_launch_script()` for
+  the `npx -y @brokkai/dsh-acp@<version>` fallback.
 - OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
   with `scripts/generate-opencode-provider-environment.py` from a checkout of
   the new tag. The test
   `opencode_provider_environment_was_generated_from_the_pinned_opencode`
   fails until you do.
-
-Pushing the commit to master runs `publish-agent-dev-image.yml`, which
-publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run
-succeeds.
 
 ## Coding Style & Naming Conventions
 

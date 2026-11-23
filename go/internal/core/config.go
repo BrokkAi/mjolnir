@@ -1221,7 +1221,7 @@ const LegacyEC2TargetNotice = "Per-session EC2 targets were removed. Choose a pe
 const ConfigurationDocumentationURL = "https://mjolnir.brokk.ai/configuration/"
 
 // ContainerImageRepository is the registry repository for the release image.
-const ContainerImageRepository = "ghcr.io/brokkai/mjolnir/agent-dev"
+const ContainerImageRepository = "ghcr.io/brokkai/mjolnir/daemon"
 
 // ReleaseContainerImage is the image for daemon-container mode.
 //

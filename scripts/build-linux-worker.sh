@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build the current checkout's portable worker using the standard agent image,
-# which includes the pinned Rust toolchain, musl target, and native build tools.
+# Build the current checkout's portable worker in a Linux Rust image.
 # The worker lands at target/worker/<triple>/<profile>/mj-worker, and the
 # script prints that target triple on stdout, since the engine decides it.
 set -euo pipefail
@@ -23,7 +22,9 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-image=ghcr.io/brokkai/mjolnir/agent-dev:latest
+toolchain=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["toolchain"]["channel"])' \
+  "$repo_root/rust-toolchain.toml")
+image="docker.io/library/rust:$toolchain-trixie"
 arch=$("$engine" run --rm --entrypoint uname "$image" -m)
 case "$arch" in
   aarch64 | arm64) arch=aarch64 ;;
@@ -52,6 +53,9 @@ mkdir -p "$output"
     triple=$1
     profile=$2
     shift 2
+    apt-get update >&2
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends musl-tools >&2
+    rustup target add "$triple" >&2
     export CC_aarch64_unknown_linux_musl=musl-gcc
     export CC_x86_64_unknown_linux_musl=musl-gcc
     cargo build --locked --target-dir /build --target "$triple" -p brokk-mj-worker --bin mj-worker "$@"

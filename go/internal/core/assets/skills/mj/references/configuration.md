@@ -384,22 +384,22 @@ change moves the daemon at once; running sessions keep going.
 ```toml
 [daemon]
 runtime = "podman"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+image = "ghcr.io/brokkai/mjolnir/daemon:latest"
 mounts = ["/srv/projects"]
 ```
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `runtime` | string | no | `"host"` | `"host"` runs `mj daemon-run` as a process on this computer. `"podman"` or `"docker"` runs it in a container of that engine. Container runtimes need Linux; elsewhere the daemon runs on the host and says so. |
-| `image` | string | no | this release's agent-dev image | The daemon container's image. |
+| `image` | string | no | this build's daemon image | The daemon container's image. |
 | `mounts` | array of absolute paths | no | `[]` | Further host directories the daemon container sees at the same path. |
 
 The daemon in the container is the image's own `mj`, built in the image
 from the same commit as your `mj`. Mjolnir uses an image only when its
 `org.brokk.mjolnir.revision` label is your build's revision: the configured
-`image`, or with none configured this release's agent-dev image or any local
+`image`, or with none configured this build's daemon image or any local
 image carrying that label. Release images always match their release. For a
-development build, `scripts/build-agent-dev-image.sh docker` (or `podman`)
+development build, `scripts/build-daemon-image.sh docker` (or `podman`)
 builds a matching image from the checkout. Without one the daemon runs on
 this computer and says why.
 
@@ -1131,7 +1131,7 @@ work when Git is older.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | no | the running Mjolnir's agent-dev image | Non-blank image reference. A release uses the immutable image published for its own version, such as `ghcr.io/brokkai/mjolnir/agent-dev:2.36.0`; a development build uses `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Omitting the field follows the running build at every upgrade; an explicit value pins that reference. |
+| `image` | string | no | the project image or `docker.io/library/buildpack-deps:noble` | A non-blank reference pins the session image. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |

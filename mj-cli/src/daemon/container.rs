@@ -31,7 +31,7 @@ use std::time::Duration;
 const INSTANCE_LABEL: &str = "ai.brokk.mjolnir.daemon-instance";
 /// Short engine queries: inspect, top, port, exec of the launch script.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
-/// Pulling the agent-dev image is gigabytes on a first start.
+/// Pulls can take longer than local engine queries.
 const PULL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 /// The `mj` the image's builder stage installs.
@@ -386,8 +386,8 @@ pub(super) async fn log_tail(program: &str, name: &str) -> String {
 /// roots the daemon uses. Returns false when this is a host placement, so the
 /// caller runs the command locally. The nested command carries the
 /// container's name in [`mj_core::placement::DAEMON_CONTAINER_ENV`], like the
-/// daemon: it runs in the daemon container, so it uses the image's harnesses
-/// and cannot try to launch another container.
+/// daemon: it runs in the daemon container, so it uses the daemon's managed
+/// harness installations and cannot try to launch another container.
 pub(crate) async fn exec_in_container(args: &[String], interactive: bool) -> Result<bool> {
     if mj_core::placement::daemon_container().is_some() {
         return Ok(false);
@@ -521,7 +521,7 @@ async fn resolve_image(
         Some((id, revision)) if revision.as_deref() == Some(wanted) => Ok(id),
         Some((_, revision)) => Err(format!(
             "image {candidate} carries Mjolnir revision {}, not this build's {wanted}; \
-             `scripts/build-agent-dev-image.sh {program}` builds one for this build from its \
+             `scripts/build-daemon-image.sh {program}` builds one for this build from its \
              checkout",
             revision.as_deref().unwrap_or("(none)")
         )),
