@@ -2347,6 +2347,68 @@ async fn json_body(response: Response) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn http_prove_uses_only_the_loopback_token_and_rejects_invalid_nonces() {
+    const TOKEN: &str = "loopback-only-token";
+    let nonce = "0123456789abcdef".repeat(4);
+    for loopback in [true, false] {
+        let (mut options, _actions, _snapshot, _bundles, _client_state) =
+            api_options_with_client_state(
+                Arc::new(FakeBackend::default()),
+                |_| {},
+                absent_preferences_path(),
+                None,
+            );
+        if loopback {
+            options.set_loopback_token(TOKEN.into());
+        }
+        let app = router(options);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/prove?nonce={nonce}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
+        if loopback {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = json_body(response).await;
+            assert!(mj_client::http::verify_http_api_proof(
+                TOKEN,
+                &nonce,
+                body["mac"].as_str().unwrap()
+            ));
+            for bad in ["", "123", "gggggggggggggggggggggggggggggggg"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::get(format!("/api/v1/prove?nonce={bad}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+        } else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let malformed = app
+                .oneshot(
+                    Request::get("/api/v1/prove?nonce=x&nonce=y")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
+        }
+    }
+}
+
+#[tokio::test]
 async fn the_api_refuses_an_unauthenticated_caller_and_still_names_its_version() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
 

@@ -801,6 +801,7 @@ pull_policy = "never"
 
 #[test]
 fn the_loopback_api_is_ready_with_phone_access_disabled() {
+    mj_daemon::server::install_rustls_crypto_provider();
     use mj_client::daemon::{
         DaemonClient, DaemonMetadata, WebViewerStatus, api_endpoint_path_in, read_api_endpoint_from,
     };
@@ -885,6 +886,45 @@ fn the_loopback_api_is_ready_with_phone_access_disabled() {
     run(&["daemon", "stop"]);
     assert!(!daemon_path.exists());
     assert!(read_api_endpoint_from(&api_path).unwrap().is_none());
+}
+
+#[test]
+fn daemon_api_token_override_honors_nonempty_values() {
+    for token in ["selected-http-token", ""] {
+        let storage = upgrade_storage();
+        let output = mj_core::subprocess::run_with_input(
+            upgrade_command(&storage)
+                .args(["api-info", "--json"])
+                .env("MJ_DAEMON_API_TOKEN", token),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = mj_client::daemon::api_endpoint_path_in(&storage.path().join("data"));
+        let endpoint = mj_client::daemon::read_api_endpoint_from(&path)
+            .unwrap()
+            .unwrap();
+        if token.is_empty() {
+            assert_eq!(endpoint.token.len(), 64);
+            assert!(endpoint.token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        } else {
+            assert_eq!(endpoint.token, token);
+        }
+        let stopped = mj_core::subprocess::run_with_input(
+            upgrade_command(&storage).args(["daemon", "stop"]),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            stopped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+    }
 }
 
 /// A replacement daemon is a new start, and a client proves that from the
@@ -1359,6 +1399,8 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
     let metadata_path = storage.path().join("data/daemon.json");
     fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
     let record = ContainerDaemonRecord {
+        api_address: None,
+        api_token: None,
         schema: CONTAINER_OWNER_SCHEMA,
         protocol_version: Some(stale.protocol_version),
         runtime: mj_core::config::DaemonRuntime::Podman,
@@ -2503,7 +2545,10 @@ if owner == 'login':
 
 #[test]
 fn force_stop_clears_only_the_unreachable_legacy_container_record() {
-    use mj_client::daemon::{DaemonMetadata, DaemonPlacement, PROTOCOL_VERSION};
+    use mj_client::daemon::{
+        ApiEndpointMetadata, DaemonMetadata, DaemonPlacement, PROTOCOL_VERSION,
+        api_endpoint_path_in, write_api_endpoint_to,
+    };
 
     let storage = upgrade_storage();
     let data = storage.path().join("data");
@@ -2522,6 +2567,18 @@ fn force_stop_clears_only_the_unreachable_legacy_container_record() {
     drop(listener);
     let path = data.join("daemon.json");
     fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let api_path = api_endpoint_path_in(&data);
+    write_api_endpoint_to(
+        &api_path,
+        &ApiEndpointMetadata {
+            address: metadata.address,
+            token: "stale-http".into(),
+            pid: 0,
+            instance_id: "stopped".into(),
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .unwrap();
     let output = mj_core::subprocess::run_with_input(
         upgrade_command(&storage).args(["daemon", "stop"]),
         &[],
@@ -2531,6 +2588,7 @@ fn force_stop_clears_only_the_unreachable_legacy_container_record() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("mj daemon stop --force"), "{stderr}");
     assert!(path.is_file());
+    assert!(api_path.is_file());
 
     let output = mj_core::subprocess::run_with_input(
         upgrade_command(&storage).args(["daemon", "stop", "--force"]),
@@ -2544,5 +2602,6 @@ fn force_stop_clears_only_the_unreachable_legacy_container_record() {
         "{stderr}"
     );
     assert!(!path.exists());
+    assert!(!api_path.exists());
     assert!(!data.join("daemon-container.json").exists());
 }

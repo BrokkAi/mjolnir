@@ -1,7 +1,7 @@
 use super::*;
 
 mod operation;
-pub(super) use operation::{validate_operation_state_tar, validate_operation_state_tar_reader};
+pub(super) use operation::validate_operation_state_tar_reader;
 
 /// A command boundary that lets Git collection and restore be tested without
 /// invoking the host's Git executable.
@@ -168,6 +168,95 @@ pub enum UntrackedFiles {
     Exclude,
 }
 
+trait CapturePayloads: Sync {
+    type Body: Default + Send + RepositoryPayload;
+
+    fn git(
+        &self,
+        runner: &dyn GitCommandRunner,
+        repository: &Path,
+        command: GitCommand,
+        action: &str,
+    ) -> Result<Self::Body>;
+
+    fn write(&self, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<Self::Body>;
+}
+
+struct InlinePayloads;
+
+impl CapturePayloads for InlinePayloads {
+    type Body = Vec<u8>;
+
+    fn git(
+        &self,
+        runner: &dyn GitCommandRunner,
+        repository: &Path,
+        command: GitCommand,
+        action: &str,
+    ) -> Result<Self::Body> {
+        git_success(runner, repository, command, action)
+    }
+
+    fn write(&self, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<Self::Body> {
+        let mut bytes = Vec::new();
+        write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+struct FilePayloads<'a>(&'a Path);
+
+impl CapturePayloads for FilePayloads<'_> {
+    type Body = StagedPayload;
+
+    fn git(
+        &self,
+        runner: &dyn GitCommandRunner,
+        repository: &Path,
+        mut command: GitCommand,
+        action: &str,
+    ) -> Result<Self::Body> {
+        let file = tempfile::NamedTempFile::new_in(self.0)?;
+        let output =
+            if command
+                .arguments
+                .starts_with(&["bundle".into(), "create".into(), "-".into()])
+            {
+                command.arguments[2] = file.path().as_os_str().to_owned();
+                let output = runner.run(repository, &command)?;
+                restrict_archive_permissions(file.path())?;
+                output
+            } else {
+                runner.run_to_file(repository, &command, file.reopen()?)?
+            };
+        ensure!(output.status == 0, "{}", git_failure(action, &output));
+        Ok(StagedPayload::File(file.into_temp_path().keep()?))
+    }
+
+    fn write(&self, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<Self::Body> {
+        let mut file = tempfile::NamedTempFile::new_in(self.0)?;
+        write(file.as_file_mut())?;
+        Ok(StagedPayload::File(file.into_temp_path().keep()?))
+    }
+}
+
+pub(crate) fn collect_file_backed_git_snapshot(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    spec: &GitCollectionSpec,
+    untracked_files: UntrackedFiles,
+    directory: &Path,
+) -> Result<RepositorySnapshot<StagedPayload>> {
+    collect_git_snapshot_into(
+        runner,
+        repository,
+        spec,
+        untracked_files,
+        &|_| Ok(()),
+        &FilePayloads(directory),
+    )
+}
+
 pub fn collect_git_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -185,6 +274,24 @@ pub fn collect_git_snapshot_with_progress(
     untracked_files: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
+    collect_git_snapshot_into(
+        runner,
+        repository,
+        spec,
+        untracked_files,
+        progress,
+        &InlinePayloads,
+    )
+}
+
+fn collect_git_snapshot_into<P: CapturePayloads>(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    spec: &GitCollectionSpec,
+    untracked_files: UntrackedFiles,
+    progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
+    payloads: &P,
+) -> Result<RepositorySnapshot<P::Body>> {
     validate_component(&spec.id, "repository id")?;
     validate_archive_relative_path(&spec.relative_destination)?;
 
@@ -196,13 +303,15 @@ pub fn collect_git_snapshot_with_progress(
     let repository = checkout.top_level.as_path();
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     let clone_state = match &spec.history {
-        GitHistoryMode::CloneFrom(base) => Some(collect_clone_refs(runner, repository, base)?),
+        GitHistoryMode::CloneFrom(base) => {
+            Some(collect_clone_refs(runner, repository, base, payloads)?)
+        }
         _ => None,
     };
     // Temporary refs made for linked worktrees; removed with the clone's on
     // every exit path below.
     let mut worktree_refs = Vec::new();
-    let captured = (|| -> Result<RepositorySnapshot> {
+    let captured = (|| -> Result<RepositorySnapshot<P::Body>> {
         let mut history = match &clone_state {
             Some(state) => state.history.clone(),
             None => select_git_history(runner, repository, &spec.history, &identity.head_commit)?,
@@ -218,8 +327,13 @@ pub fn collect_git_snapshot_with_progress(
             .iter()
             .map(|worktree| worktree.directory.clone())
             .collect::<BTreeSet<_>>();
-        let prepared =
-            prepare_linked_worktrees(runner, linked, clone_state.is_some(), &mut worktree_refs)?;
+        let prepared = prepare_linked_worktrees(
+            runner,
+            linked,
+            clone_state.is_some(),
+            &mut worktree_refs,
+            payloads,
+        )?;
         include_worktree_history(
             runner,
             repository,
@@ -243,6 +357,7 @@ pub fn collect_git_snapshot_with_progress(
             untracked_files,
             &linked_directories,
             progress,
+            payloads,
         )?;
         snapshot.linked_worktrees = collect_linked_worktree_contents(
             runner,
@@ -250,6 +365,7 @@ pub fn collect_git_snapshot_with_progress(
             untracked_files,
             &linked_directories,
             progress,
+            payloads,
         )?;
         if clone_state.is_none() && !review_refs.is_empty() {
             snapshot.metadata.review_baseline_ref = Some(session_start_scope(runner, repository)?);
@@ -296,6 +412,14 @@ pub fn collect_git_metadata_snapshot(
     repository: &Path,
     spec: &GitCollectionSpec,
 ) -> Result<RepositorySnapshot> {
+    collect_git_metadata_snapshot_with(runner, repository, spec)
+}
+
+pub(crate) fn collect_git_metadata_snapshot_with<T: Default>(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    spec: &GitCollectionSpec,
+) -> Result<RepositorySnapshot<T>> {
     validate_component(&spec.id, "repository id")?;
     validate_archive_relative_path(&spec.relative_destination)?;
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
@@ -330,10 +454,10 @@ pub fn collect_git_metadata_snapshot(
             head_commit: identity.head_commit,
             branch: identity.branch,
         },
-        committed_bundle: Vec::new(),
-        staged_patch: Vec::new(),
-        unstaged_patch: Vec::new(),
-        untracked_tar: Vec::new(),
+        committed_bundle: T::default(),
+        staged_patch: T::default(),
+        unstaged_patch: T::default(),
+        untracked_tar: T::default(),
         operation_payloads: None,
         linked_worktrees: Vec::new(),
     })
@@ -347,6 +471,12 @@ pub fn collect_git_metadata_snapshot(
 /// names the directory so an archive describes the shape of the session it
 /// belongs to, and it carries no commit, so nothing claims Git provenance.
 pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<RepositorySnapshot> {
+    collect_plain_directory_snapshot_with(spec)
+}
+
+pub(crate) fn collect_plain_directory_snapshot_with<T: Default>(
+    spec: &GitCollectionSpec,
+) -> Result<RepositorySnapshot<T>> {
     validate_component(&spec.id, "repository id")?;
     validate_archive_relative_path(&spec.relative_destination)?;
     ensure!(
@@ -373,10 +503,10 @@ pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<Repo
             head_commit: String::new(),
             branch: None,
         },
-        committed_bundle: Vec::new(),
-        staged_patch: Vec::new(),
-        unstaged_patch: Vec::new(),
-        untracked_tar: Vec::new(),
+        committed_bundle: T::default(),
+        staged_patch: T::default(),
+        unstaged_patch: T::default(),
+        untracked_tar: T::default(),
         operation_payloads: None,
         linked_worktrees: Vec::new(),
     })
@@ -1270,22 +1400,23 @@ fn include_review_history(history: &mut GitHistorySelection, refs: &BTreeMap<Str
     arguments.splice(3..3, refs.keys().cloned());
 }
 
-struct CloneRefState {
+struct CloneRefState<T> {
     history: GitHistorySelection,
     saved_refs: std::collections::BTreeMap<String, String>,
     stash_stack: Vec<mj_core::archive::SavedStashEntry>,
-    operation: Option<operation::CollectedOperation>,
+    operation: Option<operation::CollectedOperation<T>>,
     temporary_refs: Vec<String>,
 }
 
-fn collect_clone_refs(
+fn collect_clone_refs<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     base: &str,
-) -> Result<CloneRefState> {
+    payloads: &P,
+) -> Result<CloneRefState<P::Body>> {
     // An unfinished operation is part of the clone's work: it travels in the
     // snapshot, and its objects in the bundle, like a stash entry's.
-    let operation = operation::collect(runner, repository)?;
+    let operation = operation::collect(runner, repository, payloads)?;
     git_text(
         runner,
         repository,
@@ -1520,12 +1651,13 @@ fn patch_command(arguments: &[&str], unmerged_paths: &[PathBuf]) -> GitCommand {
     }
 }
 
-fn collect_staged_patch(
+fn collect_staged_patch<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     unmerged_paths: &[PathBuf],
-) -> Result<Vec<u8>> {
-    git_success(
+    payloads: &P,
+) -> Result<P::Body> {
+    payloads.git(
         runner,
         repository,
         patch_command(
@@ -1536,12 +1668,13 @@ fn collect_staged_patch(
     )
 }
 
-fn collect_unstaged_patch(
+fn collect_unstaged_patch<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     unmerged_paths: &[PathBuf],
-) -> Result<Vec<u8>> {
-    git_success(
+    payloads: &P,
+) -> Result<P::Body> {
+    payloads.git(
         runner,
         repository,
         patch_command(&["diff", "--binary", "--no-ext-diff"], unmerged_paths),
@@ -1549,15 +1682,16 @@ fn collect_unstaged_patch(
     )
 }
 
-fn collect_untracked_tar(
+fn collect_untracked_tar<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     untracked_files: UntrackedFiles,
     linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
-) -> Result<Vec<u8>> {
+    payloads: &P,
+) -> Result<P::Body> {
     if untracked_files == UntrackedFiles::Exclude {
-        return Ok(Vec::new());
+        return Ok(P::Body::default());
     }
     let untracked = git_bytes(
         runner,
@@ -1566,17 +1700,13 @@ fn collect_untracked_tar(
         &[],
         "list nonignored untracked files",
     )?;
-    build_untracked_tar(
-        repository,
-        &untracked,
-        untracked_files,
-        linked_worktrees,
-        progress,
-    )
+    payloads.write(|output| {
+        write_untracked_tar(repository, &untracked, linked_worktrees, progress, output)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect_git_contents(
+fn collect_git_contents<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     checkout: &CheckoutLocation,
     spec: &GitCollectionSpec,
@@ -1586,7 +1716,8 @@ fn collect_git_contents(
     untracked_files: UntrackedFiles,
     linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
-) -> Result<RepositorySnapshot> {
+    payloads: &P,
+) -> Result<RepositorySnapshot<P::Body>> {
     let repository = checkout.top_level.as_path();
     let GitHistorySelection {
         base_commit,
@@ -1599,20 +1730,23 @@ fn collect_git_contents(
         || {
             rayon::join(
                 || match &bundle_arguments {
-                    Some(arguments) => git_bytes_owned(
+                    Some(arguments) => payloads.git(
                         runner,
                         repository,
-                        arguments,
+                        GitCommand {
+                            arguments: arguments.iter().map(OsString::from).collect(),
+                            ..Default::default()
+                        },
                         "create committed delta bundle",
                     ),
-                    None => Ok(Vec::new()),
+                    None => Ok(P::Body::default()),
                 },
-                || collect_staged_patch(runner, repository, unmerged_paths),
+                || collect_staged_patch(runner, repository, unmerged_paths, payloads),
             )
         },
         || {
             rayon::join(
-                || collect_unstaged_patch(runner, repository, unmerged_paths),
+                || collect_unstaged_patch(runner, repository, unmerged_paths, payloads),
                 || {
                     collect_untracked_tar(
                         runner,
@@ -1620,6 +1754,7 @@ fn collect_git_contents(
                         untracked_files,
                         linked_worktrees,
                         progress,
+                        payloads,
                     )
                 },
             )
@@ -1671,12 +1806,12 @@ pub(crate) struct LinkedWorktreeDirectory {
 
 /// A linked worktree whose state has been read and whose commits are held by
 /// temporary refs.
-struct PreparedWorktree {
+struct PreparedWorktree<T> {
     location: LinkedWorktreeDirectory,
     head_commit: String,
     branch: Option<String>,
     lock_reason: Option<String>,
-    operation: Option<operation::CollectedOperation>,
+    operation: Option<operation::CollectedOperation<T>>,
 }
 
 /// Decode Git C-quoted paths, including octal-escaped native bytes.
@@ -1874,12 +2009,13 @@ pub(crate) fn linked_worktree_directories(
 /// including a detached HEAD that no branch holds. Each ref is added to
 /// `temporary_refs` as soon as it exists, so the caller removes it on every
 /// path.
-fn prepare_linked_worktrees(
+fn prepare_linked_worktrees<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     worktrees: Vec<LinkedWorktreeDirectory>,
     capture_operations: bool,
     temporary_refs: &mut Vec<String>,
-) -> Result<Vec<PreparedWorktree>> {
+    payloads: &P,
+) -> Result<Vec<PreparedWorktree<P::Body>>> {
     if worktrees.is_empty() {
         return Ok(Vec::new());
     }
@@ -1940,7 +2076,7 @@ fn prepare_linked_worktrees(
         )?;
         temporary_refs.push(pin);
         let operation = if capture_operations {
-            let operation = operation::collect(runner, directory)
+            let operation = operation::collect(runner, directory, payloads)
                 .with_context(|| describe("capture the Git operation"))?;
             if let Some(operation) = &operation {
                 operation.carry_objects(
@@ -1972,7 +2108,7 @@ fn include_worktree_history(
     repository: &Path,
     mode: &GitHistoryMode,
     history: &mut GitHistorySelection,
-    worktrees: &[PreparedWorktree],
+    worktrees: &[PreparedWorktree<impl Sized>],
     tips: &[String],
 ) -> Result<()> {
     if worktrees.is_empty() {
@@ -2018,13 +2154,14 @@ fn include_worktree_history(
     Ok(())
 }
 
-fn collect_linked_worktree_contents(
+fn collect_linked_worktree_contents<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
-    worktrees: Vec<PreparedWorktree>,
+    worktrees: Vec<PreparedWorktree<P::Body>>,
     untracked_files: UntrackedFiles,
     linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
-) -> Result<Vec<LinkedWorktreeSnapshot>> {
+    payloads: &P,
+) -> Result<Vec<LinkedWorktreeSnapshot<P::Body>>> {
     worktrees
         .into_par_iter()
         .map(|worktree| {
@@ -2049,8 +2186,8 @@ fn collect_linked_worktree_contents(
             let ((staged_patch, unstaged_patch), untracked_tar) = rayon::join(
                 || {
                     rayon::join(
-                        || collect_staged_patch(runner, directory, &unmerged_paths),
-                        || collect_unstaged_patch(runner, directory, &unmerged_paths),
+                        || collect_staged_patch(runner, directory, &unmerged_paths, payloads),
+                        || collect_unstaged_patch(runner, directory, &unmerged_paths, payloads),
                     )
                 },
                 || {
@@ -2060,6 +2197,7 @@ fn collect_linked_worktree_contents(
                         untracked_files,
                         linked_worktrees,
                         &worktree_progress,
+                        payloads,
                     )
                 },
             );
@@ -3078,6 +3216,7 @@ impl WorktreeTar {
 /// `linked_worktrees` are the directories of this repository's linked
 /// worktrees, which are captured as entries of their own, so a walk skips them
 /// instead of refusing them as foreign nested repositories.
+#[cfg(test)]
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
@@ -3085,14 +3224,25 @@ pub(super) fn build_untracked_tar(
     linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<Vec<u8>> {
+    InlinePayloads.write(|output| {
+        write_untracked_tar(repository, nul_paths, linked_worktrees, progress, output)
+    })
+}
+
+fn write_untracked_tar(
+    repository: &Path,
+    nul_paths: &[u8],
+    linked_worktrees: &BTreeSet<PathBuf>,
+    progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
+    output: &mut dyn Write,
+) -> Result<()> {
     let paths = nul_paths
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .collect::<Vec<_>>();
     let total = paths.len();
-    let mut output = Vec::new();
     {
-        let mut builder = tar::Builder::new(&mut output);
+        let mut builder = tar::Builder::new(output);
         for (index, raw_path) in paths.into_iter().enumerate() {
             let relative = mj_core::path_input::from_git_bytes(raw_path)?;
             validate_worktree_relative_path(&relative)?;
@@ -3125,7 +3275,7 @@ pub(super) fn build_untracked_tar(
         }
         builder.finish().context("finish untracked-file tar")?;
     }
-    Ok(output)
+    Ok(())
 }
 
 /// Archives the working-tree files of unmerged paths, and returns the tar and
@@ -3133,11 +3283,11 @@ pub(super) fn build_untracked_tar(
 pub(super) fn build_conflicted_worktree_tar(
     repository: &Path,
     paths: &[PathBuf],
-) -> Result<(Vec<u8>, Vec<PathBuf>)> {
-    let mut output = Vec::new();
+    output: &mut dyn Write,
+) -> Result<Vec<PathBuf>> {
     let mut missing = Vec::new();
     {
-        let mut builder = tar::Builder::new(&mut output);
+        let mut builder = tar::Builder::new(output);
         for relative in paths {
             validate_worktree_relative_path(relative)?;
             ensure_no_symlink_ancestors(repository, relative)?;
@@ -3163,7 +3313,7 @@ pub(super) fn build_conflicted_worktree_tar(
         }
         builder.finish().context("finish conflicted-file tar")?;
     }
-    Ok((output, missing))
+    Ok(missing)
 }
 
 fn is_nested_repository(source: &Path, metadata: &fs::Metadata) -> Result<bool> {
@@ -3177,7 +3327,7 @@ fn is_nested_repository(source: &Path, metadata: &fs::Metadata) -> Result<bool> 
 }
 
 fn append_worktree_entry(
-    builder: &mut tar::Builder<&mut Vec<u8>>,
+    builder: &mut tar::Builder<&mut dyn Write>,
     repository: &Path,
     relative: &Path,
     metadata: &fs::Metadata,
@@ -3235,10 +3385,6 @@ pub(super) fn validate_untracked_tar(bytes: &[u8]) -> Result<()> {
 
 pub(super) fn validate_untracked_tar_reader(reader: impl Read) -> Result<()> {
     validate_worktree_tar_reader(reader, WorktreeTar::Untracked)
-}
-
-pub(super) fn validate_conflicted_worktree_tar(bytes: &[u8]) -> Result<()> {
-    validate_conflicted_worktree_tar_reader(Cursor::new(bytes))
 }
 
 pub(super) fn validate_conflicted_worktree_tar_reader(reader: impl Read) -> Result<()> {

@@ -73,6 +73,7 @@ pub(crate) struct ApiClient {
     /// Where the one "waiting for the daemon" line goes; stderr outside tests.
     wait_notice: fn(&str),
     http: reqwest::Client,
+    _ssh_lease: Option<std::sync::Arc<mj_client::daemon::ssh::SshLease>>,
 }
 
 impl ApiClient {
@@ -134,24 +135,17 @@ impl ApiClient {
         Self::connect_to(&mut client, &identity).await
     }
 
-    async fn connect_to(
+    pub(crate) async fn connect_to(
         client: &mut daemon::DaemonClient,
         identity: &mj_client::daemon::DaemonIdentity,
     ) -> Result<Self> {
-        if !client
-            .connector()
-            .is_some_and(|connector| connector.is_ssh())
-            && identity.placement == mj_client::daemon::DaemonPlacement::Host
-            && let Some(endpoint) = mj_client::daemon::read_api_endpoint()?
-            && endpoint.pid == client.pid()
-            && endpoint.instance_id == identity.instance_id
-        {
-            let base_url = format!("http://{}", endpoint.address);
+        if let Some((base_url, token)) = client.direct_api_endpoint(identity)? {
             let http = http_client(None, None)?;
             probe_api(&http, &base_url).await?;
-            let mut api = Self::with_http(base_url, endpoint.token, http);
+            let mut api = Self::with_http(base_url, token, http);
             api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
             api.daemon_instance = Some(identity.instance_id.clone());
+            api._ssh_lease = client.ssh_lease();
             return Ok(api);
         }
 
@@ -199,6 +193,7 @@ impl ApiClient {
             busy_retry: BusyRetry::DEFAULT,
             wait_notice: |line| eprintln!("{line}"),
             http,
+            _ssh_lease: None,
         }
     }
 
