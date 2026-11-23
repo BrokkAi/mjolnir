@@ -419,6 +419,13 @@ func transcriptItemEqual(a, b *core.TranscriptItem) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
+// TranscriptItemEqual is TranscriptItem's PartialEq, for callers outside
+// this package that compare items by value (mj-chat's background
+// conversion compares `Some(item) == source`).
+func TranscriptItemEqual(a, b *core.TranscriptItem) bool {
+	return transcriptItemEqual(a, b)
+}
+
 // EntryRole is the role one transcript item renders under.
 //
 // The matcher and the builder both read it, so an entry is reused only when

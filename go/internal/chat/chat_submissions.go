@@ -5,8 +5,10 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -177,7 +179,29 @@ type StartupRetryPrompt struct {
 // RetainStartupReceipt preserves exact startup identity across bounded
 // shutdown without making it resendable.
 func (s *ChatState) RetainStartupReceipt(prompt StartupPrompt, inheritedDraft *string) {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::retain_startup_receipt")
+	if slices.ContainsFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == prompt.CommandID
+	}) {
+		return
+	}
+	latestSeq := s.latestSeq
+	s.pendingSubmissions = append(s.pendingSubmissions, PendingSubmission{
+		represented: slices.ContainsFunc(s.queuedPrompts, func(queued QueuedPrompt) bool {
+			return queued.id == prompt.CommandID
+		}),
+		id:       prompt.CommandID,
+		kind:     SubmissionKindPrompt,
+		payload:  prompt.Payload,
+		status:   "Delivery unconfirmed: checking queued prompt",
+		finished: true,
+		startupOrigin: &StartupRetryOrigin{
+			inheritedDraft:  inheritedDraft,
+			moveOperationID: prompt.MoveOperationID,
+		},
+		recordedAtMs:   core.EpochMillis(),
+		submittedAfter: &latestSeq,
+	})
+	s.syncInlineSubmissions()
 }
 
 func (s *ChatState) StartupRetryPrompts() []StartupRetryPrompt {
@@ -207,11 +231,62 @@ func (s *ChatState) settleStartupReceipt(commandID string) {
 }
 
 func (s *ChatState) restoreSubmissions(pending []PendingSubmission) {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::restore_submissions")
+	s.pendingSubmissions = pending
+	for index := range s.pendingSubmissions {
+		pending := &s.pendingSubmissions[index]
+		pending.finished = true
+		if !strings.HasPrefix(pending.status, "Delivery unconfirmed") {
+			pending.status = "Delivery unconfirmed"
+		}
+		// Older saved receipts have no frontier. Choose their anchor once on
+		// restore from the timestamps of the available durable entries.
+		if pending.submittedAfter == nil {
+			var anchor uint64
+			for entryIndex := range s.entries {
+				entry := &s.entries[entryIndex]
+				if entry.RecordedAtMs != nil && *entry.RecordedAtMs <= pending.recordedAtMs {
+					anchor = max(anchor, entry.StartSeq)
+				}
+			}
+			pending.submittedAfter = &anchor
+		}
+		pending.represented = slices.ContainsFunc(s.queuedPrompts, func(queued QueuedPrompt) bool {
+			return queued.id == pending.id
+		}) || slices.ContainsFunc(s.entries, func(entry core.ChatEntry) bool {
+			return entry.Source.Item != nil && representsSubmission(entry.Source.Item.StableID, pending.id)
+		})
+	}
+	s.pendingSubmissions = slices.DeleteFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.represented
+	})
+	s.syncInlineSubmissions()
 }
 
 func (s *ChatState) beginSubmission(id string, kind SubmissionKind, payload PromptPayload, status string) {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::begin_submission")
+	// A retry remains the same submission, including its original anchor.
+	if index := slices.IndexFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == id
+	}); index >= 0 {
+		pending := &s.pendingSubmissions[index]
+		pending.finished = false
+		pending.status = status
+		now := time.Now()
+		pending.startedAt = &now
+		s.syncInlineSubmissions()
+		return
+	}
+	latestSeq := s.latestSeq
+	now := time.Now()
+	s.pendingSubmissions = append(s.pendingSubmissions, PendingSubmission{
+		id:             id,
+		kind:           kind,
+		payload:        payload,
+		status:         status,
+		recordedAtMs:   core.EpochMillis(),
+		submittedAfter: &latestSeq,
+		startedAt:      &now,
+	})
+	s.invalidateRenderCache()
 }
 
 func (s *ChatState) recoverableSubmissionID() (string, bool) {
@@ -223,34 +298,167 @@ func (s *ChatState) recoverableSubmissionID() (string, bool) {
 	return "", false
 }
 
+// removeReceiptPreparation drops a receipt's image preparation, aborting it
+// if it still runs (Rust drops the forwarder when it leaves the map).
+func (s *ChatState) removeReceiptPreparation(id string) {
+	if forwarder, ok := s.composerRuntime.receiptPreparations[id]; ok {
+		delete(s.composerRuntime.receiptPreparations, id)
+		forwarder.drop()
+	}
+}
+
 func (s *ChatState) dismissSubmission(id string) {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::dismiss_submission")
+	s.removeReceiptPreparation(id)
+	s.pendingSubmissions = slices.DeleteFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == id && pending.canResend()
+	})
+	s.syncInlineSubmissions()
 }
 
 func (s *ChatState) prepareReceiptRetry(id string, sessionID string) bool {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::prepare_receipt_retry")
+	if _, ok := s.composerRuntime.receiptPreparations[id]; ok {
+		return true
+	}
+	index := slices.IndexFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == id && pending.canResend()
+	})
+	if index < 0 {
+		return false
+	}
+	receipt := &s.pendingSubmissions[index]
+	if !slices.ContainsFunc(receipt.payload.Images, func(image PromptImage) bool {
+		return image.Image.Reference == nil
+	}) {
+		return false
+	}
+	payload := receipt.payload
+	payload.Images = slices.Clone(receipt.payload.Images)
+	commandID := id
+	updates := s.composerRuntime.tx
+	forwarder := spawnRemoteResultForwarder(func(ctx context.Context) {
+		var err error
+		for index := range payload.Images {
+			if payload.Images[index].Image.Reference != nil {
+				continue
+			}
+			var prepared ClipboardImage
+			prepared, err = prepareAttachment(ctx, sessionID, attachmentSourceClipboard(payload.Images[index].Image))
+			if err != nil {
+				break
+			}
+			payload.Images[index].Image = prepared
+		}
+		// An aborted task sends nothing.
+		if ctx.Err() != nil {
+			return
+		}
+		update := composerIoUpdateReceiptPrepared{commandID: commandID}
+		if err != nil {
+			update.err = err
+		} else {
+			update.result = payload
+		}
+		if sendErr := updates.Send(update); sendErr != nil {
+			slog.Debug("receipt preparation result dropped because composer closed", "error", sendErr)
+		}
+	})
+	if s.composerRuntime.receiptPreparations == nil {
+		s.composerRuntime.receiptPreparations = map[string]*remoteResultForwarder{}
+	}
+	s.composerRuntime.receiptPreparations[id] = forwarder
+	s.syncInlineSubmissions()
+	return true
 }
 
 // finishReceiptPreparation takes the prepared payload, or err when image
 // preparation failed (Rust's Result<PromptPayload, String>).
 func (s *ChatState) finishReceiptPreparation(id string, payload PromptPayload, err error) {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::finish_receipt_preparation")
+	s.removeReceiptPreparation(id)
+	index := slices.IndexFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == id && pending.canResend()
+	})
+	if index < 0 {
+		return
+	}
+	receipt := &s.pendingSubmissions[index]
+	if err != nil {
+		receipt.status = "Delivery unconfirmed: image preparation failed: " + err.Error()
+	} else {
+		receipt.payload = payload
+		s.composerRuntime.preparedReceiptRetries = append(s.composerRuntime.preparedReceiptRetries, id)
+	}
+	s.syncInlineSubmissions()
 }
 
 // resendSubmission is the operation that sends a resendable receipt again,
 // or nil.
 func (s *ChatState) resendSubmission(id string) chatRemoteOperation {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::resend_submission")
+	index := slices.IndexFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == id && pending.canResend()
+	})
+	if index < 0 {
+		return nil
+	}
+	pending := &s.pendingSubmissions[index]
+	switch pending.kind {
+	case SubmissionKindShell:
+		return chatRemoteOperationRunShell{
+			CommandID: pending.id,
+			Command:   pending.payload.Text,
+		}
+	default:
+		return chatRemoteOperationPrompt{
+			CommandID: pending.id,
+			Text:      pending.payload.Text,
+			Images:    slices.Clone(pending.payload.Images),
+		}
+	}
 }
 
 func (s *ChatState) reconcileSubmissions(session *core.MaterializedSession) {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::reconcile_submissions")
+	inlineRetired := false
+	for index := range s.pendingSubmissions {
+		pending := &s.pendingSubmissions[index]
+		if slices.ContainsFunc(session.QueuedPrompts, func(queued core.MaterializedQueuedPrompt) bool {
+			return queued.CommandID == pending.id
+		}) || slices.ContainsFunc(session.Transcript, func(item *core.TranscriptItem) bool {
+			return representsSubmission(item.StableID, pending.id)
+		}) {
+			if pending.startedAt != nil {
+				s.submissionRenders = append(s.submissionRenders, submissionRender{commandID: pending.id, at: *pending.startedAt})
+				pending.startedAt = nil
+			}
+			inlineRetired = pending.isInline() || inlineRetired
+			pending.represented = true
+		}
+	}
+	s.retireRepresentedSubmissions()
+	if inlineRetired {
+		s.syncInlineSubmissions()
+	}
 }
 
 // finishSubmission returns false when authoritative state already confirmed
 // this operation.
 func (s *ChatState) finishSubmission(id string, accepted bool) bool {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::finish_submission")
+	index := slices.IndexFunc(s.pendingSubmissions, func(pending PendingSubmission) bool {
+		return pending.id == id
+	})
+	if index < 0 {
+		return true
+	}
+	pending := &s.pendingSubmissions[index]
+	represented := pending.represented
+	pending.finished = true
+	pending.status = "Queued"
+	// Once the relay has accepted a `/clear`, its "Clearing context…" line,
+	// then its divider or its failure, record it in the conversation. A row of
+	// our own would wait for a user message that never comes.
+	if represented || !accepted || pending.isContextClear() {
+		s.pendingSubmissions = slices.Delete(s.pendingSubmissions, index, index+1)
+	}
+	s.syncInlineSubmissions()
+	return !represented
 }
 
 func (s *ChatState) unconfirmAllSubmissions(err string) {
@@ -288,7 +496,63 @@ func (s *ChatState) retireRepresentedSubmissions() {
 // owner-recorded frontier. These entries never enter the durable projection
 // or the pinned rows.
 func (s *ChatState) syncInlineSubmissions() {
-	panic("unported: mj-chat/src/chat/submissions.rs ChatState::sync_inline_submissions")
+	var position *TranscriptPosition
+	if !anchorIsBottom(s.anchor) {
+		current := s.TranscriptPosition()
+		position = &current
+	}
+	previousLen := len(s.entries)
+	s.entries = slices.DeleteFunc(s.entries, func(entry core.ChatEntry) bool {
+		return isInlineSubmissionEntry(&entry)
+	})
+	removed := len(s.entries) != previousLen
+	recoverable, hasRecoverable := s.recoverableSubmissionID()
+	var inline []core.ChatEntry
+	for index := range s.pendingSubmissions {
+		pending := &s.pendingSubmissions[index]
+		if !pending.isInline() {
+			continue
+		}
+		text := pending.payload.Text
+		if pending.kind == SubmissionKindShell {
+			text = "!" + pending.payload.Text
+		}
+		status := pending.status
+		if _, preparing := s.composerRuntime.receiptPreparations[pending.id]; preparing {
+			status = "Delivery unconfirmed: preparing images…"
+		}
+		text = text + "\n\n" + status
+		if !s.standby && hasRecoverable && recoverable == pending.id {
+			text += "\nCtrl-Alt-R resend · Ctrl-Alt-D dismiss"
+		}
+		var submittedAfter uint64
+		if pending.submittedAfter != nil {
+			submittedAfter = *pending.submittedAfter
+		}
+		recordedAtMs := pending.recordedAtMs
+		entry := core.ChatEntryPlain(submittedAfter, core.ChatRoleUser, text).WithRecordedAt(&recordedAtMs)
+		messageID := "local-submission:" + pending.id
+		entry.MessageID = &messageID
+		inline = append(inline, entry)
+	}
+	if len(inline) == 0 && !removed {
+		s.invalidateRenderCache()
+		return
+	}
+	for _, entry := range inline {
+		at, _ := slices.BinarySearchFunc(s.entries, entry.StartSeq, func(existing core.ChatEntry, startSeq uint64) int {
+			// partition_point(|existing| existing.start_seq <= start_seq)
+			if existing.StartSeq <= startSeq {
+				return -1
+			}
+			return 1
+		})
+		s.entries = slices.Insert(s.entries, at, entry)
+	}
+	s.invalidateRenderCache()
+	if position != nil {
+		s.RestoreTranscriptPosition(*position)
+	}
 }
 
 func (s *ChatState) hasInlineSubmissions() bool {
