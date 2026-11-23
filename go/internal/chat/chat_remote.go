@@ -12,11 +12,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/BrokkAi/acp-go/schema"
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -35,7 +39,26 @@ func reviewerAnswerKey(role *string, request *core.ElicitationRequest) string {
 }
 
 func (s *ChatState) deferredFormResultDrafts() []ChatElicitationDraft {
-	panic("unported: mj-chat/src/chat/remote.rs ChatState::deferred_form_result_drafts")
+	var drafts []ChatElicitationDraft
+	for _, result := range s.deferredFormResults {
+		answer, ok := result.(chatRemoteResultReviewerAnswer)
+		if !ok || answer.Draft == nil || answer.Err == nil {
+			continue
+		}
+		message := answer.Err.Error()
+		if strings.Contains(message, "is no longer pending") {
+			continue
+		}
+		draft := *answer.Draft
+		draft.form = answer.Draft.form.clone()
+		if answer.Draft.reviewerRole != nil {
+			role := *answer.Draft.reviewerRole
+			draft.reviewerRole = &role
+		}
+		draft.form.setResponseError("Answer was not sent: " + message)
+		drafts = append(drafts, draft)
+	}
+	return drafts
 }
 
 func (s *ChatState) applyDeferredFormResults() {
@@ -66,7 +89,21 @@ func (s *ChatState) reportReviewRefusal(message string) {
 }
 
 func finishReviewerAnswer(chat *ChatState, draft *ChatElicitationDraft, result error) {
-	panic("unported: mj-chat/src/chat/remote.rs finish_reviewer_answer")
+	if result == nil {
+		return
+	}
+	message := result.Error()
+	if strings.Contains(message, "is no longer pending") {
+		if draft != nil {
+			chat.conversationNotice("The reviewer's request had already ended (answered elsewhere, withdrawn, or expired), so this answer was not delivered.")
+		}
+		return
+	}
+	if draft != nil && !chat.restoreFailedReviewerElicitation(*draft, message) {
+		return
+	}
+	slog.Warn("reviewer answer failed and was shown in the UI", "session_id", chat.sessionID, "error", message)
+	chat.reportReviewRefusal(message)
 }
 
 const chatRemoteQueueCapacity = 32
@@ -162,7 +199,32 @@ func (chatRemoteOperationRespondElicitation) isChatRemoteOperation() {}
 // chatRemoteOperationFeedback is the progress row an operation shows while
 // it runs: its feedback key and text (ChatRemoteOperation::feedback).
 func chatRemoteOperationFeedback(operation chatRemoteOperation) (key, text string, ok bool) {
-	panic("unported: mj-chat/src/chat/remote.rs ChatRemoteOperation::feedback")
+	switch operation := operation.(type) {
+	case chatRemoteOperationRemoveQueuedPrompt:
+		return "remove:" + operation.ID, "Removing queued prompt…", true
+	case chatRemoteOperationGoalControl:
+		return "goal:" + operation.Action.AsStr(), "Updating goal…", true
+	case chatRemoteOperationSetConfig:
+		return "config:" + operation.Key, "Changing " + operation.Key + "…", true
+	case chatRemoteOperationPlanCommand:
+		return "plan:" + operation.CommandID, "Changing plan mode…", true
+	case chatRemoteOperationCancel:
+		text := "Interrupting turn…"
+		switch operation.Intent {
+		case TurnControlIntentSteer:
+			text = "Steering turn…"
+		case TurnControlIntentApplyQueued:
+			text = "Applying queued input…"
+		}
+		return "turn-control", text, true
+	case chatRemoteOperationReviewerAnswer:
+		if operation.Draft != nil {
+			return reviewerAnswerKey(operation.Draft.reviewerRole, operation.Draft.request()), "Sending reviewer answer…", true
+		}
+	case chatRemoteOperationRespondElicitation:
+		return "answer:" + operation.Request.ID, "Sending answer…", true
+	}
+	return "", "", false
 }
 
 // chatRemoteResult is how a remote operation ended.
@@ -278,13 +340,69 @@ func (chatRemoteResultWorkerFailed) isChatRemoteResult()        {}
 // chatRemoteResultFeedbackKey is the feedback row a result clears
 // (ChatRemoteResult::feedback_key).
 func chatRemoteResultFeedbackKey(result chatRemoteResult) (string, bool) {
-	panic("unported: mj-chat/src/chat/remote.rs ChatRemoteResult::feedback_key")
+	switch result := result.(type) {
+	case chatRemoteResultFollowupUnconfirmed:
+		return result.FeedbackKey, true
+	case chatRemoteResultRemoveQueuedPrompt:
+		return "remove:" + result.ID, true
+	case chatRemoteResultGoalControl:
+		return "goal:" + result.Action.AsStr(), true
+	case chatRemoteResultSetConfig:
+		return "config:" + result.Key, true
+	case chatRemoteResultPlanCommand:
+		return "plan:" + result.CommandID, true
+	case chatRemoteResultCancel:
+		return "turn-control", true
+	case chatRemoteResultReviewerAnswer:
+		if result.Draft != nil {
+			return reviewerAnswerKey(result.Draft.reviewerRole, result.Draft.request()), true
+		}
+	case chatRemoteResultRespondElicitation:
+		return "answer:" + result.Request.ID, true
+	}
+	return "", false
 }
 
 // chatRemoteResultFailureMessage is the failure a result reports, if it
 // failed (ChatRemoteResult::failure_message).
 func chatRemoteResultFailureMessage(result chatRemoteResult) (string, bool) {
-	panic("unported: mj-chat/src/chat/remote.rs ChatRemoteResult::failure_message")
+	var err error
+	switch result := result.(type) {
+	case chatRemoteResultSync:
+		err = result.Err
+	case chatRemoteResultNoticeRecorded:
+		err = result.Err
+	case chatRemoteResultPrompt:
+		err = result.Err
+	case chatRemoteResultRunShell:
+		err = result.Err
+	case chatRemoteResultRemoveQueuedPrompt:
+		err = result.Err
+	case chatRemoteResultStopBackgroundTask:
+		err = result.Err
+	case chatRemoteResultGoalControl:
+		err = result.Err
+	case chatRemoteResultSetConfig:
+		err = result.Err
+	case chatRemoteResultPlanCommand:
+		err = result.Err
+	case chatRemoteResultCancel:
+		err = result.Err
+	case chatRemoteResultReviewerAnswer:
+		err = result.Err
+	case chatRemoteResultRespondElicitation:
+		err = result.Err
+	case chatRemoteResultFollowupUnconfirmed:
+		return result.Error, true
+	case chatRemoteResultDeliveryUnconfirmed:
+		return result.Error, true
+	case chatRemoteResultWorkerFailed:
+		return result.Error, true
+	}
+	if err == nil {
+		return "", false
+	}
+	return err.Error(), true
 }
 
 func publishChatRemoteResult(results *core.Unbounded[chatRemoteResult], attached *atomic.Bool, result chatRemoteResult) {
@@ -404,7 +522,21 @@ type chatRemoteSupervisor struct {
 // spawnChatRemoteSupervisor starts the background worker for session
 // (ChatRemoteSupervisor::spawn).
 func spawnChatRemoteSupervisor(session client.SessionHandle, sessionManager client.SessionControl) *chatRemoteSupervisor {
-	panic("unported: mj-chat/src/chat/remote.rs ChatRemoteSupervisor::spawn")
+	operationsTx, operationsRx := newChatRemoteOperationQueue(chatRemoteQueueCapacity)
+	results := core.NewUnbounded[chatRemoteResult]()
+	attached := &atomic.Bool{}
+	attached.Store(true)
+	worker := core.Spawn(func() struct{} {
+		runChatRemoteWorker(context.Background(), session, sessionManager, operationsRx, results, attached)
+		return struct{}{}
+	})
+	return &chatRemoteSupervisor{
+		operationSender: operationsTx,
+		results:         &remoteResults{receiver: results, attached: attached},
+		resultsTx:       results,
+		attached:        attached,
+		worker:          worker,
+	}
 }
 
 func (s *chatRemoteSupervisor) operations() *chatRemoteOperationSender {
@@ -443,7 +575,28 @@ func (s *chatRemoteSupervisor) recv(ctx context.Context) (chatRemoteResult, bool
 // transferResults hands the result feed to the composer: the receiver
 // follows accepted work, even when the worker-facing view is dropped.
 func (s *chatRemoteSupervisor) transferResults(updates *core.Unbounded[composerIoUpdate]) *remoteResultForwarder {
-	panic("unported: mj-chat/src/chat/remote.rs ChatRemoteSupervisor::transfer_results")
+	results := s.results
+	if results == nil {
+		return nil
+	}
+	s.results = nil
+	return spawnRemoteResultForwarder(func(ctx context.Context) {
+		// The forwarder owns the feed now; detaching it when the task ends
+		// logs whatever failure nobody will see.
+		defer results.close()
+		for {
+			result, ok := results.receiver.Recv(ctx)
+			if !ok {
+				return
+			}
+			if err := updates.Send(composerIoUpdateRemote{result: result}); err != nil {
+				if message, failed := chatRemoteResultFailureMessage(result); failed {
+					slog.Error("chat operation failed after its composer closed", "error", message)
+				}
+				return
+			}
+		}
+	})
 }
 
 // takeFinished joins the worker once it has finished: false while it still
@@ -466,7 +619,28 @@ func (s *chatRemoteSupervisor) takeFinished() (bool, error) {
 // close detaches the view from its worker, which finishes accepted work and
 // reports a failure through the feed if anyone still listens (Rust's Drop).
 func (s *chatRemoteSupervisor) close() {
-	panic("unported: mj-chat/src/chat/remote.rs ChatRemoteSupervisor::drop")
+	if s.results != nil {
+		s.results.close()
+		s.results = nil
+	}
+	if s.operationSender != nil {
+		s.operationSender.close()
+		s.operationSender = nil
+	}
+	worker := s.worker
+	if worker == nil {
+		return
+	}
+	s.worker = nil
+	results, attached := s.resultsTx, s.attached
+	core.Spawn(func() struct{} {
+		if _, err := worker.Join(context.Background()); err != nil {
+			publishChatRemoteResult(results, attached, chatRemoteResultWorkerFailed{
+				Error: fmt.Sprintf("detached chat background worker failed: %v", err),
+			})
+		}
+		return struct{}{}
+	})
 }
 
 // remoteTasks is the worker's JoinSet: the operations it has started and not
@@ -499,7 +673,76 @@ func runChatRemoteWorker(
 	results *core.Unbounded[chatRemoteResult],
 	attached *atomic.Bool,
 ) {
-	panic("unported: mj-chat/src/chat/remote.rs run_chat_remote_worker")
+	pending := newRemoteTasks()
+	accepting := true
+	for {
+		if !accepting && pending.isEmpty() {
+			return
+		}
+		// A nil channel never delivers, as tokio::select! skips a disabled
+		// branch.
+		var incoming <-chan chatRemoteOperation
+		if accepting {
+			incoming = operations.operations
+		}
+		var finished chan error
+		if !pending.isEmpty() {
+			finished = pending.finished
+		}
+		select {
+		case operation, ok := <-incoming:
+			if !ok {
+				accepting = false
+				continue
+			}
+			<-operations.slots
+			if session.IsStopped() {
+				sessionID := session.SessionID()
+				replacement, err := sessionManager.WaitForSession(ctx, sessionID, sessionActorReplacementWait)
+				if err == nil {
+					session = replacement
+				} else {
+					slog.Warn("could not reacquire replacement session actor before dispatch",
+						"session_id", sessionID, "error", err.Error())
+				}
+			}
+			enqueueChatRemoteOperation(ctx, session, sessionManager, operation, pending, results, attached)
+		case err := <-finished:
+			pending.running--
+			if err != nil {
+				publishChatRemoteResult(results, attached, chatRemoteResultWorkerFailed{
+					Error: fmt.Sprintf("chat background operation failed: %v", err),
+				})
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// isDeliveryUnconfirmed reports whether err says a submission lost its
+// acknowledgement (Rust's `error.is::<DeliveryUnconfirmed>()`).
+func isDeliveryUnconfirmed(err error) bool {
+	var unconfirmed client.DeliveryUnconfirmed
+	return errors.As(err, &unconfirmed)
+}
+
+// relayCommandBytes is the size serde_json gives a relay command: the JSON
+// without HTML escaping, which encoding/json would otherwise add.
+func relayCommandBytes(command core.RelayCommand) (int, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(command); err != nil {
+		return 0, err
+	}
+	return encoded.Len() - 1, nil
+}
+
+func textPrompt(text string) core.RelayCommandPrompt {
+	return core.RelayCommandPrompt{Prompt: []schema.ContentBlock{
+		{Kind: schema.ContentBlockKindText, Text: &schema.TextContent{Text: text}},
+	}}
 }
 
 func enqueueChatRemoteOperation(
@@ -511,7 +754,239 @@ func enqueueChatRemoteOperation(
 	results *core.Unbounded[chatRemoteResult],
 	attached *atomic.Bool,
 ) {
-	panic("unported: mj-chat/src/chat/remote.rs enqueue_chat_remote_operation")
+	publish := func(result chatRemoteResult) { publishChatRemoteResult(results, attached, result) }
+	switch operation := operation.(type) {
+	case chatRemoteOperationReviewerAnswer:
+		pending.spawn(func() {
+			handle, err := sessionManager.Session(ctx, operation.Role)
+			if err == nil {
+				err = handle.RespondElicitation(ctx, operation.RequestID, operation.Response)
+			}
+			publish(chatRemoteResultReviewerAnswer{Draft: operation.Draft, Err: err})
+		})
+	case chatRemoteOperationRecordNotice:
+		pending.spawn(func() {
+			_, err := session.Submit(ctx, operation.ID, core.RelayCommandRecordNotice{Text: operation.Text})
+			publish(chatRemoteResultNoticeRecorded{ID: operation.ID, Err: err})
+		})
+	case chatRemoteOperationSync:
+		response, err := session.EnqueueSync(ctx)
+		if err != nil {
+			publish(chatRemoteResultSync{Err: err})
+			return
+		}
+		pending.spawn(func() {
+			publish(chatRemoteResultSync{Err: response.Wait(ctx)})
+		})
+	case chatRemoteOperationPrompt:
+		commandID, text, images := operation.CommandID, operation.Text, operation.Images
+		for _, image := range images {
+			if image.Image.Reference == nil {
+				publish(chatRemoteResultPrompt{CommandID: commandID, Text: text, Images: images, Err: errors.New("Image attachment is not ready")})
+				return
+			}
+		}
+		normalized := images
+		payload := PromptPayload{Text: text, Images: slices.Clone(normalized)}
+		command := core.RelayCommandPrompt{Prompt: payload.ContentBlocks()}
+		if size, err := relayCommandBytes(command); err == nil && size > core.RelayCommandByteBudget {
+			publish(chatRemoteResultPrompt{
+				CommandID: commandID, Text: text, Images: slices.Clone(normalized),
+				Err: errors.New("Prompt exceeds the relay command budget; shorten the text"),
+			})
+			return
+		}
+		if len(normalized) > 0 {
+			view := session.View()
+			if view.Snapshot == nil || !view.Snapshot.Operational.Get().AcceptsPromptImages() {
+				publish(chatRemoteResultPrompt{CommandID: commandID, Text: text, Images: normalized, Err: errors.New(imageCapabilityNotice)})
+				return
+			}
+		}
+		response, err := session.EnqueueSubmit(ctx, commandID, command)
+		if err != nil {
+			publish(chatRemoteResultPrompt{CommandID: commandID, Text: text, Images: normalized, Err: err})
+			return
+		}
+		pending.spawn(func() {
+			ordinal, err := response.Wait(ctx)
+			if err != nil {
+				if isDeliveryUnconfirmed(err) {
+					publish(chatRemoteResultDeliveryUnconfirmed{CommandID: commandID, Error: err.Error()})
+					return
+				}
+				publish(chatRemoteResultPrompt{CommandID: commandID, Text: text, Images: slices.Clone(normalized), Err: err})
+				return
+			}
+			publish(chatRemoteResultPrompt{CommandID: commandID, Text: text, Images: slices.Clone(normalized), Ordinal: ordinal})
+		})
+	case chatRemoteOperationRunShell:
+		commandID, command := operation.CommandID, operation.Command
+		response, err := session.EnqueueSubmit(ctx, commandID, core.RelayCommandRunUserShell{Command: command})
+		if err != nil {
+			publish(chatRemoteResultRunShell{CommandID: commandID, Command: command, Err: err})
+			return
+		}
+		pending.spawn(func() {
+			ordinal, err := response.Wait(ctx)
+			if err != nil && isDeliveryUnconfirmed(err) {
+				publish(chatRemoteResultDeliveryUnconfirmed{CommandID: commandID, Error: err.Error()})
+				return
+			}
+			publish(chatRemoteResultRunShell{CommandID: commandID, Command: command, Ordinal: ordinal, Err: err})
+		})
+	case chatRemoteOperationRemoveQueuedPrompt:
+		response, err := session.EnqueueSubmit(ctx, operation.CommandID, core.RelayCommandRemoveQueuedPrompt{QueuedCommandID: operation.ID})
+		if err != nil {
+			publish(chatRemoteResultRemoveQueuedPrompt{ID: operation.ID, Text: operation.Text, Kind: operation.Kind, Err: err})
+			return
+		}
+		pending.spawn(func() {
+			_, err := response.Wait(ctx)
+			publish(chatRemoteResultRemoveQueuedPrompt{ID: operation.ID, Text: operation.Text, Kind: operation.Kind, Err: err})
+		})
+	case chatRemoteOperationStopBackgroundTask:
+		pending.spawn(func() {
+			publish(chatRemoteResultStopBackgroundTask{ID: operation.ID, Err: session.StopBackgroundTask(ctx, operation.ID)})
+		})
+	case chatRemoteOperationGoalControl:
+		response, err := session.EnqueueSubmit(ctx, operation.CommandID, core.RelayCommandGoalControl{Action: operation.Action})
+		if err != nil {
+			publish(chatRemoteResultGoalControl{Action: operation.Action, Err: err})
+			return
+		}
+		pending.spawn(func() {
+			_, err := response.Wait(ctx)
+			publish(chatRemoteResultGoalControl{Action: operation.Action, Err: err})
+		})
+	case chatRemoteOperationSetConfig:
+		response, err := session.EnqueueSubmit(ctx, operation.CommandID, core.RelayCommandSetConfig{Key: operation.Key, Value: operation.Value})
+		if err != nil {
+			publish(chatRemoteResultSetConfig{Key: operation.Key, Value: operation.Value, Err: err})
+			return
+		}
+		pending.spawn(func() {
+			_, err := response.Wait(ctx)
+			publish(chatRemoteResultSetConfig{Key: operation.Key, Value: operation.Value, Err: err})
+		})
+	case chatRemoteOperationPlanCommand:
+		pending.spawn(func() {
+			commandID := operation.CommandID
+			controlApplied, unconfirmed := false, false
+			var ordinal *uint64
+			err := func() error {
+				if err := session.ApplyPlanControl(ctx, commandID, operation.Control); err != nil {
+					return err
+				}
+				controlApplied = true
+				if operation.Prompt == nil {
+					return nil
+				}
+				response, err := session.EnqueueSubmit(ctx, commandID+"-prompt", textPrompt(*operation.Prompt))
+				if err != nil {
+					return fmt.Errorf("mode changed, but prompt was not queued: %w", err)
+				}
+				accepted, err := response.Wait(ctx)
+				if err != nil {
+					unconfirmed = isDeliveryUnconfirmed(err)
+					return fmt.Errorf("mode changed, but prompt failed: %w", err)
+				}
+				ordinal = &accepted
+				return nil
+			}()
+			if unconfirmed {
+				requested := operation.RequestedActive
+				publish(chatRemoteResultFollowupUnconfirmed{
+					CommandID:         commandID + "-prompt",
+					FeedbackKey:       "plan:" + commandID,
+					DesiredPlanActive: &requested,
+					PlanCommand:       true,
+					Error:             err.Error(),
+				})
+				return
+			}
+			publish(chatRemoteResultPlanCommand{
+				CommandID:       commandID,
+				Original:        operation.Original,
+				RequestedActive: operation.RequestedActive,
+				ControlApplied:  controlApplied,
+				Ordinal:         ordinal,
+				Err:             err,
+			})
+		})
+	case chatRemoteOperationCancel:
+		pending.spawn(func() {
+			var failures []string
+			if operation.CancelAgent {
+				command := operation.Command
+				if command == nil {
+					command = core.RelayCommandCancelTurn{}
+				}
+				if _, err := session.Submit(ctx, operation.CommandID, command); err != nil {
+					failures = append(failures, "agent: "+err.Error())
+				}
+			}
+			for index, shellCommandID := range operation.ShellCommandIDs {
+				id := fmt.Sprintf("%s-shell-%d", operation.CommandID, index)
+				if _, err := session.Submit(ctx, id, core.RelayCommandCancelUserShell{ShellCommandID: shellCommandID}); err != nil {
+					failures = append(failures, "shell: "+err.Error())
+				}
+			}
+			var err error
+			if len(failures) > 0 {
+				err = errors.New(strings.Join(failures, "; "))
+			}
+			publish(chatRemoteResultCancel{Intent: operation.Intent, Err: err})
+		})
+	case chatRemoteOperationRespondElicitation:
+		pending.spawn(func() {
+			request := operation.Request
+			answered, unconfirmed := false, false
+			var desiredPlanActive *bool
+			if operation.PlanFollowup != nil {
+				desired := operation.PlanFollowup.desiredActive
+				desiredPlanActive = &desired
+			}
+			err := func() error {
+				if err := session.RespondElicitation(ctx, request.ID, operation.Response); err != nil {
+					return err
+				}
+				answered = true
+				followup := operation.PlanFollowup
+				if followup == nil {
+					return nil
+				}
+				if followup.control != nil {
+					if err := session.ApplyPlanControl(ctx, "plan-review-"+request.ID+"-mode", followup.control); err != nil {
+						return fmt.Errorf("review answered, but plan mode was not changed: %w", err)
+					}
+				}
+				if followup.prompt != nil {
+					if _, err := session.Submit(ctx, "plan-review-"+request.ID+"-feedback", textPrompt(*followup.prompt)); err != nil {
+						unconfirmed = isDeliveryUnconfirmed(err)
+						return fmt.Errorf("review answered, but revision feedback failed: %w", err)
+					}
+				}
+				return nil
+			}()
+			if unconfirmed {
+				publish(chatRemoteResultFollowupUnconfirmed{
+					CommandID:         "plan-review-" + request.ID + "-feedback",
+					FeedbackKey:       "answer:" + request.ID,
+					DesiredPlanActive: desiredPlanActive,
+					PlanCommand:       false,
+					Error:             err.Error(),
+				})
+				return
+			}
+			publish(chatRemoteResultRespondElicitation{
+				Request:           request,
+				DesiredPlanActive: desiredPlanActive,
+				Answered:          answered,
+				Err:               err,
+			})
+		})
+	}
 }
 
 func restoreUnsentInput(chat *ChatState, input string) {
@@ -519,7 +994,14 @@ func restoreUnsentInput(chat *ChatState, input string) {
 }
 
 func restoreUnsentPrompt(chat *ChatState, text string, images []PromptImage) {
-	panic("unported: mj-chat/src/chat/remote.rs restore_unsent_prompt")
+	payload := PromptPayload{Text: text, Images: images}
+	if draft := chat.draftPayload(); draft.Equal(&payload) {
+		return
+	}
+	if chat.input != "" {
+		payload.Text += "\n\n"
+	}
+	chat.replaceInputRange(ByteRange{Start: 0, End: 0}, &payload)
 }
 
 // reportRefusedSubmission reports a submit the relay refused as a dated
@@ -549,9 +1031,244 @@ func refusedSlashCommand(text string, images []PromptImage) (string, bool) {
 }
 
 func applyChatRemoteResult(chat *ChatState, result chatRemoteResult) {
-	panic("unported: mj-chat/src/chat/remote.rs apply_chat_remote_result")
+	// A parked composer owns delivery, but not the session/review
+	// projection. Keep projection-dependent results intact until a live view
+	// owns both.
+	_, respond := result.(chatRemoteResultRespondElicitation)
+	_, reviewerAnswer := result.(chatRemoteResultReviewerAnswer)
+	if (chat.standby && (respond || reviewerAnswer)) || (!chat.reviewProjectionKnown && reviewerAnswer) {
+		chat.deferredFormResults = append(chat.deferredFormResults, result)
+		return
+	}
+	if key, ok := chatRemoteResultFeedbackKey(result); ok {
+		if cancel, isCancel := result.(chatRemoteResultCancel); !isCancel || cancel.Err != nil {
+			delete(chat.operationFeedback, key)
+		}
+	}
+	// Keep diagnostics in the process log as well as in recoverable rows.
+	// Publishing a conversation notice must never recursively publish
+	// failure. Reviewer recovery can wait for another form; it logs only
+	// when applied, rather than on each attempt to surface the saved result.
+	if message, failed := chatRemoteResultFailureMessage(result); failed && !reviewerAnswer {
+		slog.Warn("chat operation failed and was shown in the UI", "session_id", chat.sessionID, "error", message)
+	}
+	switch result := result.(type) {
+	// The local row remains until projection confirms publication. A
+	// failure is logged without publishing another notice about it.
+	case chatRemoteResultNoticeRecorded:
+		if result.Err != nil {
+			chat.refuseNotice(result.ID)
+		}
+	case chatRemoteResultSync:
+		if result.Err == nil {
+			chat.connectionFeedback = nil
+			chat.setTranscriptLoading(false)
+		} else {
+			chat.setTranscriptLoading(false)
+			chat.setConnectionNotice("Connection failed: " + result.Err.Error())
+		}
+	case chatRemoteResultPrompt:
+		if result.Err == nil {
+			chat.finishSubmission(result.CommandID, true)
+			return
+		}
+		if !chat.finishSubmission(result.CommandID, false) {
+			return
+		}
+		restoreUnsentPrompt(chat, result.Text, slices.Clone(result.Images))
+		// A refusal is an event in the conversation, and the draft already
+		// holds the text for a retry. It becomes a dated notice in time
+		// order instead of a row pinned below every later turn (I1-12).
+		if command, ok := refusedSlashCommand(result.Text, result.Images); ok {
+			chat.conversationNotice(command + " was not run: " + result.Err.Error())
+			return
+		}
+		reportRefusedSubmission(chat, SubmissionKindPrompt, result.Text, result.Err.Error())
+	case chatRemoteResultRunShell:
+		if result.Err == nil {
+			chat.finishSubmission(result.CommandID, true)
+			return
+		}
+		if !chat.finishSubmission(result.CommandID, false) {
+			return
+		}
+		restoreUnsentInput(chat, "!"+result.Command)
+		reportRefusedSubmission(chat, SubmissionKindShell, result.Command, result.Err.Error())
+	case chatRemoteResultRemoveQueuedPrompt:
+		if result.Err != nil {
+			chat.failQueuedPromptRemoval(result.ID, result.Text, result.Kind)
+			chat.conversationNotice("Queued prompt was not removed: " + result.Err.Error())
+		}
+	case chatRemoteResultStopBackgroundTask:
+		// The provider's acknowledgement only means it accepted the stop
+		// request. The next activity snapshot remains authoritative for
+		// removing the row and its pending label.
+		if result.Err != nil {
+			chat.failBackgroundStop(result.ID, result.Err.Error())
+		}
+	case chatRemoteResultGoalControl:
+		if result.Err != nil {
+			restoreUnsentInput(chat, "/goal "+result.Action.AsStr())
+			chat.conversationNotice(fmt.Sprintf("/goal %s failed: %s", result.Action.AsStr(), result.Err.Error()))
+		}
+	case chatRemoteResultSetConfig:
+		if result.Err != nil {
+			restoreUnsentInput(chat, core.ConfigCommandText(result.Key, result.Value))
+			chat.conversationNotice("Configuration was not changed: " + result.Err.Error())
+		}
+	case chatRemoteResultPlanCommand:
+		if result.Err == nil {
+			chat.planCommandPending = false
+			chat.finishPlanModeChange(result.RequestedActive)
+			chat.finishSubmission(result.CommandID+"-prompt", true)
+			return
+		}
+		unsent := chat.finishSubmission(result.CommandID+"-prompt", false)
+		chat.planCommandPending = false
+		chat.finishPlanModeChange(result.ControlApplied == result.RequestedActive)
+		if unsent {
+			restoreUnsentInput(chat, result.Original)
+		}
+		chat.conversationNotice("Plan command was not completed: " + result.Err.Error())
+	case chatRemoteResultCancel:
+		chat.turnControlSubmitting = false
+		if result.Err != nil {
+			chat.turnControlAwaitingState = nil
+		}
+		if chat.turnControlAwaitingState == nil && chat.cancellingPromptID == nil &&
+			!(chat.steering != nil && chat.steering.HoldsQueue()) {
+			delete(chat.operationFeedback, "turn-control")
+		}
+		if result.Err != nil {
+			notice := result.Intent.failureNotice(result.Err.Error())
+			chat.turnControlError = &notice
+			chat.turnControlDialogOpen = result.Intent != TurnControlIntentCancel
+			chat.conversationNotice(result.Intent.failureNotice(result.Err.Error()))
+		}
+	case chatRemoteResultReviewerAnswer:
+		finishReviewerAnswer(chat, result.Draft, result.Err)
+	case chatRemoteResultRespondElicitation:
+		feedback := "plan-review-" + result.Request.ID + "-feedback"
+		if result.Err == nil {
+			if result.DesiredPlanActive != nil {
+				chat.finishPlanModeChange(*result.DesiredPlanActive)
+			}
+			chat.finishSubmission(feedback, true)
+			return
+		}
+		chat.finishSubmission(feedback, false)
+		if !result.Answered {
+			chat.restoreFailedElicitation(result.Request, "Answer was not sent: "+result.Err.Error())
+		}
+		if result.Answered {
+			chat.conversationNotice("Answer sent; follow-up failed: " + result.Err.Error())
+		} else {
+			chat.conversationNotice("Answer was not sent: " + result.Err.Error())
+		}
+	case chatRemoteResultFollowupUnconfirmed:
+		if result.PlanCommand {
+			chat.planCommandPending = false
+		}
+		if result.DesiredPlanActive != nil {
+			chat.finishPlanModeChange(*result.DesiredPlanActive)
+		}
+		chat.unconfirmSubmission(result.CommandID, result.Error)
+	case chatRemoteResultDeliveryUnconfirmed:
+		chat.unconfirmSubmission(result.CommandID, result.Error)
+	case chatRemoteResultWorkerFailed:
+		chat.unconfirmAllSubmissions(result.Error)
+		clear(chat.operationFeedback)
+		if chat.failAllBackgroundStops() {
+			chat.conversationNotice("Background task could not be stopped: " + result.Error)
+		} else {
+			chat.conversationNotice(result.Error)
+		}
+	}
 }
 
 func queueChatRemoteOperation(operations *chatRemoteOperationSender, operation chatRemoteOperation, chat *ChatState) {
-	panic("unported: mj-chat/src/chat/remote.rs queue_chat_remote_operation")
+	// Reserve admission before replacing an unconfirmed receipt. If the
+	// local queue refuses the retry, the original identity remains
+	// recoverable.
+	permit, admitted := operations.tryReserve()
+	retrying := false
+	switch operation := operation.(type) {
+	case chatRemoteOperationPrompt:
+		id, ok := chat.recoverableSubmissionID()
+		retrying = ok && id == operation.CommandID
+	case chatRemoteOperationRunShell:
+		id, ok := chat.recoverableSubmissionID()
+		retrying = ok && id == operation.CommandID
+	}
+	if retrying && !admitted {
+		chat.SetNotice("The session command queue could not accept the resend; try again")
+		return
+	}
+	feedbackKey, feedbackText, hasFeedback := chatRemoteOperationFeedback(operation)
+	if hasFeedback {
+		if chat.operationFeedback == nil {
+			chat.operationFeedback = map[string]string{}
+		}
+		chat.operationFeedback[feedbackKey] = feedbackText
+	}
+	switch operation := operation.(type) {
+	case chatRemoteOperationPrompt:
+		chat.beginSubmission(operation.CommandID, SubmissionKindPrompt,
+			PromptPayload{Text: operation.Text, Images: slices.Clone(operation.Images)}, "Sending…")
+	case chatRemoteOperationRunShell:
+		chat.beginSubmission(operation.CommandID, SubmissionKindShell, PromptPayloadText(operation.Command), "Sending…")
+	case chatRemoteOperationPlanCommand:
+		if operation.Prompt != nil {
+			chat.beginSubmission(operation.CommandID+"-prompt", SubmissionKindPrompt, PromptPayloadText(*operation.Prompt), "Changing mode…")
+		}
+	case chatRemoteOperationRespondElicitation:
+		if operation.PlanFollowup != nil && operation.PlanFollowup.prompt != nil {
+			chat.beginSubmission("plan-review-"+operation.Request.ID+"-feedback", SubmissionKindPrompt,
+				PromptPayloadText(*operation.PlanFollowup.prompt), "Sending answer…")
+		}
+	}
+	if admitted {
+		permit.send(operation)
+		return
+	}
+	if hasFeedback {
+		delete(chat.operationFeedback, feedbackKey)
+	}
+	const queueFull = "session command queue is full"
+	switch operation := operation.(type) {
+	case chatRemoteOperationPrompt:
+		chat.finishSubmission(operation.CommandID, false)
+		restoreUnsentPrompt(chat, operation.Text, operation.Images)
+		reportRefusedSubmission(chat, SubmissionKindPrompt, operation.Text, queueFull)
+	case chatRemoteOperationRunShell:
+		chat.finishSubmission(operation.CommandID, false)
+		reportRefusedSubmission(chat, SubmissionKindShell, operation.Command, queueFull)
+		restoreUnsentInput(chat, "!"+operation.Command)
+	case chatRemoteOperationRemoveQueuedPrompt:
+		chat.failQueuedPromptRemoval(operation.ID, operation.Text, operation.Kind)
+	case chatRemoteOperationStopBackgroundTask:
+		chat.failBackgroundStop(operation.ID, queueFull)
+	case chatRemoteOperationGoalControl:
+		restoreUnsentInput(chat, "/goal "+operation.Action.AsStr())
+	case chatRemoteOperationSetConfig:
+		restoreUnsentInput(chat, core.ConfigCommandText(operation.Key, operation.Value))
+	case chatRemoteOperationPlanCommand:
+		chat.finishSubmission(operation.CommandID+"-prompt", false)
+		chat.planCommandPending = false
+		chat.finishPlanModeChange(!operation.RequestedActive)
+		restoreUnsentInput(chat, operation.Original)
+	case chatRemoteOperationReviewerAnswer:
+		finishReviewerAnswer(chat, operation.Draft, errors.New(queueFull))
+	case chatRemoteOperationRespondElicitation:
+		chat.finishSubmission("plan-review-"+operation.Request.ID+"-feedback", false)
+		chat.restoreFailedElicitation(operation.Request, "Answer was not sent: "+queueFull)
+	case chatRemoteOperationCancel:
+		chat.turnControlSubmitting = false
+		chat.turnControlAwaitingState = nil
+		notice := operation.Intent.failureNotice(queueFull)
+		chat.turnControlError = &notice
+		chat.turnControlDialogOpen = operation.Intent == TurnControlIntentSteer
+	case chatRemoteOperationSync, chatRemoteOperationRecordNotice:
+	}
+	chat.SetNotice("The session command queue is full; the command was not sent")
 }

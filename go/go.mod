@@ -18,6 +18,7 @@ require (
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-bash v0.25.1
+	github.com/yuin/goldmark v1.7.13
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/image v0.48.0
 	golang.org/x/net v0.63.0

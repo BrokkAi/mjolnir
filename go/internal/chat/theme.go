@@ -13,9 +13,12 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
+	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
 
@@ -60,7 +63,39 @@ type Palette struct {
 // GoString is Rust's derived Debug:
 // `Palette { background: Reset, ..., reverse_video: true }`.
 func (p Palette) GoString() string {
-	panic("unported: mj-chat/src/theme.rs Palette Debug")
+	pins := make([]string, len(p.Pins))
+	for i, pin := range p.Pins {
+		pins[i] = pin.GoString()
+	}
+	fields := []struct {
+		name  string
+		color Color
+	}{
+		{"background", p.Background},
+		{"surface_raised", p.SurfaceRaised},
+		{"surface", p.Surface},
+		{"selection", p.Selection},
+		{"text", p.Text},
+		{"muted", p.Muted},
+		{"border", p.Border},
+		{"accent", p.Accent},
+		{"secondary", p.Secondary},
+		{"success", p.Success},
+		{"warning", p.Warning},
+		{"error", p.Error},
+		{"session_error", p.SessionError},
+		{"session_activity", p.SessionActivity},
+		{"session_attention", p.SessionAttention},
+		{"session_idle", p.SessionIdle},
+		{"activity_dim", p.ActivityDim},
+	}
+	var text strings.Builder
+	text.WriteString("Palette { ")
+	for _, field := range fields {
+		text.WriteString(field.name + ": " + field.color.GoString() + ", ")
+	}
+	fmt.Fprintf(&text, "pins: [%s], reverse_video: %t }", strings.Join(pins, ", "), p.ReverseVideo)
+	return text.String()
 }
 
 var darkPins = [8]Color{
@@ -664,7 +699,7 @@ type Resolution struct {
 // GoString is Rust's Debug:
 // `Resolution { theme: Light, reason: TerminalBackground((255, 255, 255)) }`.
 func (r Resolution) GoString() string {
-	panic("unported: mj-chat/src/theme.rs Resolution Debug (needs UiTheme's Debug variant name)")
+	return "Resolution { theme: " + r.Theme.GoString() + ", reason: " + r.Reason.GoString() + " }"
 }
 
 // EffectiveTheme is the theme to draw with: the configured one, unless
@@ -1035,7 +1070,18 @@ func ASCIIFallback(mark rune) (string, bool) {
 // stand-in. Called after a frame is drawn while the ASCII symbol set is in
 // force.
 func FoldBufferToASCII(buffer *uv.Buffer) {
-	panic("unported: mj-chat/src/theme.rs fold_buffer_to_ascii")
+	for _, line := range buffer.Lines {
+		for x := range line {
+			cell := &line[x]
+			mark, size := utf8.DecodeRuneInString(cell.Content)
+			if size == 0 || size != len(cell.Content) {
+				continue
+			}
+			if replacement, ok := ASCIIFallback(mark); ok {
+				cell.Content = replacement
+			}
+		}
+	}
 }
 
 // detectedSymbols is SymbolsFor's guess, made once.
@@ -1256,7 +1302,38 @@ func Modal() Block {
 // The text is cut at the footer separators in force, so the ASCII set's
 // ` - ` never splits a hyphenated key such as `Shift-Enter`.
 func Hints(text string) Line {
-	panic("unported: mj-chat/src/theme.rs hints")
+	var spans []Span
+	separators := []string{FooterGroupSeparator(), FooterSeparator()}
+	for rest := text; rest != ""; {
+		// The earliest separator wins; at the same offset, the shorter one,
+		// as Rust's min over (offset, length) picks.
+		at, length := -1, 0
+		for _, separator := range separators {
+			offset := strings.Index(rest, separator)
+			if offset < 0 {
+				continue
+			}
+			if at < 0 || offset < at || (offset == at && len(separator) < length) {
+				at, length = offset, len(separator)
+			}
+		}
+		hint, separator := rest, ""
+		if at >= 0 {
+			hint, separator = rest[:at], rest[at:at+length]
+		}
+		leading := len(hint) - len(strings.TrimLeftFunc(hint, unicode.IsSpace))
+		keyEnd := len(hint)
+		if offset := strings.IndexFunc(hint[leading:], unicode.IsSpace); offset >= 0 {
+			keyEnd = leading + offset
+		}
+		spans = append(spans,
+			StyledSpan(hint[:leading], Muted()),
+			StyledSpan(hint[leading:keyEnd], KeyHint()),
+			StyledSpan(hint[keyEnd:]+separator, Muted()),
+		)
+		rest = rest[len(hint)+len(separator):]
+	}
+	return LineFrom(spans...)
 }
 
 // FooterSeparator is the text between two hints of one footer group.
@@ -1302,7 +1379,38 @@ func FitFooter(pane, chords, functions []string, width int, protected func(strin
 // once nothing else is left, which is how the palette stays visible on the
 // narrowest terminal.
 func FitFooterItems[T any](groups [3][]T, width int, label func(T) string, protected func(T) bool) [3][]T {
-	panic("unported: mj-chat/src/theme.rs fit_footer_items")
+	// The groups are edited below; keep the caller's slices intact.
+	for i := range groups {
+		groups[i] = slices.Clone(groups[i])
+	}
+	for {
+		if displayWidth(FooterItemsText(groups, label)) <= width {
+			return groups
+		}
+		victimGroup, victimIndex := -1, -1
+		for group := len(groups) - 1; group >= 0 && victimGroup < 0; group-- {
+			for index := len(groups[group]) - 1; index >= 0; index-- {
+				if !protected(groups[group][index]) {
+					victimGroup, victimIndex = group, index
+					break
+				}
+			}
+		}
+		if victimGroup < 0 {
+			// Only protected hints are left: give up the leading one, so the
+			// last hint standing is the one the table ranked last.
+			for group := range groups {
+				if len(groups[group]) > 0 {
+					victimGroup, victimIndex = group, 0
+					break
+				}
+			}
+		}
+		if victimGroup < 0 {
+			return groups
+		}
+		groups[victimGroup] = slices.Delete(groups[victimGroup], victimIndex, victimIndex+1)
+	}
 }
 
 // FooterItem is one keyed footer hint, Rust's `(K, String)`.
@@ -1325,7 +1433,29 @@ type FooterItem[K any] struct {
 // Both the dashboard footer and the composer footer go through this one
 // function, so the two cannot disagree about when the prefix is named.
 func FitPrefixedFooterItems[K any](groups [3][]FooterItem[K], width int, prefix string, protected func(K) bool) [3][]FooterItem[K] {
-	panic("unported: mj-chat/src/theme.rs fit_prefixed_footer_items")
+	label := func(item FooterItem[K]) string { return item.Text }
+	isProtected := func(item FooterItem[K]) bool { return protected(item.Key) }
+	labeled := func(groups [3][]FooterItem[K]) bool {
+		return len(groups[1]) == 0 || strings.HasPrefix(groups[1][0].Text, prefix)
+	}
+	groups[1] = slices.Clone(groups[1])
+	if len(groups[1]) > 0 {
+		groups[1][0].Text = prefix + groups[1][0].Text
+	}
+	fitted := FitFooterItems(groups, width, label, isProtected)
+	if labeled(fitted) {
+		return fitted
+	}
+	relabeled := fitted
+	relabeled[1] = slices.Clone(fitted[1])
+	if len(relabeled[1]) > 0 {
+		relabeled[1][0].Text = prefix + relabeled[1][0].Text
+	}
+	relabeled = FitFooterItems(relabeled, width, label, isProtected)
+	if labeled(relabeled) && len(relabeled[1]) > 0 {
+		return relabeled
+	}
+	return fitted
 }
 
 // FooterItemsText renders the same complete segments used to register

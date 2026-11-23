@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/BrokkAi/acp-go/schema/unstable"
+	"github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -145,7 +145,7 @@ func PromptPayloadWithImage(text string, image ClipboardImage) PromptPayload {
 
 // ContentBlocks builds ACP content while omitting the inline marker bytes
 // from text blocks. Only tracked ranges are interpreted as images.
-func (p *PromptPayload) ContentBlocks() []unstable.ContentBlock {
+func (p *PromptPayload) ContentBlocks() []schema.ContentBlock {
 	panic("unported: mj-chat/src/chat/attachments.rs ContentBlocks")
 }
 
