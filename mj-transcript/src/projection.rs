@@ -209,8 +209,6 @@ impl ProjectionIndex {
             || item
                 .stable_id
                 .starts_with(mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
-            || matches!(&item.body, TranscriptBody::System { text }
-                if text == observation::CLEARING_CONTEXT_TEXT && item.stable_id == format!("system:{}", item.position))
         {
             self.turn_boundaries
                 .insert(item.position, item.stable_id.clone());

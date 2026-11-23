@@ -11400,6 +11400,68 @@ fn bridge_restarts_keep_interrupted_autonomous_replies_separate_on_reopen() {
     check(&relay);
 }
 
+#[test]
+fn native_goal_keeps_prompt_tools_live_until_its_own_settlement() {
+    use agent_client_protocol::v1::schema::{
+        ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    };
+
+    for policy in [HarnessTurnPolicy::CodexAdapter, HarnessTurnPolicy::Disabled] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_harness_turn_policy(policy);
+        submit_relay(&mut relay, "native-goal-prompt", prompt("keep working"));
+        relay.claim_pending_commands(true).unwrap();
+        let execution = |status| {
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"session_info_update",
+                "_meta":{"execution":{"version":1,"status":status,"turnId":"native-goal"}}
+            }))
+            .unwrap()
+        };
+        relay.record_session_update(execution("running")).unwrap();
+        let marker = relay.snapshot.harness_turn;
+        if policy == HarnessTurnPolicy::CodexAdapter {
+            assert!(!marker.unwrap().autonomous);
+        } else {
+            assert!(marker.is_none());
+        }
+        relay.record_session_update(tool_call_update()).unwrap();
+        let watchdog = relay.tools_in_flight();
+
+        finish_prompt(&mut relay, "native-goal-prompt");
+        let continuing = relay.operational_state();
+        assert!(continuing.active_prompt.is_none());
+        assert!(continuing.goal.running());
+        assert_eq!(continuing.execution, RelayExecutionState::Running);
+        assert_eq!(continuing.tools_in_flight.len(), 1);
+
+        let running_tool = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1",
+            ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
+        ));
+        relay.record_session_update(running_tool.clone()).unwrap();
+        assert_eq!(watchdog.snapshot()[0].status, ToolCallStatus::InProgress);
+        let new_tool = SessionUpdate::ToolCall(ToolCall::new("native-tool", "Continue"));
+        relay.record_session_update(new_tool.clone()).unwrap();
+        assert_eq!(watchdog.snapshot().len(), 2);
+
+        relay.record_session_update(execution("idle")).unwrap();
+        assert!(relay.snapshot.harness_turn.is_none());
+        assert!(watchdog.is_empty());
+        if marker.is_some() {
+            assert!(matches!(
+                observations(&relay).last(),
+                Some(RelayObservation::HarnessTurnSettled { .. })
+            ));
+        }
+        for late in [running_tool, tool_call_update(), new_tool] {
+            relay.record_session_update(late).unwrap();
+        }
+        assert!(relay.operational_state().tools_in_flight.is_empty());
+    }
+}
+
 // Hard-won: a72c7b7fd: ACP completion split a reply whose native goal was still running.
 #[test]
 fn native_goal_reply_spans_acp_completion_and_reopen() {

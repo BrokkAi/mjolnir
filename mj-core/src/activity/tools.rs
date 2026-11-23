@@ -112,10 +112,10 @@ impl ToolsInFlight {
         }
     }
 
-    pub fn adopt_unowned(&self, owner: ForegroundOwner) {
+    pub fn transfer_owner(&self, from: &ForegroundOwner, to: ForegroundOwner) {
         for entry in self.generation().entries.values_mut() {
-            if entry.owner == ForegroundOwner::Unowned {
-                entry.owner = owner.clone();
+            if &entry.owner == from {
+                entry.owner = to.clone();
             }
         }
     }

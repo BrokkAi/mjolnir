@@ -921,30 +921,48 @@ impl DurableRelay {
                 .as_ref()
                 .is_none_or(|active| active.command_id != prompt.command_id)
         {
-            self.foreground_tools
-                .retire_owner(&ForegroundOwner::Prompt(prompt.command_id.clone()));
+            let owner = ForegroundOwner::Prompt(prompt.command_id.clone());
+            if next.goal.running() && next.execution == mj_core::relay::RelayExecutionState::Running
+            {
+                let continuing_owner = next.harness_turn.map_or(ForegroundOwner::Unowned, |turn| {
+                    ForegroundOwner::HarnessTurn(turn.first_ordinal)
+                });
+                self.foreground_tools
+                    .transfer_owner(&owner, continuing_owner);
+            } else {
+                self.foreground_tools.retire_owner(&owner);
+            }
         }
-        let previous_turn = self.snapshot.autonomous_harness_turn();
-        let next_turn = next.autonomous_harness_turn();
+        let previous_turn = self.snapshot.harness_turn;
+        let next_turn = next.harness_turn;
         if previous_turn != next_turn {
             if let Some(turn) = previous_turn {
                 self.foreground_tools
                     .retire_owner(&ForegroundOwner::HarnessTurn(turn.first_ordinal));
             }
-            if let Some(turn) = next_turn {
-                self.foreground_tools
-                    .adopt_unowned(ForegroundOwner::HarnessTurn(turn.first_ordinal));
+            if let Some(turn) = next_turn
+                && next.active_prompt.is_none()
+            {
+                self.foreground_tools.transfer_owner(
+                    &ForegroundOwner::Unowned,
+                    ForegroundOwner::HarnessTurn(turn.first_ordinal),
+                );
             }
         }
-        if matches!(
-            observation,
-            RelayObservation::CommandCompleted {
-                outcome: RelayCommandOutcome::ContextCleared { .. },
-                ..
-            }
-        ) {
-            // Bridge retirement already reset the generation before the new
-            // session opened. Only dispose of markerless foreground leftovers.
+        let markerless_goal_ended = self.snapshot.goal.running()
+            && !next.goal.running()
+            && next.active_prompt.is_none()
+            && next_turn.is_none();
+        if markerless_goal_ended
+            || matches!(
+                observation,
+                RelayObservation::CommandCompleted {
+                    outcome: RelayCommandOutcome::ContextCleared { .. },
+                    ..
+                }
+            )
+        {
+            // No remaining turn can retire markerless calls after this boundary.
             self.foreground_tools
                 .retire_owner(&ForegroundOwner::Unowned);
         }
@@ -976,7 +994,7 @@ impl DurableRelay {
                 ForegroundOwner::HostedTerminal(terminal)
             } else if let Some(prompt) = &self.snapshot.active_prompt {
                 ForegroundOwner::Prompt(prompt.command_id.clone())
-            } else if let Some(turn) = self.snapshot.autonomous_harness_turn() {
+            } else if let Some(turn) = self.snapshot.harness_turn {
                 ForegroundOwner::HarnessTurn(turn.first_ordinal)
             } else {
                 ForegroundOwner::Unowned

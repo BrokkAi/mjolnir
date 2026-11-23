@@ -29,8 +29,6 @@ pub fn queued_command_content(command_id: &str, command: &RelayCommand) -> Resul
         .map_err(Into::into)
 }
 
-pub(super) const CLEARING_CONTEXT_TEXT: &str = "Clearing context…";
-
 fn project_steered_prompt(
     current: &MaterializedSession,
     index: &ProjectionIndex,
@@ -236,7 +234,7 @@ pub(super) fn project_observation(
                 mutation.execution = Some(MaterializedExecutionState::Running {
                     started_at_ms: *created_at_ms,
                 });
-                push_system(mutation, event, CLEARING_CONTEXT_TEXT);
+                push_system(mutation, event, "Clearing context…");
             }
             // Every command that carries a prompt starts a user turn, so the
             // transcript shows what the harness was told. Mjolnir's own
@@ -405,7 +403,9 @@ pub(super) fn project_observation(
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
                 mj_core::relay::RelayCommandOutcome::ContextCleared { .. } => {
-                    settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
+                    let start = index.running_turn_start(current)
+                        .unwrap_or_else(|| index.adopted_autonomous_start(current, event.ordinal));
+                    settle_foreground_tools(index, mutation, Some(start), event);
                     mutation.clear_turn_outcome = true;
                     mutation.clear_mailbox = true;
                     close_streams(index, mutation, event.recorded_at_ms);
@@ -870,6 +870,12 @@ pub(super) fn project_observation(
                 ),
                 crate::transcript::SESSION_RESTART_TEXT,
             );
+            if current.active_turn.is_none() {
+                let start = index
+                    .running_turn_start(current)
+                    .unwrap_or_else(|| index.adopted_autonomous_start(current, event.ordinal));
+                settle_foreground_tools(index, mutation, Some(start), event);
+            }
             // A restart during a turn the harness started on its own leaves
             // nothing that can finish it. Without this the session stays
             // Running with open streams, which canonical export refuses.
@@ -878,7 +884,6 @@ pub(super) fn project_observation(
                 MaterializedExecutionState::Running { .. }
             ) && current.active_turn.is_none()
             {
-                settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
                 push_system_with_id(
                     mutation,
                     event,
