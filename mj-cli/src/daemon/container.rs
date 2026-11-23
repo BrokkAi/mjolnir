@@ -178,7 +178,9 @@ pub(super) async fn resolve_container_id(
 
 async fn resolve_id_by_name(program: &str, name: &str) -> Result<Option<String>> {
     // Container names may contain literal dots in addition to letters,
-    // digits, hyphens, and underscores. Match the exact name as a regex.
+    // digits, hyphens, and underscores. Docker matches names with a leading
+    // slash while Podman omits it, so accept an optional leading slash and
+    // verify the exact name from the formatted output.
     ensure!(
         !name.is_empty()
             && name
@@ -187,8 +189,24 @@ async fn resolve_id_by_name(program: &str, name: &str) -> Result<Option<String>>
         "invalid daemon container name: {name:?}"
     );
     let pattern = name.replace('.', "[.]");
-    let ids = list_container_ids(program, &format!("name=^/{pattern}$")).await?;
-    let mut ids = ids.lines().map(str::trim).filter(|line| !line.is_empty());
+    let listed = list_containers(
+        program,
+        &format!("name=^/?{pattern}$"),
+        "{{.ID}}\t{{.Names}}",
+    )
+    .await?;
+    parse_container_id_for_name(program, &listed, name)
+}
+
+fn parse_container_id_for_name(program: &str, stdout: &str, name: &str) -> Result<Option<String>> {
+    let mut ids = stdout.lines().filter_map(|line| {
+        let (id, names) = line.split_once('\t')?;
+        let id = id.trim();
+        let matched = names
+            .split(',')
+            .any(|candidate| candidate.trim().trim_start_matches('/') == name);
+        (!id.is_empty() && matched).then_some(id)
+    });
     let id = ids.next().map(str::to_owned);
     ensure!(
         ids.next().is_none(),
@@ -198,6 +216,10 @@ async fn resolve_id_by_name(program: &str, name: &str) -> Result<Option<String>>
 }
 
 async fn list_container_ids(program: &str, filter: &str) -> Result<String> {
+    list_containers(program, filter, "{{.ID}}").await
+}
+
+async fn list_containers(program: &str, filter: &str, format: &str) -> Result<String> {
     let output = engine(
         program,
         [
@@ -207,7 +229,7 @@ async fn list_container_ids(program: &str, filter: &str) -> Result<String> {
             "--filter",
             filter,
             "--format",
-            "{{.ID}}",
+            format,
         ],
         QUERY_TIMEOUT,
     )
@@ -220,7 +242,7 @@ async fn list_container_ids(program: &str, filter: &str) -> Result<String> {
             &output,
         ));
     }
-    String::from_utf8(output.stdout).context("container IDs were not valid UTF-8")
+    String::from_utf8(output.stdout).context("container listing was not valid UTF-8")
 }
 
 async fn container_is_running(program: &str, id: &str) -> Result<bool> {
@@ -818,6 +840,25 @@ mod tests {
         }
         let workers = "COMMAND\nsleep infinity\n/usr/local/bin/hel worker\n                       /usr/bin/codex app-server\n/bin/sh -c echo daemon-run\n                       grep daemon-run\n";
         assert!(!top_output_has_daemon_run(workers));
+    }
+
+    #[test]
+    fn container_name_listing_matches_both_docker_and_podman_formats() {
+        let podman = "id-other\tmj-daemon-2\nid-match\tmj-daemon\n";
+        assert_eq!(
+            parse_container_id_for_name("podman", podman, "mj-daemon").unwrap(),
+            Some("id-match".into())
+        );
+        let docker = "id-match\t/mj-daemon\n";
+        assert_eq!(
+            parse_container_id_for_name("docker", docker, "mj-daemon").unwrap(),
+            Some("id-match".into())
+        );
+        let absent = "id-other\tmj-daemon-2\n";
+        assert_eq!(
+            parse_container_id_for_name("podman", absent, "mj-daemon").unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

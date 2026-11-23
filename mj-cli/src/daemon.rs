@@ -1461,6 +1461,14 @@ async fn stop_pending_container(
             remove_container_owner_if_matching(record.address, &record.token)?;
             Ok(false)
         }
+        container::ContainerDaemonStatus::Running
+        | container::ContainerDaemonStatus::Exited {
+            container_running: true,
+        } if force => {
+            container::stop(record.runtime, &record.container_id).await?;
+            remove_container_owner_if_matching(record.address, &record.token)?;
+            Ok(true)
+        }
         container::ContainerDaemonStatus::Exited {
             container_running: true,
         } => {
@@ -1469,11 +1477,6 @@ async fn stop_pending_container(
             Ok(false)
         }
         container::ContainerDaemonStatus::Unknown(reason) => Err(anyhow!(reason)),
-        container::ContainerDaemonStatus::Running if force => {
-            container::stop(record.runtime, &record.container_id).await?;
-            remove_container_owner_if_matching(record.address, &record.token)?;
-            Ok(true)
-        }
         container::ContainerDaemonStatus::Running => {
             stop_daemon(
                 startup,
@@ -2575,7 +2578,13 @@ case "$1" in
     case "$*" in
       *--format={{.Names}}*) if [ "$state" = "inspect-error" ]; then echo predecessor; fi ;;
       *id=old-container-id*) ;;
-      *id=test-container-id*|*'name=^/'*) echo test-container-id ;;
+      *id=test-container-id*) echo test-container-id ;;
+      *'name=^/?'*)
+        # Podman matches names without a leading slash; require `^/?` so a
+        # Docker-only `^/` filter fails the suite.
+        filter=$(printf '%s\n' "$*" | sed -n 's/.*name=\^\/?\([^$]*\)\$.*/\1/p' | sed 's/\[\.\]/./g')
+        [ -n "$filter" ] || exit 64
+        printf 'test-container-id\t%s\n' "$filter" ;;
       *) exit 64 ;;
     esac ;;
   inspect)
@@ -2936,6 +2945,16 @@ esac
             // become orphaned or split from a retry.
             assert!(!stop_instance(false).await.unwrap());
             assert_eq!(read_container_owner().unwrap().as_ref(), Some(&prior));
+
+            // Explicit --force must stop the running container to prevent a
+            // delayed exec from starting after stop reports success.
+            assert!(stop_instance(true).await.unwrap());
+            assert!(calls().contains("stop test-container-id"));
+            assert!(!container_owner_path().exists());
+
+            // Restore the running container + pending owner for the retry check.
+            engine_state("worker");
+            write_container_owner(&prior).unwrap();
 
             let peer = async {
                 let (mut stream, _) = listener.accept().await.unwrap();
