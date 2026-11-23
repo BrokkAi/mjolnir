@@ -1424,7 +1424,7 @@ class RetirementTests(unittest.TestCase):
                 raise RuntimeError("fidelity session failed the pilot audit")
             if scenario == "transcript":
                 capture.fail = "transcript"
-            return payload().encode(), result
+            return payload().encode(), result, []
 
         def checked(output, read):
             if scenario == "output":

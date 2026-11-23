@@ -21,8 +21,8 @@ use mj_core::relay::WorkerHarnessStartupFailureKind;
 use mj_core::state::SessionState;
 
 use super::worker_binary::{
-    refresh_installed_worker_binary, replace_installed_worker_launch_config, start_worker_durably,
-    stop_worker_after_target_recovery,
+    probe_worker_liveness, refresh_installed_worker_binary, replace_installed_worker_launch_config,
+    start_worker_durably, stop_worker_after_target_recovery,
 };
 use super::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
 use super::{Controller, IdleWorkspaceLease};
@@ -168,6 +168,25 @@ impl Controller {
             let Some(session) = self.state.sessions.get(session_id) else {
                 return Ok(ParkOutcome::NotRunning);
             };
+            if failure.is_some() && session.state == SessionState::Error {
+                if session.target.is_some() {
+                    let (backend, worker_root) = self.worker_placement(session_id)?;
+                    let liveness =
+                        probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
+                    if liveness.status != 0
+                        || String::from_utf8_lossy(&liveness.stdout).trim() != "dead"
+                    {
+                        stop_worker_after_target_recovery(
+                            executor,
+                            &backend,
+                            session_id,
+                            &worker_root,
+                        )
+                        .context("stop the failed sub-agent's worker")?;
+                    }
+                }
+                return Ok(ParkOutcome::Parked);
+            }
             if session.state != SessionState::Running {
                 return Ok(ParkOutcome::NotRunning);
             }
@@ -1542,6 +1561,55 @@ mod tests {
             crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
             Some(SessionState::Running)
         );
+        channels.shutdown.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_failure_stops_the_live_worker_of_an_error_child() {
+        if !isolated("startup_failure_stops_the_live_worker_of_an_error_child") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        register_child(root.path());
+        let id = LATCH_RELAY_SESSION;
+        let child = crate::database::read_durable_session_record(id)
+            .unwrap()
+            .unwrap();
+        let failed = crate::database::fail_unready_session(
+            id,
+            "original readiness error",
+            child.state,
+            &child.updated_at,
+        )
+        .unwrap()
+        .unwrap();
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        let target = WakeTarget::new();
+
+        let outcome = loaded_controller()
+            .fail_subagent_start_worker(
+                &crate::controller::test_support::session_admission(id),
+                id,
+                "later startup rejection",
+                &target,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, ParkOutcome::Parked);
+        assert_eq!(
+            *target.purposes.lock().unwrap(),
+            [
+                "probe Mjolnir worker daemon liveness",
+                "stop Mjolnir worker daemon"
+            ]
+        );
+        let persisted = crate::database::read_durable_session_record(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.state, SessionState::Error);
+        assert_eq!(persisted.last_error, failed.last_error);
         channels.shutdown.shutdown().await.unwrap();
     }
 
