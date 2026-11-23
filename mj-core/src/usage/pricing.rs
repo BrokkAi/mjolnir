@@ -56,6 +56,8 @@ pub fn rates(model: &str) -> Option<[u64; 4]> {
         "gpt-6-astra" => [10000, 50000, 1000, 12500],
         "gpt-6-luna" => [100, 500, 10, 125],
         "gpt-5.6-sol" => [4000, 20000, 400, 5000],
+        // Checked 2026-11-23: https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2
+        "claude-fable-5-2" | "claude-mythos-5-2" => [8000, 40000, 200, 10000],
         "claude-fable-5-1" | "claude-mythos-5-1" => [10000, 50000, 250, 12500],
         "claude-opus-5-5" => [4000, 20000, 200, 5000],
         "claude-sonnet-5-5" => [2000, 10000, 100, 2500],

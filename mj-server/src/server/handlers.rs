@@ -318,24 +318,26 @@ async fn read_notification_message(
     Ok(response)
 }
 
-/// Optimize and install one browser image off the async request task. The
+/// Optimize and install one image off the async request task. The
 /// request body is deliberately raw bytes: base64 would inflate the upload,
 /// and the response contains only the small immutable reference the prompt
 /// needs.
 pub(super) async fn upload_attachment(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<ViewerPromptImage>, ApiError> {
     validate_public_id(&session_id)?;
-    let prompt_images_supported = {
+    // The terminal stages attachments even while a worker is starting, before
+    // the viewer projection can advertise the harness's image capability.
+    if !api::loopback_authenticated(&state, &headers) {
         let snapshot = state.snapshot_rx.borrow();
-        require_session_record(&snapshot, &session_id)?.prompt_images_supported
-    };
-    if !prompt_images_supported {
-        return Err(ApiError::bad_request(
-            "this session does not support image prompts",
-        ));
+        if !require_session_record(&snapshot, &session_id)?.prompt_images_supported {
+            return Err(ApiError::bad_request(
+                "this session does not support image prompts",
+            ));
+        }
     }
     if body.is_empty() {
         return Err(ApiError::bad_request("image upload must not be empty"));

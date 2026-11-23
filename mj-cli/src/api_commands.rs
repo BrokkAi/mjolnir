@@ -2871,9 +2871,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                         workspace_id: args.workspace_id.clone(),
                         profile_id,
                         target_id,
-                        project_directory: None,
-                        model: None,
-                        effort: None,
+                        ..Default::default()
                     },
                 )
                 .await?;

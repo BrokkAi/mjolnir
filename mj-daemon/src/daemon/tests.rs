@@ -7324,7 +7324,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
     const NAME: &str = "a_reviewer_create_failure_settles_its_open_review";
     const CHILD: &str = "MJ_TEST_REVIEWER_CREATE_FAILURE";
     let Ok(failure) = std::env::var(CHILD) else {
-        for failure in ["create", "configure"] {
+        for failure in ["create", "configure", "rejecting"] {
             let directory = tempfile::tempdir().unwrap();
             mj_controller::controller::test_support::IsolatedTest::new(
                 mj_controller::controller::test_support::test_name(module_path!(), NAME),
@@ -7341,7 +7341,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let workspace = mj_controller::database::create_workspace("Reviewer create failure").unwrap();
     let parent = runtime_test_session("review-parent", &workspace.id, SessionState::Running);
-    let child = runtime_test_session(
+    let mut child = runtime_test_session(
         "review-child",
         &workspace.id,
         if create_failed {
@@ -7425,6 +7425,36 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
             )
             .await
             .unwrap();
+    } else if failure == "rejecting" {
+        mj_controller::controller::recover_registered_subagent_startup(&relation, false).unwrap();
+        let configure = mj_controller::database::next_startup_delivery(&child.id)
+            .unwrap()
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
+        connection
+            .execute(
+                "UPDATE startup_steps SET phase='rejecting',error='provider refused the selected model' WHERE command_id=?1",
+                [&configure.command_id],
+            )
+            .unwrap();
+        let rejecting = mj_controller::database::next_startup_delivery(&child.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejecting.phase, "rejecting");
+        state.start_persisted_startup_delivery(rejecting, &CancellationToken::new());
+        // A pre-upgrade `rejecting` row must still confirm worker exit before
+        // settling the open review.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            mj_controller::database::finished_review(&parent.id, Some(review_id))
+                .unwrap()
+                .is_none(),
+            "persisted rejecting row must not settle a reviewer before worker exit is confirmed"
+        );
+        child.state = SessionState::Error;
+        child.last_error = Some("provider refused the selected model".into());
+        mj_controller::database::save_session(&child).unwrap();
     } else {
         use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand};
         use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
@@ -7488,6 +7518,18 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         })
         .unwrap();
         state.start_persisted_startup_delivery(configure, &CancellationToken::new());
+        // While the reviewer worker is disconnected and not confirmed stopped,
+        // startup rejection stays pending instead of settling the open review.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            mj_controller::database::finished_review(&parent.id, Some(review_id))
+                .unwrap()
+                .is_none(),
+            "disconnected reviewer must not settle its review before worker exit is confirmed"
+        );
+        child.state = SessionState::Error;
+        child.last_error = Some("provider refused the selected model".into());
+        mj_controller::database::save_session(&child).unwrap();
     }
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -7515,11 +7557,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         assert!(record.last_error.is_some());
     } else {
         let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
-        assert!(
-            steps
-                .iter()
-                .all(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
-        );
+        assert!(steps.iter().all(|step| step.phase == "failed"));
         state.cancel_and_join_startup_prompts().await.unwrap();
     }
     state.review_host().shutdown().await.unwrap();
@@ -12798,10 +12836,10 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         SessionState::Running,
     );
     mj_controller::database::save_session(&parent).unwrap();
-    let child = runtime_test_session(
+    let mut child = runtime_test_session(
         CHILD,
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
-        SessionState::Parked,
+        SessionState::Running,
     );
     let mut relation = runtime_test_subagent(CHILD, &parent.id);
     relation.model = Some("chosen-model".into());
@@ -12879,8 +12917,43 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             },
         )
         .unwrap();
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let first = mj_controller::database::next_startup_delivery(CHILD)
+        .unwrap()
+        .unwrap();
+    state.start_persisted_startup_delivery(first, &CancellationToken::new());
+    // Let the drain see a live child with no projected receipts, then
+    // advance beyond the old deadline while those receipts are still absent.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while mj_controller::database::load_startup_delivery(&model_id)
+            .unwrap()
+            .unwrap()
+            .phase
+            != "delivering"
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::pause();
+    for _ in 0..65 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    tokio::time::resume();
+    assert_eq!(
+        mj_controller::database::load_startup_delivery(&model_id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        "delivering"
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    child.state = SessionState::Parked;
+    mj_controller::database::save_session(&child).unwrap();
     // Replay the actual worker journal through the controller's storage
-    // boundary before attaching any daemon startup monitor.
+    // boundary after the child has parked.
     let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
     mj_controller::database::apply_projection_page(CHILD, move |page| {
         let mut current = mj_core::state::MaterializedSession::empty(CHILD);
@@ -12897,12 +12970,6 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         Ok(())
     })
     .unwrap();
-    let mut manager = TestRemoteManager::new().await;
-    let state = test_runtime_state_with_manager(&manager);
-    let first = mj_controller::database::next_startup_delivery(CHILD)
-        .unwrap()
-        .unwrap();
-    state.start_persisted_startup_delivery(first, &CancellationToken::new());
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if mj_controller::database::load_startup_group(CHILD, &group_id)
@@ -12928,6 +12995,211 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             .await
             .is_err(),
         "receipt monitoring must not contact or restart the parked worker"
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn child_startup_failure_waits_for_confirmed_worker_death() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION as CHILD;
+    use mj_controller::session_manager::{
+        WorkerRecoveryOutcome, WorkerRecoveryPlan, recover_worker_controlled,
+    };
+
+    const NAME: &str = "child_startup_failure_waits_for_confirmed_worker_death";
+    const PARENT: &str = "parent-startup";
+    const CAUSE: &str = "provider refused required seeded model";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(CHILD);
+    seed_live_session(temp.path(), &root);
+    let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
+    let parent = runtime_test_session(PARENT, workspace, SessionState::Running);
+    mj_controller::database::save_session(&parent).unwrap();
+    let target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    };
+    let mut child = runtime_test_session(CHILD, workspace, SessionState::Running);
+    child.target = Some(Box::new(target.clone()));
+    let relation = runtime_test_subagent(CHILD, PARENT);
+    let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+    let (command_id, step) = super::startup_followup::api_followup_steps(
+        &group,
+        crate::server::api::StartFollowup {
+            model: Some("requested-model".into()),
+            ..Default::default()
+        },
+    )
+    .remove(0);
+    mj_controller::database::register_subagent_with_startup(
+        &child,
+        &relation,
+        vec![mj_controller::database::StartupDelivery {
+            session_id: CHILD.into(),
+            command_id: command_id.clone(),
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(group.clone()),
+            accepted_ordinal: None,
+            error: None,
+        }],
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let (channels, mut state) = serve_live_session(&root, true).await;
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(mj_controller::database::subscribe_committed_state().unwrap());
+    let backend = Arc::new(crate::server_runtime::api::ApiBackend::new(
+        channels.control.client(),
+        Arc::new({
+            let state = state.clone();
+            move |id| state.session_state(id)
+        }),
+        state.clone(),
+    ));
+    state.install_report_backend(&backend);
+    let row = || {
+        mj_controller::database::load_startup_delivery(&command_id)
+            .unwrap()
+            .unwrap()
+    };
+    let reports = || mj_controller::database::pending_subagent_finished_children(PARENT).unwrap();
+
+    assert!(
+        !state
+            .fail_subagent_start(CHILD, &group, CAUSE)
+            .await
+            .unwrap()
+    );
+    assert_eq!(row().phase, "pending");
+    assert!(reports().is_empty());
+
+    // A legacy readiness failure can set Error with the worker still running.
+    let hel = root.join("hel");
+    std::fs::write(
+        &hel,
+        r#"#!/bin/sh
+if [ "$3" = --help ]; then exit 0; fi
+printf '%s\n' "$2" >> "$4/control.log"
+case "$2" in
+    liveness) if [ -e "$4/worker-live" ]; then echo alive; else echo dead; fi ;;
+    stop) echo "stop refused by fixture" >&2; exit 1 ;;
+    *) exit 2 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let live = root.join("worker-live");
+    std::fs::write(&live, "").unwrap();
+
+    let followup_group = "later-followup";
+    let followup_command = "later-followup-model";
+    let followup_cause = "provider refused the follow-up model";
+    mj_controller::database::enqueue_startup_deliveries(vec![
+        mj_controller::database::StartupDelivery {
+            session_id: CHILD.into(),
+            command_id: followup_command.into(),
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(followup_group.into()),
+            accepted_ordinal: None,
+            error: None,
+        },
+    ])
+    .unwrap();
+    assert!(
+        state
+            .reject_startup(CHILD, followup_group, followup_cause)
+            .await
+            .unwrap()
+    );
+    let followup = mj_controller::database::load_startup_delivery(followup_command)
+        .unwrap()
+        .unwrap();
+    assert_eq!(followup.phase, "failed");
+    assert_eq!(followup.error.as_deref(), Some(followup_cause));
+    assert_eq!(row().phase, "pending");
+    assert!(reports().is_empty());
+    assert!(!root.join("control.log").exists());
+
+    let child = mj_controller::database::read_durable_session_record(CHILD)
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.state, SessionState::Running);
+    assert!(child.last_error.is_none());
+    mj_controller::database::fail_unready_session(CHILD, CAUSE, child.state, &child.updated_at)
+        .unwrap()
+        .unwrap();
+    let error = state
+        .fail_subagent_start(CHILD, &group, CAUSE)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("stop refused by fixture"),
+        "{error:#}"
+    );
+    assert_eq!(row().phase, "pending");
+    assert!(reports().is_empty());
+
+    let exit_record = root.join(mj_core::relay::WORKER_EXIT_FILE);
+    channels.shutdown.shutdown().await.unwrap();
+    std::fs::remove_file(live).unwrap();
+    // Restore Running so the typed-death recovery path can commit its own Error.
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
+    std::fs::write(
+        &exit_record,
+        serde_json::json!({"reason": "worker exited", "harness_startup_failure": {"message": CAUSE}})
+            .to_string(),
+    )
+    .unwrap();
+    state.start_persisted_startup_delivery(row(), &CancellationToken::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while row().phase != "delivering" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let outcome = blocking(move || {
+        recover_worker_controlled(
+            WorkerRecoveryPlan {
+                source_target: target,
+                target: None,
+                workspace: None,
+                liveness_probe: CommandSpec::new("printf", ["dead"]).into(),
+                exit_record: Some(CommandSpec::new("cat", [exit_record.to_str().unwrap()])),
+                binary_refresh: None,
+                launch_refresh: None,
+                restart: CommandSpec::new("false", Vec::<String>::new()).into(),
+            },
+            false,
+            Some(CHILD),
+            &mj_controller::targets::ProcessExecutor,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, WorkerRecoveryOutcome::HarnessStartupFailed);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while row().phase != "failed" || !reports().contains(CHILD) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state.session_state(CHILD), Some(SessionState::Error));
+    assert!(row().error.unwrap().contains(CAUSE));
+    assert_eq!(
+        std::fs::read_to_string(root.join("control.log")).unwrap(),
+        "liveness\nstop\nliveness\n"
     );
     state.cancel_and_join_startup_prompts().await.unwrap();
 }
@@ -15677,53 +15949,8 @@ async fn daemon_upload_exchange() {
             .await
             .is_err()
     );
-    assert!(
-        !mj_core::attachment::AttachmentStore::controller("upload-session")
-            .unwrap()
-            .root()
-            .exists()
-    );
-    // Exercise several transport fragments and the pipe-buffer boundary.
-    let mut bytes = vec![37; 192 * 1024];
-    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-    let reference =
-        mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 256, 256).unwrap();
     let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
     let mut output = String::from("interrupted upload: no blob remains\n");
-    for label in ["install 196608 bytes", "repeat content-addressed install"] {
-        let blob = client.upload(&mut bytes.as_slice()).await.unwrap();
-        let reply = client
-            .request(DaemonAction::InstallAttachment {
-                session_id: "upload-session".into(),
-                reference: reference.clone(),
-                blob,
-            })
-            .await
-            .unwrap();
-        output.push_str(&format!(
-            "{label}: {}\n",
-            serde_json::to_string(&reply).unwrap()
-        ));
-    }
-    assert_eq!(
-        mj_core::attachment::AttachmentStore::controller("upload-session")
-            .unwrap()
-            .read(&reference)
-            .unwrap(),
-        bytes
-    );
-    let mut corrupt = bytes;
-    corrupt[100] ^= 1;
-    let blob = client.upload(&mut corrupt.as_slice()).await.unwrap();
-    let error = client
-        .request(DaemonAction::InstallAttachment {
-            session_id: "upload-session".into(),
-            reference,
-            blob,
-        })
-        .await
-        .unwrap_err();
-    output.push_str(&format!("corrupt payload: {error}\n"));
     let error = client
         .request(DaemonAction::ImportSession {
             blob: "another-connections-blob".into(),

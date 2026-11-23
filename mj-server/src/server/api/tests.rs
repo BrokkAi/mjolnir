@@ -1345,6 +1345,7 @@ type FakeToolDetails =
 
 #[derive(Default)]
 struct FakeBackend {
+    wiki_restore_requests: Mutex<Vec<mj_client::daemon::WikiRestoreRequest>>,
     login_errors: std::collections::BTreeMap<String, String>,
     /// When set, a history write announces itself on the first and waits
     /// for the second before it finishes.
@@ -1426,6 +1427,55 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn wiki_restore(
+        &self,
+        request: mj_client::daemon::WikiRestoreRequest,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_client::daemon::RegisteredSession>>> {
+        Box::pin(async move {
+            let (_, state) = sample_config_state();
+            self.wiki_restore_requests.lock().unwrap().push(request);
+            Ok(Some(mj_client::daemon::RegisteredSession {
+                session: state.sessions.get("session-1").unwrap().clone(),
+                remembered_container_size: Some((
+                    "host-1".into(),
+                    mj_core::state::HostContainerSize {
+                        cpus: 4,
+                        memory_bytes: 8192,
+                    },
+                )),
+            }))
+        })
+    }
+
+    fn session_working_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_client::http::SessionWorkingContext>>> {
+        Box::pin(async move {
+            Ok(
+                (session_id == "session-1").then(|| mj_client::http::SessionWorkingContext {
+                    cwd: "/remote/project".into(),
+                    branch: "detached HEAD".into(),
+                }),
+            )
+        })
+    }
+
+    fn session_git_status(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::local_git::SessionGitStatus>>> {
+        Box::pin(async move {
+            Ok(
+                (session_id == "session-1").then(|| mj_core::local_git::SessionGitStatus {
+                    checkout: "/remote/project".into(),
+                    branch: "detached HEAD".into(),
+                    ..Default::default()
+                }),
+            )
+        })
+    }
+
     fn tool_call_detail(
         &self,
         session_id: String,
@@ -2344,6 +2394,68 @@ async fn login_cookie(app: &axum::Router) -> String {
 async fn json_body(response: Response) -> serde_json::Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn http_prove_uses_only_the_loopback_token_and_rejects_invalid_nonces() {
+    const TOKEN: &str = "loopback-only-token";
+    let nonce = "0123456789abcdef".repeat(4);
+    for loopback in [true, false] {
+        let (mut options, _actions, _snapshot, _bundles, _client_state) =
+            api_options_with_client_state(
+                Arc::new(FakeBackend::default()),
+                |_| {},
+                absent_preferences_path(),
+                None,
+            );
+        if loopback {
+            options.set_loopback_token(TOKEN.into());
+        }
+        let app = router(options);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/prove?nonce={nonce}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
+        if loopback {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = json_body(response).await;
+            assert!(mj_client::http::verify_http_api_proof(
+                TOKEN,
+                &nonce,
+                body["mac"].as_str().unwrap()
+            ));
+            for bad in ["", "123", "gggggggggggggggggggggggggggggggg"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::get(format!("/api/v1/prove?nonce={bad}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+        } else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let malformed = app
+                .oneshot(
+                    Request::get("/api/v1/prove?nonce=x&nonce=y")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
+        }
+    }
 }
 
 #[tokio::test]
@@ -8197,14 +8309,21 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
 async fn a_review_that_cannot_start_is_a_conflict_with_its_reason() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = mj_core::runtime::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/review"))
-                .body(Body::empty())
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = mj_client::http::HttpDaemonClient::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "test-api-token",
+    )
+    .unwrap();
+    let server = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+    let response =
+        mj_core::runtime::spawn(async move { client.start_turn_review("session-1").await });
+    let request = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
     request
         .reply
         .send(ActionOutcome::Refused(
@@ -8213,13 +8332,16 @@ async fn a_review_that_cannot_start_is_a_conflict_with_its_reason() {
             ),
         ))
         .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = json_body(response).await;
+    let error = response.await.unwrap().unwrap_err();
+    let error = error
+        .downcast_ref::<mj_client::http::HttpApiError>()
+        .unwrap();
+    assert_eq!(error.status(), StatusCode::CONFLICT);
     assert_eq!(
-        body["error"],
+        error.message,
         "prompts are queued; the review waits for them"
     );
+    drop(server);
 }
 
 #[tokio::test]
@@ -9148,4 +9270,87 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn checkout_probe_routes_validate_the_id_and_return_typed_status() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    for (probe, field) in [("working-context", "cwd"), ("git-status", "checkout")] {
+        for (id, status) in [
+            ("session-1", StatusCode::OK),
+            ("missing", StatusCode::NOT_FOUND),
+            ("invalid%20id", StatusCode::BAD_REQUEST),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    bearer(Request::get(format!("/api/v1/sessions/{id}/{probe}")))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{id}/{probe}");
+            if status == StatusCode::OK {
+                let body = json_body(response).await;
+                assert_eq!(body[field], "/remote/project");
+                assert_eq!(body["branch"], "detached HEAD");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn wiki_restore_preserves_legacy_response_and_returns_opted_in_registration() {
+    let backend = Arc::new(FakeBackend::default());
+    let (mut options, _, _, _, _) =
+        api_options_with_client_state(backend.clone(), |_| {}, absent_preferences_path(), None);
+    options.set_loopback_token("restore-test-token".into());
+    let app = router(options);
+    let restore = |body: serde_json::Value| {
+        app.clone().oneshot(
+            Request::post("/api/v1/wiki/sessions/archive%2Fsession/restore")
+                .header(AUTHORIZATION, "Bearer restore-test-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+    let legacy = restore(serde_json::json!({"profile_id":"codex-1","target_id":"raw"}))
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::CREATED);
+    assert_eq!(
+        json_body(legacy).await,
+        serde_json::json!({"session_id":"session-1"})
+    );
+    let terminal = restore(serde_json::json!({
+        "profile_id":"codex-1",
+        "target_id":"podman",
+        "include_registration":true,
+        "additional_mounts":[{"source":"/host","destination":"/shared","access":"ro"}],
+        "resource_allocation":{"kind":"container","cpus":3,"memory_bytes":4096}
+    }))
+    .await
+    .unwrap();
+    assert_eq!(terminal.status(), StatusCode::CREATED);
+    let body = json_body(terminal).await;
+    let legacy: StartSessionResponse = serde_json::from_value(body.clone()).unwrap();
+    let terminal: WikiRestoreResponse = serde_json::from_value(body).unwrap();
+    let registered = terminal.registered.unwrap();
+    assert_eq!(registered.session.id, legacy.session_id);
+    assert_eq!(registered.remembered_container_size.unwrap().0, "host-1");
+    let requests = backend.wiki_restore_requests.lock().unwrap();
+    assert_eq!(requests[1].wiki_id, "archive/session");
+    assert_eq!(
+        requests[1].additional_mounts[0].destination,
+        PathBuf::from("/shared")
+    );
+    assert_eq!(
+        requests[1].resource_allocation,
+        Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 3,
+            memory_bytes: 4096,
+        })
+    );
 }

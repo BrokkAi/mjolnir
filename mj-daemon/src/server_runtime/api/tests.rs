@@ -9332,3 +9332,76 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
     assert_eq!(agents[2]["role"], "orchestrator");
     assert_eq!(agents[2]["active_children"], 1);
 }
+
+#[tokio::test]
+async fn session_checkout_probes_read_the_registered_target_during_drain() {
+    if !isolated_subagent_test(
+        "session_checkout_probes_read_the_registered_target_during_drain",
+        "MJ_CHECKOUT_PROBES_CHILD",
+        "checkout-probes",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let repository = mj_controller::controller::test_support::committed_repository();
+    let id = "session-probes";
+    let mut session =
+        mj_controller::controller::test_support::managed_clone_session(repository.path(), id);
+    session.state = SessionState::Running;
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: repository.path().join(id),
+    }));
+    let worktree = session.managed_worktree.as_ref().unwrap();
+    let checkout = worktree.worktree_root.clone();
+    let branch = worktree.branch.clone();
+    std::fs::write(checkout.join("untracked.txt"), "new file").unwrap();
+
+    let mut config = test_config(&[(&session.last_profile, session.harness_kind)]);
+    config.targets.insert(
+        session.target_template_id.clone(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    config.save().unwrap();
+    mj_controller::database::save_session(&session).unwrap();
+    let runtime = crate::daemon::tests::test_runtime_state_loading_the_store();
+    let (submitted, _) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: id.into(),
+            accepted_ordinal: 1,
+            submitted,
+            view: None,
+        })),
+        running_states(),
+        runtime,
+    );
+
+    mj_controller::upgrade::gate().begin_draining();
+    let context = backend
+        .session_working_context(id.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.cwd, checkout);
+    assert_eq!(context.branch, branch);
+    let status = backend
+        .session_git_status(id.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.checkout, checkout);
+    assert_eq!(status.branch, branch);
+    assert!(
+        status
+            .changed
+            .iter()
+            .any(|change| change.path == "untracked.txt")
+    );
+    assert!(
+        backend
+            .session_git_status("missing".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

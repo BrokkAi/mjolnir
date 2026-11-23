@@ -66,6 +66,9 @@ func Rates(model string) ([4]uint64, bool) {
 		return [4]uint64{100, 500, 10, 125}, true
 	case "gpt-5.6-sol":
 		return [4]uint64{4000, 20000, 400, 5000}, true
+	// Checked 2026-11-23: https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2
+	case "claude-fable-5-2", "claude-mythos-5-2":
+		return [4]uint64{8000, 40000, 200, 10000}, true
 	case "claude-fable-5-1", "claude-mythos-5-1":
 		return [4]uint64{10000, 50000, 250, 12500}, true
 	case "claude-opus-5-5":

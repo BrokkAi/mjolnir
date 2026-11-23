@@ -3,6 +3,7 @@ mod chunk_bytes;
 pub mod connector;
 pub mod login_terminal;
 pub mod ssh;
+mod ssh_http_proxy;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -11,7 +12,6 @@ use mj_core::config::{Config, data_dir};
 use mj_core::credentials::CredentialSyncSignal;
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{RelayCommand, RelayOperationalState};
-use mj_core::review::driver::Resolution;
 use mj_core::state::*;
 use mj_core::targets::{AdditionalMount, ProvisionStage};
 use mj_core::workspace::WorkspaceRecord;
@@ -78,6 +78,48 @@ pub fn read_api_endpoint_from(path: &Path) -> Result<Option<ApiEndpointMetadata>
         .with_context(|| format!("parse {}", path.display()))
 }
 
+pub fn write_api_endpoint(metadata: &ApiEndpointMetadata) -> Result<()> {
+    write_api_endpoint_to(&api_endpoint_path(), metadata)
+}
+
+pub fn write_api_endpoint_to(path: &Path, metadata: &ApiEndpointMetadata) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    mj_core::config::create_owner_only_directory(parent)?;
+    // NamedTempFile creates the file with mode 0600 on Unix.
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(&serde_json::to_vec_pretty(metadata)?)?;
+    file.as_file().sync_all()?;
+    #[cfg(windows)]
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| format!("replace {}", path.display()));
+    }
+    file.persist(path)
+        .with_context(|| format!("publish {}", path.display()))?;
+    Ok(())
+}
+
+/// The caller serializes publication and cleanup with its ownership lock.
+pub fn remove_api_endpoint_if_matching(
+    matches: impl FnOnce(&ApiEndpointMetadata) -> bool,
+) -> Result<()> {
+    let path = api_endpoint_path();
+    if read_api_endpoint_from(&path)?.as_ref().is_some_and(matches) {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 /// The environment variable naming the container a daemon was launched in.
 pub use mj_core::placement::DAEMON_CONTAINER_ENV;
 
@@ -118,6 +160,10 @@ pub struct ContainerDaemonRecord {
     pub address: SocketAddr,
     pub token: String,
     pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_address: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
 }
 
 fn default_container_owner_schema() -> u32 {
@@ -191,6 +237,10 @@ pub struct DaemonEndpoint {
     pub control_address: SocketAddr,
     pub token: String,
     pub instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_address: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
 }
 
 /// Where the daemon runs, as the daemon itself reports it.
@@ -985,11 +1035,6 @@ pub enum DaemonAction {
         bytes: Vec<u8>,
         sha256: Option<String>,
     },
-    InstallAttachment {
-        session_id: String,
-        reference: mj_core::attachment::AttachmentRef,
-        blob: String,
-    },
     TranscriptionAvailable {
         preferred_profile: String,
     },
@@ -1177,38 +1222,11 @@ pub enum DaemonAction {
     RemoveProject {
         bundle_id: String,
     },
-    WikiSyncRequest,
-    WikiSyncWatch {
-        epoch: String,
-        after: u64,
-    },
-    WikiSearch {
-        query: String,
-        limit: usize,
-    },
     /// The live sessions whose user or agent messages contain a query,
     /// ignoring case. Tool calls and tool output do not count.
     SessionTextSearch {
         query: String,
     },
-    /// The markdown briefing for one indexed session.
-    WikiBrief {
-        wiki_id: String,
-        max_chars: usize,
-    },
-    /// The passages of one indexed session that match a query, with context.
-    WikiHits {
-        wiki_id: String,
-        query: String,
-        context_messages: usize,
-        per_message_chars: usize,
-    },
-    /// What one indexed session is, and what continuing it would mean.
-    WikiSession {
-        wiki_id: String,
-    },
-    /// Start a new session from an archived one's transcript.
-    WikiRestore(WikiRestoreRequest),
     ScanRecovery {
         all_instances: bool,
     },
@@ -1387,19 +1405,6 @@ pub enum DaemonAction {
         elicitation_id: String,
         response: ElicitationResponse,
     },
-    StopBackgroundTask {
-        session_id: String,
-        background_task_id: String,
-    },
-    /// Review the turn this session just finished, on a surface's request.
-    StartTurnReview {
-        session_id: String,
-    },
-    /// Forward, dismiss, or cancel the open review.
-    ResolveTurnReview {
-        session_id: String,
-        resolution: Resolution,
-    },
     StartSessionLifecycle(SessionLifecycleRequest),
     WaitSessionLifecycle(LifecycleReceipt),
     SuspendPreflight {
@@ -1425,10 +1430,6 @@ pub enum DaemonAction {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         acknowledge_container_recreation: bool,
     },
-    PreviewContainerUpgrade {
-        session_id: String,
-    },
-    UpgradeContainer(mj_core::state::ContainerUpgradeRequest),
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
         session_id: String,
@@ -1447,9 +1448,6 @@ pub enum DaemonAction {
         session_id: String,
     },
     CancelLifecycle {
-        session_id: String,
-    },
-    CancelContainerUpgrade {
         session_id: String,
     },
     RecoverDraft {
@@ -1575,7 +1573,6 @@ pub enum DaemonReply {
     TranscriptionAvailable(bool),
     Transcription(String),
     BlobUploaded(String),
-    AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
     LifecycleFailed(String),
@@ -1645,13 +1642,9 @@ pub enum DaemonReply {
     Text(String),
     OptionalSessionState(Option<SessionState>),
     RecoveryScan(mj_core::state::RecoveryScan),
-    WikiRows(WikiSearchPage),
-    WikiSyncStatus(WikiSyncStatus),
     ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
     ProjectCreated(mj_core::project_catalog::SavedProject),
     SessionTextMatches(SessionTextSearchPage),
-    WikiHits(Option<WikiHitTranscript>),
-    WikiSession(Option<Box<WikiSessionInfo>>),
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
     StartupPromptIdentityConflict,
@@ -2186,7 +2179,14 @@ impl DaemonClient {
     /// dialed (including a container's published loopback port).
     pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
         let identity = self.identity().await?;
+        let api = if self.connector().is_some_and(|connector| connector.is_ssh()) {
+            None
+        } else {
+            self.matching_local_api_endpoint(&identity)?
+        };
         Ok(DaemonEndpoint {
+            api_address: api.as_ref().map(|endpoint| endpoint.address),
+            api_token: api.map(|endpoint| endpoint.token),
             config_path: None,
             protocol_version: self.metadata.protocol_version,
             build_version: identity.build_version,
@@ -2194,6 +2194,41 @@ impl DaemonClient {
             token: self.metadata.token.clone(),
             instance_id: identity.instance_id,
         })
+    }
+
+    fn matching_local_api_endpoint(
+        &self,
+        identity: &DaemonIdentity,
+    ) -> Result<Option<ApiEndpointMetadata>> {
+        if identity.instance_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(read_api_endpoint()?.filter(|endpoint| {
+            endpoint.pid == self.metadata.pid
+                && endpoint.instance_id == identity.instance_id
+                && !endpoint.token.is_empty()
+        }))
+    }
+
+    pub fn direct_api_endpoint(
+        &self,
+        identity: &DaemonIdentity,
+    ) -> Result<Option<(String, String)>> {
+        if self.connector().is_some_and(|connector| connector.is_ssh()) {
+            return Ok(self
+                .ssh_lease
+                .as_deref()
+                .and_then(ssh::SshLease::api_endpoint));
+        }
+        Ok(self
+            .matching_local_api_endpoint(identity)?
+            .map(|endpoint| (format!("http://{}", endpoint.address), endpoint.token)))
+    }
+
+    /// Keep the process-private forward alive for an HTTP client that outlives
+    /// this control connection.
+    pub fn ssh_lease(&self) -> Option<std::sync::Arc<ssh::SshLease>> {
+        self.ssh_lease.clone()
     }
 
     /// Speak the daemon's advertised dialect, not this build's: management
@@ -2446,6 +2481,10 @@ impl DaemonClient {
         );
         self.stream = Some(stream);
         Ok(response)
+    }
+
+    pub async fn http(&mut self) -> Result<crate::http::HttpDaemonClient> {
+        crate::http::HttpDaemonClient::from_daemon_client(self).await
     }
 
     pub async fn identity(&mut self) -> Result<DaemonIdentity> {
@@ -3052,36 +3091,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn wiki_sync_request(&mut self) -> Result<WikiSyncStatus> {
-        match self
-            .request_without_reconnect(DaemonAction::WikiSyncRequest)
-            .await?
-        {
-            DaemonReply::WikiSyncStatus(status) => Ok(status),
-            reply => bail!("unexpected SessionWiki sync reply {reply:?}"),
-        }
-    }
-
-    pub async fn wiki_sync_watch(&mut self, epoch: String, after: u64) -> Result<WikiSyncStatus> {
-        match self
-            .request_without_reconnect(DaemonAction::WikiSyncWatch { epoch, after })
-            .await?
-        {
-            DaemonReply::WikiSyncStatus(status) => Ok(status),
-            reply => bail!("unexpected SessionWiki sync reply {reply:?}"),
-        }
-    }
-
-    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
-        match self
-            .request_without_reconnect(DaemonAction::WikiSearch { query, limit })
-            .await?
-        {
-            DaemonReply::WikiRows(page) => Ok(page),
-            reply => bail!("unexpected SessionWiki search reply {reply:?}"),
-        }
-    }
-
     /// The live sessions whose user or agent messages contain `query`, and
     /// which of the two matched. Answers from the SessionWiki index, so a very
     /// new message can be missing until the next sync.
@@ -3092,61 +3101,6 @@ impl DaemonClient {
         {
             DaemonReply::SessionTextMatches(matches) => Ok(matches),
             reply => bail!("unexpected session text search reply {reply:?}"),
-        }
-    }
-
-    /// The markdown briefing for one indexed session.
-    pub async fn wiki_brief(&mut self, wiki_id: String, max_chars: usize) -> Result<String> {
-        match self
-            .request(DaemonAction::WikiBrief { wiki_id, max_chars })
-            .await?
-        {
-            DaemonReply::Text(markdown) => Ok(markdown),
-            reply => bail!("unexpected SessionWiki brief reply {reply:?}"),
-        }
-    }
-
-    /// The passages of one indexed session that match a query, each matching
-    /// message with `context_messages` neighbours on either side and its text
-    /// capped at `per_message_chars`. `None` when the index holds no session
-    /// with that id.
-    pub async fn wiki_hits(
-        &mut self,
-        wiki_id: String,
-        query: String,
-        context_messages: usize,
-        per_message_chars: usize,
-    ) -> Result<Option<WikiHitTranscript>> {
-        match self
-            .request(DaemonAction::WikiHits {
-                wiki_id,
-                query,
-                context_messages,
-                per_message_chars,
-            })
-            .await?
-        {
-            DaemonReply::WikiHits(transcript) => Ok(transcript),
-            reply => bail!("unexpected SessionWiki hits reply {reply:?}"),
-        }
-    }
-
-    /// What the index knows about one session, or `None` when the index holds
-    /// no session with that id.
-    pub async fn wiki_session(&mut self, wiki_id: String) -> Result<Option<WikiSessionInfo>> {
-        match self.request(DaemonAction::WikiSession { wiki_id }).await? {
-            DaemonReply::WikiSession(info) => Ok(info.map(|info| *info)),
-            reply => bail!("unexpected SessionWiki session reply {reply:?}"),
-        }
-    }
-
-    /// Start a new session carrying a hand-off compacted from an archived one.
-    /// It answers like any other session start: the record exists and is
-    /// provisioning, and the hand-off follows once the harness is ready.
-    pub async fn wiki_restore(&mut self, request: WikiRestoreRequest) -> Result<RegisteredSession> {
-        match self.request(DaemonAction::WikiRestore(request)).await? {
-            DaemonReply::RegisteredSession(registered) => Ok(*registered),
-            reply => bail!("unexpected SessionWiki restore reply {reply:?}"),
         }
     }
 
@@ -3595,21 +3549,6 @@ impl DaemonClient {
         }
     }
 
-    /// Ask the daemon to review committed work through the push gate.
-    ///
-    /// The refusal includes how to proceed, such as committing tracked
-    /// changes or choosing a harness with push-gate support. It travels as text rather than
-    /// as a code every surface would have to translate.
-    pub async fn start_turn_review(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::StartTurnReview { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected review reply {reply:?}"),
-        }
-    }
-
     pub async fn sync_session(&mut self, session_id: String) -> Result<()> {
         match self
             .request(DaemonAction::SyncSession { session_id })
@@ -3655,23 +3594,6 @@ impl DaemonClient {
         {
             DaemonReply::NativeAgentHistory(page) => Ok(page),
             reply => bail!("unexpected native agent history reply {reply:?}"),
-        }
-    }
-
-    pub async fn stop_background_task(
-        &mut self,
-        session_id: String,
-        background_task_id: String,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::StopBackgroundTask {
-                session_id,
-                background_task_id,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected background task stop reply {reply:?}"),
         }
     }
 
@@ -3859,16 +3781,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected cancel-lifecycle reply {reply:?}"),
-        }
-    }
-
-    pub async fn cancel_container_upgrade(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CancelContainerUpgrade { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected container-upgrade cancellation reply {reply:?}"),
         }
     }
 
@@ -4085,7 +3997,9 @@ pub const MOVE_ORIGIN_DELTA_PROTOCOL: u32 = SUSPEND_CONSENT_PROTOCOL + 1;
 pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = ORCHESTRATORS_PROTOCOL + 1;
+const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
+/// Attachments, reviews, task stops, container upgrades, and wiki actions use HTTP.
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 1;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
@@ -4107,32 +4021,6 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RETRY_DELAY: Duration = Duration::from_millis(40);
 impl DaemonClient {
-    pub async fn preview_container_upgrade(
-        &mut self,
-        session_id: String,
-    ) -> Result<mj_core::state::ContainerUpgradePreview> {
-        match self
-            .request(DaemonAction::PreviewContainerUpgrade { session_id })
-            .await?
-        {
-            DaemonReply::ContainerUpgradePreview(preview) => Ok(preview),
-            reply => bail!("unexpected container upgrade preview reply: {reply:?}"),
-        }
-    }
-
-    pub async fn upgrade_container(
-        &mut self,
-        request: mj_core::state::ContainerUpgradeRequest,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::UpgradeContainer(request))
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected container upgrade reply: {reply:?}"),
-        }
-    }
-
     pub async fn prepare_move_session(
         &mut self,
         selection: MoveSelection,
@@ -4949,7 +4837,7 @@ mod tests {
                 .await
                 .unwrap();
                 let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                let DaemonAction::InstallAttachment { blob: actual, .. } = consume.action else {
+                let DaemonAction::TranscribeAudio { blob: actual, .. } = consume.action else {
                     panic!("expected consumer");
                 };
                 assert_eq!(actual, blob);
@@ -4975,16 +4863,8 @@ mod tests {
             }
             assert_eq!(accepted, 1);
         });
-        let reference = mj_core::attachment::AttachmentRef {
-            sha256: "a".repeat(64),
-            mime_type: "image/png".into(),
-            size: bytes.len(),
-            width: 1,
-            height: 1,
-        };
-        let action = |blob| DaemonAction::InstallAttachment {
-            session_id: "session".into(),
-            reference: reference.clone(),
+        let action = |blob| DaemonAction::TranscribeAudio {
+            preferred_profile: "test".into(),
             blob,
         };
         let mut reader = std::io::Cursor::new(bytes);
