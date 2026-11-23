@@ -301,6 +301,7 @@ pub(super) async fn prepare_control(
                     elicitation_id: RECOVERY_ID.into(),
                     action: "cancel".into(),
                     reply: None,
+                    answers: None,
                 },
             )
             .await?;
@@ -373,6 +374,7 @@ pub(super) async fn recover(
             elicitation_id: RECOVERY_ID.into(),
             action: "cancel".into(),
             reply: None,
+            answers: None,
         },
     )
     .await?;
@@ -540,6 +542,8 @@ pub(super) async fn resolve(
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
     }
     let reply = Some(question.request.reply_text(response));
+    let answers = (*response != ElicitationResponse::Cancel)
+        .then(|| question.request.trusted_answers(response));
     *pending = None;
     emit_runtime_event(
         events,
@@ -547,6 +551,7 @@ pub(super) async fn resolve(
             elicitation_id: id.into(),
             action: response.action_name().into(),
             reply,
+            answers,
         },
     )
     .await?;

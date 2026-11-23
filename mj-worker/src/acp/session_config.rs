@@ -147,6 +147,8 @@ pub(super) async fn resolve_session_config_recovery(
     }
     let action = response.action_name().to_owned();
     let reply = Some(request.reply_text(response));
+    let answers =
+        (*response != ElicitationResponse::Cancel).then(|| request.trusted_answers(response));
     *pending = None;
     emit_runtime_event(
         events,
@@ -154,6 +156,7 @@ pub(super) async fn resolve_session_config_recovery(
             elicitation_id: elicitation_id.to_owned(),
             action,
             reply,
+            answers,
         },
     )
     .await?;

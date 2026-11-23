@@ -503,64 +503,71 @@ where
                             biased;
                             () = ticket.withdrawn() => None,
                             () = cancellation.cancelled() => None,
-                            decision = guardian.review(&request, input.as_ref(), native_child) => Some(decision),
+                            decision = guardian.review(&request, input.as_ref(), native_child, &permission_id_prefix) => Some(decision),
                         };
                         let title = request.tool_call.fields.title.as_deref().map(str::trim)
                             .filter(|title| !title.is_empty()).unwrap_or("a tool call");
                         let subject = permission_title_with_command(title, input.as_ref());
-                        match decision {
+                        let settlement = match decision {
                             None => {
                                 return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                             }
-                            // Once only: an allow the harness remembers would let
-                            // later calls skip review.
-                            Some(guardian::GuardianDecision::Allow { review }) => match guardian::allow_once_response(&request) {
-                                // Settled under the withdrawal lock: a verdict
-                                // never follows a cancel the agent was told of.
-                                Some(response) => return ticket.settle(|withdrawn| {
-                                    let withdrawn = withdrawn || cancellation.is_cancelled();
-                                    let answered = responder.respond(if withdrawn {
-                                        RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                    } else {
-                                        response
-                                    });
-                                    if !withdrawn && answered.is_ok() {
-                                        guardian.record_settled_review(review);
+                            // An allow the harness remembers would let later calls skip review.
+                            Some(guardian::GuardianDecision::Allow { review }) => {
+                                match guardian::allow_once_response(&request) {
+                                    Some(response) => Some((review, response, None)),
+                                    None => {
+                                        guardian_preface = Some(guardian::ask_person_preface(
+                                            "the guardian allowed it, but the harness offered no way to allow it once",
+                                        ));
+                                        None
                                     }
-                                    answered
-                                }),
-                                None => guardian_preface = Some(guardian::ask_person_preface(
-                                    "the guardian allowed it, but the harness offered no way to allow it once",
-                                )),
-                            },
-                            Some(guardian::GuardianDecision::Deny { mut rationale, review }) => {
-                                let (settled, tripped, answered) = ticket.settle(|withdrawn| {
-                                    let withdrawn = withdrawn || cancellation.is_cancelled();
-                                    let answered = responder.respond(if withdrawn {
-                                        RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                    } else {
-                                        guardian::rejection_response(&request)
-                                    });
-                                    let settled = !withdrawn && answered.is_ok();
-                                    let tripped = settled && guardian.record_settled_review(review);
-                                    (settled, tripped, answered)
-                                });
-                                if settled {
-                                    if tripped {
-                                        rationale.push_str(" The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.");
-                                    }
-                                    permission_events
-                                        .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
-                                        .await
-                                        .map_err(|_| relay_event_channel_error())?;
                                 }
-                                return answered;
+                            }
+                            Some(guardian::GuardianDecision::Deny { rationale, review }) => {
+                                Some((review, guardian::rejection_response(&request), Some(rationale)))
                             }
                             // A turn withdrawn from here on still reaches the
                             // form: registering it answers `cancelled`.
                             Some(guardian::GuardianDecision::AskPerson { reason }) => {
                                 guardian_preface = Some(guardian::ask_person_preface(&reason));
+                                None
                             }
+                        };
+                        if let Some((review, response, rationale)) = settlement {
+                            // Reserve room before settling. Publication to the live context
+                            // and the journal queue share the ticket's withdrawal decision.
+                            let reserved = tokio::select! {
+                                biased;
+                                () = ticket.withdrawn() => None,
+                                () = cancellation.cancelled() => None,
+                                reserved = permission_events.reserve() => Some(reserved),
+                            };
+                            let Some(reserved) = reserved else {
+                                return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                            };
+                            let journal = reserved.map_err(|_| relay_event_channel_error())?;
+                            let (settled, tripped, answered) = ticket.settle(|withdrawn| {
+                                let withdrawn = withdrawn || cancellation.is_cancelled();
+                                let answered = responder.respond(if withdrawn {
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                } else {
+                                    response
+                                });
+                                let settled = !withdrawn && answered.is_ok();
+                                let tripped = settled && guardian.record_settled_review(review, journal);
+                                (settled, tripped, answered)
+                            });
+                            if settled && let Some(mut rationale) = rationale {
+                                if tripped {
+                                    rationale.push_str(" The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.");
+                                }
+                                permission_events
+                                    .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                            }
+                            return answered;
                         }
                     }
                     let native_child = permission_native_agents.lock().expect("native agent router poisoned")
@@ -624,6 +631,9 @@ where
                                     elicitation_id: id.clone(),
                                     action,
                                     reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
+                                    answers: response.as_ref().and_then(PendingAnswer::human)
+                                        .filter(|response| **response != ElicitationResponse::Cancel)
+                                        .map(|response| review.trusted_answers(response)),
                                 })
                                 .await
                             {
@@ -774,6 +784,9 @@ where
                             reply: response.as_ref().and_then(PendingAnswer::human)
                                 .filter(|response| **response != ElicitationResponse::Cancel)
                                 .map(|response| form.reply_text(response)),
+                            answers: response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel)
+                                .map(|response| form.trusted_answers(response)),
                         }).await {
                             tracing::debug!(%error, "harness permission result receiver closed");
                         }
@@ -1040,6 +1053,9 @@ where
                                 elicitation_id: id.clone(),
                                 action,
                                 reply: response.as_ref().and_then(PendingAnswer::human).map(|response| request.reply_text(response)),
+                                answers: response.as_ref().and_then(PendingAnswer::human)
+                                    .filter(|response| **response != ElicitationResponse::Cancel)
+                                    .map(|response| request.trusted_answers(response)),
                             })
                             .await
                         {
@@ -1137,6 +1153,9 @@ where
                                 elicitation_id: id.clone(),
                                 action,
                                 reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
+                                answers: response.as_ref().and_then(PendingAnswer::human)
+                                    .filter(|response| **response != ElicitationResponse::Cancel)
+                                    .map(|response| review.trusted_answers(response)),
                             })
                             .await
                         {
@@ -2094,6 +2113,7 @@ async fn record_refused_question(
             elicitation_id,
             action: action.into(),
             reply: None,
+            answers: None,
         })
         .await
         .map_err(|_| relay_event_channel_error())

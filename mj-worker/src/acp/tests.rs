@@ -2520,6 +2520,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         elicitation_id,
         action,
         reply,
+        answers,
     } = resolution
     else {
         unreachable!()
@@ -2544,6 +2545,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
             elicitation_id,
             action,
             reply,
+            answers,
         })
         .unwrap();
     let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");
@@ -8771,6 +8773,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                     elicitation_id,
                     action,
                     reply,
+                    ..
                 } => {
                     assert!(reply.is_none(), "harness withdrawal is not a user reply");
                     break (requested, (elicitation_id, action));

@@ -283,6 +283,64 @@ impl ElicitationRequest {
                 .is_some_and(|parent| parent.secret)
     }
 
+    fn submitted_fields<'a>(
+        &'a self,
+        content: &'a BTreeMap<String, ElicitationValue>,
+    ) -> impl Iterator<Item = (&'a ElicitationField, &'a str, &'a ElicitationValue)> {
+        self.fields.iter().filter_map(|field| {
+            let value = content.get(&field.id)?;
+            let parent = field
+                .custom_answer_for
+                .as_ref()
+                .and_then(|id| self.fields.iter().find(|parent| parent.id == *id));
+            let title = parent
+                .filter(|parent| !content.contains_key(&parent.id))
+                .map_or(field.title.as_str(), |parent| parent.title.as_str());
+            Some((field, title, value))
+        })
+    }
+
+    /// Extract human answers without using harness labels as values.
+    pub fn trusted_answers(
+        &self,
+        response: &ElicitationResponse,
+    ) -> Vec<crate::guardian::TrustedUserAnswerField> {
+        let ElicitationResponse::Accept { content } = response else {
+            return Vec::new();
+        };
+        self.submitted_fields(content)
+            .map(|(field, title, value)| {
+                let (value, option_label) = if self.field_is_secret(field) {
+                    ("[hidden]".to_owned(), None)
+                } else {
+                    let raw = match value {
+                        ElicitationValue::String(text) => text.clone(),
+                        ElicitationValue::StringArray(values) => values.join(", "),
+                        ElicitationValue::Integer(number) => number.to_string(),
+                        ElicitationValue::Number(number) => number.to_string(),
+                        ElicitationValue::Boolean(flag) => flag.to_string(),
+                    };
+                    let option_label = if matches!(
+                        field.kind,
+                        ElicitationFieldKind::SingleSelect { .. }
+                            | ElicitationFieldKind::MultiSelect { .. }
+                    ) {
+                        let display = field.reply_value_text(value);
+                        (display != raw).then_some(display)
+                    } else {
+                        None
+                    };
+                    (raw, option_label)
+                };
+                crate::guardian::TrustedUserAnswerField {
+                    field_label: title.to_owned(),
+                    value,
+                    option_label,
+                }
+            })
+            .collect()
+    }
+
     /// The user's reply for conversation history. Mask secrets here, before
     /// the runtime event or durable journal can retain them.
     pub fn reply_text(&self, response: &ElicitationResponse) -> String {
@@ -292,17 +350,7 @@ impl ElicitationRequest {
         ];
         match response {
             ElicitationResponse::Accept { content } => {
-                for field in &self.fields {
-                    let Some(value) = content.get(&field.id) else {
-                        continue;
-                    };
-                    let parent = field
-                        .custom_answer_for
-                        .as_ref()
-                        .and_then(|id| self.fields.iter().find(|parent| parent.id == *id));
-                    let title = parent
-                        .filter(|parent| !content.contains_key(&parent.id))
-                        .map_or(&field.title, |parent| &parent.title);
+                for (field, title, value) in self.submitted_fields(content) {
                     let text = if self.field_is_secret(field) {
                         "[hidden]".to_owned()
                     } else {

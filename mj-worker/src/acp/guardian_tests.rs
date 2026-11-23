@@ -597,6 +597,7 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
             elicitation_id: elicitation_id.into(),
             action: "accept".into(),
             reply: Some("Only to staging.".into()),
+            answers: None,
         })
         .unwrap();
     endpoint.complete(GuardianReviewResult {
@@ -616,7 +617,7 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
     };
     assert_eq!(answer.kind, TrustedUserInputKind::ManualPermission);
     assert_eq!(answer.prompt, "Deploy to staging?");
-    assert_eq!(answer.reply, "Only to staging.");
+    assert_eq!(answer.legacy_reply.as_deref(), Some("Only to staging."));
     assert_eq!(
         fresh.retry_reason.as_deref(),
         Some("New user authorization arrived while the previous review was in flight.")

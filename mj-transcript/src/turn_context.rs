@@ -3,7 +3,7 @@ use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use mj_core::activity::ActivityFacts;
 use mj_core::activity::verdict::*;
 use mj_core::config::HarnessKind;
-use mj_core::guardian::{PriorGuardianReview, TrustedUserInput};
+use mj_core::guardian::{MAX_PRIOR_GUARDIAN_REVIEWS, PriorGuardianReview, TrustedUserInput};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +27,9 @@ struct TurnContextState {
     /// none; a recovery continues the same request and keeps them.
     guardian_reviews: GuardianReviews,
     trusted_user_inputs: Vec<TrustedUserInput>,
-    prior_guardian_reviews: VecDeque<PriorGuardianReview>,
+    prior_guardian_reviews: Vec<PriorGuardianReview>,
+    // These verdicts have settled but their journal events have not arrived.
+    pending_prior_guardian_reviews: VecDeque<PriorGuardianReview>,
 }
 
 /// Codex's per-turn guardian denial circuit breaker
@@ -146,6 +148,9 @@ impl TurnContext {
             authorization: state.authorization.clone(),
             trusted_user_inputs: std::mem::take(&mut state.trusted_user_inputs),
             prior_guardian_reviews: std::mem::take(&mut state.prior_guardian_reviews),
+            pending_prior_guardian_reviews: std::mem::take(
+                &mut state.pending_prior_guardian_reviews,
+            ),
             user_prompt_tail,
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
@@ -420,29 +425,47 @@ impl TurnContext {
 
     pub fn record_prior_guardian_review(&self, review: PriorGuardianReview) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
-        let reviews = &mut state.prior_guardian_reviews;
-        if reviews.len() == GUARDIAN_DENIAL_WINDOW {
+        let reviews = &mut state.pending_prior_guardian_reviews;
+        if reviews.len() == MAX_PRIOR_GUARDIAN_REVIEWS {
             reviews.pop_front();
         }
         reviews.push_back(review);
     }
 
     pub fn prior_guardian_reviews(&self) -> Vec<PriorGuardianReview> {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
+        let state = self.0.lock().expect("turn context lock poisoned");
+        let reviews = state
             .prior_guardian_reviews
             .iter()
-            .cloned()
-            .collect()
+            .chain(&state.pending_prior_guardian_reviews);
+        let excess = (state.prior_guardian_reviews.len()
+            + state.pending_prior_guardian_reviews.len())
+        .saturating_sub(MAX_PRIOR_GUARDIAN_REVIEWS);
+        reviews.skip(excess).cloned().collect()
+    }
+
+    pub fn set_prior_guardian_reviews(&self, durable: Vec<PriorGuardianReview>) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.prior_guardian_reviews = durable;
+        state.pending_prior_guardian_reviews.clear();
+    }
+
+    pub fn sync_prior_guardian_reviews(&self, durable: Vec<PriorGuardianReview>) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        // Keep only unsettled journal deliveries. Merging the old durable
+        // history too would resurrect entries evicted by the snapshot's bound.
+        state.pending_prior_guardian_reviews.retain(|pending| {
+            !pending.review_id.as_ref().is_some_and(|id| {
+                durable
+                    .iter()
+                    .any(|review| review.review_id.as_ref() == Some(id))
+            })
+        });
+        state.prior_guardian_reviews = durable;
     }
 
     pub fn clear_prior_guardian_reviews(&self) {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
-            .prior_guardian_reviews
-            .clear();
+        self.set_prior_guardian_reviews(Vec::new());
     }
 
     /// Whether the guardian's denials tripped the breaker in this request, so
@@ -604,6 +627,7 @@ mod tests {
         assert!(context.record_guardian_review(true));
         for index in 0..=GUARDIAN_DENIAL_WINDOW {
             context.record_prior_guardian_review(PriorGuardianReview {
+                review_id: None,
                 tool: "shell".into(),
                 action_summary: index.to_string(),
                 outcome: mj_core::guardian::Outcome::Deny,

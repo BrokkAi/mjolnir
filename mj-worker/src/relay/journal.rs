@@ -818,7 +818,10 @@ impl DurableRelay {
             .observe_relay(&event.observation, summary_prompt.as_deref());
         let authorization_changed = match &event.observation {
             RelayObservation::CommandStarted { .. }
-            | RelayObservation::ElicitationResolved { reply: Some(_), .. } => true,
+            | RelayObservation::ElicitationResolved { reply: Some(_), .. }
+            | RelayObservation::ElicitationResolved {
+                answers: Some(_), ..
+            } => true,
             RelayObservation::CommandQueued { command, .. } => {
                 matches!(command, RelayCommand::SeedAssessmentContext { .. })
             }
@@ -844,14 +847,15 @@ impl DurableRelay {
             self.turn_context
                 .set_trusted_user_inputs(self.snapshot.trusted_user_inputs());
         }
-        if matches!(
-            event.observation,
+        match &event.observation {
+            RelayObservation::GuardianReviewed { .. } => self
+                .turn_context
+                .sync_prior_guardian_reviews(self.snapshot.prior_guardian_reviews()),
             RelayObservation::CommandCompleted {
                 outcome: RelayCommandOutcome::ContextCleared { .. },
                 ..
-            }
-        ) {
-            self.turn_context.clear_prior_guardian_reviews();
+            } => self.turn_context.clear_prior_guardian_reviews(),
+            _ => {}
         }
         if matches!(
             event.observation,

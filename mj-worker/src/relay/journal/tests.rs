@@ -10,6 +10,70 @@ use crate::relay::{
     RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
 };
 
+#[test]
+fn guardian_reviews_survive_journal_replay_without_duplicating_pending_verdicts() {
+    use mj_core::guardian::{Outcome, PriorGuardianReview};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let review = |id: &str| PriorGuardianReview {
+        review_id: Some(id.into()),
+        tool: "Bash".into(),
+        action_summary: id.into(),
+        outcome: Outcome::Deny,
+        risk_level: None,
+        user_authorization: None,
+        rationale: None,
+    };
+    let first = review("one");
+    let second = review("two");
+    let expected = vec![first.clone(), second.clone()];
+    let context = relay.turn_context();
+    for review in &expected {
+        context.record_prior_guardian_review(review.clone());
+    }
+    // Echo the first settled verdict while the second is still in flight.
+    for review in [first, second.clone(), second] {
+        relay
+            .record_observation(RelayObservation::GuardianReviewed { review })
+            .unwrap();
+        assert_eq!(context.prior_guardian_reviews(), expected);
+    }
+    assert_eq!(relay.snapshot.prior_guardian_reviews(), expected);
+
+    drop(relay);
+    std::fs::remove_file(temp.path().join(RELAY_STATE_FILE)).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(relay.turn_context().prior_guardian_reviews(), expected);
+    assert_eq!(relay.snapshot.prior_guardian_reviews(), expected);
+
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+    submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "new-native-session".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.turn_context().prior_guardian_reviews().is_empty());
+    assert!(relay.snapshot.prior_guardian_reviews().is_empty());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(relay.turn_context().prior_guardian_reviews().is_empty());
+}
+
 // Hard-won: b62fe3b: later notices evicted the turn facts still read by the process watcher.
 #[test]
 fn current_turn_work_receipt_survives_acknowledged_control_flood_and_restart() {
@@ -2424,6 +2488,7 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
                 elicitation_id: id.into(),
                 action: action.into(),
                 reply: None,
+                answers: None,
             })
             .unwrap();
         assert_eq!(

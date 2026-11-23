@@ -22,6 +22,7 @@ use mj_core::guardian::{
     collect_project_instructions, compact_action_summary,
 };
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,6 +81,7 @@ pub(in crate::acp) struct Guardian {
     spec: LaunchSpec,
     host: tokio::sync::Mutex<Option<Arc<ReviewerHost>>>,
     endpoint: Option<Arc<GuardianEndpoint>>,
+    review_sequence: AtomicU64,
 }
 
 impl Guardian {
@@ -94,6 +96,7 @@ impl Guardian {
                     spec: spec.clone(),
                     host: tokio::sync::Mutex::new(None),
                     endpoint,
+                    review_sequence: AtomicU64::new(0),
                 })
             })
     }
@@ -104,6 +107,7 @@ impl Guardian {
         request: &RequestPermissionRequest,
         input: Option<&serde_json::Value>,
         native_child: bool,
+        bridge_id: &str,
     ) -> GuardianDecision {
         let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         if self.spec.turn_context.guardian_tripped() {
@@ -116,6 +120,8 @@ impl Guardian {
                 reason: "it denied several actions in this turn".into(),
             };
         }
+        let sequence = self.review_sequence.fetch_add(1, Ordering::Relaxed);
+        let review_id = format!("{bridge_id}{sequence}");
         let action = planned_action(
             self.spec.harness,
             request,
@@ -159,7 +165,14 @@ impl Guardian {
                 Ok(GuardianReviewOutcome::UseAcpFallback { .. }) => {}
                 Ok(GuardianReviewOutcome::Allow { .. }) => {
                     return GuardianDecision::Allow {
-                        review: Self::prior_review(&action, Outcome::Allow, None, None, None),
+                        review: Self::prior_review(
+                            review_id,
+                            &action,
+                            Outcome::Allow,
+                            None,
+                            None,
+                            None,
+                        ),
                     };
                 }
                 Ok(GuardianReviewOutcome::Deny {
@@ -170,6 +183,7 @@ impl Guardian {
                 }) => {
                     return GuardianDecision::Deny {
                         review: Self::prior_review(
+                            review_id,
                             &action,
                             Outcome::Deny,
                             Some(risk_level),
@@ -199,8 +213,13 @@ impl Guardian {
                 }
             }
         }
-        self.review_over_acp(&tool_call_id, &action, project_instructions.as_deref())
-            .await
+        self.review_over_acp(
+            review_id,
+            &tool_call_id,
+            &action,
+            project_instructions.as_deref(),
+        )
+        .await
     }
 
     async fn review_remotely(
@@ -232,6 +251,7 @@ impl Guardian {
 
     async fn review_over_acp(
         &self,
+        review_id: String,
         tool_call_id: &str,
         action: &serde_json::Value,
         project_instructions: Option<&str>,
@@ -289,6 +309,7 @@ impl Guardian {
             "guardian reviewed a permission request"
         );
         let review = Self::prior_review(
+            review_id,
             action,
             outcome,
             Some(assessment.risk_level),
@@ -305,6 +326,7 @@ impl Guardian {
     }
 
     fn prior_review(
+        review_id: String,
         action: &serde_json::Value,
         outcome: Outcome,
         risk_level: Option<mj_core::guardian::RiskLevel>,
@@ -314,6 +336,7 @@ impl Guardian {
         use mj_core::assessment::trim_middle;
 
         PriorGuardianReview {
+            review_id: Some(review_id),
             tool: trim_middle(action["tool"].as_str().unwrap_or("tool")),
             action_summary: compact_action_summary(action),
             outcome,
@@ -325,9 +348,16 @@ impl Guardian {
         }
     }
 
-    pub(in crate::acp) fn record_settled_review(&self, review: PriorGuardianReview) -> bool {
+    pub(in crate::acp) fn record_settled_review(
+        &self,
+        review: PriorGuardianReview,
+        journal: mpsc::Permit<'_, RuntimeEvent>,
+    ) -> bool {
         let denied = review.outcome == Outcome::Deny;
-        self.spec.turn_context.record_prior_guardian_review(review);
+        self.spec
+            .turn_context
+            .record_prior_guardian_review(review.clone());
+        journal.send(RuntimeEvent::GuardianReviewed { review });
         self.spec.turn_context.record_guardian_review(denied)
     }
 

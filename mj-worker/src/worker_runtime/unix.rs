@@ -1429,10 +1429,14 @@ mod history_tests {
             trusted_user_inputs: vec![mj_core::guardian::TrustedUserInput {
                 id: "ask".into(),
                 kind: mj_core::guardian::TrustedUserInputKind::UserAnswer,
+                title: None,
                 prompt: "Proceed?".into(),
-                reply: "Yes".into(),
+                action: "accept".into(),
+                answers: Vec::new(),
+                legacy_reply: Some("Yes".into()),
             }],
             prior_reviews: vec![mj_core::guardian::PriorGuardianReview {
+                review_id: None,
                 tool: "shell".into(),
                 action_summary: "make deploy".into(),
                 outcome: mj_core::guardian::Outcome::Allow,

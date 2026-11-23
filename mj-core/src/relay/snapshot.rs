@@ -1401,12 +1401,17 @@ pub enum RelayObservation {
     ElicitationRequested {
         request: ElicitationRequest,
     },
+    GuardianReviewed {
+        review: crate::guardian::PriorGuardianReview,
+    },
     ElicitationResolved {
         elicitation_id: String,
         action: String,
         /// Rendered user reply, with secret fields masked before recording.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<crate::guardian::TrustedUserAnswerField>>,
     },
     ElicitationsCleared,
     CommandQueued {
@@ -1815,6 +1820,8 @@ pub struct RelaySnapshot {
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_user_inputs: Vec<crate::guardian::TrustedUserInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_guardian_reviews: Vec<crate::guardian::PriorGuardianReview>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -2002,6 +2009,10 @@ impl RelaySnapshot {
         self.trusted_user_inputs.clone()
     }
 
+    pub fn prior_guardian_reviews(&self) -> Vec<crate::guardian::PriorGuardianReview> {
+        self.prior_guardian_reviews.clone()
+    }
+
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
         self.harness_turn.filter(|turn| turn.autonomous)
@@ -2023,6 +2034,7 @@ impl RelaySnapshot {
             person_input_through: 0,
             assessment_context: Some(Default::default()),
             trusted_user_inputs: Vec::new(),
+            prior_guardian_reviews: Vec::new(),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
             continuation: Default::default(),
