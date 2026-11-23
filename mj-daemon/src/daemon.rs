@@ -809,6 +809,9 @@ pub(crate) struct StartedLifecycle {
     receipt: LifecycleReceipt,
     result: LifecycleWatch,
     acceptance: LifecycleAcceptance,
+    /// Cloned destroy hold for synchronous callers that must keep handoff
+    /// admission through writing their final acknowledgement.
+    destroy_admission: Option<mj_controller::upgrade::Work>,
 }
 
 impl LifecycleFailure {

@@ -485,7 +485,7 @@ impl RuntimeState {
         }
         let mut work = Some(work);
         let mut superseded_restart_intent = None;
-        let (result, receipt, acceptance) = {
+        let (result, receipt, acceptance, destroy_admission) = {
             lifecycle_owner.ensure_available()?;
             ensure!(
                 matches!(
@@ -562,6 +562,15 @@ impl RuntimeState {
                     resume_workspace_id.as_deref(),
                     child_close,
                 )?;
+                let destroy_admission = (kind == LifecycleKind::ForceDestroy)
+                    .then(|| {
+                        active
+                            .upgrade_work
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                    })
+                    .flatten();
                 (
                     active.result.clone(),
                     LifecycleReceipt {
@@ -569,6 +578,7 @@ impl RuntimeState {
                         operation_id: active.operation_id.clone(),
                     },
                     active.acceptance.clone(),
+                    destroy_admission,
                 )
             } else {
                 // A destroy is waited for by a stop or handoff, up to a bound;
@@ -633,6 +643,9 @@ impl RuntimeState {
                     None
                 };
                 let admitted = if resumable { None } else { Some(admit()?) };
+                let destroy_admission = (kind == LifecycleKind::ForceDestroy)
+                    .then(|| admitted.clone())
+                    .flatten();
                 let upgrade_work = Arc::new(Mutex::new(admitted));
                 let control = control.unwrap_or_default();
                 // Decided under the owner lock, before anyone else can see the
@@ -1095,13 +1108,14 @@ impl RuntimeState {
                     }
                     state.publish_revision();
                 });
-                (result_rx, receipt, acceptance)
+                (result_rx, receipt, acceptance, destroy_admission)
             }
         };
         Ok(StartedLifecycle {
             receipt,
             result,
             acceptance,
+            destroy_admission,
         })
     }
 
