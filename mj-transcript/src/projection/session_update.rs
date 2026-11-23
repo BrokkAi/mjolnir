@@ -444,10 +444,25 @@ pub(super) fn settle_foreground_tools(
     start: Option<u64>,
     event: &RelayEvent,
 ) {
-    let Some(start) = start.filter(|start| *start < event.ordinal) else {
+    settle_foreground_tools_in_range(
+        index,
+        mutation,
+        start.map(|start| (start, event.ordinal)),
+        event,
+    );
+}
+
+pub(super) fn settle_foreground_tools_in_range(
+    index: &ProjectionIndex,
+    mutation: &mut MaterializedSessionMutation,
+    range: Option<(u64, u64)>,
+    event: &RelayEvent,
+) {
+    let Some((start, end)) = range.filter(|(start, end)| start < end && *end <= event.ordinal)
+    else {
         return;
     };
-    for item in index.open_tools_in_turn(start, event.ordinal) {
+    for item in index.open_tools_in_turn(start, end) {
         let mut closed = TranscriptItem::clone(item);
         let TranscriptBody::Tool { call, .. } = &mut closed.body else {
             unreachable!("only tool rows are indexed");

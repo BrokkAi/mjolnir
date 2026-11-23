@@ -361,15 +361,33 @@ impl ProjectionIndex {
                 .filter(|item| item.created_at_ms == started_at_ms)
                 .map(|item| item.position);
         }
-        // Only a stand-alone harness turn can be Running without a prompt.
-        // An already completed marker remains after its owner is gone.
-        (id.strip_prefix(crate::transcript::HARNESS_TURN_ITEM_PREFIX)
-            .and_then(|ordinal| ordinal.parse::<u64>().ok())
-            == Some(start)
-            && !current.last_turn_outcome.as_ref().is_some_and(|turn| {
-                turn.turn_start_position.is_some() && turn.completed_ordinal > start
-            }))
-        .then_some(start)
+        is_open_autonomous_turn(current, start, id)
+            .then(|| self.adopted_autonomous_start(current, start))
+    }
+
+    fn open_autonomous_turn_before(&self, current: &MaterializedSession, end: u64) -> Option<u64> {
+        self.turn_boundaries
+            .range(..end)
+            .rev()
+            .take_while(|(_, id)| self.get(id).is_some_and(|item| item.is_turn_start()))
+            .find_map(|(&start, id)| is_open_autonomous_turn(current, start, id).then_some(start))
+    }
+
+    fn adopted_autonomous_start(&self, current: &MaterializedSession, turn_start: u64) -> u64 {
+        let Some((&previous, id)) = self.turn_boundaries.range(..turn_start).next_back() else {
+            return 0;
+        };
+        if self.get(id).is_some_and(|item| !item.is_turn_start()) {
+            return previous;
+        }
+        // A native tool can be announced before its harness turn marker.
+        // A previous turn's completion bounds which earlier calls it adopted.
+        current
+            .last_turn_outcome
+            .as_ref()
+            .map(|turn| turn.completed_ordinal)
+            .filter(|completed| (previous..turn_start).contains(completed))
+            .map_or(turn_start, |completed| completed.saturating_add(1))
     }
 
     pub fn terminal_referrers(
@@ -382,6 +400,15 @@ impl ProjectionIndex {
             .flatten()
             .filter_map(|stable_id| self.transcript.get(stable_id))
     }
+}
+
+fn is_open_autonomous_turn(current: &MaterializedSession, start: u64, id: &str) -> bool {
+    id.strip_prefix(crate::transcript::HARNESS_TURN_ITEM_PREFIX)
+        .and_then(|ordinal| ordinal.parse::<u64>().ok())
+        == Some(start)
+        && !current.last_turn_outcome.as_ref().is_some_and(|turn| {
+            turn.turn_start_position.is_some() && turn.completed_ordinal > start
+        })
 }
 
 fn tool_status_is_open(status: ToolCallStatus) -> bool {

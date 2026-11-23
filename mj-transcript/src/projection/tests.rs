@@ -1885,12 +1885,14 @@ fn a_harness_turn_without_output_keeps_its_divider_and_stops_its_clock() {
 #[test]
 fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     let mut session = MaterializedSession::empty("session");
+    announce_pending_tool(&mut session, "pre-marker");
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnStarted {
             started_at_ms: 4_200,
         },
     );
+    announce_pending_tool(&mut session, "autonomous-tool");
     // A prompt typed mid-turn dispatches at once, so it is still running
     // when the harness reaches the boundary of the turn it started.
     apply_observation(
@@ -1911,6 +1913,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
             started_at_ms: 20,
         },
     );
+    announce_pending_tool(&mut session, "prompt-tool");
     apply_observation(&mut session, agent_chunk("still writing", "answer-1"));
 
     apply_observation(
@@ -1922,6 +1925,18 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
         },
     );
 
+    assert_eq!(
+        projected_tool_status(&session, "pre-marker"),
+        ToolCallStatus::Failed
+    );
+    assert_eq!(
+        projected_tool_status(&session, "autonomous-tool"),
+        ToolCallStatus::Failed
+    );
+    assert_eq!(
+        projected_tool_status(&session, "prompt-tool"),
+        ToolCallStatus::Pending
+    );
     assert!(
         matches!(
             session.execution,
@@ -1952,6 +1967,10 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     );
 
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert_eq!(
+        projected_tool_status(&session, "prompt-tool"),
+        ToolCallStatus::Failed
+    );
     assert!(
         !session.transcript.iter().any(
             |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
@@ -4254,6 +4273,7 @@ fn foreground_tool_projection_retires_only_the_ending_turn() {
             ))),
         };
         apply_observation(&mut session, announce("historical-unowned"));
+        apply_observation(&mut session, RelayObservation::SessionRestarted);
         if matches!(
             boundary,
             RelayObservation::SessionRestarted | RelayObservation::HarnessTurnSettled { .. }
@@ -4353,5 +4373,101 @@ fn foreground_tool_projection_retires_only_the_ending_turn() {
             panic!("expected tool")
         };
         assert_eq!(call.value()["rawOutput"], json!("Done"));
+    }
+}
+
+fn announce_pending_tool(session: &mut MaterializedSession, id: &'static str) {
+    apply_observation(
+        session,
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCall(ToolCall::new(id, "Build"))),
+        },
+    );
+}
+
+fn projected_tool_status(session: &MaterializedSession, id: &str) -> ToolCallStatus {
+    let stable_id = crate::tool_item_id(id);
+    let item = session
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == stable_id)
+        .unwrap();
+    let TranscriptBody::Tool { call, .. } = &item.body else {
+        panic!("expected a tool")
+    };
+    call.typed_status()
+}
+
+#[test]
+fn autonomous_boundary_settles_adopted_tools_without_changing_prior_turn_history() {
+    for prefix in ["first", "completed", "restarted"] {
+        for ends_by_restart in [false, true] {
+            let mut session = MaterializedSession::empty("antigravity-tools");
+            if prefix != "first" {
+                apply_observation(
+                    &mut session,
+                    RelayObservation::HarnessTurnStarted { started_at_ms: 10 },
+                );
+                let previous_start = session.applied_event_ordinal;
+                announce_pending_tool(&mut session, "historical");
+                apply_observation(
+                    &mut session,
+                    RelayObservation::HarnessTurnSettled {
+                        prompt_in_flight: false,
+                        origin: Some("antigravity".into()),
+                        autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                            start_ordinal: previous_start,
+                            stop_reason: "end_turn".into(),
+                            work_facts: None,
+                        }),
+                    },
+                );
+                // Simulate an unsettled row saved by the older projector.
+                let historical = session
+                    .transcript
+                    .iter_mut()
+                    .find(|item| item.stable_id == "tool:historical")
+                    .unwrap();
+                let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(historical).body else {
+                    panic!("expected a tool");
+                };
+                call.edit(|value| value["status"] = json!("pending"));
+            }
+            if prefix == "restarted" {
+                apply_observation(&mut session, RelayObservation::SessionRestarted);
+            }
+            announce_pending_tool(&mut session, "adopted");
+            apply_observation(
+                &mut session,
+                RelayObservation::HarnessTurnStarted { started_at_ms: 20 },
+            );
+            let start = session.applied_event_ordinal;
+            let boundary = if ends_by_restart {
+                RelayObservation::SessionRestarted
+            } else {
+                RelayObservation::HarnessTurnSettled {
+                    prompt_in_flight: false,
+                    origin: Some("antigravity".into()),
+                    autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                        start_ordinal: start,
+                        stop_reason: "end_turn".into(),
+                        work_facts: None,
+                    }),
+                }
+            };
+            apply_observation(&mut session, boundary);
+            assert_eq!(
+                projected_tool_status(&session, "adopted"),
+                ToolCallStatus::Failed,
+                "{prefix}, restart={ends_by_restart}"
+            );
+            if prefix != "first" {
+                assert_eq!(
+                    projected_tool_status(&session, "historical"),
+                    ToolCallStatus::Pending,
+                    "{prefix}, restart={ends_by_restart}"
+                );
+            }
+        }
     }
 }

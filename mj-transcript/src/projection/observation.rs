@@ -928,12 +928,23 @@ pub(super) fn project_observation(
             // harness started on its own settles. The relay keeps the session
             // Running for it, and so does this: the prompt's own result closes
             // the streams and stops the clock.
+            let autonomous_start = autonomous.as_ref().map(|turn| turn.start_ordinal);
+            let range = if *prompt_in_flight {
+                current.active_turn.as_ref().and_then(|prompt| {
+                    let end = index.prompt_start(prompt);
+                    autonomous_start
+                        .or_else(|| index.open_autonomous_turn_before(current, end))
+                        .filter(|start| *start < end)
+                        .map(|start| (index.adopted_autonomous_start(current, start), end))
+                })
+            } else {
+                autonomous_start
+                    .map(|start| index.adopted_autonomous_start(current, start))
+                    .or_else(|| index.running_turn_start(current))
+                    .map(|start| (start, event.ordinal))
+            };
+            settle_foreground_tools_in_range(index, mutation, range, event);
             if !prompt_in_flight {
-                let start = autonomous
-                    .as_ref()
-                    .map(|turn| turn.start_ordinal)
-                    .or_else(|| index.running_turn_start(current));
-                settle_foreground_tools(index, mutation, start, event);
                 if let Some(turn) = autonomous {
                     let start = turn.start_ordinal;
                     let command_id = mj_core::continuation::harness_turn_id(start);
