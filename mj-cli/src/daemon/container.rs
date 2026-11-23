@@ -788,7 +788,9 @@ async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
 /// the data roots are environment, never arguments, and the daemon's output
 /// goes to the volume's log.
 async fn exec_daemon(program: &str, spec: &ContainerSpec, id: &str, token: &str) -> Result<()> {
-    let script = format!("exec {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1");
+    let script = format!(
+        "exec {IMAGE_EXECUTABLE} daemon-wait-exit --exit-dir {VOLUME_MOUNT}/data/daemon-exits -- {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1"
+    );
     let args: Vec<OsString> = vec![
         "exec".into(),
         "--detach".into(),
