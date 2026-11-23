@@ -1934,8 +1934,11 @@ func TestRestartContinuationRecoveryIsIdempotentAndPreservesNeverDeliveredBlocks
 			t.Fatalf("recovery mode %d: claimed %+v", cut, claimed)
 		}
 		recoveryBlocks := core.DeepClone(journalTestBlocksForCommand(t, claimed[0]))
-		if journalTestJSON(t, recoveryBlocks[1:]) != journalTestJSON(t, originalBlocks) {
+		if journalTestJSON(t, journalTestPromptBlocks(t, claimed[0].Command)) != journalTestJSON(t, originalBlocks) {
 			t.Fatalf("recovery mode %d: recovery blocks lost the original request", cut)
+		}
+		if len(recoveryBlocks) != 1 {
+			t.Fatalf("recovery must not replay the request: %d blocks", len(recoveryBlocks))
 		}
 		if recoveryBlocks[0].Kind != acpschema.ContentBlockKindText || recoveryBlocks[0].Text == nil {
 			t.Fatal("missing recovery note")
@@ -1960,7 +1963,7 @@ func TestRestartContinuationRecoveryIsIdempotentAndPreservesNeverDeliveredBlocks
 			t.Fatalf("second recovery claimed %+v", second)
 		}
 		if journalTestJSON(t, journalTestBlocksForCommand(t, second[0])) != journalTestJSON(t, recoveryBlocks) {
-			t.Fatal("a second restart must not nest the note or lose the original request")
+			t.Fatal("a second restart must send only the recovery note")
 		}
 		journalTestComplete(t, relay, second[0].CommandID, journalTestEndTurn())
 		if claimed := journalTestClaim(t, relay); claimed[0].CommandID != "later-user-input" {
@@ -2177,10 +2180,10 @@ func TestRestartContinuationMovesAMaximumRequestWhenTheDurableQueueIsNearFull(t 
 		if len(relay.snapshot.QueuedPrompts) != queued {
 			t.Fatalf("%d queued prompts, want %d", len(relay.snapshot.QueuedPrompts), queued)
 		}
-		if journalTestJSON(t, blocks[1:]) != journalTestJSON(t, journalTestPromptBlocks(t, original)) {
+		if journalTestJSON(t, journalTestPromptBlocks(t, recovered[0].Command)) != journalTestJSON(t, journalTestPromptBlocks(t, original)) {
 			t.Fatal("the recovered request lost the original blocks")
 		}
-		if len(blocks) != 2 {
+		if len(blocks) != 1 {
 			t.Fatalf("%d recovered blocks", len(blocks))
 		}
 	}
@@ -2217,8 +2220,11 @@ func TestRestartContinuationPreservesMailboxWakeContentWithoutRedeliveringItsEve
 		if len(recovered) != 1 {
 			t.Fatalf("recovered %+v", recovered)
 		}
-		if journalTestJSON(t, journalTestBlocksForCommand(t, recovered[0])[1:]) != journalTestJSON(t, originalBlocks) {
+		if journalTestJSON(t, journalTestPromptBlocks(t, recovered[0].Command)) != journalTestJSON(t, originalBlocks) {
 			t.Fatal("the recovery lost the wake's content")
+		}
+		if blocks := journalTestBlocksForCommand(t, recovered[0]); len(blocks) != 1 {
+			t.Fatalf("recovery must not replay the wake: %d blocks", len(blocks))
 		}
 		if journalTestJSON(t, recovered[0].Command) != originalCommand {
 			t.Fatal("the recovered command differs from the original")

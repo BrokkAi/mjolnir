@@ -2,8 +2,8 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-/// Restart prompts retain their original payload; the note is added only when rendered.
-pub const RESTART_RECOVERY_NOTE: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted, and running tool calls were lost. The original request that began this turn is repeated below for context. Any corrections or redirections given during the turn, visible in the conversation, take precedence over it. If you had already started, continue from where you left off rather than starting over. Before repeating a command whose result you did not see, check whether it already took effect, especially for anything with external side effects.";
+/// Restart prompts retain their stored payload but render only this note.
+pub const RESTART_RECOVERY_NOTE: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted, and running tool calls were lost. Consult your conversation history and continue from where you left off, following the user's latest instructions. Any corrections or redirections given during the turn take precedence over the original request. Before repeating a command whose result you did not see, check whether it already took effect, especially for anything with external side effects.";
 
 const RESTART_PREFIX: &str = "auto-continue-restart-";
 
