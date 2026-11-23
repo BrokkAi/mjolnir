@@ -115,8 +115,6 @@ struct HarnessPreparationSetup {
     config: WorkerLaunchConfig,
     relay: Arc<RelayCell>,
     restarting: bool,
-    session_git_config_include: Option<PathBuf>,
-    credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     antigravity_task_home: Option<std::result::Result<PathBuf, String>>,
     resume_session: Option<String>,
@@ -566,12 +564,15 @@ impl Drop for CancelPreparationOnDrop {
 
 async fn preparation_step(
     root: &std::path::Path,
-    status: &watch::Sender<PreparationSnapshot>,
+    status: Option<&watch::Sender<PreparationSnapshot>>,
     step: &str,
     timeout: std::time::Duration,
     cancel: &CancellationToken,
 ) -> Result<PreparationStepBudget> {
     let budget = PreparationStepBudget::new(step, timeout);
+    let Some(status) = status else {
+        return Ok(budget);
+    };
     status.send_modify(|snapshot| {
         snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
             step: step.to_owned(),
@@ -858,100 +859,35 @@ async fn restart_harness_in_place_response(
     };
     let mut launch_config = launch_config;
     let persisted_launch_config = launch_config.clone();
-    // Apply the same target_environment merge, policy enforcement, staged-home
-    // env, and $MJ_KEEP_DIR setup as initial startup (`run_daemon_owned` /
-    // `prepare_managed_harness`) so managed harness discovery sees the target's
-    // XDG_CACHE_HOME/PATH and the restarted bridge keeps $MJ_KEEP_DIR.
-    let mut merged_environment = launch_config.target_environment.clone();
-    merged_environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
-    merged_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
-    merged_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
-    merged_environment.extend(launch_config.environment.clone());
-    merged_environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
-    merged_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
-    merged_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
-    launch_config.environment = merged_environment;
-    if let Ok(startup_directory) = std::env::current_dir() {
-        super::resolve_relative_harness_home(&mut launch_config, &startup_directory);
-    }
-    if launch_config.no_github_credentials {
-        mj_core::credentials::remove_github_authentication_environment(
-            &mut launch_config.environment,
-        );
-        mj_core::credentials::remove_github_authentication_environment(
-            &mut launch_config.target_environment,
-        );
-    }
-    if let Err(error) = super::enforce_execution_policy(&mut launch_config) {
+    let initialize = std::env::current_dir()
+        .context("resolve worker startup directory")
+        .and_then(|startup_directory| {
+            initialize_launch_environment(&mut launch_config, &startup_directory);
+            super::enforce_execution_policy(&mut launch_config)
+                .context("enforce execution policy for in-place harness restart")
+        });
+    if let Err(error) = initialize {
         return RelayResponseEnvelope {
             request_id,
             protocol_version,
-            body: compaction_error(
-                RelayErrorCode::InvalidState,
-                &format!("enforce execution policy for in-place harness restart: {error:#}"),
-            ),
+            body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
         };
     }
-    if launch_config.harness == HarnessKind::OpenCode
-        && let Ok(endpoint) = super::credential_endpoint(&launch_config)
-    {
-        launch_config
-            .harness
-            .configure_staged_home_environment(&endpoint.home, &mut launch_config.environment);
-    }
-    let keep_cwd = launch_config.cwd.clone();
-    let keep_session_id = launch_config.session_id.clone();
-    let mut keep_environment = launch_config.environment.clone();
-    match tokio::time::timeout(
-        LOCAL_PREPARATION_STEP_TIMEOUT,
-        mj_core::runtime::spawn_blocking(move || {
-            let result = mj_core::session_keep::install_session_keep_dir(
-                &keep_cwd,
-                &keep_session_id,
-                &mut keep_environment,
-            );
-            (result, keep_environment)
-        }),
-    )
-    .await
-    {
-        Ok(Ok((Ok(_), updated_environment))) => {
-            launch_config.environment = updated_environment;
-        }
-        Ok(Ok((Err(error), _))) => {
-            tracing::warn!(
-                session_id = %launch_config.session_id,
-                cwd = %launch_config.cwd.display(),
-                error = format!("{error:#}"),
-                "could not prepare the session keep directory during in-place harness restart"
-            );
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                session_id = %launch_config.session_id,
-                cwd = %launch_config.cwd.display(),
-                error = %error,
-                "session keep directory preparation task failed during in-place harness restart"
-            );
-        }
-        Err(_) => {
-            tracing::warn!(
-                session_id = %launch_config.session_id,
-                cwd = %launch_config.cwd.display(),
-                timeout = ?LOCAL_PREPARATION_STEP_TIMEOUT,
-                "session keep directory preparation timed out during in-place harness restart"
-            );
-        }
-    }
-    let supervisor_path = relay_root.join("acp-supervisor.json");
-    let mut prepared = match super::prepare_harness_launch(
-        launch_config.harness,
-        launch_config.harness_runtime,
-        launch_config.execution_policy,
-        super::harness_launch::primary_supervisor_spec(&launch_config),
-    )
-    .await
-    {
+    let prepared = Box::pin(prepare_harness_environment(
+        relay_root,
+        &mut launch_config,
+        relay,
+        None,
+        &CancellationToken::new(),
+        false,
+    ))
+    .await;
+    let PreparedHarnessEnvironment {
+        launch: prepared,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode: updated_mailbox_delivery_mode,
+        ..
+    } = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             return RelayResponseEnvelope {
@@ -964,186 +900,18 @@ async fn restart_harness_in_place_response(
             };
         }
     };
-    if let Err(error) =
-        super::harness_launch::freeze_node_entrypoints(relay_root, &mut prepared).await
-    {
-        return RelayResponseEnvelope {
-            request_id,
-            protocol_version,
-            body: compaction_error(
-                RelayErrorCode::Internal,
-                &format!("freeze updated harness entrypoints: {error:#}"),
-            ),
-        };
-    }
+    let supervisor_path = relay_root.join("acp-supervisor.json");
     let mut additional_directories = acp_additional_directories(&launch_config);
     super::tool_cache::extend_writable_directories(
         launch_config.harness,
         &prepared.environment,
         &mut additional_directories,
     );
-    prepared
-        .environment
-        .remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
-    prepared
-        .environment
-        .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
-    prepared
-        .environment
-        .remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
-    prepared
-        .environment
-        .remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
-    prepared
-        .environment
-        .remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
     let updated_credentials = super::credential_endpoint(&launch_config);
     let updated_harness = launch_config.harness;
     let updated_claude_login_path = (updated_harness == HarnessKind::Claude)
         .then(|| mj_core::credentials::claude_oauth_login_path(&launch_config.environment))
         .flatten();
-    let (boundary_mailbox_hook_available, updated_mailbox_delivery_mode) = if let Ok(endpoint) =
-        &updated_credentials
-    {
-        let hook_root = relay_root.to_path_buf();
-        let hook_session_id = launch_config.session_id.clone();
-        let hook_home = endpoint.home.clone();
-        match updated_harness {
-            HarnessKind::Claude => {
-                let role = launch_config.subagent_mcp_role();
-                let capabilities = (launch_config.oracle, launch_config.orchestrators_enabled);
-                let subtle_subagents = launch_config.subtle_subagents;
-                let review_tools = launch_config.review_tools();
-                let available = match tokio::time::timeout(
-                    LOCAL_PREPARATION_STEP_TIMEOUT,
-                    mj_core::runtime::spawn_blocking(move || {
-                        // An in-place profile switch replaces these files with
-                        // the destination profile. Restore the worker-owned
-                        // servers and permissions before Claude reads them.
-                        super::subagents::configure_claude_subagent_mcp(
-                            &hook_root,
-                            &hook_session_id,
-                            &hook_home,
-                            role,
-                            capabilities,
-                            subtle_subagents,
-                            review_tools,
-                        )?;
-                        super::subagents::configure_claude_mailbox_hook(
-                            &hook_root,
-                            &hook_session_id,
-                            &hook_home,
-                        )
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(Ok(available))) => available,
-                    Ok(Ok(Err(error))) => {
-                        return RelayResponseEnvelope {
-                            request_id,
-                            protocol_version,
-                            body: compaction_error(
-                                RelayErrorCode::Internal,
-                                &format!(
-                                    "prepare Claude profile for in-place harness restart: {error:#}"
-                                ),
-                            ),
-                        };
-                    }
-                    Ok(Err(error)) => {
-                        return RelayResponseEnvelope {
-                            request_id,
-                            protocol_version,
-                            body: compaction_error(
-                                RelayErrorCode::Internal,
-                                &format!(
-                                    "Claude profile task failed during in-place harness restart: {error}"
-                                ),
-                            ),
-                        };
-                    }
-                    Err(_) => {
-                        return RelayResponseEnvelope {
-                            request_id,
-                            protocol_version,
-                            body: compaction_error(
-                                RelayErrorCode::Internal,
-                                "Claude profile preparation timed out during in-place harness restart",
-                            ),
-                        };
-                    }
-                };
-                (available, None)
-            }
-            HarnessKind::Antigravity => {
-                let available = match tokio::time::timeout(
-                    LOCAL_PREPARATION_STEP_TIMEOUT,
-                    mj_core::runtime::spawn_blocking(move || {
-                        super::subagents::configure_antigravity_mailbox_hook(
-                            &hook_root,
-                            &hook_session_id,
-                            &hook_home,
-                        )
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(Ok(available))) => available,
-                    Ok(Ok(Err(error))) => {
-                        tracing::warn!(
-                            session_id = %launch_config.session_id,
-                            error = format!("{error:#}"),
-                            "could not verify Antigravity mailbox hook during in-place harness restart"
-                        );
-                        false
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            session_id = %launch_config.session_id,
-                            error = %error,
-                            "Antigravity mailbox hook task failed during in-place harness restart"
-                        );
-                        false
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            session_id = %launch_config.session_id,
-                            "Antigravity mailbox hook verification timed out during in-place harness restart"
-                        );
-                        false
-                    }
-                };
-                let mode = if available {
-                    mj_core::mailbox::MailboxDeliveryMode::ToolBoundary
-                } else {
-                    mj_core::mailbox::MailboxDeliveryMode::TurnBoundary
-                };
-                (available, Some(mode))
-            }
-            HarnessKind::Codex => {
-                let mode = match tokio::time::timeout(
-                    LOCAL_PREPARATION_STEP_TIMEOUT,
-                    mj_core::runtime::spawn_blocking(move || {
-                        mj_core::codex_provider::codex_provider(&hook_home, None)
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(Ok(provider))) => {
-                        Some(mj_core::mailbox::MailboxDeliveryMode::for_codex_provider(
-                            provider.as_ref(),
-                        ))
-                    }
-                    _ => None,
-                };
-                (false, mode)
-            }
-            _ => (false, None),
-        }
-    } else {
-        (false, None)
-    };
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
@@ -1665,10 +1433,6 @@ pub async fn run_daemon_owned(
     mut config: WorkerLaunchConfig,
 ) -> Result<()> {
     let root = owner.root().to_owned();
-    let session_git_config_include = config
-        .target_environment
-        .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
-        .map(PathBuf::from);
     config
         .target_environment
         .remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
@@ -1681,20 +1445,9 @@ pub async fn run_daemon_owned(
             "the worker's Fastino key was already initialized"
         );
     }
-    let mut target_environment = config.target_environment.clone();
-    target_environment.extend(config.environment);
-    target_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
-    target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
-    config.environment = target_environment;
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
-    super::resolve_relative_harness_home(&mut config, &startup_directory);
-    if config.no_github_credentials {
-        mj_core::credentials::remove_github_authentication_environment(&mut config.environment);
-        mj_core::credentials::remove_github_authentication_environment(
-            &mut config.target_environment,
-        );
-    }
+    initialize_launch_environment(&mut config, &startup_directory);
     let checkpoint_only = config.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     super::record_startup_step(&root, "policy");
     if !checkpoint_only {
@@ -2044,8 +1797,6 @@ pub async fn run_daemon_owned(
         config,
         relay: relay.clone(),
         restarting,
-        session_git_config_include,
-        credentials,
         kimi_task_home,
         antigravity_task_home,
         resume_session,
@@ -2554,7 +2305,7 @@ async fn prepare_project_tools(
     roots: &[PathBuf],
     config: &mut WorkerLaunchConfig,
     base_environment: &BTreeMap<String, String>,
-    status: &watch::Sender<PreparationSnapshot>,
+    status: Option<&watch::Sender<PreparationSnapshot>>,
     relay: &Arc<RelayCell>,
 ) -> Result<(bool, Option<super::project_tools::Install>)> {
     let mut environment = base_environment.clone();
@@ -2570,6 +2321,15 @@ async fn prepare_project_tools(
         super::project_tools::apply_environment(&mut environment, roots, None)?;
         config.environment = environment.clone();
         applied = true;
+        let Some(status) = status else {
+            // The running worker already owns any install in progress. Resolve
+            // the same mise runtime and PATH without starting another install.
+            let mise =
+                mj_harness_install::harness_install::ensure_mise_runtime(&environment).await?;
+            super::project_tools::apply_environment(&mut environment, roots, Some(&mise))?;
+            config.environment = environment;
+            return Ok(None);
+        };
         status.send_modify(|snapshot| {
             snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
                 step: "Install project tools".into(),
@@ -2628,30 +2388,54 @@ async fn prepare_project_tools(
     Ok((applied, install))
 }
 
-async fn prepare_and_start_harness(
-    setup: HarnessPreparationSetup,
-    dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
-    status: &watch::Sender<PreparationSnapshot>,
+fn initialize_launch_environment(
+    config: &mut WorkerLaunchConfig,
+    startup_directory: &std::path::Path,
+) {
+    let mut environment = config.target_environment.clone();
+    environment.append(&mut config.environment);
+    for directive in [
+        mj_core::worker_launch::SESSION_NITRO_MBX_ENV,
+        mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH,
+        mj_core::jev::FASTINO_KEY_ENVIRONMENT,
+    ] {
+        environment.remove(directive);
+    }
+    config.environment = environment;
+    super::resolve_relative_harness_home(config, startup_directory);
+    if config.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut config.environment);
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut config.target_environment,
+        );
+    }
+}
+
+struct PreparedHarnessEnvironment {
+    launch: super::harness_launch::PreparedHarnessLaunch,
+    profile_registration: bool,
+    managed_subagent: bool,
+    subagent_role: Option<mj_core::subagent::SubagentMcpRole>,
+    boundary_mailbox_hook_available: bool,
+    mailbox_delivery_mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    project_tools_install: Option<super::project_tools::Install>,
+}
+
+/// Build the process environment and its worker-owned files for every primary
+/// harness launch, including a replacement of the bridge in a running worker.
+async fn prepare_harness_environment(
+    root: &std::path::Path,
+    config: &mut WorkerLaunchConfig,
+    relay: &Arc<RelayCell>,
+    status: Option<&watch::Sender<PreparationSnapshot>>,
     cancel: &CancellationToken,
-) -> Result<RunningHarness> {
-    let HarnessPreparationSetup {
-        root: root_path,
-        mut config,
-        relay,
-        restarting,
-        session_git_config_include,
-        credentials,
-        kimi_task_home,
-        antigravity_task_home,
-        resume_session,
-        native_session_history,
-        capture,
-    } = setup;
+    record_launch_baseline: bool,
+) -> Result<PreparedHarnessEnvironment> {
     let project_tools_roots = super::project_tools::take_roots(&mut config.environment)?;
     let managed_subagent = config.is_managed_subagent();
+    let credentials = super::credential_endpoint(config);
     let review_tools = config.review_tools();
     let subagent_role = config.subagent_mcp_role();
-    let root = root_path.as_path();
     let login_budget = preparation_step(
         root,
         status,
@@ -2675,7 +2459,7 @@ async fn prepare_and_start_harness(
     .await?;
     if config.harness == HarnessKind::OpenCode {
         // Retained launch files can predate the explicit OpenCode config pin.
-        let home = super::credential_endpoint(&config)
+        let home = super::credential_endpoint(config)
             .map_err(anyhow::Error::msg)?
             .home;
         config
@@ -2696,15 +2480,20 @@ async fn prepare_and_start_harness(
     let github_root = root.to_owned();
     let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();
-    let git_config_include = session_git_config_include.clone();
+    let git_config_include = config
+        .target_environment
+        .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+        .map(PathBuf::from);
     let mut explicit_environment = config.environment.clone();
     explicit_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     explicit_environment.remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
     explicit_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let base_environment_for_filter = base_environment.clone();
     // Credential sync installs the session's slopcop login in its harness home.
-    let slopcop_login = super::credential_endpoint(&config)
-        .map(|endpoint| endpoint.home.join(mj_core::slopcop::LOGIN_FILE));
+    let slopcop_login = credentials
+        .as_ref()
+        .map(|endpoint| endpoint.home.join(mj_core::slopcop::LOGIN_FILE))
+        .map_err(Clone::clone);
     session_environment =
         bounded_blocking_preparation_step(&login_budget, cancel, move |step_cancel| {
             if step_cancel.is_cancelled() {
@@ -2733,7 +2522,7 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
-    if record_raw_launch && !restarting {
+    if record_raw_launch && record_launch_baseline {
         let budget = preparation_step(
             root,
             status,
@@ -2950,7 +2739,8 @@ async fn prepare_and_start_harness(
                     }
                     Ok((registered, mailbox_hook_available))
                 })
-                .await?;
+                .await
+                .context("prepare Claude profile")?;
             boundary_mailbox_hook_available = mailbox_hook_available;
             registered
         }
@@ -2977,7 +2767,8 @@ async fn prepare_and_start_harness(
                     }
                     super::subagents::configure_antigravity_mailbox_hook(&root, &session_id, &home)
                 })
-                .await?;
+                .await
+                .context("prepare Antigravity profile")?;
             boundary_mailbox_hook_available = mailbox_hook_available;
             mailbox_delivery_mode = Some(if mailbox_hook_available {
                 mj_core::mailbox::MailboxDeliveryMode::ToolBoundary
@@ -3060,15 +2851,7 @@ async fn prepare_and_start_harness(
         }
         _ => false,
     };
-    {
-        let mut relay = relay.lock().expect("relay state lock poisoned");
-        relay.set_steering_delivery_mode(config.harness, boundary_mailbox_hook_available);
-        // Resolved before the harness starts, so no hook can drain earlier.
-        if let Some(mode) = mailbox_delivery_mode {
-            relay.set_mailbox_delivery_mode(mode);
-        }
-    }
-    if config.prepares_review() {
+    if status.is_some() && config.prepares_review() {
         let budget = preparation_step(
             root,
             status,
@@ -3095,8 +2878,7 @@ async fn prepare_and_start_harness(
 
     let (project_tools_applied, project_tools_install) = match &project_tools_roots {
         Some(roots) => {
-            prepare_project_tools(root, roots, &mut config, base_environment, status, &relay)
-                .await?
+            prepare_project_tools(root, roots, config, base_environment, status, relay).await?
         }
         None => (false, None),
     };
@@ -3148,7 +2930,7 @@ async fn prepare_and_start_harness(
             config.harness,
             config.harness_runtime,
             config.execution_policy,
-            super::harness_launch::primary_supervisor_spec(&config),
+            super::harness_launch::primary_supervisor_spec(config),
         )
         .await?;
         super::harness_launch::freeze_node_entrypoints(root, &mut prepared).await?;
@@ -3173,6 +2955,53 @@ async fn prepare_and_start_harness(
             .environment
             .extend(prepared_harness.environment.clone());
     }
+    Ok(PreparedHarnessEnvironment {
+        launch: prepared_harness,
+        profile_registration,
+        managed_subagent,
+        subagent_role,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode,
+        project_tools_install,
+    })
+}
+
+async fn prepare_and_start_harness(
+    setup: HarnessPreparationSetup,
+    dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
+    status: &watch::Sender<PreparationSnapshot>,
+    cancel: &CancellationToken,
+) -> Result<RunningHarness> {
+    let HarnessPreparationSetup {
+        root: root_path,
+        mut config,
+        relay,
+        restarting,
+        kimi_task_home,
+        antigravity_task_home,
+        resume_session,
+        native_session_history,
+        capture,
+    } = setup;
+    let root = root_path.as_path();
+    let PreparedHarnessEnvironment {
+        launch: prepared_harness,
+        profile_registration,
+        managed_subagent,
+        subagent_role,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode,
+        project_tools_install,
+    } = prepare_harness_environment(root, &mut config, &relay, Some(status), cancel, !restarting)
+        .await?;
+    {
+        let mut relay = relay.lock().expect("relay state lock poisoned");
+        relay.set_steering_delivery_mode(config.harness, boundary_mailbox_hook_available);
+        // Resolved before the harness starts, so no hook can drain earlier.
+        if let Some(mode) = mailbox_delivery_mode {
+            relay.set_mailbox_delivery_mode(mode);
+        }
+    }
     let managed_cache_root = prepared_harness
         .managed
         .as_ref()
@@ -3182,7 +3011,7 @@ async fn prepare_and_start_harness(
 
     let acp_budget = preparation_step(
         root,
-        status,
+        Some(status),
         "acp-setup",
         LOCAL_PREPARATION_STEP_TIMEOUT,
         cancel,
@@ -3212,7 +3041,7 @@ async fn prepare_and_start_harness(
 
     preparation_step(
         root,
-        status,
+        Some(status),
         "bridge-start",
         LOCAL_PREPARATION_STEP_TIMEOUT,
         cancel,
@@ -4449,7 +4278,7 @@ mod preparation_tests {
             &[checkout],
             &mut config,
             &BTreeMap::new(),
-            &status,
+            Some(&status),
             &relay,
         )
         .await
@@ -4534,7 +4363,7 @@ mod preparation_tests {
             supervise_preparation(&prep_root, &prep_status, &prep_cancellation, async move {
                 preparation_step(
                     &fake_root,
-                    &fake_status,
+                    Some(&fake_status),
                     "harness-resolve",
                     LOCAL_PREPARATION_STEP_TIMEOUT,
                     &fake_cancellation,
@@ -4953,7 +4782,7 @@ mod preparation_tests {
             supervise_preparation::<()>(&prep_root, &prep_status, &prep_cancellation, async move {
                 preparation_step(
                     &fake_root,
-                    &fake_status,
+                    Some(&fake_status),
                     "harness-resolve",
                     LOCAL_PREPARATION_STEP_TIMEOUT,
                     &fake_cancellation,
@@ -5267,6 +5096,126 @@ mod preparation_tests {
         ));
         writer.shutdown().await.unwrap();
         handler.await.unwrap().unwrap();
+    }
+
+    // Hard-won: #1672: in-place Move restarted the harness without the session Git setup
+    #[tokio::test]
+    async fn restart_harness_in_place_preserves_session_git_environment() {
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut launch = super::super::relay_tests::launch_config(root.to_str().unwrap());
+        launch.cwd = root.to_owned();
+        launch.harness = HarnessKind::Claude;
+        launch.environment.clear();
+        launch.environment.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            root.to_string_lossy().into_owned(),
+        );
+        launch
+            .target_environment
+            .insert("PATH".into(), "/usr/bin:/bin".into());
+        let git_include = root.join("image-gitconfig");
+        launch.target_environment.insert(
+            mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH.into(),
+            git_include.to_string_lossy().into_owned(),
+        );
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root, &launch.session_id, "1.0.0").unwrap(),
+        ));
+        let store_id = relay.lock().unwrap().operational_state().store_id.unwrap();
+
+        let mut startup_config = launch.clone();
+        initialize_launch_environment(&mut startup_config, root);
+        super::super::enforce_execution_policy(&mut startup_config).unwrap();
+        let (status, _) = watch::channel(PreparationSnapshot::default());
+        let startup = Box::pin(prepare_harness_environment(
+            root,
+            &mut startup_config,
+            &relay,
+            Some(&status),
+            &CancellationToken::new(),
+            true,
+        ))
+        .await
+        .unwrap();
+        let expected = startup.launch.spec.environment;
+        assert!(std::env::split_paths(&expected["PATH"]).any(|path| path == root.join("bin")));
+        assert_eq!(
+            std::path::Path::new(&expected["GIT_CONFIG_GLOBAL"]),
+            root.join("gitconfig")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("gitconfig"))
+                .unwrap()
+                .contains(&*git_include.to_string_lossy())
+        );
+        let token_path = root.join("github-token");
+        // The daemon may have refreshed the original container token since startup.
+        mj_core::credentials::write_github_token(&token_path, b"refreshed-test-token").unwrap();
+        let token_before = std::fs::read(&token_path).unwrap();
+
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
+        let (commands, mut receiver) = mpsc::channel(1);
+        let reload = mj_core::runtime::spawn(async move {
+            let Some(CommandRequest::ReloadLaunchConfig {
+                supervisor_spec,
+                environment,
+                resolved,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("expected a replacement harness launch");
+            };
+            resolved.send(Ok(())).unwrap();
+            let (_, spec) = *supervisor_spec.unwrap();
+            (spec.environment, environment)
+        });
+        let response = Box::pin(restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "reload".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move".into(),
+                    expected_store_id: store_id,
+                    launch_config: Box::new(launch),
+                },
+            },
+            Some(&commands),
+            &relay,
+            &credentials,
+            root,
+        ))
+        .await;
+        assert!(
+            matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::HarnessRestartedInPlace
+                }
+            ),
+            "{:?}",
+            response.body
+        );
+        let (spec_environment, shell_environment) = reload.await.unwrap();
+        for name in ["PATH", "GIT_CONFIG_GLOBAL"] {
+            assert_eq!(spec_environment.get(name), expected.get(name));
+            assert_eq!(shell_environment.get(name), expected.get(name));
+        }
+        assert!(
+            std::fs::read_to_string(root.join("gitconfig"))
+                .unwrap()
+                .contains(&*git_include.to_string_lossy())
+        );
+        assert_eq!(std::fs::read(&token_path).unwrap(), token_before);
     }
 
     // Hard-won: e2c147489: an in-place profile switch discarded Claude's agent and review tools.
