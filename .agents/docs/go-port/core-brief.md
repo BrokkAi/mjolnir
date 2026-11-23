@@ -192,8 +192,9 @@ already-ported packages were synced to. Read Rust only from the read-only
 checkout of that commit at
 `/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b`
 (create it with `git worktree add --detach <path> 3dde0c11b` if missing),
-never from the Rust files in your own worktree, which may be newer. Record
-the crate in `go/PORTED_FROM` with that commit.
+never from the Rust files in your own worktree, which may be newer. Do not
+track later Rust changes: there are no sync passes until the owner has
+tested the Go build.
 
 ## The terminal UI on Charm (mj-chat, mj-tui, mj-cli's dashboard)
 
