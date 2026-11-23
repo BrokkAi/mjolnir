@@ -17947,6 +17947,7 @@ async fn retired_harness_stop_keeps_independent_descendants() {
         };
         let parent = session("parent");
         let child = session("borrower");
+        let sibling = session("sibling");
         let bound = session("bound-grandchild");
         let independent = session("independent-grandchild");
         let worker_root = |id: &str| root.path().join(id);
@@ -17968,6 +17969,8 @@ async fn retired_harness_stop_keeps_independent_descendants() {
         let mut borrower = runtime_test_subagent(&child.id, &parent.id);
         borrower.orchestrator = true;
         database::save_subagent_session(&child, &borrower).unwrap();
+        database::save_subagent_session(&sibling, &runtime_test_subagent(&sibling.id, &parent.id))
+            .unwrap();
         database::save_subagent_session(&bound, &runtime_test_subagent(&bound.id, &child.id))
             .unwrap();
         database::register_subagent_with_startup(
@@ -17985,12 +17988,32 @@ async fn retired_harness_stop_keeps_independent_descendants() {
             .unwrap();
         assert_ne!(before.id, shared.id);
         test_fixtures::retire_test_harness(&child.id).unwrap();
-        test_fixtures::retire_test_harness(&bound.id).unwrap();
         if variant == "retired" {
+            test_fixtures::retire_test_harness(&bound.id).unwrap();
             test_fixtures::retire_test_harness(&independent.id).unwrap();
         }
 
         let state = test_runtime_state_loading_the_store();
+        state
+            .stop_subagents_before_close(&sibling.id, None)
+            .await
+            .unwrap();
+        assert!(!worker_root(&child.id).join("stopped").exists());
+        assert_eq!(
+            database::session_environment(&child.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            shared.id
+        );
+        assert_eq!(
+            database::load_retired_harness_session(&child.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SessionState::Running
+        );
+
         state
             .stop_subagents_before_close(&parent.id, None)
             .await
@@ -18011,6 +18034,11 @@ async fn retired_harness_stop_keeps_independent_descendants() {
         );
         assert!(
             database::load_retired_harness_session(&bound.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            database::read_durable_session_record(&bound.id)
                 .unwrap()
                 .is_none()
         );

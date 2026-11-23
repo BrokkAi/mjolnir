@@ -458,7 +458,10 @@ impl RuntimeState {
                     .state
                     .active_borrowers(&parent_session_id)
                     .iter()
-                    .filter(|id| peers.contains(id))
+                    // A supported borrower under a retired parent has no
+                    // typed relation. The durable walk below finds its parent
+                    // and StopSubagent recurses to the borrower.
+                    .filter(|id| peers.contains(id) && controller.state.subagents.contains_key(*id))
                     .map(|child_id| {
                         let child_liveness = liveness
                             .get(child_id)
@@ -510,12 +513,19 @@ impl RuntimeState {
                     .collect();
                 // Retired workers still have durable bindings and relations,
                 // even though they have no typed record for the parent notice.
-                for peer in peers
-                    .iter()
-                    .filter(|id| !controller.state.sessions.contains_key(*id))
-                {
-                    if let Some(relation) = mj_controller::database::load_subagent(peer)? {
-                        parents.insert(peer.clone(), relation.parent_session_id);
+                let mut frontier = vec![parent_session_id.clone()];
+                let mut seen = BTreeSet::from([parent_session_id.clone()]);
+                while let Some(current) = frontier.pop() {
+                    for relation in mj_controller::database::list_subagents_among(&current, &peers)?
+                    {
+                        let child_id = relation.child_session_id;
+                        if !seen.insert(child_id.clone()) {
+                            continue;
+                        }
+                        if !controller.state.sessions.contains_key(&child_id) {
+                            parents.insert(child_id.clone(), current.clone());
+                        }
+                        frontier.push(child_id);
                     }
                 }
                 let children: Vec<_> = parents
