@@ -129,6 +129,7 @@ pub(super) fn project_observation(
                 }
             }
         }
+        RelayObservation::GuardianReviewed { .. } => {}
         RelayObservation::PermissionAutoApproved {
             option_id,
             option_name,
@@ -168,6 +169,7 @@ pub(super) fn project_observation(
             elicitation_id,
             reply,
             action,
+            ..
         } => {
             if action == mj_core::elicitation::OPERATOR_AWAY_ACTION {
                 if let Some(request) = current

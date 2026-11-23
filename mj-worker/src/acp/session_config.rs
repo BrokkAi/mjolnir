@@ -145,18 +145,15 @@ pub(super) async fn resolve_session_config_recovery(
             "configuration can only be changed while the agent is idle".into(),
         )));
     }
-    let action = response.action_name().to_owned();
-    let reply = Some(request.reply_text(response));
-    *pending = None;
-    emit_runtime_event(
+    emit_elicitation_resolution(
         events,
-        RuntimeEvent::ElicitationResolved {
-            elicitation_id: elicitation_id.to_owned(),
-            action,
-            reply,
-        },
+        &spec.turn_context,
+        request,
+        response.action_name(),
+        Some(response),
     )
     .await?;
+    *pending = None;
     let mut applied = Vec::new();
     let mut refused = Vec::new();
     for (key, value) in chosen {
