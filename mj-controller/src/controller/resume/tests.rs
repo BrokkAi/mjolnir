@@ -47,6 +47,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let parent_id = "0123456789abcdef0123456789abcdef";
     let mut parent = checkpoint_test_session(parent_id);
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -59,6 +60,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         worker_root: child_directory.path().join(&child.id),
     }));
     let relation = mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: child.id.clone(),
@@ -316,6 +318,9 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -380,6 +385,9 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -479,6 +487,9 @@ async fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
             ..Config::default()
         },
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -666,6 +677,9 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             ..Config::default()
         },
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -968,6 +982,9 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1690,6 +1707,9 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1872,6 +1892,9 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2124,6 +2147,9 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2402,6 +2428,7 @@ exit 0
     // when the archive holds that session's conversation.
     let mut session = checkpoint_test_session(session_id);
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2430,6 +2457,9 @@ exit 0
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2524,6 +2554,7 @@ exit 0
             assert_eq!(
                 durable.sessions[session_id].subagents,
                 Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None
                 }),

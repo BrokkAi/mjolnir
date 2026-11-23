@@ -496,6 +496,7 @@ impl DashboardContext {
             update.records,
             update.sessions,
             update.subagents,
+            update.environment_owners,
             update.last_subagent_policies,
         );
         self.dashboard
@@ -641,6 +642,7 @@ impl DashboardContext {
             mj_client::daemon::RuntimeSessionView,
         >,
         subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
+        environment_owners: mj_core::snapshot_map::SnapshotMap<String, String>,
         last_subagent_policies: std::collections::BTreeMap<
             String,
             mj_core::subagent::SubagentPolicy,
@@ -683,6 +685,7 @@ impl DashboardContext {
         }
         if self.controller.state.sessions == sessions
             && self.controller.state.subagents == subagents
+            && self.controller.state.environment_owners == environment_owners
             && self.controller.state.last_subagent_policies == last_subagent_policies
         {
             return;
@@ -705,6 +708,7 @@ impl DashboardContext {
         self.departed_records.retain(|id, _| chats.contains_key(id));
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
+        self.controller.state.environment_owners = environment_owners;
         self.controller.state.last_subagent_policies = last_subagent_policies;
         self.dashboard.set_state(self.controller.state.clone());
         for id in retired_ids {

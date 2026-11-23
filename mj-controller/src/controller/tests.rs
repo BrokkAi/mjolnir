@@ -880,6 +880,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
     let parent = controller.state.sessions.get_mut(parent_id).unwrap();
     parent.state = SessionState::Running;
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2084,6 +2085,7 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
     };
     let mut options = launch_options(Vec::new());
     options.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2152,6 +2154,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         base_commit: None,
     }));
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2313,6 +2316,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         base_commit: None,
     }));
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2675,6 +2679,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.path().to_path_buf());
         session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         });
@@ -2930,6 +2935,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
                 // reloads the controller before registering a child, and the
                 // child registration below needs the parent's own choice.
                 subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -3274,6 +3280,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
             last_subagent_policies: std::collections::BTreeMap::from([(
                 "codex".into(),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -3295,6 +3302,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         Some(SubagentPolicy::Native)
     );
     let fixed = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -3364,6 +3372,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     );
     let mut legacy = controller.state.sessions[&native].clone();
     legacy.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3372,6 +3381,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     assert_eq!(
         restarted.state.sessions[&native].subagents,
         Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         })
@@ -3379,6 +3389,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     assert_eq!(
         restarted.state.sessions[&single].subagents,
         Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         })
@@ -3638,6 +3649,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .unwrap();
     let parent = controller.state.sessions.get_mut(parent_id).unwrap();
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3686,6 +3698,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .unwrap();
     child_record.state = SessionState::Running;
     child_record.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3777,6 +3790,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });

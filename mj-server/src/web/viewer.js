@@ -6980,7 +6980,13 @@ function confirmSessionSuspension(session) {
             ? '1 sub-agent has not handed back; suspending stops it.'
             : `${unfinishedChildren} sub-agents have not handed back; suspending stops them.`), controls);
         }
-        const hasWarnings = untrackedCount > 0 || ops.length > 0 || preflight.raw || preflight.interrupting || unfinishedChildren > 0;
+        const owningChildren = preflight.owning_children_to_suspend || 0;
+        if (owningChildren > 0) {
+          dialog.insertBefore(el('p', '', owningChildren === 1
+            ? "Suspending also suspends one child with its own environment and drops that child's untracked files."
+            : `Suspending also suspends ${owningChildren} children with their own environments and drops their untracked files.`), controls);
+        }
+        const hasWarnings = untrackedCount > 0 || ops.length > 0 || preflight.raw || preflight.interrupting || unfinishedChildren > 0 || owningChildren > 0;
         const confirmLabel = untrackedCount > 0
           ? `Discard ${untrackedCount} ${untrackedCount === 1 ? 'file' : 'files'} and continue`
           : (hasWarnings ? 'Continue anyway' : 'Suspend session');

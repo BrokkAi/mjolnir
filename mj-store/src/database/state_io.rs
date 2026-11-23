@@ -136,6 +136,11 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         )?,
         ..Default::default()
     };
+    let mut owners = connection.prepare(super::environments::ENVIRONMENT_OWNER_QUERY)?;
+    for row in owners.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (session_id, owner_id) = row?;
+        state.environment_owners.insert(session_id, owner_id);
+    }
     let mut statement = connection
         .prepare("SELECT profile_id, policy FROM subagent_preference ORDER BY profile_id")?;
     let rows = statement.query_map([], |row| {
@@ -625,6 +630,15 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
     insert_session_with_parent(tx, session, None)
 }
 
+fn stored_session_policy(session: &SessionRecord) -> serde_json::Result<Option<String>> {
+    // Milestone 3 removes this bridge when the policy owns the setting.
+    let mut policy = session.subagents.clone();
+    if let Some(mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. }) = &mut policy {
+        *orchestrators = session.supervisors;
+    }
+    policy.as_ref().map(serde_json::to_string).transpose()
+}
+
 pub(super) fn insert_session_with_parent(
     tx: &Transaction<'_>,
     session: &SessionRecord,
@@ -744,7 +758,7 @@ pub(super) fn insert_session_with_parent(
             session.archived,
             session.draft_input,
             session.create_managed_worktree,
-            session.subagents.as_ref().map(serde_json::to_string).transpose()?,
+            stored_session_policy(session)?,
             session
                 .container_workspace
                 .as_ref()
@@ -833,7 +847,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         no_github_credentials: _,
         notifications_ignored: _,
         // A Move can change it along with the profile the session runs on.
-        subagents,
+        subagents: _,
         oracle,
         additional_mounts: _,
         container_workspace: _,
@@ -898,7 +912,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            subagents.as_ref().map(serde_json::to_string).transpose()?,
+            stored_session_policy(session)?,
             project.as_ref().map(serde_json::to_string).transpose()?,
             oracle,
             oracle_choice

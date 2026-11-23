@@ -493,6 +493,37 @@ pub fn expand_github_source(source: &str) -> Result<String> {
     Ok(expanded)
 }
 
+pub fn canonical_github_https_url(source: &str, shorthand: Shorthand) -> Option<String> {
+    let remote = parse_github_remote(source, shorthand)?;
+    remote.is_default_endpoint().then(|| {
+        format!(
+            "https://github.com/{}/{}.git",
+            remote.owner, remote.repository
+        )
+    })
+}
+
+/// Return a sanitized, normalized URL for user-facing clone/push previews.
+///
+/// Default-endpoint GitHub remotes are shown as
+/// `https://github.com/{owner}/{repository}.git` (stripping any userinfo and
+/// unifying SSH/HTTPS/suffix spellings) without altering operational URLs
+/// passed to Git. Other remotes use [`display_url`].
+pub fn display_network_url(url: &str) -> String {
+    let sanitized = display_url(url.trim());
+    canonical_github_https_url(&sanitized, Shorthand::Rejected).unwrap_or(sanitized)
+}
+
+/// Sanitize, normalize, and deduplicate a list of user-facing remote URLs
+/// while preserving first-seen order.
+pub fn display_network_urls(urls: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    urls.iter()
+        .map(|url| display_network_url(url))
+        .filter(|url| seen.insert(url.clone()))
+        .collect()
+}
+
 /// Whether [`parse_github_remote`] accepts a bare `owner/repository`.
 ///
 /// Text typed into a `github =` setting, the CLI or the API may be shorthand.
@@ -819,6 +850,42 @@ fn sanitize_diagnostic(text: &str, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_network_url_normalizes_github_and_keeps_alternate_routes() {
+        for input in [
+            "git@github.com:BrokkAi/mjolnir.git",
+            "git@github.com:BrokkAi/mjolnir",
+            "github.com:BrokkAi/mjolnir.git",
+            "ssh://git@github.com/BrokkAi/mjolnir",
+            "https://github.com/BrokkAi/mjolnir",
+            "https://GITHUB.COM/BrokkAi/mjolnir/",
+            "http://github.com/BrokkAi/mjolnir",
+            "https://user:token@github.com/BrokkAi/mjolnir",
+        ] {
+            assert_eq!(
+                display_network_url(input),
+                "https://github.com/BrokkAi/mjolnir.git",
+                "{input}"
+            );
+        }
+        assert_eq!(
+            display_network_urls(&[
+                "git@github.com:BrokkAi/mjolnir.git".into(),
+                "https://github.com/BrokkAi/mjolnir".into(),
+                "https://user:token@github.com/BrokkAi/mjolnir/".into(),
+                "ssh://git@ssh.github.com:443/BrokkAi/mjolnir.git".into(),
+                "ssh://git@github.com:22/BrokkAi/mjolnir.git".into(),
+                "https://user:secret@git.example/repo".into(),
+            ]),
+            vec![
+                "https://github.com/BrokkAi/mjolnir.git",
+                "ssh://ssh.github.com:443/BrokkAi/mjolnir.git",
+                "ssh://github.com:22/BrokkAi/mjolnir.git",
+                "https://git.example/repo",
+            ]
+        );
+    }
 
     #[test]
     fn github_shorthand_expands_to_https() {

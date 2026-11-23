@@ -286,7 +286,7 @@ impl ViewerSnapshot {
                 let project = state.project_identity_session(session);
                 let source = project.project_source(config);
                 let subagent = state.subagents.get(&session.id);
-                let subagent_session_ids = children
+                let subagent_session_ids: Vec<String> = children
                     .get(&session.id)
                     .map(|children| children.keys().cloned().collect())
                     .unwrap_or_default();
@@ -345,6 +345,9 @@ impl ViewerSnapshot {
                     retry_assessment_pending: false,
                     quota_recovery: None,
                     is_subagent_session: state.is_subagent_session(&session.id),
+                    owning_children_to_suspend: state
+                        .suspendable_owned_child_ids(&session.id)
+                        .len(),
                     supports_open_request: false,
                     relay_state: None,
                     id: session.id.clone(),
@@ -676,6 +679,8 @@ pub struct ViewerSession {
     /// viewer or API JSON contract.
     #[serde(skip, default)]
     pub(crate) is_subagent_session: bool,
+    #[serde(skip, default)]
+    pub(crate) owning_children_to_suspend: usize,
     /// Whether the session's worker keeps a persistent open request (relay
     /// protocol 64 and later). In-process only, like `is_subagent_session`:
     /// the notification message rule needs it, the JSON contract does not.
