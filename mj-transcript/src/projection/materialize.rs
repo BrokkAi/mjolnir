@@ -419,7 +419,7 @@ fn canonical_item_owned(item: TranscriptItem) -> CanonicalTranscriptItem {
             terminal_refs,
             presentation: presentation.map(|boxed| *boxed),
         },
-        TranscriptBody::TerminalOutput { record } => CanonicalTranscriptBody::TerminalOutput {
+        TranscriptBody::TerminalOutput { record, .. } => CanonicalTranscriptBody::TerminalOutput {
             record: canonical_terminal_output(&record),
         },
         TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan },
@@ -468,7 +468,7 @@ fn canonical_item_shared(item: &TranscriptItem) -> CanonicalTranscriptItem {
             terminal_refs: terminal_refs.clone(),
             presentation: presentation.as_deref().cloned(),
         },
-        TranscriptBody::TerminalOutput { record } => CanonicalTranscriptBody::TerminalOutput {
+        TranscriptBody::TerminalOutput { record, .. } => CanonicalTranscriptBody::TerminalOutput {
             record: canonical_terminal_output(record),
         },
         TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan: plan.clone() },
@@ -530,9 +530,7 @@ pub fn materialized_session_from_canonical(
                     presentation: presentation.clone().map(Box::new),
                 },
                 CanonicalTranscriptBody::TerminalOutput { record } => {
-                    TranscriptBody::TerminalOutput {
-                        record: materialized_terminal_output(record),
-                    }
+                    TranscriptBody::terminal_output(materialized_terminal_output(record))
                 }
                 CanonicalTranscriptBody::Plan { plan } => {
                     TranscriptBody::Plan { plan: plan.clone() }

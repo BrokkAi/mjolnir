@@ -3121,7 +3121,7 @@ fn terminal_output_before_the_tool_call_attaches_when_the_call_arrives() {
     assert_eq!(session.transcript[0].stable_id, "terminal:term-1");
     assert!(matches!(
         &session.transcript[0].body,
-        TranscriptBody::TerminalOutput { record } if record.terminal_id == "term-1"
+        TranscriptBody::TerminalOutput { record, .. } if record.terminal_id == "term-1"
     ));
 
     apply_observation(&mut session, terminal_tool_call("call-1", "term-1"));
@@ -3186,7 +3186,7 @@ fn mismatched_raw_result_does_not_hide_a_genuine_orphan_failure() {
     assert_eq!(session.transcript.len(), 2);
     assert!(session.transcript.iter().any(|item| matches!(
         &item.body,
-        TranscriptBody::TerminalOutput { record }
+        TranscriptBody::TerminalOutput { record, .. }
             if record.output.text() == "orphan failure\n"
     )));
 }
@@ -3971,6 +3971,7 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
                 source_kind: crate::transcript::ToolSummarySourceKind::Title,
                 tool_kind: agent_client_protocol::v1::schema::ToolKind::Read,
                 summary_version: crate::transcript::TOOL_SUMMARY_VERSION,
+                ..Default::default()
             })),
         },
     }));
@@ -3980,15 +3981,13 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
         latest_content_event_ordinal: None,
         created_at_ms: 40,
         last_changed_at_ms: 40,
-        body: TranscriptBody::TerminalOutput {
-            record: TerminalOutputRecord {
-                terminal_id: "term-2".into(),
-                output: "orphaned output\n".into(),
-                truncated: false,
-                exit_code: None,
-                signal: Some("SIGKILL".into()),
-            },
-        },
+        body: TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: "term-2".into(),
+            output: "orphaned output\n".into(),
+            truncated: false,
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+        }),
     }));
     session.transcript.push(Arc::new(TranscriptItem {
         stable_id: "plan:4".into(),

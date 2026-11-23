@@ -28,7 +28,7 @@ pub const LEGACY_HANDOFF_PREAMBLE: &str =
 pub const HANDOFF_PLACEHOLDER: &str =
     "[cross-harness resume handoff: continuing work from a prior harness]";
 /// Prior handoffs repeat history already represented in the lineage.
-fn user_text(text: String) -> String {
+pub fn user_text(text: String) -> String {
     let trimmed = text.trim_start();
     if [
         HANDOFF_PREAMBLE,
@@ -135,6 +135,43 @@ pub fn excerpt(text: &str, limit: usize) -> String {
     )
 }
 
+#[derive(Default)]
+pub struct ToolOutcome<'a> {
+    pub exit_code: Option<i64>,
+    pub signal: Option<&'a str>,
+}
+
+impl<'a> ToolOutcome<'a> {
+    pub fn from_raw_output(output: Option<&'a Value>) -> Self {
+        Self {
+            exit_code: output
+                .and_then(|value| value.get("exit_code"))
+                .and_then(Value::as_i64),
+            signal: output
+                .and_then(|value| value.get("signal"))
+                .and_then(Value::as_str),
+        }
+    }
+
+    pub fn observe_terminal(&mut self, code: Option<u32>, signal: Option<&'a str>) {
+        self.exit_code = code.map(i64::from).or(self.exit_code);
+        self.signal = signal.or(self.signal);
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.signal.is_some() || self.exit_code.is_some_and(|code| code != 0)
+    }
+
+    fn write_to(&self, value: &mut Value) {
+        if let Some(code) = self.exit_code {
+            value["exit_code"] = json!(code);
+        }
+        if let Some(signal) = self.signal {
+            value["signal"] = json!(signal);
+        }
+    }
+}
+
 fn tool_value(call: &Value, presentation: Option<&ToolCallPresentation>, full: bool) -> Value {
     let name = match serde_json::from_value::<ToolCall>(call.clone()) {
         Ok(call) => materialized_tool_call_presentation(presentation, &call).summary,
@@ -149,12 +186,7 @@ fn tool_value(call: &Value, presentation: Option<&ToolCallPresentation>, full: b
         "kind": call.get("kind").and_then(Value::as_str).unwrap_or("other"),
         "status": call.get("status").and_then(Value::as_str).unwrap_or("pending"),
     });
-    if let Some(code) = call.pointer("/rawOutput/exit_code").and_then(Value::as_i64) {
-        compact["exit_code"] = json!(code);
-    }
-    if let Some(signal) = call.pointer("/rawOutput/signal").and_then(Value::as_str) {
-        compact["signal"] = json!(signal);
-    }
+    ToolOutcome::from_raw_output(call.get("rawOutput")).write_to(&mut compact);
     if full {
         compact["call"] = call.clone();
     }
@@ -792,13 +824,9 @@ fn attach_terminals<'a>(
         ),
     >,
 ) {
+    let mut outcome = ToolOutcome::default();
     for (id, output, code, signal, truncated) in terminals {
-        if let Some(code) = code {
-            value["exit_code"] = json!(code);
-        }
-        if let Some(signal) = signal {
-            value["signal"] = json!(signal);
-        }
+        outcome.observe_terminal(code, signal);
         if value.get("call").is_some() {
             if !value["terminals"].is_object() {
                 value["terminals"] = json!({});
@@ -807,6 +835,7 @@ fn attach_terminals<'a>(
                 json!({"output":output,"exit_code":code,"signal":signal,"truncated":truncated});
         }
     }
+    outcome.write_to(value);
 }
 
 fn bound_value(value: &mut Value, limit: usize) {

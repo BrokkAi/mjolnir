@@ -2205,6 +2205,7 @@ fn materialized_session_round_trip_preserves_typed_projection() {
                 source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
                 tool_kind: agent_client_protocol::v1::schema::ToolKind::Execute,
                 summary_version: 0,
+                ..Default::default()
             }));
         }
     }
@@ -7744,7 +7745,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
             let (parked_id, body) = if standalone {
                 (
                     "terminal:late-terminal".to_owned(),
-                    TranscriptBody::TerminalOutput { record },
+                    TranscriptBody::terminal_output(record),
                 )
             } else {
                 (
@@ -8835,7 +8836,7 @@ fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() 
             latest_content_event_ordinal: None,
             created_at_ms: 1,
             last_changed_at_ms: 1,
-            body: TranscriptBody::TerminalOutput { record },
+            body: TranscriptBody::terminal_output(record),
         });
         full.transcript = if output_first {
             vec![parked, owner.clone()]

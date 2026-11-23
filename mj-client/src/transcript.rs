@@ -368,7 +368,7 @@ pub fn suppress_duplicate_standalone_terminal_output(entries: &mut [ChatEntry]) 
         let Some(item) = entry.source.0.as_ref() else {
             continue;
         };
-        let TranscriptBody::TerminalOutput { record } = &item.body else {
+        let TranscriptBody::TerminalOutput { record, .. } = &item.body else {
             continue;
         };
         let digest = record.raw_result_digest();
@@ -531,8 +531,13 @@ pub fn materialized_chat_entry_with_outputs(
                     .map_or(ToolStatus::Pending, |call| tool_status(&call.status)),
             );
             if let Some(call) = call {
-                let presentation =
+                let mut presentation =
                     materialized_tool_call_presentation(presentation.as_deref(), &call);
+                // Inline chat still shows the full command while the raw call
+                // is available. The materialized row stores only its label.
+                if presentation.source.is_empty() {
+                    presentation.source = tool_call_presentation(&call).source;
+                }
                 entry.tool_summary = Some(presentation.summary.clone());
                 entry.tool_presentation = Some(presentation);
                 entry.tool_input = call.raw_input.clone();
@@ -572,7 +577,7 @@ pub fn materialized_chat_entry_with_outputs(
             }
             entry
         }
-        TranscriptBody::TerminalOutput { record } => {
+        TranscriptBody::TerminalOutput { record, .. } => {
             let mut entry = ChatEntry::plain(
                 item.position,
                 ChatRole::System,
@@ -1706,15 +1711,13 @@ mod tests {
         }
         session.transcript.push(item(
             301,
-            TranscriptBody::TerminalOutput {
-                record: TerminalOutputRecord {
-                    terminal_id: "parked".into(),
-                    output: "unique parked output".into(),
-                    truncated: false,
-                    exit_code: Some(0),
-                    signal: None,
-                },
-            },
+            TranscriptBody::terminal_output(TerminalOutputRecord {
+                terminal_id: "parked".into(),
+                output: "unique parked output".into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            }),
         ));
         session.applied_event_ordinal = 301;
         let previous = materialized_chat_entries(&session);

@@ -115,8 +115,13 @@ pub(super) fn project_session_update(
             );
             materialized_call.update(update.fields.clone());
             if presentation_changed
-                || presentation.as_ref().is_none_or(|value| {
-                    value.summary_version < crate::transcript::TOOL_SUMMARY_VERSION
+                || presentation.as_ref().is_none_or(|p| {
+                    p.summary_version < crate::transcript::TOOL_SUMMARY_VERSION
+                        || (p.output_line_count.is_some()
+                            && matches!(
+                                materialized_call.status,
+                                ToolCallStatus::Pending | ToolCallStatus::InProgress
+                            ))
                 })
             {
                 *presentation = Some(Box::new(tool_call_presentation(&materialized_call)));
@@ -421,7 +426,8 @@ pub(super) fn push_system_with_id(
     );
 }
 
-pub(super) fn upsert(mutation: &mut MaterializedSessionMutation, item: TranscriptItem) {
+pub(super) fn upsert(mutation: &mut MaterializedSessionMutation, mut item: TranscriptItem) {
+    crate::transcript::enrich_settled_tool(&mut item.body);
     if let Some(existing) = mutation.transcript.iter_mut().find(|candidate| {
         matches!(candidate, TranscriptMutation::Upsert(current) if current.stable_id == item.stable_id)
     }) {

@@ -32,15 +32,13 @@ fn background_conversion_reuses_unchanged_entries_and_refreshes_changed_text() {
             latest_content_event_ordinal: None,
             created_at_ms: 3,
             last_changed_at_ms: 3,
-            body: mj_core::transcript::TranscriptBody::TerminalOutput {
-                record: TerminalOutputRecord {
-                    terminal_id: "parked".into(),
-                    output: "done\n".into(),
-                    truncated: false,
-                    exit_code: Some(0),
-                    signal: None,
-                },
-            },
+            body: mj_core::transcript::TranscriptBody::terminal_output(TerminalOutputRecord {
+                terminal_id: "parked".into(),
+                output: "done\n".into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            }),
         }),
     ];
     let first = TranscriptSnapshot::from_materialized(&session);
@@ -2440,15 +2438,13 @@ fn legacy_kimi_duplicate_is_suppressed_without_reprojecting_history() {
             latest_content_event_ordinal: None,
             created_at_ms: 2,
             last_changed_at_ms: 2,
-            body: TranscriptBody::TerminalOutput {
-                record: TerminalOutputRecord {
-                    terminal_id: "term-1".into(),
-                    output: OUTPUT.into(),
-                    truncated: false,
-                    exit_code: Some(1),
-                    signal: None,
-                },
-            },
+            body: TranscriptBody::terminal_output(TerminalOutputRecord {
+                terminal_id: "term-1".into(),
+                output: OUTPUT.into(),
+                truncated: false,
+                exit_code: Some(1),
+                signal: None,
+            }),
         }),
     ];
 
@@ -2489,7 +2485,7 @@ fn terminal_output_item(position: u64, record: TerminalOutputRecord) -> Arc<Tran
         latest_content_event_ordinal: None,
         created_at_ms: position as i64,
         last_changed_at_ms: position as i64,
-        body: TranscriptBody::TerminalOutput { record },
+        body: TranscriptBody::terminal_output(record),
     })
 }
 
@@ -2773,6 +2769,7 @@ fn current_stored_tool_presentation_is_preserved() {
                 source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
                 tool_kind: ToolKind::Execute,
                 summary_version: mj_transcript::transcript::TOOL_SUMMARY_VERSION,
+                ..Default::default()
             })),
         },
     })];
@@ -2810,6 +2807,7 @@ fn stale_stored_tool_presentation_is_reparsed_for_rich_surfaces() {
                 source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
                 tool_kind: ToolKind::Execute,
                 summary_version: 0,
+                ..Default::default()
             })),
         },
     })];

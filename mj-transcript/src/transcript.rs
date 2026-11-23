@@ -1,9 +1,11 @@
 //! Transcript projection and presentation implementation.
 
 use agent_client_protocol::v1::schema::{
-    SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation, ToolCallUpdateFields, ToolKind,
+    SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdateFields, ToolKind,
 };
 use mj_core::acp::RuntimeEvent;
+use mj_core::packed_text::PackedText;
 pub use mj_core::transcript::*;
 use serde::Deserialize;
 use serde_json::Value;
@@ -14,6 +16,97 @@ const TOOL_SUMMARY_MAX_NESTING: usize = 16;
 const UNNAMED_COMMAND_SUMMARY: &str = "…";
 /// Parser-rule version stored with cached tool summaries.
 pub const TOOL_SUMMARY_VERSION: u8 = 11;
+
+const ERROR_LINE_BYTES: usize = 256;
+const EDIT_SNIPPET_BYTES: usize = 512;
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    &text[..text.floor_char_boundary(max_bytes)]
+}
+
+fn first_error_line(output: &str, is_error: bool) -> Option<String> {
+    if !is_error {
+        return None;
+    }
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| truncate_utf8(line, ERROR_LINE_BYTES).to_owned())
+}
+
+pub fn tool_output(call: &ToolCall, terminal_outputs: &[TerminalOutputRecord]) -> String {
+    tool_content_details(
+        &call.content,
+        terminal_outputs,
+        call.raw_output.as_ref(),
+        tool_status(&call.status),
+    )
+    .join("\n")
+}
+
+pub fn tool_output_is_error(call: &ToolCall, terminal_outputs: &[TerminalOutputRecord]) -> bool {
+    let mut outcome = crate::summary::ToolOutcome::from_raw_output(call.raw_output.as_ref());
+    for record in terminal_outputs {
+        outcome.observe_terminal(record.exit_code, record.signal.as_deref());
+    }
+    call.status == ToolCallStatus::Failed || outcome.is_error()
+}
+
+/// Capture compact output and edit evidence after all parts of a tool event
+/// have been applied, including a terminal arriving after ACP settlement.
+pub(crate) fn enrich_settled_tool(body: &mut TranscriptBody) {
+    let TranscriptBody::Tool {
+        call,
+        terminal_outputs,
+        presentation,
+        ..
+    } = body
+    else {
+        return;
+    };
+    if !matches!(
+        call.typed_status(),
+        ToolCallStatus::Completed | ToolCallStatus::Failed
+    ) || presentation.as_ref().is_some_and(|p| p.detail_trimmed)
+    {
+        return;
+    }
+    let call = match call.decode() {
+        Ok(call) => call,
+        Err(error) => {
+            tracing::warn!(%error, "could not enrich a stored tool call");
+            return;
+        }
+    };
+    let presentation = presentation.get_or_insert_with(|| Box::new(tool_call_presentation(&call)));
+    let output = tool_output(&call, terminal_outputs);
+    let is_error = tool_output_is_error(&call, terminal_outputs);
+    presentation.output_line_count = Some(output.lines().count() as u64);
+    presentation.output_is_error = Some(is_error);
+    presentation.first_error_line = first_error_line(&output, is_error);
+    presentation.edit_snippets.clear();
+    if call.status == ToolCallStatus::Completed {
+        for item in &call.content {
+            if let ToolCallContent::Diff(diff) = item {
+                let path = diff.path.to_string_lossy().replace('\\', "/");
+                let patch = mj_core::diff::patch_of(diff);
+                if !path.is_empty() && !patch.text.is_empty() {
+                    presentation.edit_snippets.push(ToolEditSnippet {
+                        path,
+                        kind: if patch.created {
+                            ToolEditKind::Write
+                        } else {
+                            ToolEditKind::Edit
+                        },
+                        snippet: truncate_utf8(&patch.text, EDIT_SNIPPET_BYTES).to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    presentation.source = PackedText::default();
+}
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -27,47 +120,87 @@ pub const TOOL_SUMMARY_VERSION: u8 = 11;
 /// Returns whether anything changed, so a caller can skip the write.
 pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
     let TranscriptBody::Tool {
-        call,
-        terminal_outputs,
-        terminal_refs,
-        ..
+        call, presentation, ..
     } = body
     else {
         return false;
     };
+    if !matches!(
+        call.typed_status(),
+        ToolCallStatus::Completed | ToolCallStatus::Failed
+    ) || presentation.as_ref().is_some_and(|p| p.detail_trimmed)
+    {
+        return false;
+    }
+    if !presentation
+        .as_ref()
+        .is_some_and(|p| p.output_line_count.is_some() && p.output_is_error.is_some())
+    {
+        enrich_settled_tool(body);
+    }
+    let TranscriptBody::Tool {
+        call,
+        terminal_outputs,
+        terminal_refs,
+        presentation: Some(presentation),
+    } = body
+    else {
+        return false;
+    };
+    presentation.source = PackedText::default();
+    presentation.detail_trimmed = true;
+    terminal_outputs.clear();
+    terminal_refs.clear();
     call.edit(|value| {
         let Some(object) = value.as_object_mut() else {
-            return false;
+            return;
         };
-        let mut changed = !terminal_outputs.is_empty() || !terminal_refs.is_empty();
-        terminal_outputs.clear();
-        terminal_refs.clear();
         for field in ["rawInput", "rawOutput", "_meta"] {
-            changed |= object.remove(field).is_some();
+            object.remove(field);
         }
         let Some(content) = object
             .get_mut("content")
             .and_then(|value| value.as_array_mut())
         else {
-            return changed;
+            return;
         };
-        let before = content.len();
         // Diffs stay, because the transcript still shows their stat. Their patch
         // text does not, and neither do the two file copies an older record holds
         // instead of a patch: `diff::drop_patch_text` turns those into the
         // counts `format_diffstat` reads before dropping them.
         content.retain(|item| item.get("type").and_then(|kind| kind.as_str()) == Some("diff"));
-        changed |= content.len() != before;
         for item in content.iter_mut() {
-            changed |= drop_diff_body(item);
+            drop_diff_body(item);
         }
-        changed
-    })
+    });
+    true
 }
 
-fn drop_diff_body(item: &mut serde_json::Value) -> bool {
-    use agent_client_protocol::v1::schema::ToolCallContent;
+pub fn compact_transcript_body_for_retention(body: &mut TranscriptBody) -> bool {
+    if let TranscriptBody::TerminalOutput {
+        record,
+        output_line_count,
+        first_error_line: error_line,
+        detail_trimmed,
+    } = body
+    {
+        if *detail_trimmed {
+            return false;
+        }
+        let output = record.output.text();
+        *output_line_count = Some(output.lines().count() as u64);
+        *error_line = first_error_line(
+            &output,
+            record.signal.is_some() || record.exit_code.is_some_and(|code| code != 0),
+        );
+        record.output = PackedText::default();
+        *detail_trimmed = true;
+        return true;
+    }
+    compact_tool_call_for_retention(body)
+}
 
+fn drop_diff_body(item: &mut serde_json::Value) {
     // Round-trip through `ToolCallContent`, not `Diff`: the variant tag lives
     // on the enum, and writing back a bare `Diff` would strip it and make the
     // whole tool call unreadable.
@@ -76,23 +209,19 @@ fn drop_diff_body(item: &mut serde_json::Value) -> bool {
         // Content this cannot read is content it must not rewrite.
         Err(error) => {
             tracing::warn!(%error, "skipping unreadable tool content during retention");
-            return false;
+            return;
         }
     };
     let ToolCallContent::Diff(diff) = &mut content else {
-        return false;
+        return;
     };
     if !mj_core::diff::drop_patch_text(diff) {
-        return false;
+        return;
     }
     match serde_json::to_value(&content) {
-        Ok(value) => {
-            *item = value;
-            true
-        }
+        Ok(value) => *item = value,
         Err(error) => {
             tracing::warn!(%error, "could not rewrite a diff during retention");
-            false
         }
     }
 }
@@ -162,17 +291,34 @@ pub fn materialized_tool_call_presentation(
     stored: Option<&ToolCallPresentation>,
     call: &ToolCall,
 ) -> ToolCallPresentation {
-    stored
-        .filter(|presentation| {
-            presentation.summary_version >= TOOL_SUMMARY_VERSION
+    match stored {
+        Some(presentation)
+            if presentation.summary_version >= TOOL_SUMMARY_VERSION
+                || presentation.detail_trimmed
                 || match presentation.source_kind {
                     ToolSummarySourceKind::RawInput => call.raw_input.is_none(),
                     ToolSummarySourceKind::RawOutput => call.raw_output.is_none(),
                     ToolSummarySourceKind::Title => false,
-                }
-        })
-        .cloned()
-        .unwrap_or_else(|| tool_call_presentation(call))
+                } =>
+        {
+            presentation.clone()
+        }
+        Some(presentation) => {
+            let mut rebuilt = tool_call_presentation(call);
+            if presentation.output_line_count.is_some() {
+                rebuilt.source = PackedText::default();
+            }
+            ToolCallPresentation {
+                summary: rebuilt.summary,
+                source: rebuilt.source,
+                source_kind: rebuilt.source_kind,
+                tool_kind: rebuilt.tool_kind,
+                summary_version: rebuilt.summary_version,
+                ..presentation.clone()
+            }
+        }
+        None => tool_call_presentation(call),
+    }
 }
 
 /// Apply the presentation-relevant portion of a partial ACP update to cached
@@ -432,6 +578,7 @@ fn presentation_from_source(
         source_kind,
         tool_kind,
         summary_version: TOOL_SUMMARY_VERSION,
+        ..Default::default()
     }
 }
 
@@ -455,6 +602,7 @@ fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresenta
         source_kind: ToolSummarySourceKind::Title,
         tool_kind,
         summary_version: TOOL_SUMMARY_VERSION,
+        ..Default::default()
     }
 }
 
@@ -1788,7 +1936,7 @@ pub fn transcript_item_text_with_outputs(
             }
             sanitize_terminal_text(&text)
         }
-        TranscriptBody::TerminalOutput { record } => {
+        TranscriptBody::TerminalOutput { record, .. } => {
             if outputs.shown_under_tool(&record.terminal_id) {
                 return String::new();
             }
@@ -1871,6 +2019,39 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn standalone_terminal_retention_preserves_multibyte_error_and_outcome() {
+        let first_error = format!("error {}", "界".repeat(100));
+        let mut body = TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: "term-1".into(),
+            output: format!("   \n  {first_error}\n{}\n", "stdout\n".repeat(10_000)).into(),
+            truncated: true,
+            exit_code: Some(137),
+            signal: Some("SIGKILL".into()),
+        });
+
+        assert!(compact_transcript_body_for_retention(&mut body));
+        assert!(!compact_transcript_body_for_retention(&mut body));
+        let compact = serde_json::to_vec(&body).unwrap();
+        assert!(compact.len() < 1024);
+        let TranscriptBody::TerminalOutput {
+            record,
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
+        } = serde_json::from_slice(&compact).unwrap()
+        else {
+            panic!("expected a terminal record")
+        };
+        assert!(record.output.is_empty());
+        assert_eq!(record.exit_code, Some(137));
+        assert_eq!(record.signal.as_deref(), Some("SIGKILL"));
+        assert!(record.truncated);
+        assert_eq!(output_line_count, Some(10_003));
+        assert_eq!(first_error_line.as_deref(), Some(&first_error[..255]));
+        assert!(detail_trimmed);
+    }
+
+    #[test]
     fn a_live_tool_call_records_when_it_started_and_ended() {
         let mut entries = Vec::new();
         let call = ToolCall::new("tool-1", "cargo test").status(ToolCallStatus::InProgress);
@@ -1911,6 +2092,7 @@ mod tests {
             source_kind: ToolSummarySourceKind::Title,
             tool_kind: ToolKind::Other,
             summary_version: 1,
+            ..Default::default()
         };
         assert_eq!(
             materialized_tool_call_presentation(Some(&stale), &call).summary,
@@ -2082,6 +2264,7 @@ mod tests {
             source_kind: ToolSummarySourceKind::RawInput,
             tool_kind: ToolKind::Execute,
             summary_version: 0,
+            ..Default::default()
         };
         assert_eq!(
             materialized_tool_call_presentation(Some(&stale), &compacted),
@@ -2263,6 +2446,7 @@ mod tests {
             source_kind: ToolSummarySourceKind::RawInput,
             tool_kind: ToolKind::Execute,
             summary_version: 0,
+            ..Default::default()
         };
 
         let repaired = materialized_tool_call_presentation(Some(&stale), &call);
@@ -2431,7 +2615,7 @@ mod tests {
                 latest_content_event_ordinal: None,
                 created_at_ms: 1,
                 last_changed_at_ms: 1,
-                body: TranscriptBody::TerminalOutput { record },
+                body: TranscriptBody::terminal_output(record),
             };
             transcript_item_text(&item)
         };

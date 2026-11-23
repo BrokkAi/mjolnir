@@ -820,7 +820,7 @@ pub(super) fn project_observation(
                 match index.get(&stable_id) {
                     Some(existing) => {
                         let mut item = TranscriptItem::clone(existing);
-                        item.body = TranscriptBody::TerminalOutput { record };
+                        item.body = TranscriptBody::terminal_output(record);
                         item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
                         upsert(mutation, item);
                     }
@@ -832,7 +832,7 @@ pub(super) fn project_observation(
                             latest_content_event_ordinal: None,
                             created_at_ms: event.recorded_at_ms,
                             last_changed_at_ms: event.recorded_at_ms,
-                            body: TranscriptBody::TerminalOutput { record },
+                            body: TranscriptBody::terminal_output(record),
                         },
                     ),
                 }

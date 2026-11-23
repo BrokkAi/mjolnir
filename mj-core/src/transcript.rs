@@ -57,6 +57,11 @@ impl TerminalRecord for crate::archive::CanonicalTerminalOutput {
         &self.terminal_id
     }
 }
+impl<R: TerminalRecord> Default for TerminalOutputs<'_, R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl<'a, R: TerminalRecord> TerminalOutputs<'a, R> {
     fn new() -> Self {
         Self {
@@ -65,11 +70,14 @@ impl<'a, R: TerminalRecord> TerminalOutputs<'a, R> {
             referenced: Default::default(),
         }
     }
-    fn tool(&mut self, id: &'a str, embedded: &'a [R], refs: &'a [String]) {
+    pub fn tool(&mut self, id: &'a str, embedded: &'a [R], refs: &'a [String]) {
         self.tools.insert(id, (embedded, refs));
         self.referenced.extend(refs.iter().map(String::as_str));
         self.referenced
             .extend(embedded.iter().map(TerminalRecord::terminal_id));
+    }
+    pub fn standalone(&mut self, record: &'a R) {
+        self.standalone.insert(record.terminal_id(), record);
     }
     pub fn for_tool(&self, stable_id: &str) -> std::borrow::Cow<'a, [R]> {
         let Some((embedded, refs)) = self.tools.get(stable_id) else {
@@ -126,8 +134,8 @@ impl<'a> TerminalOutputs<'a> {
                     terminal_refs,
                     ..
                 } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
-                TranscriptBody::TerminalOutput { record } => {
-                    outputs.standalone.insert(&record.terminal_id, record);
+                TranscriptBody::TerminalOutput { record, .. } => {
+                    outputs.standalone(record);
                 }
                 _ => {}
             }
@@ -148,7 +156,7 @@ impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
                     ..
                 } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
                 crate::archive::CanonicalTranscriptBody::TerminalOutput { record } => {
-                    outputs.standalone.insert(&record.terminal_id, record);
+                    outputs.standalone(record);
                 }
                 _ => {}
             }
@@ -158,18 +166,37 @@ impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
 }
 
 /// Where a tool's compact presentation source came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSummarySourceKind {
     RawInput,
     RawOutput,
+    #[default]
     Title,
 }
 
-/// Bounded presentation metadata derived from an ACP tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEditKind {
+    Edit,
+    Write,
+    MultiEdit,
+    NotebookEdit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolEditSnippet {
+    pub path: String,
+    pub kind: ToolEditKind,
+    pub snippet: String,
+}
+
+/// Bounded presentation metadata derived from an ACP tool call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallPresentation {
     pub summary: String,
+    // Existing canonical transcript readers require the field even when empty.
+    #[serde(default)]
     pub source: PackedText,
     pub source_kind: ToolSummarySourceKind,
     pub tool_kind: ToolKind,
@@ -177,6 +204,16 @@ pub struct ToolCallPresentation {
     /// identifies presentation metadata written before parser versioning.
     #[serde(default)]
     pub summary_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_line_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_error_line: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_is_error: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edit_snippets: Vec<ToolEditSnippet>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub detail_trimmed: bool,
 }
 
 /// An ACP call retained as JSON text. All cached interpretations are built
@@ -374,6 +411,12 @@ pub enum TranscriptBody {
     /// never dropped.
     TerminalOutput {
         record: TerminalOutputRecord,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_line_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_error_line: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        detail_trimmed: bool,
     },
     Plan {
         /// Complete current ACP `Plan`, including entry priorities and all
@@ -394,6 +437,17 @@ pub enum TranscriptBody {
     System {
         text: String,
     },
+}
+
+impl TranscriptBody {
+    pub fn terminal_output(record: TerminalOutputRecord) -> Self {
+        Self::TerminalOutput {
+            record,
+            output_line_count: None,
+            first_error_line: None,
+            detail_trimmed: false,
+        }
+    }
 }
 
 /// Append one ACP `ContentChunk` value to a transcript item's chunk list,
@@ -500,6 +554,18 @@ pub struct TerminalOutputRecord {
     pub exit_code: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+}
+
+impl From<&crate::archive::CanonicalTerminalOutput> for TerminalOutputRecord {
+    fn from(record: &crate::archive::CanonicalTerminalOutput) -> Self {
+        Self {
+            terminal_id: record.terminal_id.clone(),
+            output: record.output.clone().into(),
+            truncated: record.truncated,
+            exit_code: record.exit_code,
+            signal: record.signal.clone(),
+        }
+    }
 }
 
 impl TerminalOutputRecord {
