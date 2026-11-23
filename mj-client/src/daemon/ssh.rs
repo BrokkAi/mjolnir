@@ -153,6 +153,7 @@ pub async fn discover(
 /// it never stops the remote daemon.
 pub struct SshLease {
     pub local_addr: std::net::SocketAddr,
+    pub local_api_addr: Option<std::net::SocketAddr>,
     pub endpoint: DaemonEndpoint,
     child: mj_core::subprocess::SupervisedChild,
     #[cfg(windows)]
@@ -160,6 +161,16 @@ pub struct SshLease {
 }
 
 impl SshLease {
+    pub fn api_endpoint(&self) -> Option<(String, String)> {
+        let address = self.local_api_addr?;
+        let token = self
+            .endpoint
+            .api_token
+            .as_ref()
+            .filter(|token| !token.is_empty())?;
+        Some((format!("http://{address}"), token.clone()))
+    }
+
     /// Credentials for the forwarded connection, never persisted to disk.
     /// PID zero deliberately carries no local process authority.
     pub fn metadata(&self) -> super::DaemonMetadata {
@@ -250,12 +261,35 @@ async fn open_with_port(
             local_addr.port(),
             forward_destination(endpoint.control_address)
         ));
+        let local_api_addr = if let Some(remote_api) = endpoint.api_address
+            && endpoint
+                .api_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+        {
+            let api_port = port()?;
+            anyhow::ensure!(
+                api_port != local_addr.port(),
+                "SSH control and HTTP forwards need distinct local ports"
+            );
+            command.arg("-L").arg(format!(
+                "127.0.0.1:{api_port}:{}",
+                forward_destination(remote_api)
+            ));
+            Some(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                api_port,
+            )))
+        } else {
+            None
+        };
         #[cfg(windows)]
         command.args(&placement.ssh_args);
         command.arg(placement.host.as_deref().context("missing SSH host")?);
         let child = mj_core::subprocess::SupervisedChild::spawn(&mut command)?;
         let mut lease = SshLease {
             local_addr,
+            local_api_addr,
             endpoint: endpoint.clone(),
             child,
             #[cfg(windows)]
@@ -286,6 +320,8 @@ async fn open_with_port(
                         let fresh = discover(placement, remote_instance, intent).await?;
                         if fresh.instance_id != endpoint.instance_id
                             || fresh.control_address != endpoint.control_address
+                            || fresh.api_address != endpoint.api_address
+                            || fresh.api_token != endpoint.api_token
                         {
                             return Ok(Some(fresh));
                         }
@@ -357,6 +393,27 @@ pub(super) async fn prove_stream(stream: &mut tokio::net::TcpStream, token: &str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_endpoint_json_works_with_old_and_new_discovery_clients() {
+        let old = serde_json::json!({
+            "protocol_version": 1,
+            "build_version": "2.0.0",
+            "control_address": "127.0.0.1:8787",
+            "token": "control",
+            "instance_id": "started",
+        });
+        let endpoint: super::DaemonEndpoint = serde_json::from_value(old.clone()).unwrap();
+        assert!(endpoint.api_address.is_none());
+        assert!(endpoint.api_token.is_none());
+        let mut new = old;
+        new["api_address"] = serde_json::json!("[::1]:8788");
+        new["api_token"] = serde_json::json!("api");
+        let endpoint: super::DaemonEndpoint = serde_json::from_value(new).unwrap();
+        let round_trip = serde_json::to_value(endpoint).unwrap();
+        assert_eq!(round_trip["api_address"], "[::1]:8788");
+        assert_eq!(round_trip["api_token"], "api");
+    }
+
     #[test]
     fn detects_log_options_without_matching_option_values() {
         for (args, expected) in [
@@ -515,6 +572,17 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(lease.endpoint.instance_id, endpoint.instance_id);
+        let (url, token) = lease
+            .api_endpoint()
+            .expect("the remote publishes its HTTP API");
+        assert_ne!(
+            lease.local_api_addr.unwrap().port(),
+            lease.local_addr.port()
+        );
+        let http = crate::http::HttpDaemonClient::new(url, token).unwrap();
+        http.get_json::<serde_json::Value>("/api/v1/options")
+            .await
+            .unwrap();
         lease.terminate().await.unwrap();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let occupied_port = occupied.local_addr().unwrap().port();

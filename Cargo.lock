@@ -753,6 +753,8 @@ dependencies = [
  "hmac",
  "image",
  "libc",
+ "reqwest",
+ "rustls",
  "semver",
  "serde",
  "serde_json",

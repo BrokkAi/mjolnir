@@ -2,8 +2,7 @@
 //!
 //! The container is the daemon's machine. It has its own filesystem, its own
 //! network namespace, and one named volume mounted at [`VOLUME_MOUNT`]. The
-//! host supplies only three things: the engine command, a published loopback
-//! port, and the token. No host directory, network namespace, PID namespace or
+//! host supplies the engine command, published loopback ports, and credentials. No host directory, network namespace, PID namespace or
 //! uid is shared with the container. A host directory the user explicitly
 //! wants inside a session belongs in `[daemon] mounts`.
 //!
@@ -17,7 +16,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use mj_client::daemon::{
     CONTAINER_OWNER_SCHEMA, ContainerDaemonRecord, DaemonMetadata, DaemonPlacement,
-    PROTOCOL_VERSION, remove_container_owner_if_matching, write_container_owner,
+    PROTOCOL_VERSION, write_container_owner,
 };
 use mj_core::config::{DaemonConfig, DaemonRuntime, RELEASE_CONTAINER_IMAGE, data_dir};
 use sha2::Digest;
@@ -43,12 +42,15 @@ const VOLUME_MOUNT: &str = "/var/lib/mjolnir";
 /// The daemon listens on this port inside its own network namespace. The host
 /// publishes it on a random loopback port, so containers never collide.
 const CONTAINER_PORT: u16 = 8787;
+const CONTAINER_API_PORT: u16 = 8788;
 #[derive(Debug, Clone)]
 pub(super) struct ContainerLaunch {
     pub(super) runtime: DaemonRuntime,
     pub(super) container_id: String,
     pub(super) container_name: String,
     pub(super) metadata: DaemonMetadata,
+    pub(super) api_address: std::net::SocketAddr,
+    pub(super) api_token: String,
 }
 
 /// Where the configuration puts the daemon on this computer, decided once for
@@ -96,26 +98,37 @@ pub(super) async fn launch(
     let program = spec.program();
     remove_idle_predecessors(program, spec).await?;
     ensure_running(program, spec).await?;
-    let port = published_port(program, &spec.name).await?;
+    let port = published_port(program, &spec.name, CONTAINER_PORT).await?;
+    let api_port = published_port(program, &spec.name, CONTAINER_API_PORT).await?;
     let container_id = resolve_container_id(spec.runtime(), &spec.name)
         .await?
         .with_context(|| format!("daemon container {} disappeared before launch", spec.name))?;
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let token = match prior_unpublished {
-        Some(prior)
-            if prior.runtime == spec.runtime()
-                && prior.container_id == container_id
-                && prior.address == address =>
-        {
-            // Both execs may reach the store lock. Either winner must accept the published token.
-            prior.token.clone()
-        }
-        prior => {
-            if let Some(prior) = prior {
-                remove_container_owner_if_matching(prior.address, &prior.token)?;
+    let api_address = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
+    let prior = prior_unpublished.filter(|prior| {
+        prior.runtime == spec.runtime()
+            && prior.container_id == container_id
+            && prior.address == address
+    });
+    let (token, api_token) = if let Some(prior) = prior {
+        // Both execs may reach the store lock. Either winner must accept the published tokens.
+        let token = prior
+            .api_token
+            .as_ref()
+            .filter(|token| prior.api_address == Some(api_address) && !token.is_empty());
+        let api_token = match token {
+            Some(token) => token.clone(),
+            None => {
+                super::remove_container_api_endpoint(prior)?;
+                super::random_token()?
             }
-            super::random_token()?
+        };
+        (prior.token.clone(), api_token)
+    } else {
+        if let Some(prior) = prior_unpublished {
+            super::clear_container_owner(prior)?;
         }
+        (super::random_token()?, super::random_token()?)
     };
     let metadata = daemon_metadata(spec, address, token);
     write_container_owner(&ContainerDaemonRecord {
@@ -127,13 +140,17 @@ pub(super) async fn launch(
         address: metadata.address,
         token: metadata.token.clone(),
         started_at: metadata.started_at.clone(),
+        api_address: Some(api_address),
+        api_token: Some(api_token.clone()),
     })?;
-    exec_daemon(program, spec, &container_id, &metadata.token).await?;
+    exec_daemon(program, spec, &container_id, &metadata.token, &api_token).await?;
     Ok(ContainerLaunch {
         runtime: spec.runtime(),
         container_id,
         container_name: spec.name.clone(),
         metadata,
+        api_address,
+        api_token,
     })
 }
 
@@ -586,19 +603,24 @@ impl ContainerSpec {
             volume,
             mounts,
         };
+        spec.name = spec.name_with_api_port(CONTAINER_API_PORT);
+        Ok(spec)
+    }
+
+    fn name_with_api_port(&self, api_port: u16) -> String {
         let mut digest = sha2::Sha256::new();
-        digest.update(spec.engine.engine().unwrap_or("host"));
+        digest.update(self.engine.engine().unwrap_or("host"));
         digest.update([0]);
-        digest.update(&spec.image);
+        digest.update(&self.image);
         digest.update([0]);
-        digest.update(&spec.volume);
-        for mount in &spec.mounts {
+        digest.update(&self.volume);
+        for mount in &self.mounts {
             digest.update([1]);
             digest.update(mount.as_os_str().as_encoded_bytes());
         }
+        digest.update(api_port.to_be_bytes());
         let digest = mj_core::hex::lower_hex(digest.finalize());
-        spec.name = format!("mj-daemon-{}-{}", spec.instance, &digest[..12]);
-        Ok(spec)
+        format!("mj-daemon-{}-{}", self.instance, &digest[..12])
     }
 
     fn run_command(&self) -> Vec<OsString> {
@@ -610,6 +632,7 @@ impl ContainerSpec {
             // The host picks a free loopback port; the container always
             // listens on its own fixed port.
             format!("--publish=127.0.0.1::{CONTAINER_PORT}").into(),
+            format!("--publish=127.0.0.1::{CONTAINER_API_PORT}").into(),
             format!("--volume={}:{VOLUME_MOUNT}", self.volume).into(),
             format!("--workdir={VOLUME_MOUNT}").into(),
             "--entrypoint=sleep".into(),
@@ -629,10 +652,10 @@ impl ContainerSpec {
 
 /// The container engine's published loopback port for the daemon's fixed
 /// inside port.
-async fn published_port(program: &str, name: &str) -> Result<u16> {
+async fn published_port(program: &str, name: &str, container_port: u16) -> Result<u16> {
     let output = engine(
         program,
-        ["port", name, &format!("{CONTAINER_PORT}/tcp")],
+        ["port", name, &format!("{container_port}/tcp")],
         QUERY_TIMEOUT,
     )
     .await?;
@@ -787,7 +810,13 @@ async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
 /// Start a daemon process in the container's own filesystem. The token and
 /// the data roots are environment, never arguments, and the daemon's output
 /// goes to the volume's log.
-async fn exec_daemon(program: &str, spec: &ContainerSpec, id: &str, token: &str) -> Result<()> {
+async fn exec_daemon(
+    program: &str,
+    spec: &ContainerSpec,
+    id: &str,
+    token: &str,
+    api_token: &str,
+) -> Result<()> {
     let script = format!(
         "exec {IMAGE_EXECUTABLE} daemon-wait-exit --exit-dir {VOLUME_MOUNT}/data/daemon-exits -- {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1"
     );
@@ -802,6 +831,8 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, id: &str, token: &str)
         // The token is copied from this process's environment; `--env=NAME`
         // keeps its value out of the engine's argument list.
         "--env=MJ_DAEMON_TOKEN".into(),
+        format!("--env=MJ_DAEMON_API_LISTEN=0.0.0.0:{CONTAINER_API_PORT}").into(),
+        "--env=MJ_DAEMON_API_TOKEN".into(),
         format!("--env=MJ_DAEMON_CONTAINER={}", spec.name).into(),
         format!("--env=MJ_DAEMON_CONTAINER_RUNTIME={program}").into(),
         "--env=MJ_DAEMON_LOG=/var/lib/mjolnir/daemon.log".into(),
@@ -810,8 +841,16 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, id: &str, token: &str)
         "-c".into(),
         script.into(),
     ];
-    let output =
-        engine_with_env(program, args, &[("MJ_DAEMON_TOKEN", token)], QUERY_TIMEOUT).await?;
+    let output = engine_with_env(
+        program,
+        args,
+        &[
+            ("MJ_DAEMON_TOKEN", token),
+            ("MJ_DAEMON_API_TOKEN", api_token),
+        ],
+        QUERY_TIMEOUT,
+    )
+    .await?;
     if !output.status.success() {
         return Err(failure(
             program,
@@ -937,12 +976,18 @@ mod tests {
     /// namespace, one data volume, and no implicit host home or path.
     #[test]
     fn a_daemon_container_shares_nothing_but_its_volume() {
-        let args = spec(vec![PathBuf::from("/srv/project")])
+        let spec = spec(vec![PathBuf::from("/srv/project")]);
+        assert_ne!(
+            spec.name_with_api_port(CONTAINER_API_PORT),
+            spec.name_with_api_port(8789)
+        );
+        let args = spec
             .run_command()
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg == "--publish=127.0.0.1::8787"));
+        assert!(args.iter().any(|arg| arg == "--publish=127.0.0.1::8788"));
         assert!(
             args.iter()
                 .any(|arg| arg == "--volume=mj-instance-data:/var/lib/mjolnir")
