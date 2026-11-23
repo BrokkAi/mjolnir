@@ -1444,6 +1444,7 @@ mod tests {
         save_move_operation_with(&connection, &operation(&stale)).unwrap();
         connection.execute("UPDATE sessions SET draft_input='keep this draft', session_title_override='new title' WHERE session_id=?1", [&stale.id]).unwrap();
         stale.last_profile = "destination".into();
+        stale.staged_aws_profile = Some("destination-team".into());
         stale.state = SessionState::Provisioning;
         save_session_to(&path, &stale).unwrap();
         let current = load_state_from(&path)
@@ -1454,6 +1455,10 @@ mod tests {
         assert_eq!(current.draft_input, "keep this draft");
         assert_eq!(current.session_title_override.as_deref(), Some("new title"));
         assert_eq!(current.last_profile, "destination");
+        assert_eq!(
+            current.staged_aws_profile.as_deref(),
+            Some("destination-team")
+        );
 
         // A no-op Move's omitted choices cannot overwrite a settings edit.
         let allocation = SessionResourceAllocation::Container {

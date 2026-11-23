@@ -721,6 +721,7 @@ impl OriginDeltaSuspend {
                 launch: Some(&launch),
                 prepared: false,
                 messages: &RESTART_FOR_CHECKPOINT,
+                staged_aws_profile: None,
                 swap_admission: None,
                 discard_queued_prompts: None,
             };

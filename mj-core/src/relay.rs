@@ -210,7 +210,11 @@ pub const RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL: u32 = 84;
 /// The version stays at 85 so it never goes back down, but no request is gated
 /// on it; the next capability takes 86, never 85.
 pub const RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL: u32 = 85;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL;
+/// 86 adds exact targets for worker-published interruption.
+pub const RELAY_CANCEL_TURN_TARGET_PROTOCOL: u32 = 86;
+/// 87 includes trusted user inputs, prior reviews, and retry context in guardian requests.
+pub const RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL: u32 = 87;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -254,7 +258,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 28 is breaking: older writers lose command pins and native-use evidence.
 // Revision 29 is breaking: older writers drop an active in-place move dispatch hold.
 // Revision 30 is breaking: the dispatch is the only stored live command payload.
-pub const RELAY_STATE_VERSION: u32 = 30;
+// Revision 31 is breaking: older readers cannot replay CancelTurnTarget commands.
+pub const RELAY_STATE_VERSION: u32 = 31;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

@@ -96,7 +96,7 @@ pub fn scp_upload(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool)
     if recursive {
         args.push("-r".into());
     }
-    args.push(scp_local_path(source));
+    args.push(openssh_local_path(source));
     args.push(format!("{}:{remote}", ssh.destination));
     scp_command(ssh, args)
 }
@@ -105,16 +105,17 @@ pub fn scp_upload(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool)
 pub fn scp_download(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
     let mut args = scp_args(ssh);
     args.push(format!("{}:{remote}", ssh.destination));
-    args.push(scp_local_path(Path::new(local)));
+    args.push(openssh_local_path(Path::new(local)));
     scp_command(ssh, args)
 }
 
-/// A controller path as `scp` must see it. `scp` reads an argument with a
+/// A controller path without a Windows verbatim prefix, for OpenSSH arguments.
+/// `scp` reads an argument with a
 /// colon before any separator as `host:path`, and Windows OpenSSH exempts only
 /// a plain drive letter, so a verbatim path from `canonicalize`
 /// (`\\?\C:\...`) would name the host `\\?\C`. Spell it without the
 /// verbatim prefix; nothing else about the path changes.
-fn scp_local_path(path: &Path) -> String {
+pub fn openssh_local_path(path: &Path) -> String {
     use std::path::{Component, Prefix};
     let text = path.to_string_lossy();
     match path.components().next() {

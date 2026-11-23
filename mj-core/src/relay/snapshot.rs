@@ -163,6 +163,10 @@ pub enum RelayCommand {
     CancelTurnFor {
         active_prompt_id: String,
     },
+    /// Interrupt exactly the worker-published target.
+    CancelTurnTarget {
+        target: TurnInterruptTarget,
+    },
     /// Interrupt this turn only while the intended queued change is still first.
     ApplyQueuedFor {
         active_prompt_id: String,
@@ -291,6 +295,7 @@ impl RelayCommand {
             Self::ClearNotifications { .. } | Self::NotificationsRead { .. } => {
                 super::RELAY_NOTIFICATION_STACK_PROTOCOL
             }
+            Self::CancelTurnTarget { .. } => super::RELAY_CANCEL_TURN_TARGET_PROTOCOL,
             Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
@@ -378,6 +383,7 @@ impl RelayCommand {
                 | Self::CancelTurn
                 | Self::Steer { .. }
                 | Self::CancelTurnFor { .. }
+                | Self::CancelTurnTarget { .. }
                 | Self::ApplyQueuedFor { .. }
                 | Self::Cancel
                 | Self::Close { .. }
@@ -410,7 +416,9 @@ impl RelayCommand {
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
             Self::Steer { .. } => RelayCommandKind::Steer,
-            Self::CancelTurnFor { .. } => RelayCommandKind::CancelTurn,
+            Self::CancelTurnFor { .. } | Self::CancelTurnTarget { .. } => {
+                RelayCommandKind::CancelTurn
+            }
             Self::ApplyQueuedFor { .. } => RelayCommandKind::CancelTurn,
             Self::ResolveSteering { .. } => RelayCommandKind::ResolveSteering,
             Self::Cancel => RelayCommandKind::Cancel,
@@ -1005,6 +1013,11 @@ impl RelayOperationalState {
 
     /// Targeted turn control was introduced with relay protocol 17.
     #[must_use]
+    pub fn publishes_interrupt_targets(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_CANCEL_TURN_TARGET_PROTOCOL)
+    }
+
     pub fn supports_targeted_turn_control(&self) -> bool {
         self.relay_protocol_version.is_some_and(|version| {
             version
@@ -1373,12 +1386,17 @@ pub enum RelayObservation {
     ElicitationRequested {
         request: ElicitationRequest,
     },
+    GuardianReviewed {
+        review: crate::guardian::PriorGuardianReview,
+    },
     ElicitationResolved {
         elicitation_id: String,
         action: String,
         /// Rendered user reply, with secret fields masked before recording.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<crate::guardian::TrustedUserAnswerField>>,
     },
     ElicitationsCleared,
     CommandQueued {
@@ -1820,6 +1838,10 @@ pub struct RelaySnapshot {
     pub person_input_through: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_user_inputs: Vec<crate::guardian::TrustedUserInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_guardian_reviews: Vec<crate::guardian::PriorGuardianReview>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -2003,6 +2025,14 @@ impl RelaySnapshot {
             .map(crate::assessment::ContextHistory::reader_view)
     }
 
+    pub fn trusted_user_inputs(&self) -> Vec<crate::guardian::TrustedUserInput> {
+        self.trusted_user_inputs.clone()
+    }
+
+    pub fn prior_guardian_reviews(&self) -> Vec<crate::guardian::PriorGuardianReview> {
+        self.prior_guardian_reviews.clone()
+    }
+
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
         self.harness_turn.filter(|turn| turn.autonomous)
@@ -2023,6 +2053,8 @@ impl RelaySnapshot {
             notifications_read_through: 0,
             person_input_through: 0,
             assessment_context: Some(Default::default()),
+            trusted_user_inputs: Vec::new(),
+            prior_guardian_reviews: Vec::new(),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
             continuation: Default::default(),

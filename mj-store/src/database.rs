@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 154;
+const SCHEMA_VERSION: i64 = 155;
 
 pub mod web_push;
 pub use web_push::*;
@@ -141,6 +141,7 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
         id: id.into(),
         title: "test session".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
+        staged_aws_profile: None,
         last_profile: "codex".into(),
         bundle_id: bundle.into(),
         project_directory: None,

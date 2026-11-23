@@ -66,6 +66,44 @@ fn upgrade_command(storage: &common::DaemonStorage) -> Command {
     command
 }
 
+// Hard-won: a06334f2e2: redirected bare mj started the daemon and consumed first-launch placement.
+#[test]
+fn redirected_bare_mj_leaves_first_launch_placement_unset() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let data = root.path().join("data");
+    fs::create_dir(&config).unwrap();
+    fs::create_dir(&data).unwrap();
+    let _storage = common::DaemonStorage::new(root, config.clone(), data.clone());
+    let output = mj_core::subprocess::run_with_input(
+        common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+            .args(["--instance", "redirected-bare-mj"])
+            .env("MJ_CONFIG_DIR", &config)
+            .env("MJ_DATA_DIR", &data)
+            .env("MJOLNIR_NO_UPDATE_CHECK", "1"),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "Welcome to Mjolnir",
+            "Run `mj doctor` for non-interactive validation."
+        ]
+    );
+    assert!(!data.join("daemon.json").exists());
+    assert!(!data.join("mj.sqlite3").exists());
+}
+
 /// A configured Apple runtime is started by the real daemon startup path.
 /// The fake CLI holds its start operation until this test observes a
 /// successful management request, proving that the daemon does not wait for
@@ -759,6 +797,94 @@ pull_policy = "never"
         command_line.split(|byte| *byte == 0).nth(1),
         Some(b"daemon-run".as_slice())
     );
+}
+
+#[test]
+fn the_loopback_api_is_ready_with_phone_access_disabled() {
+    use mj_client::daemon::{
+        DaemonClient, DaemonMetadata, WebViewerStatus, api_endpoint_path_in, read_api_endpoint_from,
+    };
+    use mj_client::web::WebViewerAccess;
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let daemon_path = data.join("daemon.json");
+    let api_path = api_endpoint_path_in(&data);
+    let run = |args: &[&str]| {
+        let output =
+            mj_core::subprocess::run_with_input(upgrade_command(&storage).args(args), &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let api_info = run(&["api-info", "--json"]);
+    let metadata: DaemonMetadata =
+        serde_json::from_slice(&fs::read(&daemon_path).unwrap()).unwrap();
+    let endpoint = read_api_endpoint_from(&api_path).unwrap().unwrap();
+    let base_url = format!("http://{}/api/v1", endpoint.address);
+    let info: serde_json::Value = serde_json::from_str(&api_info).unwrap();
+    assert_eq!(info["base_url"], base_url);
+    assert!(endpoint.address.ip().is_loopback());
+    assert_eq!(endpoint.pid, metadata.pid);
+    assert_eq!(endpoint.protocol_version, metadata.protocol_version);
+    assert!(
+        endpoint.token != metadata.token,
+        "TCP and HTTP secrets must differ"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&api_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let persisted_token = fs::read_to_string(data.join("api-token")).unwrap();
+    assert!(run(&["api-token"]).trim() == persisted_token.trim());
+    assert!(endpoint.token != persisted_token.trim());
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut daemon = DaemonClient::connect(metadata).await.unwrap();
+        assert_eq!(
+            daemon.identity().await.unwrap().instance_id,
+            endpoint.instance_id
+        );
+        assert!(matches!(
+            daemon.web_access().await.unwrap(),
+            WebViewerAccess::Unavailable(_)
+        ));
+        assert_eq!(
+            daemon.status().await.unwrap().phone_status,
+            WebViewerStatus::Disabled
+        );
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (route, token, status) in [
+            ("options", &endpoint.token, reqwest::StatusCode::OK),
+            ("options", &persisted_token, reqwest::StatusCode::OK),
+            (
+                "settings",
+                &endpoint.token,
+                reqwest::StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let response = http
+                .get(format!("{base_url}/{route}"))
+                .bearer_auth(token.trim())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{route}");
+        }
+    });
+    run(&["daemon", "stop"]);
+    assert!(!daemon_path.exists());
+    assert!(read_api_endpoint_from(&api_path).unwrap().is_none());
 }
 
 /// A replacement daemon is a new start, and a client proves that from the

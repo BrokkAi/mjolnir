@@ -24,10 +24,13 @@ impl Drop for ClaudeProbe {
 
 impl ClaudeProbe {
     async fn new() -> Self {
-        Self::with_replayed_autonomous_turn(false).await
+        Self::open(false, None).await
     }
 
-    async fn with_replayed_autonomous_turn(replay: bool) -> Self {
+    async fn open(
+        replay: bool,
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+    ) -> Self {
         let (client, agent) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -66,7 +69,7 @@ impl ClaudeProbe {
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
-            terminal_owner: None,
+            terminal_owner,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -290,9 +293,10 @@ impl RelayPeer {
         let mut durable = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
         durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
         durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+        let relay = Arc::new(crate::relay::RelayCell::new(durable));
         let mut peer = Self {
-            probe: ClaudeProbe::new().await,
-            relay: Arc::new(crate::relay::RelayCell::new(durable)),
+            probe: ClaudeProbe::open(false, Some(Arc::downgrade(&relay))).await,
+            relay,
             in_flight: BTreeMap::new(),
             _directory: directory,
         };
@@ -335,6 +339,70 @@ impl RelayPeer {
             if matches!(self.event().await, RuntimeEvent::PromptFinished { .. }) {
                 break;
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn autonomous_interrupt_rechecks_the_turn_in_the_acp_inbox() {
+    use mj_core::relay::{RelayCommand, RelayObservation, TurnInterruptTarget};
+
+    for settled in [false, true] {
+        let mut peer = RelayPeer::new().await;
+        let start_ordinal = {
+            let mut relay = peer.relay.lock().unwrap();
+            let start_ordinal = relay
+                .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+                .unwrap();
+            crate::relay::test_support::submit_relay(
+                &mut relay,
+                "exact-interrupt",
+                RelayCommand::CancelTurnTarget {
+                    target: TurnInterruptTarget::Autonomous { start_ordinal },
+                },
+            );
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+            if settled {
+                relay
+                    .record_observation(RelayObservation::HarnessTurnSettled {
+                        origin: None,
+                        autonomous: None,
+                        prompt_in_flight: false,
+                    })
+                    .unwrap();
+                relay
+                    .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 2 })
+                    .unwrap();
+            }
+            start_ordinal
+        };
+        peer.probe
+            .commands
+            .send(CommandRequest::CancelUnpromptedTurn {
+                request_id: "exact-interrupt".into(),
+                target: TurnInterruptTarget::Autonomous { start_ordinal },
+            })
+            .await
+            .unwrap();
+        let event = loop {
+            let event = peer.probe.event().await;
+            if matches!(&event,
+                RuntimeEvent::CommandRejected { request_id, .. }
+                | RuntimeEvent::CancelApplied { request_id } if request_id == "exact-interrupt")
+            {
+                break event;
+            }
+        };
+        if settled {
+            assert!(
+                matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "exact-interrupt")
+            );
+        } else {
+            assert!(
+                matches!(event, RuntimeEvent::CancelApplied { request_id } if request_id == "exact-interrupt")
+            );
+            assert_eq!(peer.probe.message().await["method"], "session/cancel");
         }
     }
 }
@@ -683,6 +751,78 @@ async fn claude_prompt_usage_includes_native_agents_without_recounting_the_paren
     probe.close().await;
 }
 
+// Hard-won: #1106: Claude session-limit turns lost usage before AIR sessionFailure preserved response usage
+#[tokio::test]
+async fn claude_session_failure_preserves_whole_turn_usage() {
+    let mut probe = ClaudeProbe::new().await;
+    let prompt = probe
+        .prompt("quota-limited", "Run the delegated work")
+        .await;
+    let title = "The Claude account has no available quota.";
+    probe
+        .result(
+            &prompt,
+            json!({
+                "stopReason": "end_turn",
+                "usage": {"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                    "cachedReadTokens":1000,"cachedWriteTokens":10},
+                "_meta": {
+                    "jetbrains": {"air": {"version": 1, "sessionFailure": {
+                        "id": "turn-1:error", "revision": 1, "category": "limit",
+                        "severity": "error", "actions": [], "title": title
+                    }}},
+                    "quota": {
+                        "token_count":{"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                            "cachedInputTokens":1000,"cachedWriteTokens":10,"reasoningOutputTokens":0},
+                        "model_usage": [
+                            {"model":"claude-opus-5-5","token_count":{"totalTokens":1117,
+                                "inputTokens":100,"outputTokens":7,"cachedInputTokens":1000,
+                                "cachedWriteTokens":10,"reasoningOutputTokens":0}},
+                            {"model":"claude-sonnet-5-5","token_count":{"totalTokens":2234,
+                                "inputTokens":200,"outputTokens":14,"cachedInputTokens":2000,
+                                "cachedWriteTokens":20,"reasoningOutputTokens":0}}
+                        ]
+                    }
+                }
+            }),
+        )
+        .await;
+
+    let (stop_reason, diagnostic, usage) = loop {
+        if let RuntimeEvent::PromptFinished {
+            request_id,
+            stop_reason,
+            diagnostic,
+            usage,
+            ..
+        } = probe.event().await
+        {
+            assert_eq!(request_id, "quota-limited");
+            break (stop_reason, diagnostic, usage);
+        }
+    };
+    assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
+    let diagnostic = diagnostic.expect("quota failure carries a diagnostic");
+    assert_eq!(diagnostic.message, title);
+    assert_eq!(diagnostic.code.as_deref(), Some("usageLimitExceeded"));
+
+    let usage = usage.expect("the failed prompt still reported usage");
+    assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
+    assert_eq!(
+        (usage.total_tokens, usage.input_tokens, usage.output_tokens),
+        (3351, 300, 21)
+    );
+    assert_eq!(
+        (usage.cached_read_tokens, usage.cached_write_tokens),
+        (Some(3000), Some(30))
+    );
+    let models = usage.provider_details.unwrap().model_usage;
+    assert_eq!(models.len(), 2);
+    assert_eq!(models["claude-opus-5-5"].total_tokens, 1117);
+    assert_eq!(models["claude-sonnet-5-5"].total_tokens, 2234);
+    probe.close().await;
+}
+
 #[tokio::test]
 async fn malformed_claude_model_accounting_reports_incomplete_usage() {
     let mut probe = ClaudeProbe::new().await;
@@ -1013,7 +1153,7 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
 
 #[tokio::test]
 async fn autonomous_turn_spawns_are_live_edges_and_not_replayed_history() {
-    let mut probe = ClaudeProbe::with_replayed_autonomous_turn(true).await;
+    let mut probe = ClaudeProbe::open(true, None).await;
     probe.autonomous_turn("live-turn").await;
     let mut replay_seen = false;
     loop {

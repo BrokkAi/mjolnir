@@ -57,7 +57,7 @@ def exercise(lab, terminal):
     workspace = lab.snapshot()["workspaces"][0]["id"]
     for title, marker in [("Selection A", "alpha-selection-marker"),
                           ("Selection B", "beta-selection-marker")]:
-        status, result = lab.request("POST", "/api/actions", {
+        status, result = lab.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "fixture", "target_id": "localhost", "title": title,
             "project_directory": str(lab.project),
@@ -68,13 +68,13 @@ def exercise(lab, terminal):
             s.get("title") == title and s.get("state") == "running"
             for s in value.get("sessions", [])), f"{title} running")
         session = next(s for s in snapshot["sessions"] if s["title"] == title)
-        status, result = lab.request("POST", "/api/actions", {
+        status, result = lab.request("POST", "/api/v1/actions", {
             "action": "prompt", "session_id": session["id"], "text": marker,
         })
         if status != 202:
             raise ScenarioFailure(f"prompt failed: {status} {result}")
         def replied():
-            status, value = lab.request("GET", f"/api/conversations/{session['id']}")
+            status, value = lab.request("GET", f"/api/v1/conversations/{session['id']}")
             return status == 200 and any(
                 f"reliability reply: {marker}" in line
                 for entry in value.get("entries", []) for line in entry.get("lines", []))

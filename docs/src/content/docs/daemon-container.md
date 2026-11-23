@@ -98,5 +98,5 @@ starting a host daemon; the two stores are not automatically merged.
 
 - Docker with a reachable Linux daemon, including Docker Desktop on macOS or
   Windows.
-- Or rootless Podman on Linux or `podman machine` on macOS.
+- Or rootless Podman on Linux.
 - The container engine must be able to pull from `ghcr.io`.

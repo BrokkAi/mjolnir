@@ -92,6 +92,9 @@ impl PodmanHost<'_> {
 /// This intentionally never pulls an image. Image availability is verified by
 /// `mj doctor --smoke` and by the subsequent target creation command.
 pub fn verify_local_podman(executor: &impl CommandExecutor) -> Result<ContainerPreflight> {
+    if cfg!(target_os = "macos") {
+        return Err(PodmanUnsupportedOnMacos.into());
+    }
     verify_podman(PodmanHost::Local, executor)
 }
 
@@ -496,26 +499,46 @@ fn observe_apple_container_on_host(
 /// supports.
 pub const APPLE_CONTAINER_MINIMUM_MACOS: u32 = 26;
 
-/// Why the local Docker daemon cannot overlay host directories, or `None`
-/// when it runs on this Linux host and sees them directly.
-///
-/// On macOS every Docker daemon (Docker Desktop, Colima, OrbStack) runs in a
-/// Linux VM, as Docker Desktop also does on Linux. The VM reaches host
-/// directories through a file share (virtiofs, gRPC FUSE, sshfs, 9p) that
-/// cannot back an overlay lower layer, and the local volume driver may not
-/// see them at their host path at all (#1152). Bind mounts are translated
-/// through the share, so these daemons still get read-only attachments.
-pub fn local_docker_vm_share(executor: &impl CommandExecutor) -> Result<Option<&'static str>> {
-    const REASON: &str = "Docker runs in a VM that reaches host directories through a file share";
-    if !cfg!(target_os = "linux") {
-        return Ok(Some(REASON));
-    }
-    let command = CommandSpec::new(
-        "docker",
-        ["version", "--format", "{{.Server.Platform.Name}}"],
-    )
-    .purpose("identify the Docker daemon platform")
-    .stage(ProvisionStage::Provisioning);
+/// Attachment mode verified by the Docker smoke test and used at launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockerAttachmentMode {
+    Overlay,
+    ReadOnly { reason: &'static str },
+}
+
+const DOCKER_VM_SHARE_REASON: &str = "Docker runs in a VM that reaches host directories through a file share, which cannot back the copy-on-write overlay";
+const APPLE_OVERLAY_REASON: &str =
+    "Apple container does not support copy-on-write directory overlays";
+
+/// Identify how the daemon reaches its host directories. The Darwin flag
+/// selects a smoke source under the host's home directory, shared into the VM.
+pub(super) fn docker_attachment_mode(
+    ssh: Option<&SshTarget>,
+    executor: &impl CommandExecutor,
+) -> Result<(DockerAttachmentMode, bool)> {
+    let read_only = DockerAttachmentMode::ReadOnly {
+        reason: DOCKER_VM_SHARE_REASON,
+    };
+    let command = match ssh {
+        Some(ssh) => ssh_validation_command(
+            ssh,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                r#"os=$(uname -s) || exit; printf '%s\n' "$os"
+if [ "$os" = Linux ]; then docker version --format '{{.Server.Platform.Name}}'; fi"#
+                    .into(),
+            ],
+            "identify the SSH Docker host and daemon platform",
+        ),
+        None if !cfg!(target_os = "linux") => return Ok((read_only, cfg!(target_os = "macos"))),
+        None => CommandSpec::new(
+            "docker",
+            ["version", "--format", "{{.Server.Platform.Name}}"],
+        )
+        .purpose("identify the Docker daemon platform")
+        .stage(ProvisionStage::Provisioning),
+    };
     let output = executor.execute(&command)?;
     ensure!(
         output.status == 0,
@@ -524,11 +547,65 @@ pub fn local_docker_vm_share(executor: &impl CommandExecutor) -> Result<Option<&
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    let platform = String::from_utf8_lossy(&output.stdout);
-    Ok(platform
-        .trim()
-        .starts_with("Docker Desktop")
-        .then_some(REASON))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let platform = if ssh.is_some() {
+        let (os, platform) = stdout
+            .trim()
+            .split_once('\n')
+            .unwrap_or((stdout.trim(), ""));
+        let os = os.trim();
+        ensure!(
+            !os.is_empty(),
+            "SSH Docker host did not report its operating system"
+        );
+        if os != "Linux" {
+            return Ok((read_only, os == "Darwin"));
+        }
+        platform
+    } else {
+        &stdout
+    };
+    let mode = if platform.trim().starts_with("Docker Desktop") {
+        read_only
+    } else {
+        DockerAttachmentMode::Overlay
+    };
+    Ok((mode, false))
+}
+
+/// Reasons to mount copy-on-write sources read-only, in source order.
+/// Native engines can use OverlayFS only over supported lower filesystems.
+pub fn overlay_read_only_reasons(
+    target: &TargetTemplate,
+    sources: &[PathBuf],
+    executor: &impl CommandExecutor,
+) -> Result<Vec<Option<String>>> {
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (ssh, docker) = match target {
+        TargetTemplate::AppleContainer(_) | TargetTemplate::SshAppleContainer { .. } => {
+            return Ok(vec![Some(APPLE_OVERLAY_REASON.to_owned()); sources.len()]);
+        }
+        TargetTemplate::LocalDocker(_) => (None, true),
+        TargetTemplate::SshDocker { ssh, .. } => (Some(ssh), true),
+        TargetTemplate::LocalPodman(_) => (None, false),
+        TargetTemplate::SshPodman { ssh, .. } => (Some(ssh), false),
+        _ => return Ok(vec![None; sources.len()]),
+    };
+    if docker
+        && let (DockerAttachmentMode::ReadOnly { reason }, _) =
+            docker_attachment_mode(ssh, executor)?
+    {
+        return Ok(vec![Some(reason.to_owned()); sources.len()]);
+    }
+    Ok(probe_filesystem_types(ssh, sources, executor)?
+        .into_iter()
+        .map(|filesystem| {
+            overlay_unsupported_filesystem(&filesystem)
+                .map(|reason| format!("the overlay is unreliable on {filesystem} ({reason})"))
+        })
+        .collect())
 }
 
 /// How the launch options, the session wizard, doctor and Setup say that a
@@ -772,10 +849,18 @@ pub fn verify_ssh_podman(
     // One SSH round trip carries every probe; a remote shell runs them in
     // sequence and frames each result so the checks below stay unchanged.
     let probes = run_ssh_podman_probes(host, executor)?;
-    let macos_host = probes
-        .get(PLATFORM_PROBE_KEY)
-        .is_some_and(|output| output.status == 0 && output.stdout.trim_ascii() == b"Darwin");
-    let mut preflight = verify_podman_probes(host, macos_host, |probe| {
+    if let Some(platform) = probes.get(PLATFORM_PROBE_KEY) {
+        match (platform.status, platform.stdout.trim_ascii()) {
+            (0, b"Darwin") => return Err(PodmanUnsupportedOnMacos.into()),
+            (0, b"Linux") => {}
+            _ => bail!(
+                "{}: Podman requires a Linux host; uname reported {:?}.",
+                host.failure(),
+                String::from_utf8_lossy(&platform.stdout).trim()
+            ),
+        }
+    }
+    let mut preflight = verify_podman_probes(host, |probe| {
         let output = probes.get(probe.key()).cloned().ok_or_else(|| {
             anyhow::anyhow!(
                 "{}",
@@ -791,11 +876,7 @@ pub fn verify_ssh_podman(
         })?;
         check_podman_probe_status(host, probe, output)
     })?;
-    // Lingering is systemd's: a Mac has no `loginctl`, and its engine is the
-    // Podman machine rather than a user service.
-    if !macos_host
-        && let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY))
-    {
+    if let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY)) {
         preflight.warnings.push(warning);
     }
     Ok(preflight)
@@ -811,11 +892,21 @@ pub enum PodmanPostcondition {
     UidMap,
 }
 
+pub const PODMAN_UNSUPPORTED_ON_MACOS: &str =
+    "Podman is supported on Linux hosts only; on macOS use Apple container or Docker.";
+
+#[derive(Debug)]
+pub struct PodmanUnsupportedOnMacos;
+
+impl std::fmt::Display for PodmanUnsupportedOnMacos {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PODMAN_UNSUPPORTED_ON_MACOS)
+    }
+}
+
+impl std::error::Error for PodmanUnsupportedOnMacos {}
+
 /// One Podman command whose result is checked.
-///
-/// `podman info` works through a remote client, unlike `podman unshare`. That
-/// matters on macOS, where Podman always talks to a `podman machine` VM and
-/// the client is remote by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodmanProbe {
     Version,
@@ -931,19 +1022,19 @@ impl PodmanPostcondition {
     pub fn remediation(self) -> &'static str {
         match self {
             Self::Version => {
-                "Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
+                "Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
             }
             Self::Rootless => {
-                "Run Mjolnir as the ordinary user without `sudo`, and use a rootless Podman. On macOS run `podman machine set --rootful=false` and restart the machine; on Linux do not run Podman as root and unset `CONTAINER_HOST` if a remote connection is selected."
+                "Run Mjolnir as the ordinary user without `sudo`, and use a rootless Podman. Unset `CONTAINER_HOST` if a remote connection is selected."
             }
             Self::Remote => {
-                "Unset `CONTAINER_HOST` and `CONTAINER_CONNECTION`, then select the local rootless Podman connection. On macOS the Podman machine connection is the supported local client; a manually configured remote connection is not."
+                "Unset `CONTAINER_HOST` and `CONTAINER_CONNECTION`, then select the local rootless Podman connection."
             }
             Self::Info => {
-                "Make sure `podman info` succeeds as the user running Mjolnir. On macOS start the Podman machine with `podman machine start`, creating it with `podman machine init --now` if none exists; on Linux install the UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora) if Podman reports one is missing."
+                "Make sure `podman info` succeeds as the user running Mjolnir. Install the UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora) if Podman reports one is missing."
             }
             Self::UidMap => {
-                "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session. On macOS, update Podman and recreate the machine if its rootless UID map does not cover container IDs 0 and 1."
+                "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session."
             }
         }
     }
@@ -953,19 +1044,13 @@ pub(super) fn verify_podman(
     host: PodmanHost<'_>,
     executor: &impl CommandExecutor,
 ) -> Result<ContainerPreflight> {
-    verify_podman_probes(host, cfg!(target_os = "macos"), |probe| {
-        execute_podman_probe(executor, host, probe)
-    })
+    verify_podman_probes(host, |probe| execute_podman_probe(executor, host, probe))
 }
 
 /// Apply the rootless Podman postconditions to probe results, however they
 /// were obtained: one command each locally, one batched command over SSH.
-///
-/// `macos_host` says the host running `podman` is a Mac, whose engine is
-/// always its Podman machine.
 pub(super) fn verify_podman_probes(
     host: PodmanHost<'_>,
-    macos_host: bool,
     probe_output: impl Fn(PodmanProbe) -> Result<CommandOutput>,
 ) -> Result<ContainerPreflight> {
     let version = probe_output(PodmanProbe::Version)?;
@@ -986,12 +1071,8 @@ pub(super) fn verify_podman_probes(
         ));
     }
 
-    // A remote client is expected only on a Mac, whose Podman machine is
-    // that host's engine whether Mjolnir runs there or reaches it over SSH.
-    // On Linux, `serviceIsRemote` means CONTAINER_HOST or a selected
-    // connection points this target at another host's engine, whose paths and
-    // containers are not the ones Mjolnir records.
-    if info.service_is_remote && !macos_host {
+    // A remote engine owns different paths and containers than this host.
+    if info.service_is_remote {
         return Err(probe_failure(
             host,
             PodmanPostcondition::Remote,
@@ -1485,8 +1566,9 @@ probe() {
     printf '__mj_probe_status__ %s %s\n' "$name" "$status"
     return "$status"
 }
+probe platform uname -s || exit 0
+[ "$out" = Linux ] || exit 0
 probe version podman --version || exit 0
-probe platform uname -s
 probe info podman info --format json
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0
@@ -1517,7 +1599,8 @@ pub(super) fn run_ssh_podman_probes(
         bail!("{message}");
     }
     let probes = parse_podman_probe_output(&output.stdout);
-    if !probes.contains_key(PodmanProbe::Version.key()) {
+    if !probes.contains_key(PodmanProbe::Version.key()) && !probes.contains_key(PLATFORM_PROBE_KEY)
+    {
         return Err(podman_probe_run_failure(
             host,
             PodmanProbe::Version,

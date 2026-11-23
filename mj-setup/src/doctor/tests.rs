@@ -1025,6 +1025,7 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
 }
 
 // Hard-won: ecc10219: doctor omitted the built-in Podman target that the dashboard already listed and checked.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn podman_checks_cover_the_built_in_podman_target() {
     let checks = podman_checks(
@@ -1054,7 +1055,6 @@ fn docker_desktop_smoke_verifies_the_read_only_attachment() {
         Ok(output(b"created\n")),
         Ok(output(b"ok\n")),
         Ok(output(b"removed\n")),
-        Ok(output(b"Docker Desktop 4.40.0 (187762)\n")),
     ]);
 
     let check = docker_image_check("docker", "ubuntu:24.04", &executor, true);
@@ -1066,6 +1066,13 @@ fn docker_desktop_smoke_verifies_the_read_only_attachment() {
             .contains("read-only attachment smoke test passed")
     );
     let commands = executor.commands.borrow();
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.args.first().is_some_and(|arg| arg == "version"))
+            .count(),
+        1
+    );
     assert!(commands.iter().all(|command| {
         !command
             .args
@@ -1472,6 +1479,7 @@ fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
 }
 
 /// Image checks must stop when the host's Podman preflight is unsupported.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
     let executor = FakeExecutor::new([Ok(output(b"")), Ok(output(b"podman version 3.4.7\n"))]);
@@ -1532,6 +1540,7 @@ fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
 /// freshness check for Linux targets was missing (launch finding R5-2). A
 /// built-in target whose engine is unavailable needs no worker.
 // Hard-won: 435bf565: doctor omitted worker and architecture checks for a ready built-in target absent from config.toml.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
     let engines = [
@@ -1684,6 +1693,20 @@ fn session_environment_reports_node_paths_and_installs_missing_with_curl() {
 }
 
 #[test]
+fn macos_doctor_reports_podman_unsupported_without_running_it() {
+    let executor = FakeExecutor::new([]);
+    let platform = ApplePlatform::Macos {
+        architecture: "aarch64".into(),
+        major_version: 26,
+    };
+    let check = local_podman_runtime_check(&executor, &platform);
+    assert_eq!(check.status, CheckStatus::Unsupported);
+    assert!(check.detail.contains("use Apple container or Docker"));
+    assert!(executor.commands.borrow().is_empty());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
 fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
     for response in [
         Err(anyhow!("No such file or directory (os error 2)")),
@@ -1772,7 +1795,8 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
         assert!(instructions.contains("installs its own pinned Node.js"));
     }
     let macos = setup_instructions(InstructionsPlatform::Macos);
-    assert!(macos.contains("podman machine"), "{macos}");
+    assert!(!macos.contains("podman"), "{macos}");
+    assert!(macos.contains("Docker Desktop") && macos.contains("Apple container"));
 }
 
 /// Releases before this one wrote Mjolnir's own refs into user repositories
@@ -2126,6 +2150,22 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
 /// The remote Apple container check runs every probe on the far side of SSH,
 /// and its failure names the one thing that is missing (a running daemon)
 /// rather than an unreachable host.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn remote_apple_without_platform_requires_an_arm_worker() {
+    let mut config = Config::default();
+    config.targets.insert(
+        "mac-apple".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-apple-container",
+            "host": "mac.test",
+            "image": "example.invalid/agent:latest"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(container_worker_architectures(Ok(&config)), ["aarch64"]);
+}
+
 #[test]
 fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
     let ssh = RuntimeSshTarget {

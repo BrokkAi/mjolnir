@@ -131,7 +131,7 @@ class ResumeRegression(Regression):
 
     def wait_recovery_notice(self, parent, copy_time):
         def visible():
-            status, conversation = self.request("GET", f"/api/conversations/{parent}", timeout=WAIT)
+            status, conversation = self.request("GET", f"/api/v1/conversations/{parent}", timeout=WAIT)
             text = json.dumps(conversation)
             return (status == 200 and copy_time in text and "files are current" in text)
         self.wait(visible, "timestamped native-history recovery notice")
@@ -175,7 +175,7 @@ with socket.socket(socket.AF_UNIX) as connection:
 
     # Hard-won: 07d2 readiness failure: Resume must reattach a live bare worker too.
     def bare_regression(self, workspace):
-        status, response = self.request("POST", "/api/actions", {
+        status, response = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "bare-fixture", "target_id": "localhost", "title": "resume-bare",
             "project_directory": str(self.runtime_root / "bare-project"),
@@ -237,7 +237,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         self.prompt(parent, "hold before queued image runtime loss")
         image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
         upload = urllib.request.Request(
-            self.base_url + f"/api/sessions/{parent}/attachments", data=image,
+            self.base_url + f"/api/v1/sessions/{parent}/attachments", data=image,
             method="POST", headers={"Content-Type": "image/png"})
         with self.http.open(upload, timeout=WAIT) as response:
             reference = json.load(response)["attachment"]
@@ -264,7 +264,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         self.cli("resume", "--session", parent)
         self.authenticate()
         def image_notice():
-            status, conversation = self.request("GET", f"/api/conversations/{parent}", timeout=WAIT)
+            status, conversation = self.request("GET", f"/api/v1/conversations/{parent}", timeout=WAIT)
             text = json.dumps(conversation)
             return status == 200 and queued in text and "Re-send this prompt with its images" in text
         self.wait(image_notice, "durable queued-image recovery guidance")
@@ -278,7 +278,7 @@ with socket.socket(socket.AF_UNIX) as connection:
 
     # Hard-won: 337bc5e review: a live worker hid missing bundle checkouts.
     def live_missing_checkouts_regression(self, workspace):
-        status, response = self.request("POST", "/api/actions", {
+        status, response = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "multiple", "target_id": "podman", "title": "resume-multiple",
             "additional_mounts": [{"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}],
@@ -325,7 +325,7 @@ with socket.socket(socket.AF_UNIX) as connection:
     def retained_bind_regression(self, workspace):
         directory = self.runtime_root / "bound-checkout"
         directory.mkdir()
-        status, response = self.request("POST", "/api/actions", {
+        status, response = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "multiple", "target_id": "podman-bind", "title": "resume-bound",
             "additional_mounts": [
@@ -441,7 +441,7 @@ else:
         workspace = self.prepare_resume_fixture()
         # The fixture and release markers must be visible in both worker roots.
         mounts = [{"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}]
-        status, response = self.request("POST", "/api/actions", {
+        status, response = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "fixture", "target_id": "podman", "title": "resume-parent",
             "additional_mounts": mounts, "subagents": {"mode": "mjolnir"},
@@ -481,7 +481,7 @@ else:
             if dead:
                 self.cli("workspaces", "list")
                 self.authenticate()
-                status, response = self.request("POST", "/api/actions", {
+                status, response = self.request("POST", "/api/v1/actions", {
                     "action": "resume", "session_id": parent, "workspace_id": workspace,
                     "profile_id": "fake", "target_id": "podman", "queue": "discard",
                 }, timeout=WAIT)
@@ -544,7 +544,7 @@ else:
         config.write_text(good_config)
         self.cli("workspaces", "list")
         self.authenticate()
-        status, response = self.request("POST", "/api/actions", {
+        status, response = self.request("POST", "/api/v1/actions", {
             "action": "resume", "session_id": parent, "workspace_id": workspace,
             "profile_id": "fake", "target_id": "podman", "queue": "discard",
         }, timeout=WAIT)

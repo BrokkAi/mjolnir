@@ -310,7 +310,7 @@ impl CredentialSyncNotices {
         // A key that stopped failing is forgotten silently, so the same failure
         // after a clean cycle is reported again. A result can end only the
         // failures of the steps it checked: the renewal task's result is about
-        // one session's role-scoped AWS credentials, and every other result
+        // one session's AWS credentials, and every other result
         // is about everything but those.
         self.last_failures.retain(|key, _| {
             key.0 != result.profile_id

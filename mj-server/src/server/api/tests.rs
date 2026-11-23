@@ -2252,6 +2252,23 @@ fn api_app_with_client_state(
     mpsc::Receiver<super::super::BundleRequest>,
     mpsc::Receiver<super::super::ClientStateRequest>,
 ) {
+    let (options, actions, snapshots, bundles, client_state) =
+        api_options_with_client_state(backend, adjust, preferences_path, worker_check);
+    (router(options), actions, snapshots, bundles, client_state)
+}
+
+fn api_options_with_client_state(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    worker_check: Option<crate::server::WorkerSourceCheck>,
+) -> (
+    ServerOptions,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<super::super::ClientStateRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -2293,13 +2310,7 @@ fn api_app_with_client_state(
     if let Some(check) = worker_check {
         options.set_worker_source_check(check);
     }
-    (
-        router(options),
-        action_rx,
-        snapshot_tx,
-        bundle_rx,
-        client_state_rx,
-    )
+    (options, action_rx, snapshot_tx, bundle_rx, client_state_rx)
 }
 
 fn bearer(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -2704,6 +2715,46 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
     assert_eq!(json_body(response).await["turn_id"], 3);
 }
 
+#[tokio::test]
+async fn public_interrupt_submits_only_when_the_session_offers_it() {
+    let (app, mut actions, snapshot_tx, _) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            // The daemon can publish an interrupt for queued recovery with no active prompt.
+            snapshot.sessions[0].capabilities.interrupt_turn = true;
+        });
+    let request = || {
+        bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = mj_core::runtime::spawn(app.clone().oneshot(request()));
+    let action = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        action.action,
+        ControllerAction::InterruptTurn {
+            session_id: "session-1".into()
+        }
+    );
+    action
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.interrupt_turn = false);
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert!(actions.try_recv().is_err());
+}
+
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
 // Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
 #[tokio::test]
@@ -2755,6 +2806,53 @@ async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt
         backend.prompts.lock().unwrap().is_empty(),
         "a withdrawn prompt is never submitted"
     );
+}
+
+#[tokio::test]
+async fn an_interrupt_on_either_listener_withdraws_the_other_listeners_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(FakeBackend {
+        record_gate: Some((started.clone(), release.clone())),
+        ..FakeBackend::default()
+    });
+    let (options, _actions, _snapshot_tx, _bundles, _client_state) = api_options_with_client_state(
+        backend.clone(),
+        |snapshot| {
+            snapshot.sessions[0].capabilities.prompt = true;
+            snapshot.sessions[0].capabilities.interrupt_turn = false;
+        },
+        absent_preferences_path(),
+        None,
+    );
+    let loopback = router(options.clone());
+    let phone = router(options);
+    for (sender, interrupter) in [(&loopback, &phone), (&phone, &loopback)] {
+        let prompt = sender.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"stop me"}"#))
+                .unwrap(),
+        );
+        tokio::pin!(prompt);
+        tokio::select! {
+            () = started.notified() => {}
+            result = &mut prompt => panic!("prompt finished before it was held: {result:?}"),
+        }
+        let interrupt = interrupter
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(interrupt.status(), StatusCode::ACCEPTED);
+        release.notify_one();
+        assert_eq!(prompt.await.unwrap().status(), StatusCode::CONFLICT);
+    }
+    assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -8988,13 +9086,13 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
     );
     let cookie = login_cookie(&app).await;
 
-    for (route, cookie_only) in [
+    for (route, use_cookie) in [
         ("/api/v1/sessions/session-1/items", false),
         (
             "/api/v1/sessions/session-1/native-agents/child/items",
             false,
         ),
-        ("/api/sessions/session-1/items", true),
+        ("/api/v1/sessions/session-1/items", true),
     ] {
         let edit = format!("{route}/tool%3Aedit/detail");
         let request = |builder: axum::http::request::Builder| {
@@ -9002,14 +9100,8 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
         };
         let response = request(Request::get(&edit)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
-        if cookie_only {
-            assert_eq!(
-                request(bearer(Request::get(&edit))).await.unwrap().status(),
-                StatusCode::UNAUTHORIZED
-            );
-        }
         let authenticated = |path: &str| {
-            if cookie_only {
+            if use_cookie {
                 Request::get(path).header(COOKIE, &cookie)
             } else {
                 bearer(Request::get(path))

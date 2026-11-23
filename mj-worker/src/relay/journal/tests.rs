@@ -7,8 +7,72 @@ use crate::relay::test_support::*;
 use crate::relay::{
     ClaimedRelayCommand, RELAY_EVENT_FORMAT_V1, RELAY_EVENT_GENESIS_DIGEST, RelayCommandKind,
     RelayCommandOutcome, RelayCursor, RelayErrorCode, RelayErrorDetail, RelayExecutionState,
-    RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
+    RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload, TurnInterruptTarget,
 };
+
+#[test]
+fn guardian_reviews_survive_journal_replay_without_duplicating_pending_verdicts() {
+    use mj_core::guardian::{Outcome, PriorGuardianReview};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let review = |id: &str| PriorGuardianReview {
+        review_id: Some(id.into()),
+        tool: "Bash".into(),
+        action_summary: id.into(),
+        outcome: Outcome::Deny,
+        risk_level: None,
+        user_authorization: None,
+        rationale: None,
+    };
+    let first = review("one");
+    let second = review("two");
+    let expected = vec![first.clone(), second.clone()];
+    let context = relay.turn_context();
+    for review in &expected {
+        context.record_prior_guardian_review(review.clone());
+    }
+    // Echo the first settled verdict while the second is still in flight.
+    for review in [first, second.clone(), second] {
+        relay
+            .record_observation(RelayObservation::GuardianReviewed { review })
+            .unwrap();
+        assert_eq!(context.prior_guardian_reviews(), expected);
+    }
+    assert_eq!(relay.snapshot.prior_guardian_reviews(), expected);
+
+    drop(relay);
+    std::fs::remove_file(temp.path().join(RELAY_STATE_FILE)).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(relay.turn_context().prior_guardian_reviews(), expected);
+    assert_eq!(relay.snapshot.prior_guardian_reviews(), expected);
+
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+    submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "new-native-session".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.turn_context().prior_guardian_reviews().is_empty());
+    assert!(relay.snapshot.prior_guardian_reviews().is_empty());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(relay.turn_context().prior_guardian_reviews().is_empty());
+}
 
 // Hard-won: b62fe3b: later notices evicted the turn facts still read by the process watcher.
 #[test]
@@ -2167,7 +2231,10 @@ fn revision_29_migrates_live_payloads_and_legacy_receipts_through_replay() {
     drop(relay);
     fs::write(&path, serde_json::to_vec(&idle).unwrap()).unwrap();
     relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
-    assert_eq!(persisted_relay_snapshot(temp.path()).format_version, 30);
+    assert_eq!(
+        persisted_relay_snapshot(temp.path()).format_version,
+        mj_core::relay::RELAY_STATE_VERSION
+    );
 
     let mut old = prompt("uncompacted terminal body");
     if let RelayCommand::Prompt { prompt } = &mut old
@@ -2232,7 +2299,7 @@ fn revision_29_migrates_live_payloads_and_legacy_receipts_through_replay() {
     );
     let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let snapshot = persisted_relay_snapshot(temp.path());
-    assert_eq!(snapshot.format_version, 30);
+    assert_eq!(snapshot.format_version, mj_core::relay::RELAY_STATE_VERSION);
     assert_eq!(snapshot.latest_ordinal, tail_ordinal);
     assert_eq!(snapshot.active_prompt.unwrap().command_id, "active-prompt");
     assert!(stored["active_prompt"].get("prompt").is_none());
@@ -2516,6 +2583,7 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
                 elicitation_id: id.into(),
                 action: action.into(),
                 reply: None,
+                answers: None,
             })
             .unwrap();
         assert_eq!(
@@ -2538,7 +2606,7 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
 // Hard-won: 1d399ac64: interrupt during reload left queued recovery running afterwards.
 #[test]
 fn interrupt_queued_recovery_finishes_locally_across_partial_completion() {
-    for cut in 0..3 {
+    for (cut, legacy) in [(0, false), (1, false), (2, false), (0, true)] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
         submit_relay(&mut relay, "original-turn", prompt("first task"));
@@ -2547,15 +2615,35 @@ fn interrupt_queued_recovery_finishes_locally_across_partial_completion() {
         drop(relay);
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
         let target = mj_core::continuation::restart_continuation_id("original-turn");
+        assert!(!relay.is_acp_ready());
+        let command = relay
+            .operational_state()
+            .turn_controls
+            .unwrap()
+            .interrupt
+            .unwrap();
+        assert_eq!(
+            command,
+            RelayCommand::CancelTurnTarget {
+                target: TurnInterruptTarget::QueuedRestart {
+                    command_id: target.clone()
+                },
+            }
+        );
+        let command = if legacy {
+            RelayCommand::CancelTurn
+        } else {
+            command
+        };
         if cut == 0 {
-            submit_relay(&mut relay, "interrupt-reload", RelayCommand::CancelTurn);
+            submit_relay(&mut relay, "interrupt-reload", command);
         } else {
             relay
                 .append_relay_event(
                     Some("interrupt-reload"),
                     RelayObservation::CommandQueued {
                         command_id: "interrupt-reload".into(),
-                        command: RelayCommand::CancelTurn,
+                        command,
                         created_at_ms: 1,
                         insert_at_front: false,
                     },

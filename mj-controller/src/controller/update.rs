@@ -6,7 +6,7 @@
 //! the running binary was installed, asks that channel whether a newer
 //! release exists, and (in [`check_prompt_and_apply`]) asks the
 //! user before changing anything. npm and Homebrew upgrades delegate to the
-//! package manager; curl installs self-replace; cargo and npx installs only
+//! package manager; release installs self-replace; cargo and npx installs only
 //! print the command, because a live `cargo install` rebuild or a nested
 //! `npx` run is not something to start from inside mj.
 
@@ -33,6 +33,9 @@ const HOMEBREW_FORMULA_URL: &str =
 const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
+const UPDATE_LOCK_NAME: &str = ".mj-self-update.lock";
+// Shared with install.ps1, which also sweeps these files.
+const REPLACED_PREFIX: &str = ".mj-replaced-";
 const NPM_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPM";
 const NPX_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPX";
 const HOMEBREW_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_HOMEBREW";
@@ -62,7 +65,7 @@ impl Default for UpdateSources {
 /// How the running `mj` binary was installed. Decides both where the latest
 /// version is published and who is allowed to replace the binary: package
 /// managers own their trees, so upgrades there run the manager's own
-/// command, while a curl install may only be replaced in place.
+/// command, while a release install can be replaced in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallMethod {
     Npm,
@@ -222,7 +225,9 @@ fn cargo_json_install_recorded(
                     && record
                         .get("bins")
                         .and_then(serde_json::Value::as_array)
-                        .is_some_and(|bins| bins.iter().any(|name| name.as_str() == Some(binary)))
+                        .is_some_and(|bins| {
+                            cargo_bins_contain(bins.iter().filter_map(|name| name.as_str()), binary)
+                        })
             })
         })
 }
@@ -245,11 +250,15 @@ fn cargo_toml_install_recorded(
         .is_some_and(|installs| {
             installs.iter().any(|(source, bins)| {
                 cargo_source_matches(source, package, version)
-                    && bins
-                        .as_array()
-                        .is_some_and(|bins| bins.iter().any(|name| name.as_str() == Some(binary)))
+                    && bins.as_array().is_some_and(|bins| {
+                        cargo_bins_contain(bins.iter().filter_map(|name| name.as_str()), binary)
+                    })
             })
         })
+}
+
+fn cargo_bins_contain<'a>(mut names: impl Iterator<Item = &'a str>, binary: &str) -> bool {
+    names.any(|name| name == binary || name.strip_suffix(".exe") == Some(binary))
 }
 
 fn cargo_source_matches(source: &str, package: &str, version: Option<&str>) -> bool {
@@ -636,8 +645,8 @@ impl StartupUpdateOutcome {
 ///   `brew upgrade --formula brokkai/tap/mjolnir`; mj never writes into
 ///   `node_modules` or the Cellar itself, because those trees belong to the
 ///   package managers.
-/// - curl installs download the release archive, verify its SHA-256 sidecar,
-///   update the controller and every bundled application helper, and re-exec.
+/// - release installs download the archive, verify its SHA-256 sidecar,
+///   update the controller and every bundled application helper, and restart.
 /// - npx and cargo installs are notice-only.
 ///
 /// Runs on every interactive startup before the daemon or dashboard starts.
@@ -645,11 +654,8 @@ impl StartupUpdateOutcome {
 /// the terminal like any foreground command, so this must never be called
 /// from a UI render path.
 pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
-    // The controller ships for Linux and macOS (Windows users run WSL2), so
-    // there is no Windows replacer to maintain; debug builds are developers,
-    // who upgrade themselves.
-    if cfg!(windows)
-        || cfg!(debug_assertions)
+    // Developers running debug builds upgrade those builds themselves.
+    if cfg!(debug_assertions)
         || !io::stdin().is_terminal()
         || !io::stdout().is_terminal()
         || std::env::var_os(NO_UPDATE_CHECK_ENV).is_some()
@@ -673,7 +679,7 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
                 Ok(false) => return StartupUpdateOutcome::Declined,
                 Err(error) => return StartupUpdateOutcome::failed("Upgrade prompt", &error),
             }
-            // The success path re-execs and never returns; reaching the end
+            // The success path restarts and never returns; reaching the end
             // means the upgrade failed and the current process lives on.
             match download_apply_and_restart(&update).await {
                 Ok(()) => StartupUpdateOutcome::Skipped,
@@ -799,7 +805,7 @@ fn run_managed_upgrade(version: &Version, method: &InstallMethod) -> Result<Rest
     Ok(restart)
 }
 
-/// How the process re-execs after a successful managed upgrade.
+/// How the process restarts after a successful upgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RestartTarget {
     /// The upgrade replaced the binary file at this exact path, so re-execing
@@ -821,22 +827,23 @@ fn managed_restart_target(method: &InstallMethod, current_exe: &Path) -> Result<
     }
 }
 
-#[cfg(unix)]
 fn restart_current_process(target: RestartTarget) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let mut command = match target {
         RestartTarget::SameExe(exe) => Command::new(exe),
-        RestartTarget::Wrapper => Command::new("mj"),
+        RestartTarget::Wrapper => Command::new(BIN_NAME),
     };
-    let error = command.args(args).exec();
-    Err(error).context("exec replacement mj")
-}
-
-#[cfg(not(unix))]
-fn restart_current_process(_target: RestartTarget) -> Result<()> {
-    bail!("automatic restart is only supported on Unix platforms")
+    command.args(std::env::args_os().skip(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec()).context("exec replacement mj")
+    }
+    #[cfg(not(unix))]
+    {
+        let status =
+            mj_core::subprocess::run_interactive(&mut command).context("run replacement mj")?;
+        std::process::exit(status.code().unwrap_or(1))
+    }
 }
 
 async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
@@ -902,18 +909,25 @@ fn install_release_archive(
     archive_name: &str,
     archive_bytes: &[u8],
 ) -> Result<PathBuf> {
-    ensure!(
-        cfg!(unix),
-        "self-update replacement is only supported on Unix platforms"
-    );
     let target_exe = current_exe
         .canonicalize()
         .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
     let parent = target_exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", target_exe.display()))?;
-    // Keep staging on the destination filesystem so each replacement is an
-    // atomic rename, including binaries that are currently running.
+    // Keep the lock file in place so every updater locks the same file.
+    let lock_path = parent.join(UPDATE_LOCK_NAME);
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open update lock {}", lock_path.display()))?;
+    let _lock = mj_core::file_lock::FileLock::acquire_cancellable(lock_file, &|| false)
+        .with_context(|| format!("acquire update lock {}", lock_path.display()))?;
+    sweep_replaced_files(parent);
+    // Keep staging on the destination filesystem for the final renames.
     let staging = tempfile::Builder::new()
         .prefix(".mj-self-update-")
         .tempdir_in(parent)
@@ -940,10 +954,86 @@ fn install_release_archive(
         } else {
             parent.join(name)
         };
-        std::fs::rename(&binary, &target)
+        replace_installed_file(&binary, &target)
             .with_context(|| format!("install {}", target.display()))?;
     }
     Ok(target_exe)
+}
+
+fn sweep_replaced_files(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(REPLACED_PREFIX.as_bytes())
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            // Windows keeps the old image mapped until its last process exits.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_installed_file(staged: &Path, target: &Path) -> Result<()> {
+    Ok(std::fs::rename(staged, target)?)
+}
+
+#[cfg(windows)]
+fn replace_installed_file(staged: &Path, target: &Path) -> Result<()> {
+    replace_installed_file_rename_aside(staged, target)
+}
+
+#[cfg(any(windows, test))]
+fn replace_installed_file_rename_aside(staged: &Path, target: &Path) -> Result<()> {
+    match target.symlink_metadata() {
+        Ok(metadata) => ensure!(!metadata.is_dir(), "{} is a directory", target.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return std::fs::rename(staged, target).context("promote staged binary");
+        }
+        Err(error) => return Err(error).context("inspect installed binary"),
+    }
+
+    let parent = target.parent().context("installed binary has no parent")?;
+    let mut prefix = OsString::from(REPLACED_PREFIX);
+    prefix.push(
+        target
+            .file_name()
+            .context("installed binary has no file name")?,
+    );
+    prefix.push("-");
+    let reservation = tempfile::Builder::new()
+        .prefix(&prefix)
+        .rand_bytes(32)
+        .tempfile_in(parent)
+        .context("reserve name for replaced binary")?
+        .into_temp_path();
+    let aside = reservation.to_path_buf();
+    reservation.close().context("remove placeholder file")?;
+    match std::fs::rename(target, &aside) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return std::fs::rename(staged, target).context("promote staged binary");
+        }
+        Err(error) => return Err(error).context("move installed binary aside"),
+    }
+
+    if let Err(error) = std::fs::rename(staged, target) {
+        if let Err(restore) = std::fs::rename(&aside, target) {
+            return Err(error).with_context(|| {
+                format!(
+                    "promote staged binary and restore {}: {restore}",
+                    aside.display()
+                )
+            });
+        }
+        return Err(error).context("promote staged binary");
+    }
+    let _ = std::fs::remove_file(aside);
+    Ok(())
 }
 
 fn stage_release_archive(

@@ -196,14 +196,12 @@ impl CommandExecutor for ShellHost {
 fn one_ssh_call_answers_every_runtime_check_including_a_stopped_apple_container() {
     let mac = ShellHost::new(&[
         ("uname", "echo 'Darwin  aarch64'"),
-        // Podman that fails with 100 KiB of complaint.
-        (
-            "podman",
-            "i=0; while [ $i -lt 2048 ]; do printf '%050d\\n' $i >&2; i=$((i+1)); done; exit 1",
-        ),
+        ("podman", r#"touch "${0%/*}/podman-invoked"; exit 1"#),
+        // Keep the later Apple results visible after more than a pipe buffer.
         (
             "docker",
-            r#"echo '{"ServerVersion":"27.3.1","OSType":"linux"}'"#,
+            r#"i=0; while [ $i -lt 2048 ]; do printf '%050d\n' $i >&2; i=$((i+1)); done
+echo '{"ServerVersion":"27.3.1","OSType":"linux"}'"#,
         ),
         ("sw_vers", "echo 26.1"),
         (
@@ -222,7 +220,8 @@ fn one_ssh_call_answers_every_runtime_check_including_a_stopped_apple_container(
             .unwrap()
     };
     assert_eq!(status(RuntimeKind::Bare).0, CheckStatus::Ready);
-    assert_eq!(status(RuntimeKind::Podman).0, CheckStatus::Fixable);
+    assert_eq!(status(RuntimeKind::Podman).0, CheckStatus::Unsupported);
+    assert!(!mac.stubs.path().join("podman-invoked").exists());
     let docker = status(RuntimeKind::Docker);
     assert_eq!(
         docker,
