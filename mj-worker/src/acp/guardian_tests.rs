@@ -641,6 +641,105 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
 }
 
 #[tokio::test]
+async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
+    use crate::relay::DurableRelay;
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{
+        GUARDIAN_DISABLED_REASON, GuardianReviewOutcome, GuardianReviewResult,
+    };
+    use mj_core::relay::RelayObservation;
+
+    let temp = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(relay_dir.path(), "guardian-answer-order", "test").unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (requests, mut events, runtime, context) = start_scripted_harness(
+        temp.path(),
+        &["make test", "make deploy"],
+        &[],
+        &["Review both actions."],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Kimi;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+            spec.turn_context = relay.turn_context();
+        },
+    );
+    let first = wait_for_guardian_request(&endpoint).await;
+    endpoint.complete(GuardianReviewResult {
+        request_id: first.request_id,
+        decision: GuardianReviewOutcome::AskPerson {
+            reason: GUARDIAN_DISABLED_REASON.into(),
+        },
+    });
+    let form = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+            break request;
+        }
+    };
+    relay
+        .record_observation(RelayObservation::ElicitationRequested {
+            request: form.clone(),
+        })
+        .unwrap();
+    let (resolved, reply) = oneshot::channel();
+    requests
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: form.id,
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String("approve".into()),
+                )]),
+            },
+            resolved,
+        })
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    // Leave the resolution queued while the harness asks for its next review.
+    let second = wait_for_guardian_request(&endpoint).await;
+    let [answer] = second.trusted_user_inputs.as_slice() else {
+        panic!("the next review must already have the human answer");
+    };
+    assert_eq!(answer.action, "accept");
+    assert_eq!(
+        answer.answers[0].option_label.as_deref(),
+        Some("Approve once")
+    );
+    let resolution = loop {
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            reply,
+            answers,
+        } = next_event(&mut events).await
+        {
+            break RelayObservation::ElicitationResolved {
+                elicitation_id,
+                action,
+                reply,
+                answers,
+            };
+        }
+    };
+    relay.record_observation(resolution).unwrap();
+    assert_eq!(context.trusted_user_inputs(), second.trusted_user_inputs);
+    endpoint.complete(GuardianReviewResult {
+        request_id: second.request_id,
+        decision: GuardianReviewOutcome::Allow {
+            stage: "utility_llm".into(),
+            stage1_score: None,
+        },
+    });
+    await_recorded(temp.path(), "session_outcomes", 2).await;
+    assert!(endpoint.requests().is_empty());
+    runtime.abort();
+}
+
+#[tokio::test]
 async fn guardian_alignment_sends_settled_denial_on_the_next_turn() {
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{

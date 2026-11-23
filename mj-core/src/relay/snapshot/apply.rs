@@ -2425,92 +2425,19 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 .pending_elicitations
                 .remove(elicitation_id)
                 .flatten();
-            let reply_text = reply
-                .as_deref()
-                .map(str::trim)
-                .filter(|reply| !reply.is_empty());
-            if matches!(action.as_str(), "accept" | "decline")
-                && (answers.is_some() || reply_text.is_some())
-            {
-                use crate::assessment::{MAX_MESSAGES, trim_middle};
-                use crate::guardian::{
-                    TrustedUserAnswerField, TrustedUserInput, TrustedUserInputKind,
-                };
-                let kind = if pending_request
-                    .as_ref()
-                    .is_some_and(|r| r.tool_permission.is_some())
-                    || elicitation_id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX)
-                {
-                    TrustedUserInputKind::ManualPermission
-                } else {
-                    TrustedUserInputKind::UserAnswer
-                };
-                let prompt = pending_request.as_ref().map_or("", |r| r.message.trim());
-                let title = pending_request
-                    .as_ref()
-                    .and_then(|r| r.title.as_deref())
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty() && *title != prompt)
-                    .map(trim_middle);
-                let legacy_reply = if answers.is_none() {
-                    reply_text.and_then(|reply| {
-                        let header = pending_request
-                            .as_ref()
-                            .map_or("", |r| r.title.as_deref().unwrap_or(&r.message));
-                        let tail = reply
-                            .strip_prefix(header.trim_start())
-                            .and_then(|rest| rest.strip_prefix("\n\n"))
-                            .map_or(reply, str::trim);
-                        (!tail.is_empty() && tail != header.trim()).then(|| trim_middle(tail))
-                    })
-                } else {
-                    None
-                };
-                let answers = answers
-                    .iter()
-                    .flatten()
-                    .map(|field| TrustedUserAnswerField {
-                        field_label: trim_middle(&field.field_label),
-                        selected_option: field.selected_option,
-                        value: trim_middle(&field.value),
-                        option_label: field.option_label.as_deref().map(trim_middle),
-                    })
-                    .collect();
+            use crate::guardian::TrustedUserInput;
+            if let Some(input) = TrustedUserInput::from_elicitation(
+                // Legacy bridges could reuse IDs. The ordinal distinguishes their answers.
+                format!("elicitation:{}:{elicitation_id}", event.ordinal),
+                elicitation_id,
+                pending_request.as_ref(),
+                action,
+                reply.as_deref(),
+                answers.as_deref(),
+            ) {
                 let inputs = &mut snapshot.trusted_user_inputs;
-                inputs.push(TrustedUserInput {
-                    // Older bridges could reuse a form ID after reload.
-                    // Each durable resolution has a unique, replay-stable ordinal.
-                    id: format!("elicitation:{}:{elicitation_id}", event.ordinal),
-                    kind,
-                    title,
-                    prompt: trim_middle(prompt),
-                    action: action.clone(),
-                    answers,
-                    legacy_reply,
-                });
-                let mut bytes = 0;
-                let retained = inputs
-                    .iter()
-                    .rev()
-                    .take(MAX_MESSAGES)
-                    .take_while(|input| {
-                        bytes += input.id.len()
-                            + input.prompt.len()
-                            + input.action.len()
-                            + input.title.as_ref().map_or(0, String::len)
-                            + input.legacy_reply.as_ref().map_or(0, String::len)
-                            + input
-                                .answers
-                                .iter()
-                                .map(|field| {
-                                    field.field_label.len()
-                                        + field.value.len()
-                                        + field.option_label.as_ref().map_or(0, String::len)
-                                })
-                                .sum::<usize>();
-                        bytes <= crate::continuation::USER_BYTES
-                    })
-                    .count();
+                inputs.push(input);
+                let retained = TrustedUserInput::retained_count(inputs.iter());
                 inputs.drain(..inputs.len() - retained);
             }
             if reply.is_some() {
@@ -2705,6 +2632,53 @@ fn begin_delivered_message_turn(
 #[cfg(test)]
 mod open_request_tests {
     use super::*;
+
+    #[test]
+    fn guardian_alignment_keeps_latest_form_when_answers_exceed_the_history_budget() {
+        use crate::continuation::USER_BYTES;
+        use crate::guardian::{TrustedUserAnswerField, TrustedUserInput};
+
+        let mut snapshot = RelaySnapshot::new("large-form".into());
+        let fields = vec![
+            TrustedUserAnswerField {
+                field_label: "details".into(),
+                value: "x".repeat(crate::assessment::MESSAGE_HEAD_BYTES),
+                selected_option: false,
+                option_label: None,
+            };
+            16
+        ];
+        for (ordinal, id, answers) in [(1, "earlier", Vec::new()), (2, "large", fields)] {
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V2,
+                ordinal,
+                previous_digest: String::new(),
+                digest: String::new(),
+                recorded_at_ms: 1,
+                command_id: None,
+                observation: RelayObservation::ElicitationResolved {
+                    elicitation_id: id.into(),
+                    action: "accept".into(),
+                    reply: None,
+                    answers: Some(answers),
+                },
+            };
+            event.digest = relay_event_digest(&event).unwrap();
+            apply_relay_event(&mut snapshot, &event).unwrap();
+        }
+        let latest = snapshot.trusted_user_inputs.last().unwrap();
+        assert_eq!(latest.elicitation_id(), Some("large"));
+        assert!(!latest.answers.is_empty());
+        assert!(latest.answers.len() < 16);
+        assert!(
+            snapshot
+                .trusted_user_inputs
+                .iter()
+                .map(TrustedUserInput::text_bytes)
+                .sum::<usize>()
+                <= USER_BYTES
+        );
+    }
 
     #[test]
     fn guardian_alignment_replays_human_form_answers_until_context_is_cleared() {

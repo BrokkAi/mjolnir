@@ -4,7 +4,7 @@ use mj_core::activity::ActivityFacts;
 use mj_core::activity::verdict::*;
 use mj_core::config::HarnessKind;
 use mj_core::guardian::{MAX_PRIOR_GUARDIAN_REVIEWS, PriorGuardianReview, TrustedUserInput};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Default)]
@@ -26,10 +26,19 @@ struct TurnContextState {
     /// Mjolnir guardian reviews in this request. A new request starts with
     /// none; a recovery continues the same request and keeps them.
     guardian_reviews: GuardianReviews,
-    trusted_user_inputs: Vec<TrustedUserInput>,
+    trusted_user_inputs: GuardianUserInputs,
     prior_guardian_reviews: Vec<PriorGuardianReview>,
     // These verdicts have settled but their journal events have not arrived.
     pending_prior_guardian_reviews: VecDeque<PriorGuardianReview>,
+}
+
+#[derive(Debug, Default)]
+struct GuardianUserInputs {
+    durable: Vec<TrustedUserInput>,
+    pending: Vec<TrustedUserInput>,
+    /// Retained journal records keep their live identity for in-flight reviews.
+    live_ids: HashMap<String, String>,
+    next_pending_id: u64,
 }
 
 /// Codex's per-turn guardian denial circuit breaker
@@ -408,19 +417,73 @@ impl TurnContext {
             .render(limit)
     }
 
-    pub fn set_trusted_user_inputs(&self, inputs: Vec<TrustedUserInput>) {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
-            .trusted_user_inputs = inputs;
+    pub fn set_trusted_user_inputs(&self, durable: Vec<TrustedUserInput>) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        let history = &mut state.trusted_user_inputs;
+        history.durable = durable;
+        history.pending.clear();
+        history.live_ids.clear();
+    }
+
+    /// Record the answer and enqueue its echo in the same order. The
+    /// callback must only publish into a channel slot already reserved.
+    pub fn record_pending_trusted_user_input(
+        &self,
+        elicitation_id: &str,
+        mut input: TrustedUserInput,
+        publish: impl FnOnce(),
+    ) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        let history = &mut state.trusted_user_inputs;
+        input.id = format!("pending:{}:{elicitation_id}", history.next_pending_id);
+        history.next_pending_id += 1;
+        history.pending.push(input);
+        let retained = TrustedUserInput::retained_count(history.pending.iter());
+        history.pending.drain(..history.pending.len() - retained);
+        publish();
+    }
+
+    pub fn sync_trusted_user_inputs(&self, durable: Vec<TrustedUserInput>) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        let history = &mut state.trusted_user_inputs;
+        history
+            .live_ids
+            .retain(|id, _| durable.iter().any(|input| &input.id == id));
+        // The journal retains a suffix. Match only newly appended entries to
+        // pending inputs: an older answer may have reused the same form ID.
+        let first_new = durable
+            .iter()
+            .rposition(|input| history.durable.iter().any(|old| old.id == input.id))
+            .map_or(0, |index| index + 1);
+        for input in &durable[first_new..] {
+            if let Some(elicitation_id) = input.elicitation_id()
+                && let Some(index) = history
+                    .pending
+                    .iter()
+                    .position(|pending| pending.elicitation_id() == Some(elicitation_id))
+            {
+                let pending = history.pending.remove(index);
+                history.live_ids.insert(input.id.clone(), pending.id);
+            }
+        }
+        history.durable = durable;
     }
 
     pub fn trusted_user_inputs(&self) -> Vec<TrustedUserInput> {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
-            .trusted_user_inputs
-            .clone()
+        let state = self.0.lock().expect("turn context lock poisoned");
+        let history = &state.trusted_user_inputs;
+        let inputs = history.durable.iter().chain(&history.pending);
+        let retained = TrustedUserInput::retained_count(inputs.clone());
+        inputs
+            .skip(history.durable.len() + history.pending.len() - retained)
+            .map(|input| {
+                let mut input = input.clone();
+                if let Some(id) = history.live_ids.get(&input.id) {
+                    input.id.clone_from(id);
+                }
+                input
+            })
+            .collect()
     }
 
     pub fn record_prior_guardian_review(&self, review: PriorGuardianReview) {
@@ -618,6 +681,40 @@ mod tests {
     use super::*;
     use mj_core::activity::InFlightToolCall;
     use serde_json::json;
+
+    #[test]
+    fn guardian_alignment_keeps_live_answer_identity_when_reused_form_ids_are_journaled() {
+        let context = TurnContext::default();
+        let elicitation = "form:with:colons";
+        let input = |ordinal| {
+            TrustedUserInput::from_elicitation(
+                format!("elicitation:{ordinal}:{elicitation}"),
+                elicitation,
+                None,
+                "accept",
+                Some("Same reply"),
+                None,
+            )
+            .unwrap()
+        };
+        let older = input(1);
+        context.set_trusted_user_inputs(vec![older.clone()]);
+
+        context.record_pending_trusted_user_input(elicitation, input(2), || {});
+        let first_live_view = context.trusted_user_inputs();
+        assert_eq!(first_live_view.len(), 2);
+        assert_ne!(first_live_view[0].id, first_live_view[1].id);
+
+        context.sync_trusted_user_inputs(vec![older.clone(), input(2)]);
+        assert_eq!(context.trusted_user_inputs(), first_live_view);
+
+        context.record_pending_trusted_user_input(elicitation, input(3), || {});
+        let second_live_view = context.trusted_user_inputs();
+        assert_eq!(second_live_view.len(), 3);
+        assert_ne!(second_live_view[1].id, second_live_view[2].id);
+        context.sync_trusted_user_inputs(vec![older, input(2), input(3)]);
+        assert_eq!(context.trusted_user_inputs(), second_live_view);
+    }
 
     #[test]
     fn guardian_alignment_keeps_bounded_review_history_across_turns() {

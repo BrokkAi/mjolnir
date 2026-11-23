@@ -311,11 +311,22 @@ impl ElicitationRequest {
         self.submitted_fields(content)
             .map(|(field, title, value)| {
                 let secret = self.field_is_secret(field);
-                let selected_option = matches!(
-                    field.kind,
-                    ElicitationFieldKind::SingleSelect { .. }
-                        | ElicitationFieldKind::MultiSelect { .. }
-                );
+                let selected_option = match (&field.kind, value) {
+                    (
+                        ElicitationFieldKind::SingleSelect { options, .. },
+                        ElicitationValue::String(value),
+                    ) => options.iter().any(|option| option.value == *value),
+                    (
+                        ElicitationFieldKind::MultiSelect { options, .. },
+                        ElicitationValue::StringArray(values),
+                    ) => {
+                        !values.is_empty()
+                            && values
+                                .iter()
+                                .all(|value| options.iter().any(|option| option.value == *value))
+                    }
+                    _ => false,
+                };
                 let (value, option_label) = if selected_option {
                     let displayed = if secret {
                         "[hidden]".to_owned()
@@ -1225,10 +1236,36 @@ mod tests {
         // An answer written in the note is the question's own answer. The
         // harness gets it in the question field, where codex-acp reads an Air
         // client's typed answer, so the required field is never missing.
-        assert_eq!(
-            request.harness_response(answer(&[("scope_note", "Only the parser")])),
-            Ok(answer(&[("scope", "Only the parser")]))
-        );
+        let normalized = request
+            .harness_response(answer(&[("scope_note", "Only the parser")]))
+            .unwrap();
+        assert_eq!(normalized, answer(&[("scope", "Only the parser")]));
+        let answers = request.trusted_answers(&normalized);
+        let [entered] = answers.as_slice() else {
+            panic!("expected one typed answer")
+        };
+        assert!(!entered.selected_option);
+        assert_eq!(entered.value, "Only the parser");
+        assert!(entered.option_label.is_none());
+
+        let input = crate::guardian::TrustedUserInput::from_elicitation(
+            "elicitation:1:typed-answer".into(),
+            &request.id,
+            Some(&request),
+            "accept",
+            None,
+            Some(&answers),
+        )
+        .unwrap();
+        let review: crate::guardian::GuardianReviewRequest = serde_json::from_value(json!({
+            "request_id": "review", "harness": "codex", "session_id": "forms",
+            "tool_call_id": "tool", "action": {}, "user_instructions": [],
+            "user_instructions_omitted": false, "transcript": "", "trusted_user_inputs": [input],
+        }))
+        .unwrap();
+        let prompt = review.request_text_tool_free();
+        assert!(prompt.contains(r#"Human entered value: "Only the parser""#));
+        assert!(!prompt.contains("Human selected option shown on screen"));
         // The note is an alternative to a pick, never beside one: codex-acp's
         // async question path reads a note in place of the pick, so sending
         // both would lose the pick.

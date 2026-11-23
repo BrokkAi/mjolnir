@@ -243,6 +243,118 @@ pub struct TrustedUserInput {
     pub legacy_reply: Option<String>,
 }
 
+impl TrustedUserInput {
+    /// Build the same evidence from a live human answer and its journal echo.
+    pub fn from_elicitation(
+        id: String,
+        elicitation_id: &str,
+        form: Option<&crate::elicitation::ElicitationRequest>,
+        action: &str,
+        reply: Option<&str>,
+        answers: Option<&[TrustedUserAnswerField]>,
+    ) -> Option<Self> {
+        use crate::assessment::trim_middle;
+
+        let reply = reply.map(str::trim).filter(|reply| !reply.is_empty());
+        if !matches!(action, "accept" | "decline") || (answers.is_none() && reply.is_none()) {
+            return None;
+        }
+        let kind = if form.is_some_and(|form| form.tool_permission.is_some())
+            || elicitation_id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX)
+        {
+            TrustedUserInputKind::ManualPermission
+        } else {
+            TrustedUserInputKind::UserAnswer
+        };
+        let prompt = form.map_or("", |form| form.message.trim());
+        let title = form
+            .and_then(|form| form.title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty() && *title != prompt)
+            .map(trim_middle);
+        let legacy_reply = if answers.is_none() {
+            reply.and_then(|reply| {
+                let header = form.map_or("", |form| form.title.as_deref().unwrap_or(&form.message));
+                let tail = reply
+                    .strip_prefix(header.trim_start())
+                    .and_then(|rest| rest.strip_prefix("\n\n"))
+                    .map_or(reply, str::trim);
+                (!tail.is_empty() && tail != header.trim()).then(|| trim_middle(tail))
+            })
+        } else {
+            None
+        };
+        let mut input = Self {
+            id,
+            kind,
+            title,
+            prompt: trim_middle(prompt),
+            action: action.to_owned(),
+            answers: Vec::new(),
+            legacy_reply,
+        };
+        let mut remaining = crate::continuation::USER_BYTES.saturating_sub(input.retention_bytes());
+        for field in answers.into_iter().flatten() {
+            let field = TrustedUserAnswerField {
+                field_label: trim_middle(&field.field_label),
+                selected_option: field.selected_option,
+                value: trim_middle(&field.value),
+                option_label: field.option_label.as_deref().map(trim_middle),
+            };
+            let Some(left) = remaining.checked_sub(field.text_bytes()) else {
+                break;
+            };
+            remaining = left;
+            input.answers.push(field);
+        }
+        Some(input)
+    }
+
+    pub fn elicitation_id(&self) -> Option<&str> {
+        let id = self
+            .id
+            .strip_prefix("elicitation:")
+            .or_else(|| self.id.strip_prefix("pending:"))?;
+        id.split_once(':').map(|(_, elicitation_id)| elicitation_id)
+    }
+
+    pub(crate) fn text_bytes(&self) -> usize {
+        self.id.len()
+            + self.prompt.len()
+            + self.action.len()
+            + self.title.as_ref().map_or(0, String::len)
+            + self.legacy_reply.as_ref().map_or(0, String::len)
+            + self
+                .answers
+                .iter()
+                .map(TrustedUserAnswerField::text_bytes)
+                .sum::<usize>()
+    }
+
+    fn retention_bytes(&self) -> usize {
+        // Charge both IDs equally, so a journal echo cannot change which
+        // answers fit in the history. An ordinal uses at most 20 digits.
+        let reserved = self.elicitation_id().map_or(0, |id| {
+            ("elicitation:".len() + 20 + 1 + id.len()).saturating_sub(self.id.len())
+        });
+        self.text_bytes() + reserved
+    }
+
+    /// Retain the newest answers within the authorization history budget.
+    pub fn retained_count<'a>(inputs: impl DoubleEndedIterator<Item = &'a Self>) -> usize {
+        let mut bytes = 0;
+        inputs
+            .rev()
+            .take(crate::assessment::MAX_MESSAGES)
+            .enumerate()
+            .take_while(|(index, input)| {
+                bytes += input.retention_bytes();
+                *index == 0 || bytes <= crate::continuation::USER_BYTES
+            })
+            .count()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedUserAnswerField {
@@ -253,6 +365,14 @@ pub struct TrustedUserAnswerField {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub option_label: Option<String>,
+}
+
+impl TrustedUserAnswerField {
+    fn text_bytes(&self) -> usize {
+        self.field_label.len()
+            + self.value.len()
+            + self.option_label.as_ref().map_or(0, String::len)
+    }
 }
 
 /// A session retains the same number of prior decisions in memory and on disk.

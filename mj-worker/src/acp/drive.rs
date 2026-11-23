@@ -622,19 +622,11 @@ where
                             let response = await_elicitation_response(
                                 &pending, &id, answer_rx, cancellation.cancelled(),
                             ).await;
-                            let action = response
-                                .as_ref()
-                                .map_or("cancel", PendingAnswer::action_name)
-                                .to_owned();
-                            if let Err(error) = events
-                                .send(RuntimeEvent::ElicitationResolved {
-                                    elicitation_id: id.clone(),
-                                    action,
-                                    reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
-                                    answers: response.as_ref().and_then(PendingAnswer::human)
-                                        .filter(|response| **response != ElicitationResponse::Cancel)
-                                        .map(|response| review.trusted_answers(response)),
-                                })
+                            if let Err(error) = emit_elicitation_resolution(
+                                &events, &permission_parent_context, &review,
+                                response.as_ref().map_or("cancel", PendingAnswer::action_name),
+                                response.as_ref().and_then(PendingAnswer::human),
+                            )
                                 .await
                             {
                                 tracing::debug!(
@@ -750,6 +742,14 @@ where
                             pending.remove(&id);
                             None
                         };
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &permission_parent_context, &form,
+                            response.as_ref().map_or("closed", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel),
+                        ).await {
+                            tracing::debug!(%error, "harness permission result receiver closed");
+                        }
                         // ACP keeps `cancelled` for a cancelled turn. Skip is a
                         // rejection of this call alone, so it selects the
                         // request's one-time rejection. Cancel reaches here only
@@ -777,18 +777,6 @@ where
                         let result = responder.respond(answer);
                         if let Err(error) = result {
                             tracing::debug!(%error, "harness permission responder closed");
-                        }
-                        if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
-                            elicitation_id: id,
-                            action: response.as_ref().map_or("closed", PendingAnswer::action_name).into(),
-                            reply: response.as_ref().and_then(PendingAnswer::human)
-                                .filter(|response| **response != ElicitationResponse::Cancel)
-                                .map(|response| form.reply_text(response)),
-                            answers: response.as_ref().and_then(PendingAnswer::human)
-                                .filter(|response| **response != ElicitationResponse::Cancel)
-                                .map(|response| form.trusted_answers(response)),
-                        }).await {
-                            tracing::debug!(%error, "harness permission result receiver closed");
                         }
                     });
                     Ok(())
@@ -1021,6 +1009,7 @@ where
                     let answer_rx = handler_elicitations.register(request.clone(), requesting_agent, AwayRequest::Question);
                     let pending = handler_elicitations.clone();
                     let events = elicitation_events.clone();
+                    let turn_context = ext_parent_context.clone();
                     let cancellation = responder.cancellation();
                     mj_core::runtime::spawn(async move {
                         if events
@@ -1044,19 +1033,11 @@ where
                         let response = await_elicitation_response(
                             &pending, &id, answer_rx, cancellation.cancelled(),
                         ).await;
-                        let action = response
-                            .as_ref()
-                            .map_or("cancel", PendingAnswer::action_name)
-                            .to_owned();
-                        if let Err(error) = events
-                            .send(RuntimeEvent::ElicitationResolved {
-                                elicitation_id: id.clone(),
-                                action,
-                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| request.reply_text(response)),
-                                answers: response.as_ref().and_then(PendingAnswer::human)
-                                    .filter(|response| **response != ElicitationResponse::Cancel)
-                                    .map(|response| request.trusted_answers(response)),
-                            })
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &turn_context, &request,
+                            response.as_ref().map_or("cancel", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human),
+                        )
                             .await
                         {
                             tracing::debug!(
@@ -1121,6 +1102,7 @@ where
                     let answer_rx = handler_elicitations.register(review.clone(), requesting_agent, AwayRequest::Plan);
                     let pending = handler_elicitations.clone();
                     let events = ext_events.clone();
+                    let turn_context = ext_parent_context.clone();
                     let cancellation = responder.cancellation();
                     mj_core::runtime::spawn(async move {
                         if events
@@ -1144,19 +1126,11 @@ where
                         let response = await_elicitation_response(
                             &pending, &id, answer_rx, cancellation.cancelled(),
                         ).await;
-                        let action = response
-                            .as_ref()
-                            .map_or("cancel", PendingAnswer::action_name)
-                            .to_owned();
-                        if let Err(error) = events
-                            .send(RuntimeEvent::ElicitationResolved {
-                                elicitation_id: id.clone(),
-                                action,
-                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
-                                answers: response.as_ref().and_then(PendingAnswer::human)
-                                    .filter(|response| **response != ElicitationResponse::Cancel)
-                                    .map(|response| review.trusted_answers(response)),
-                            })
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &turn_context, &review,
+                            response.as_ref().map_or("cancel", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human),
+                        )
                             .await
                         {
                             tracing::debug!(

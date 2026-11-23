@@ -844,17 +844,21 @@ impl DurableRelay {
         if authorization_changed {
             self.turn_context
                 .set_authorization_context(self.snapshot.authorization_context());
-            self.turn_context
-                .set_trusted_user_inputs(self.snapshot.trusted_user_inputs());
         }
         match &event.observation {
+            RelayObservation::ElicitationResolved { .. } => self
+                .turn_context
+                .sync_trusted_user_inputs(self.snapshot.trusted_user_inputs()),
             RelayObservation::GuardianReviewed { .. } => self
                 .turn_context
                 .sync_prior_guardian_reviews(self.snapshot.prior_guardian_reviews()),
             RelayObservation::CommandCompleted {
                 outcome: RelayCommandOutcome::ContextCleared { .. },
                 ..
-            } => self.turn_context.clear_prior_guardian_reviews(),
+            } => {
+                self.turn_context.clear_prior_guardian_reviews();
+                self.turn_context.set_trusted_user_inputs(Vec::new());
+            }
             _ => {}
         }
         if matches!(

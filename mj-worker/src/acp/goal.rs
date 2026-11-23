@@ -541,20 +541,15 @@ pub(super) async fn resolve(
         }
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
     }
-    let reply = Some(question.request.reply_text(response));
-    let answers = (*response != ElicitationResponse::Cancel)
-        .then(|| question.request.trusted_answers(response));
-    *pending = None;
-    emit_runtime_event(
+    emit_elicitation_resolution(
         events,
-        RuntimeEvent::ElicitationResolved {
-            elicitation_id: id.into(),
-            action: response.action_name().into(),
-            reply,
-            answers,
-        },
+        &spec.turn_context,
+        &question.request,
+        response.action_name(),
+        Some(response),
     )
     .await?;
+    *pending = None;
     Ok(Some(Ok(())))
 }
 
