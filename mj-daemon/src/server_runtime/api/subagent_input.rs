@@ -94,10 +94,12 @@ impl ApiBackend {
                 None,
                 &requested_target_for_auth,
             )?;
-            // The oracle is asked with ask_oracle, never addressed directly.
+            // Review children are private to the review host. A parent asks
+            // its oracle through ask_oracle.
             if mj_controller::database::load_subagent(&target_id)?.is_some_and(|relation| {
-                relation.kind == mj_core::subagent::SubagentKind::Oracle
-                    && relation.parent_session_id == sender_for_auth
+                relation.kind == mj_core::subagent::SubagentKind::Reviewer
+                    || (relation.kind == mj_core::subagent::SubagentKind::Oracle
+                        && relation.parent_session_id == sender_for_auth)
             }) {
                 anyhow::bail!(mj_core::refusal::Refusal::unusable(format!(
                     "target session {} does not exist or was destroyed",

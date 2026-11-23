@@ -803,10 +803,7 @@ pub fn session_launch_config(
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).
     launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
-    if let Some(child) = subagent
-        .as_ref()
-        .filter(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
-    {
+    if let Some(child) = subagent.as_ref() {
         let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key);
         let steps = crate::database::load_startup_group(session_id, &group)?;
         // The assignment is delivered at most once per session history.
