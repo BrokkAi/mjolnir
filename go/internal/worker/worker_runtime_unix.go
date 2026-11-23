@@ -2978,6 +2978,11 @@ func awaitLiveBaseline(relay *RelayCell, frames <-chan connectionFrame, envelope
 		var outcome *LiveBaselineResult
 		var ended bool
 		var frameErr error
+		// The watcher goroutine sends exactly once. When its branch wins, that
+		// send is already consumed; otherwise cancel it and take the send, so
+		// the next iteration owns releases alone.
+		var changedErr error
+		changedDone := false
 		select {
 		case frame := <-frames:
 			_, frameErr = frame.disconnected()
@@ -2987,10 +2992,13 @@ func awaitLiveBaseline(relay *RelayCell, frames <-chan connectionFrame, envelope
 				cut = LiveBaselineResult{Err: errors.New("worker dropped its adoption cut: channel closed")}
 			}
 			outcome = &cut
-		case <-released:
+		case changedErr = <-released:
+			changedDone = true
 		}
 		stopWait()
-		<-released
+		if !changedDone {
+			<-released
+		}
 		switch {
 		case frameErr != nil:
 			return LiveBaselineResult{Err: frameErr}, false, nil
@@ -2998,6 +3006,8 @@ func awaitLiveBaseline(relay *RelayCell, frames <-chan connectionFrame, envelope
 			return LiveBaselineResult{}, true, nil
 		case outcome != nil:
 			return *outcome, false, nil
+		case changedErr != nil:
+			return LiveBaselineResult{Err: fmt.Errorf("worker adoption observation stopped: %w", changedErr)}, false, nil
 		}
 	}
 }
