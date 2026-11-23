@@ -62,3 +62,99 @@ func TestPlacementRefusesADaemonKeyItDoesNotRead(t *testing.T) {
 		t.Fatal(refusal)
 	}
 }
+
+func daemonTestSSHPlacement() DaemonConfig {
+	placement := DefaultDaemonConfig()
+	placement.Runtime = DaemonRuntimeSsh
+	host := "test-box"
+	placement.Host = &host
+	return placement
+}
+
+func daemonTestRead(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func daemonTestLoadPlacement(t *testing.T, path string) DaemonConfig {
+	t.Helper()
+	placement, err := DaemonConfigLoadPlacement(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return placement
+}
+
+// Hard-won: 916f27ded: the first-launch save wrote a file with only
+// `[daemon]`, which the local daemon refuses to load once `runtime` is
+// switched back to `host`; and an explicit `runtime = "host"` looked unset.
+func TestAPlacementFileMadeHereLoadsAsAConfigAndExplicitHostCountsAsSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if set, err := DaemonConfigIsSetIn(path); err != nil || set {
+		t.Fatalf("set %v, %v", set, err)
+	}
+	ssh := daemonTestSSHPlacement()
+	if err := ssh.ReplacePlacement(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if written := daemonTestRead(t, path); !strings.HasPrefix(written, "version = ") {
+		t.Fatal(written)
+	}
+	if _, err := ConfigLoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("version = 23\n[daemon]\nruntime = \"host\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if set, err := DaemonConfigIsSetIn(path); err != nil || !set {
+		t.Fatalf("set %v, %v", set, err)
+	}
+	if !daemonTestLoadPlacement(t, path).IsDefault() {
+		t.Fatal("explicit host loads as the default")
+	}
+	// A launch that saw no table must not overwrite one added since.
+	refused := ssh.ReplacePlacement(path, nil)
+	if refused == nil || !strings.Contains(refused.Error(), "it is now set") {
+		t.Fatalf("refusal %v", refused)
+	}
+	if !daemonTestLoadPlacement(t, path).IsDefault() {
+		t.Fatal("the refused launch replaced the placement")
+	}
+}
+
+// The placement is written into a file the daemon machine owns, so every
+// other table and comment must survive, and choosing the default placement
+// again must leave no empty `[daemon]` table behind.
+func TestSavingAPlacementKeepsTheRestOfTheFileAndRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	others := "# kept comment\nprofiles = \"owned by remote\"\n\n[phone]\nenabled = false\n"
+	if err := os.WriteFile(path, []byte(others), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ssh := daemonTestSSHPlacement()
+	if err := ssh.ReplacePlacement(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if written := daemonTestRead(t, path); !strings.HasPrefix(written, others) {
+		t.Fatal(written)
+	}
+	if got := daemonTestLoadPlacement(t, path); !daemonConfigOptionEqual(&got, &ssh) {
+		t.Fatalf("placement %+v", got)
+	}
+
+	// A launch that decided from an older file is refused, not applied.
+	stale := DefaultDaemonConfig().ReplacePlacement(path, nil)
+	if stale == nil || !strings.Contains(stale.Error(), "it now names test-box") {
+		t.Fatalf("refusal %v", stale)
+	}
+	if err := DefaultDaemonConfig().ReplacePlacement(path, &ssh); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimRight(daemonTestRead(t, path), " \t\r\n"); got != strings.TrimRight(others, " \t\r\n") {
+		t.Fatalf("file %q", got)
+	}
+}

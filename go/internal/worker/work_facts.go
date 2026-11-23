@@ -36,6 +36,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -215,7 +216,7 @@ func selectProcesses(rows []ProcRow, scan *ScanContext, describe func(*ProcRow) 
 		}
 		described := describe(row)
 		if scan.OwnExe != nil && described.Exe != nil &&
-			slices.Equal(capturePathComponents(*described.Exe), capturePathComponents(*scan.OwnExe)) {
+			slices.Equal(workFactsPathComponents(*described.Exe), workFactsPathComponents(*scan.OwnExe)) {
 			continue
 		}
 		work = append(work, workItem{row: row, described: described, detached: !inTree})
@@ -389,9 +390,9 @@ func readWorktree(ctx context.Context, children *ObserverChildren, git string, d
 	if statusErr != nil {
 		return core.ObservedUnavailable[core.WorktreeFacts](statusErr.Error())
 	}
-	facts := parseStatus(captureLossy(status), directory)
+	facts := parseStatus(fromUTF8Lossy(status), directory)
 	if commit := facts.Head; commit != nil {
-		switch sha, subject, ok := strings.Cut(captureLossy(head), "\x00"); {
+		switch sha, subject, ok := strings.Cut(fromUTF8Lossy(head), "\x00"); {
 		case headErr != nil:
 			commit.Subject = core.ObservedUnavailable[string](headErr.Error())
 		// Exactly as Git reported it: redaction and cutting are for the
@@ -448,7 +449,7 @@ func runGit(ctx context.Context, children *ObserverChildren, git string, directo
 		return output.Stdout, nil
 	}
 	detail := ""
-	if lines := captureLines(captureLossy(output.Stderr)); len(lines) > 0 {
+	if lines := rustLines(fromUTF8Lossy(output.Stderr)); len(lines) > 0 {
 		detail = strings.TrimSpace(lines[0])
 	}
 	if detail == "" {
@@ -687,4 +688,22 @@ func workFactsExitStatus(state *os.ProcessState) string {
 		return fmt.Sprintf("signal: %d (%s)", int(status.Signal()), status.Signal())
 	}
 	return fmt.Sprintf("exit status: %d", state.ExitCode())
+}
+
+// workFactsPathComponents is a path's components as Rust's Path::components
+// yields them, for comparing paths as Rust's PathBuf equality does: the root
+// as "/", "." dropped except at the start, ".." kept.
+func workFactsPathComponents(path string) []string {
+	separator := func(r rune) bool { return r == '/' || (runtime.GOOS == "windows" && r == '\\') }
+	var components []string
+	if path != "" && separator(rune(path[0])) {
+		components = append(components, "/")
+	}
+	for index, part := range strings.FieldsFunc(path, separator) {
+		if part == "." && !(index == 0 && components == nil && strings.HasPrefix(path, ".")) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
 }

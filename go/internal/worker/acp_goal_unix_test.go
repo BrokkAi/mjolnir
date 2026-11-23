@@ -19,6 +19,7 @@ import (
 	"github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
@@ -142,9 +143,30 @@ func goalFileExists(path string) bool {
 	return err == nil
 }
 
+// goalAwaitStopped is Rust's `drop(tx); while receive.recv().await.is_some()
+// {}` followed by the bounded wait for the runtime task: Run never closes
+// events, so the drain ends when Run returns rather than outliving the test.
+func goalAwaitStopped(t *testing.T, requests chan<- CommandRequest, events <-chan core.RuntimeEvent, runtime <-chan error) {
+	t.Helper()
+	close(requests)
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-events:
+		case err := <-runtime:
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		case <-deadline:
+			t.Fatal("the runtime did not stop")
+		}
+	}
+}
+
 // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
 func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
-	_ = core.InitializeFromParent()
+	_ = harnessinstall.InitializeFromParent()
 	type goalCase struct {
 		asking, running bool
 		answer          *bool
@@ -380,6 +402,8 @@ func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
 				resolved := make(chan error, 1)
 				requests <- CommandRequestResolveElicitation{ElicitationID: core.RecoveryID, Response: response, Resolved: resolved}
 				// Continue draining while the control response is in flight.
+				// Rust's ack and event receivers both fail once the runtime
+				// drops them; Run never closes events, so watch it return.
 			drain:
 				for {
 					select {
@@ -388,10 +412,9 @@ func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
 							t.Fatal(err)
 						}
 						break drain
-					case _, ok := <-events:
-						if !ok {
-							t.Fatal("the runtime stopped before answering")
-						}
+					case <-events:
+					case err := <-runtime:
+						t.Fatalf("the runtime stopped before answering: %v", err)
 					}
 				}
 				observed := relay.Observe()
@@ -425,19 +448,7 @@ func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
 				t.Fatal("automatic recovery must not ask")
 			}
 		}
-		close(requests)
-		go func() {
-			for range events {
-			}
-		}()
-		select {
-		case err := <-runtime:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("the runtime did not stop")
-		}
+		goalAwaitStopped(t, requests, events, runtime)
 		observed = relay.Observe()
 		live := observed.operatorAway.liveQuestions()
 		observed.Unlock()
@@ -455,7 +466,7 @@ func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
 }
 
 func TestGoalControlsWorkDuringPromptsAndPendingResumeWithLargeOutput(t *testing.T) {
-	_ = core.InitializeFromParent()
+	_ = harnessinstall.InitializeFromParent()
 	for _, harness := range []core.HarnessKind{core.HarnessKindCodex, core.HarnessKindClaude} {
 		for _, foreground := range []bool{false, true} {
 			root := t.TempDir()
@@ -591,19 +602,7 @@ func TestGoalControlsWorkDuringPromptsAndPendingResumeWithLargeOutput(t *testing
 					break
 				}
 			}
-			close(requests)
-			go func() {
-				for range events {
-				}
-			}()
-			select {
-			case err := <-runtime:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("the runtime did not stop")
-			}
+			goalAwaitStopped(t, requests, events, runtime)
 		}
 	}
 }

@@ -102,6 +102,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
         "podman".into(),
         mj_core::config::TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),

@@ -665,7 +665,9 @@ func reviewerHostStart(ctx context.Context, spec *LaunchSpec) (*ReviewerHost, er
 		return nil, err
 	}
 	command.Stdin, command.Stdout, command.Stderr = stdinRead, stdoutWrite, stderrWrite
-	err = command.Start()
+	// Register the bridge with the worker's orphan reaper as it spawns, so
+	// the reaper never takes the exit status its owner awaits.
+	err = core.SpawnChild(command)
 	stdinRead.Close()
 	stdoutWrite.Close()
 	stderrWrite.Close()

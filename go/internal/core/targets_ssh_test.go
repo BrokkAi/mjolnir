@@ -25,6 +25,14 @@ import (
 // tests that set it take turns (Rust: SHARING_TEST_LOCK).
 var sharingTestLock sync.Mutex
 
+// skipUnlessUnix skips a test that needs a Unix shell and file modes.
+func skipUnlessUnix(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix only")
+	}
+}
+
 // lockMasterOpening takes the file lock that serializes checking and opening
 // the master on socket across processes, without an executor.
 func lockMasterOpening(socket string) (*FileLock, error) {

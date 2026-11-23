@@ -994,6 +994,93 @@ func TestSensitiveStdinIsSentAgainOnEachRetry(t *testing.T) {
 	}
 }
 
+// failAfterReader yields remaining bytes of input, then fails as an
+// upstream that disconnected mid-stream.
+type failAfterReader struct{ remaining int }
+
+func (r *failAfterReader) Read(buffer []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, errors.New("simulated upstream disconnect")
+	}
+	count := min(len(buffer), r.remaining)
+	for index := range buffer[:count] {
+		buffer[index] = 'x'
+	}
+	r.remaining -= count
+	return count, nil
+}
+
+// A mid-stream stdin read error must kill the child before closing stdin so
+// a length-less writer never publishes a truncated file on EOF.
+func TestStreamedStdinReadErrorTerminatesChildBeforeEOF(t *testing.T) {
+	published := filepath.Join(t.TempDir(), "published.bin")
+	// The child reads stdin to EOF and only creates published.bin if it
+	// sees EOF.
+	command := NewCommandSpec("sh", []string{"-c", fmt.Sprintf("cat >/dev/null && printf done > '%s'", published)})
+	executor := NewCancellableProcessExecutor(new(atomic.Bool))
+	if _, err := executor.ExecuteWithStdin(&command, &failAfterReader{remaining: 128 * 1024}); err == nil {
+		t.Fatal("expected stdin read error to fail command")
+	}
+	if _, err := os.Stat(published); err == nil {
+		t.Fatal("child must be killed before seeing EOF on stdin read error")
+	}
+}
+
+// blockingReader blocks its first Read until aborted, signalling entered
+// once it blocks.
+type blockingReader struct {
+	aborted chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{aborted: make(chan struct{}), entered: make(chan struct{})}
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.aborted
+	return 0, errors.New("stdin aborted")
+}
+
+func (r *blockingReader) abort() {
+	select {
+	case <-r.aborted:
+	default:
+		close(r.aborted)
+	}
+}
+
+func TestAbortableStdinUnblocksOnEarlyChildExitAndCancellation(t *testing.T) {
+	// 1. The child exits non-zero before reading stdin while the reader
+	// blocks.
+	reader := newBlockingReader()
+	command := NewCommandSpec("sh", []string{"-c", "echo already-exists >&2; exit 7"})
+	executor := NewCancellableProcessExecutor(new(atomic.Bool))
+	output, err := executor.ExecuteWithAbortableStdin(&command, reader, reader.abort)
+	if err != nil {
+		t.Fatalf("non-zero child exit returns CommandOutput without hanging: %v", err)
+	}
+	if output.Status != 7 || !strings.Contains(string(output.Stderr), "already-exists") {
+		t.Fatalf("status %d stderr %q", output.Status, output.Stderr)
+	}
+
+	// 2. Cancellation fires while the child is waiting on stdin and the
+	// reader blocks.
+	reader = newBlockingReader()
+	cancelled := new(atomic.Bool)
+	go func() {
+		<-reader.entered
+		cancelled.Store(true)
+	}()
+	command = NewCommandSpec("sh", []string{"-c", "cat >/dev/null"})
+	executor = NewCancellableProcessExecutor(cancelled)
+	if _, err := executor.ExecuteWithAbortableStdin(&command, reader, reader.abort); err == nil {
+		t.Fatal("cancellation must return error promptly")
+	}
+}
+
 // signalIgnoreSIGXFSZ keeps the test process alive when a write passes
 // RLIMIT_FSIZE, so the write fails with EFBIG instead.
 func signalIgnoreSIGXFSZ() {

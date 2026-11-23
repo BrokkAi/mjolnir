@@ -88,6 +88,63 @@ func assertTranscriptGolden(t *testing.T, name, actual string) {
 	}
 }
 
+func TestStandaloneTerminalRetentionPreservesMultibyteErrorAndOutcome(t *testing.T) {
+	firstError := "error " + strings.Repeat("界", 100)
+	exitCode := uint32(137)
+	signal := "SIGKILL"
+	var body core.TranscriptBody = core.TranscriptBodyTerminalOutputOf(core.TerminalOutputRecord{
+		TerminalID: "term-1",
+		Output:     core.NewPackedText(fmt.Sprintf("   \n  %s\n%s\n", firstError, strings.Repeat("stdout\n", 10_000))),
+		Truncated:  true,
+		ExitCode:   &exitCode,
+		Signal:     &signal,
+	})
+
+	if !CompactTranscriptBodyForRetention(&body) {
+		t.Fatal("the first compaction changed nothing")
+	}
+	if CompactTranscriptBodyForRetention(&body) {
+		t.Fatal("a second compaction changed the row again")
+	}
+	compact, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compact) >= 1024 {
+		t.Fatalf("compact row is %d bytes", len(compact))
+	}
+	decoded, err := core.DecodeTranscriptBody(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, ok := decoded.(core.TranscriptBodyTerminalOutput)
+	if !ok {
+		t.Fatalf("expected a terminal record, got %T", decoded)
+	}
+	record := terminal.Record
+	if !record.Output.IsEmpty() {
+		t.Fatalf("output kept: %q", record.Output.Text())
+	}
+	if record.ExitCode == nil || *record.ExitCode != 137 {
+		t.Fatalf("exit code %v", record.ExitCode)
+	}
+	if record.Signal == nil || *record.Signal != "SIGKILL" {
+		t.Fatalf("signal %v", record.Signal)
+	}
+	if !record.Truncated {
+		t.Fatal("truncation lost")
+	}
+	if terminal.OutputLineCount == nil || *terminal.OutputLineCount != 10_003 {
+		t.Fatalf("line count %v", terminal.OutputLineCount)
+	}
+	if terminal.FirstErrorLine == nil || *terminal.FirstErrorLine != firstError[:255] {
+		t.Fatalf("first error line %v", terminal.FirstErrorLine)
+	}
+	if !terminal.DetailTrimmed {
+		t.Fatal("detail not marked trimmed")
+	}
+}
+
 func TestALiveToolCallRecordsWhenItStartedAndEnded(t *testing.T) {
 	var entries []core.ChatEntry
 	call := newTranscriptTestCall("tool-1", "cargo test").status(acp.ToolCallStatusInProgress).build()

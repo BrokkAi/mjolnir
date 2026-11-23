@@ -46,6 +46,7 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
+	"github.com/BrokkAi/mjolnir/go/internal/workerreview"
 )
 
 // runtimeRelayTestsSessionID is the session every fixture in this module
@@ -8601,6 +8602,8 @@ func TestPushGateStartupAndEnvironmentFollowHarnessAndPrimaryOwnership(t *testin
 				t.Fatalf("MJ_REVIEW_GATE = %q", got)
 			}
 		}
+		// The controller writes Off for workers that borrow the workspace.
+		launch.ReviewTrigger = core.ReviewTriggerOff
 		launch.Environment[core.SessionManagedSubagentEnv] = "1"
 		notices, err = prepareReviewGate(&launch)
 		runtimeRelayMust(t, err)
@@ -8618,10 +8621,7 @@ func TestPushGateStartupAndEnvironmentFollowHarnessAndPrimaryOwnership(t *testin
 	}
 }
 
-// A child offered the review tools records where its work starts at launch,
-// without the push gate. Otherwise a repository with no default-branch merge
-// base would record the already-committed HEAD at its first request and refuse.
-func TestAReviewEnabledChildIsPinnedAtLaunchWithoutThePushGate(t *testing.T) {
+func TestAnOwningOrchestratorPinsTheStartAndInstallsThePushGate(t *testing.T) {
 	temp := t.TempDir()
 	repository := gitRepository(t, temp)
 	launch := launchConfig("/test/profile")
@@ -8631,7 +8631,7 @@ func TestAReviewEnabledChildIsPinnedAtLaunchWithoutThePushGate(t *testing.T) {
 	launch.ReviewTrigger = core.ReviewTriggerPush
 	launch.Environment[core.SessionManagedSubagentEnv] = "1"
 	start := testSupportGit(repository, "rev-parse", "HEAD")
-	if !launch.PreparesReview() || launch.ReviewGate() {
+	if !launch.PreparesReview() || !launch.ReviewGate() {
 		t.Fatalf("prepares review = %v, review gate = %v", launch.PreparesReview(), launch.ReviewGate())
 	}
 	notices, err := prepareReviewGate(&launch)
@@ -8639,15 +8639,15 @@ func TestAReviewEnabledChildIsPinnedAtLaunchWithoutThePushGate(t *testing.T) {
 	if len(notices) != 0 {
 		t.Fatalf("notices = %q", notices)
 	}
-	if runtimeRelayExists(filepath.Join(repository, ".git/hooks/pre-push")) {
-		t.Fatal("a child installed the push gate")
+	if !runtimeRelayExists(filepath.Join(repository, ".git/hooks/pre-push")) {
+		t.Fatal("an owning orchestrator did not install the push gate")
 	}
-	if _, ok := primarySupervisorSpec(&launch).Environment["MJ_REVIEW_GATE"]; ok {
-		t.Fatal("a child's bridge carries MJ_REVIEW_GATE")
+	if _, ok := primarySupervisorSpec(&launch).Environment["MJ_REVIEW_GATE"]; !ok {
+		t.Fatal("an owning orchestrator's bridge lacks MJ_REVIEW_GATE")
 	}
 	runtimeRelayWriteFile(t, filepath.Join(repository, "tracked.rs"), []byte("fn main() { work(); }\n"))
 	testSupportGit(repository, "commit", "-qam", "child work")
-	head, err := ReviewStartHead(checkpoint.SystemGit{}, repository, "review-child")
+	head, err := workerreview.ReviewStartHead(checkpoint.SystemGit{}, repository, "review-child")
 	runtimeRelayMust(t, err)
 	if !runtimeRelayIs(head, start) {
 		t.Fatalf("the first review covers the commits made after the child started: %v, want %q", head, start)
@@ -8655,6 +8655,7 @@ func TestAReviewEnabledChildIsPinnedAtLaunchWithoutThePushGate(t *testing.T) {
 	// A harness that cannot offer the tools records nothing and says nothing.
 	launch.SessionID = "muse-child"
 	launch.Harness = core.HarnessKindMuse
+	launch.ReviewTrigger = core.ReviewTriggerOff
 	if launch.PreparesReview() {
 		t.Fatal("Muse prepares review")
 	}
@@ -8774,14 +8775,16 @@ func TestAChangeWaitAnswersOnARelayChangeOrAtItsBound(t *testing.T) {
 		}
 		wait := func(ordinal uint64, digest string) *core.JoinHandle[runtimeRelayChangeWait] {
 			return core.Spawn(func() runtimeRelayChangeWait {
-				body, err := waitForChange(ctx, relay, nil, nil, &feed, ordinal, &digest)
+				// Each wait owns its connection's guardian generation.
+				var guardianGeneration uint64
+				body, err := waitForChange(ctx, relay, nil, nil, &feed, &guardianGeneration, ordinal, &digest)
 				return runtimeRelayChangeWait{body: body, err: err}
 			})
 		}
 		ordinal, digest := current()
 
 		started := time.Now()
-		body, err := waitForChange(ctx, relay, nil, nil, &feed, ordinal, &digest)
+		body, err := waitForChange(ctx, relay, nil, nil, &feed, new(uint64), ordinal, &digest)
 		latest, observedDigest, queueChanged := observed(body, err)
 		if latest != ordinal || observedDigest != digest || queueChanged {
 			t.Fatalf("quiet wait observed %d %s %v", latest, observedDigest, queueChanged)
@@ -8811,7 +8814,7 @@ func TestAChangeWaitAnswersOnARelayChangeOrAtItsBound(t *testing.T) {
 			t.Fatalf("the change was answered after %v", elapsed)
 		}
 
-		body, err = waitForChange(ctx, relay, nil, nil, &feed, ordinal, &digest)
+		body, err = waitForChange(ctx, relay, nil, nil, &feed, new(uint64), ordinal, &digest)
 		if stale, _, _ := observed(body, err); stale != ordinal+1 {
 			t.Fatalf("a stale view is answered at once: %d", stale)
 		}
@@ -8834,4 +8837,68 @@ func TestAChangeWaitAnswersOnARelayChangeOrAtItsBound(t *testing.T) {
 			t.Fatalf("two waits took %v", elapsed)
 		}
 	})
+}
+
+func TestAntigravityConnectedWithHookPublishesSteeringAndEnablesAutomaticSteering(t *testing.T) {
+	durable, err := DurableRelayOpen(t.TempDir(), runtimeRelayTestsSessionID, "1.0.0")
+	runtimeRelayMust(t, err)
+	relay := NewRelayCell(durable)
+	guard := relay.Lock()
+	guard.SetTurnVerdictHarness(core.HarnessKindAntigravity)
+	guard.SetSteeringDeliveryMode(core.HarnessKindAntigravity, true)
+	guard.Unlock()
+	agentName, agentVersion := "antigravity", "1.5.11"
+	protocolVersion := acpschema.ProtocolVersion(1)
+	unsupported := false
+	_, err = recordRuntimeEvent(relay, map[string]core.RelayCommand{}, core.RuntimeEventConnected{
+		AgentName:         &agentName,
+		AgentVersion:      &agentVersion,
+		ProtocolVersion:   &protocolVersion,
+		Capabilities:      &acpschema.AgentCapabilities{},
+		AgentInfo:         &acpschema.Implementation{Name: "antigravity", Version: "1.5.11"},
+		SteeringSupported: &unsupported,
+	})
+	runtimeRelayMust(t, err)
+
+	locked := relay.Lock()
+	defer locked.Unlock()
+	if supported := locked.OperationalState().SteeringSupported; supported == nil || !*supported {
+		t.Fatalf("published steering support = %v, want true", supported)
+	}
+	// Verify automatic steering is enabled by starting a turn and queueing a
+	// follow-up prompt.
+	locked.setAcpReady(true)
+	_, err = locked.RecordObservation(core.RelayObservationSessionOpened{NativeSessionID: "agy-conv-connected"})
+	runtimeRelayMust(t, err)
+	submit := func(id, text string) {
+		t.Helper()
+		response := locked.Handle(core.RelayRequestEnvelope{
+			RequestID:       id,
+			ProtocolVersion: core.RelayProtocolVersion,
+			Request: core.RelayRequestSubmit{CommandID: id, Command: core.RelayCommandPrompt{
+				Prompt: []acpschema.ContentBlock{relayTextBlock(text)},
+			}},
+		})
+		if _, ok := response.Body.(core.RelayResponseBodyOk); !ok {
+			t.Fatalf("%#v", response)
+		}
+	}
+	submit("agy-connected-first", "first")
+	claimed, err := locked.ClaimPendingCommands(true)
+	runtimeRelayMust(t, err)
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d commands", len(claimed))
+	}
+	submit("agy-connected-steer", "steer me")
+	claimed, err = locked.ClaimPendingCommands(true)
+	runtimeRelayMust(t, err)
+	if len(claimed) != 0 {
+		t.Fatalf("a hook steer was claimed as an ACP command: %#v", claimed)
+	}
+	answer, err := locked.DrainMailbox("PostToolBatch", nil)
+	runtimeRelayMust(t, err)
+	drained, ok := answer.(core.RelayResponsePayloadMailboxDrained)
+	if !ok || drained.LeaseID == nil || drained.Text == nil || drained.Count != 1 || !strings.Contains(*drained.Text, "steer me") {
+		t.Fatalf("drain = %#v", answer)
+	}
 }

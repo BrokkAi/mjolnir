@@ -4070,6 +4070,7 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     };
     let template = mj_core::config::TargetTemplate::LocalPodman {
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: Default::default(),
@@ -4343,6 +4344,7 @@ fn launches_on_every_target(
     let bundle = crate::database::test_fixtures::local_bundle(Path::new("/src/project"));
     let container = mj_core::config::TargetTemplate::LocalPodman {
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: Default::default(),
@@ -4528,6 +4530,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
     session.container_workspace = Some(workspace.clone());
     let docker = mj_core::config::TargetTemplate::LocalDocker {
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: mj_core::config::DEFAULT_SESSION_IMAGE.to_owned(),
             pull_policy: Default::default(),
@@ -4812,6 +4815,7 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
             extra_args: Vec::new(),
         },
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
             pull_policy: Default::default(),
@@ -5824,15 +5828,17 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             (".data/opencode/log/opencode.log", false),
             (".data/opencode/repos/native", false),
         ],
-        // dsh-acp keeps only its sessions, written atomically through a
-        // temporary file beside each record.
         HarnessKind::Antigravity => &[
             ("antigravity-cli/antigravity-oauth-token", true),
+            ("antigravity-cli/settings.json", true),
+            ("config/projects/default-cli-project.json", true),
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),
             ("antigravity-cli/conversations/old.db", false),
             ("settings.json", false),
         ],
+        // dsh-acp keeps only its sessions, written atomically through a
+        // temporary file beside each record.
         HarnessKind::Dsh => &[
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),

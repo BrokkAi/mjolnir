@@ -126,8 +126,8 @@ fn contract_cases_keep_errors_exits_panics_and_parameter_calls_distinct() {
             run()?;
             if first { return Err("bad"); }
             f(); (hooks.callback)();
-            panic!("panic"); assert_eq!(a, b);
-            value.unwrap(); result.expect("failure");
+            panic!("panic"); assert!(ok); debug_assert!(ok); unreachable!();
+            assert_eq!(a, b); value.unwrap(); result.expect("failure");
             let nested = || { panic!("deferred"); };
             fn nested_item() { panic!("nested fn"); }
             Err("tail")
@@ -142,10 +142,83 @@ fn contract_cases_keep_errors_exits_panics_and_parameter_calls_distinct() {
         found["panic"],
         [
             "panic!(\"panic\")",
-            "assert_eq!(a, b)",
-            "value.unwrap()",
-            "result.expect(\"failure\")"
+            "assert!(ok)",
+            "debug_assert!(ok)",
+            "unreachable!()"
         ]
+    );
+}
+
+// Hard-won: 73f3134: .unwrap()/.expect() and unmodeled panic macros were required as panic/raise candidates
+#[test]
+fn panic_and_raise_candidates_match_modeled_macros_only() {
+    let text = r#"fn seed() {
+    assert!(ok);
+    debug_assert!(ok);
+    panic!("boom");
+    unreachable!();
+    std::panic!("std");
+    ::core::assert!(ok);
+    assert_eq!(a, b);
+    assert_ne!(a, b);
+    debug_assert_eq!(a, b);
+    debug_assert_ne!(a, b);
+    todo!();
+    unimplemented!();
+    custom::assert!(ok);
+    value.unwrap();
+    result.expect("failure");
+}
+"#;
+    let expected = [
+        "assert!(ok)",
+        "debug_assert!(ok)",
+        "panic!(\"boom\")",
+        "unreachable!()",
+        "std::panic!(\"std\")",
+        "::core::assert!(ok)",
+    ];
+    let panic_query = query("contract-cases", &[":kind", "\"panic\""], procedure());
+    assert_eq!(
+        by_kind(&file(&panic_query, text), &panic_query)["panic"],
+        expected
+    );
+
+    let raise_query = query("guarded-paths", &[":event", "\"raise\""], procedure());
+    assert_eq!(
+        by_kind(&file(&raise_query, text), &raise_query)["raise"],
+        expected
+    );
+
+    // .unwrap() and .expect() stay ordinary calls and value-transfer arguments,
+    // and claiming kind="panic" on them fails anchor-kind.
+    let call_query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    assert_eq!(
+        by_kind(&file(&call_query, text), &call_query)["call"],
+        ["value.unwrap()", "result.expect(\"failure\")"]
+    );
+    let arg_query = query("value-transfers", &[":port", "\"argument\""], procedure());
+    assert_eq!(
+        by_kind(&file(&arg_query, text), &arg_query)["argument"],
+        ["value", "result", "\"failure\""]
+    );
+    for line in [15, 16] {
+        let row = json!({"kind": "contract_case", "fields": {
+            "kind": "panic", "site": value_site(line, line), "calls": []
+        }});
+        assert_eq!(codes(&row_checks(&panic_query, text, row)), ["anchor-kind"]);
+    }
+    // Unmodeled macros stay opaque/unchecked for anchor-kind (e.g. macros expanding to control flow).
+    let macro_row = json!({"kind": "contract_case", "fields": {
+        "kind": "panic", "site": value_site(8, 8), "calls": []
+    }});
+    let macro_out = row_checks(&panic_query, text, macro_row);
+    assert!(macro_out.errors.is_empty());
+    assert!(
+        macro_out
+            .unchecked
+            .iter()
+            .any(|item| item.what.starts_with("anchor-kind"))
     );
 }
 

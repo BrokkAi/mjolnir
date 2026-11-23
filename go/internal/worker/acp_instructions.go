@@ -49,7 +49,11 @@ func compose(ctx context.Context, spec *LaunchSpec, mcpAvailable bool, events ch
 	}
 	if socket := spec.SubagentMCPSocket; socket != nil && mcpAvailable &&
 		(spec.Harness != core.HarnessKindClaude || socket.ProfileRegistration) {
-		facts.Agents = &core.AgentTools{Role: socket.Role, ReviewTools: socket.ReviewTools}
+		facts.Agents = &core.AgentTools{
+			Role:                 socket.Role,
+			ReviewTools:          socket.ReviewTools,
+			OrchestratorsEnabled: socket.OrchestratorsEnabled,
+		}
 	}
 	if directory, ok := spec.Environment[core.ChildReportDirEnv]; ok {
 		facts.ReportDirectory = &directory

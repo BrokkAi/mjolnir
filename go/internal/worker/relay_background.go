@@ -1,7 +1,8 @@
 // Port of mj-worker/src/relay/background.rs.
 //
-// Agent-owned background work: adapter (AIR) tasks, Kimi's detached agents
-// and the hosted terminals the agent left running.
+// Agent-owned background work: adapter (AIR) tasks, Kimi's detached agents,
+// Antigravity's native tasks and the hosted terminals the agent left
+// running.
 
 package worker
 
@@ -10,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"unicode"
@@ -19,6 +22,69 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
+
+// antigravityWorkState is what this worker knows about Antigravity's
+// native task state, from its hooks and its databases.
+type antigravityWorkState struct {
+	hookEpoch                  uint64
+	acpEpochActive             bool
+	staleStepIndices           map[int64]struct{}
+	staleStepIndicesSet        bool
+	summaryCommitGen           uint64
+	summaryStatus              *AntigravityRunStatus
+	summaryNotFullyIdle        bool
+	summaryHasRunningSubagents bool
+	summaryBusyStartedAtMs     *int64
+	lastSummaryRowDigest       *[32]byte
+	lastPreInvocationSteps     *int64
+	pendingStopWork            *antigravityPendingStopWork
+	hookIdleGen                *uint64
+	warnedMissingFullyIdle     bool
+	harnessTurnSawRunning      bool
+	pendingTurnSettle          *string
+	runningTasks               []core.BackgroundCommand
+	taskFirstSeenMs            map[int64]int64
+}
+
+type antigravityPendingStopWork struct {
+	startedAtMs int64
+	// baselineDigest is the row already on disk at Stop time, if any.
+	baselineDigest *[32]byte
+	// minStepCount: NO_TOOL_CALL appends a step after PreInvocation's
+	// initial step count.
+	minStepCount *int64
+	sawBusy      bool
+}
+
+func (w *antigravityWorkState) appendCommands(commands []core.BackgroundCommand, turnInFlight bool) []core.BackgroundCommand {
+	commands = append(commands, w.runningTasks...)
+	if len(w.runningTasks) != 0 || !w.acpEpochActive {
+		return commands
+	}
+	summaryFresh := w.hookIdleGen == nil || *w.hookIdleGen != w.summaryCommitGen
+	summaryRunning := w.summaryStatus != nil && w.summaryStatus.IsActive()
+	summaryReportsBackground := summaryFresh &&
+		(((w.summaryNotFullyIdle || summaryRunning) && !turnInFlight) || w.summaryHasRunningSubagents)
+	if w.pendingStopWork != nil || summaryReportsBackground {
+		id, command := "pending", "Antigravity background task"
+		if w.summaryHasRunningSubagents {
+			id, command = "subagent", "Antigravity subagent running"
+		} else if summaryFresh && summaryRunning && !turnInFlight {
+			id, command = "turn", "Antigravity turn running"
+		}
+		var startedAtMs int64
+		switch {
+		case w.pendingStopWork != nil:
+			startedAtMs = w.pendingStopWork.startedAtMs
+		case w.summaryBusyStartedAtMs != nil:
+			startedAtMs = *w.summaryBusyStartedAtMs
+		default:
+			panic("background evidence has a start time")
+		}
+		commands = append(commands, core.BackgroundCommandAntigravity(id, startedAtMs, command))
+	}
+	return commands
+}
 
 func backgroundTaskID(kind, providerID string) string {
 	return kind + ":" + providerID
@@ -218,7 +284,7 @@ func kimiAgentDescription(title *string, rawInput json.RawMessage, taskID *strin
 func (r *DurableRelay) SetBackgroundWorkPolicy(policy BackgroundWorkPolicy) {
 	r.backgroundWork = policy
 	r.backgroundWorkKnown = nil
-	if policy == BackgroundWorkPolicyKimiTasks {
+	if policy == BackgroundWorkPolicyKimiTasks || policy == BackgroundWorkPolicyAntigravityTasks {
 		known := false
 		r.backgroundWorkKnown = &known
 	}
@@ -281,6 +347,9 @@ func (r *DurableRelay) backgroundCommands() []core.BackgroundCommand {
 				commands = append(commands, r.kimiProvisionalTasks[toolCallID].command)
 			}
 		}
+	}
+	if r.backgroundWork == BackgroundWorkPolicyAntigravityTasks {
+		commands = r.antigravityWork.appendCommands(commands, turnInFlight)
 	}
 	slices.SortStableFunc(commands, func(left, right core.BackgroundCommand) int {
 		if order := cmp.Compare(left.StartedAtMs, right.StartedAtMs); order != 0 {
@@ -606,6 +675,290 @@ func (r *DurableRelay) KimiBackgroundTasksUnavailable() error {
 	return nil
 }
 
+func (r *DurableRelay) forgetAntigravityState() {
+	r.antigravityWork = antigravityWorkState{hookEpoch: r.antigravityWork.hookEpoch + 1}
+	if r.backgroundWork == BackgroundWorkPolicyAntigravityTasks {
+		known := false
+		r.backgroundWorkKnown = &known
+	}
+}
+
+// resetAntigravityState forgets every Antigravity observation, as a harness
+// restart does, and publishes the change.
+func (r *DurableRelay) resetAntigravityState() error {
+	r.forgetAntigravityState()
+	return r.persistActivityTransition()
+}
+
+func (r *DurableRelay) matchesAntigravityConversation(conversationID *string) bool {
+	return conversationID != nil && *conversationID != "" &&
+		r.snapshot.NativeSessionID != nil && *r.snapshot.NativeSessionID == *conversationID
+}
+
+func (r *DurableRelay) antigravityPromptStarted() {
+	r.antigravityWork.hookEpoch++
+	if r.harnessTurns == HarnessTurnPolicyAntigravity {
+		wasActive := r.antigravityWork.acpEpochActive
+		r.antigravityWork.acpEpochActive = true
+		if !wasActive {
+			known := false
+			r.backgroundWorkKnown = &known
+		}
+	}
+}
+
+func (r *DurableRelay) antigravityPreInvocation(conversationID *string, initialNumSteps *int64) error {
+	if !r.matchesAntigravityConversation(conversationID) {
+		return nil
+	}
+	wasActive := r.antigravityWork.acpEpochActive
+	r.antigravityWork.acpEpochActive = true
+	r.antigravityWork.hookEpoch++
+	if !wasActive {
+		known := false
+		r.backgroundWorkKnown = &known
+	}
+	r.antigravityWork.hookIdleGen = nil
+	if initialNumSteps != nil {
+		steps := *initialNumSteps
+		r.antigravityWork.lastPreInvocationSteps = &steps
+	}
+	if r.canOpenHarnessTurn() {
+		r.antigravityWork.harnessTurnSawRunning = false
+		r.antigravityWork.pendingTurnSettle = nil
+		if err := r.openHarnessTurnIfAllowed(); err != nil {
+			return err
+		}
+	}
+	return r.persistActivityTransition()
+}
+
+// antigravityStop applies an Antigravity Stop hook. observedBaselineDigest
+// is Rust's Option<Option<[u8; 32]>>: nil when the summary row was not
+// sampled, otherwise the sampled row's digest, itself nil when no row was
+// on disk.
+func (r *DurableRelay) antigravityStop(conversationID *string, fullyIdle *bool, terminationReason *string, observedBaselineDigest **[32]byte) error {
+	if (r.backgroundWork != BackgroundWorkPolicyAntigravityTasks && r.harnessTurns != HarnessTurnPolicyAntigravity) ||
+		!r.matchesAntigravityConversation(conversationID) {
+		return nil
+	}
+
+	work := &r.antigravityWork
+	work.hookEpoch++
+	wasActive := work.acpEpochActive
+	work.acpEpochActive = true
+	if !wasActive {
+		known := false
+		r.backgroundWorkKnown = &known
+	}
+	if fullyIdle != nil && *fullyIdle {
+		work.pendingStopWork = nil
+		generation := work.summaryCommitGen
+		work.hookIdleGen = &generation
+	} else {
+		var minStepCount *int64
+		if terminationReason != nil && *terminationReason == "NO_TOOL_CALL" && work.lastPreInvocationSteps != nil {
+			steps := *work.lastPreInvocationSteps
+			if steps < math.MaxInt64 {
+				steps++
+			}
+			minStepCount = &steps
+		}
+		startedAtMs := core.EpochMillis()
+		if work.pendingStopWork != nil {
+			startedAtMs = work.pendingStopWork.startedAtMs
+		}
+		baselineDigest := work.lastSummaryRowDigest
+		if observedBaselineDigest != nil {
+			baselineDigest = *observedBaselineDigest
+		}
+		work.pendingStopWork = &antigravityPendingStopWork{
+			startedAtMs:    startedAtMs,
+			baselineDigest: baselineDigest,
+			minStepCount:   minStepCount,
+		}
+		work.hookIdleGen = nil
+		if fullyIdle == nil && !work.warnedMissingFullyIdle {
+			slog.Warn("Antigravity Stop hook omitted fullyIdle; treating background work as pending",
+				"session_id", r.snapshot.SessionID)
+			work.warnedMissingFullyIdle = true
+		}
+	}
+
+	// This must publish under the relay lock before the hook is acknowledged
+	// and ACP is free to finish the prompt.
+	if err := r.noteBackgroundWork(); err != nil {
+		return err
+	}
+	if err := r.persistActivityTransition(); err != nil {
+		return err
+	}
+	if r.snapshot.ActivePrompt == nil && r.snapshot.AutonomousHarnessTurn() != nil {
+		reason := "end_turn"
+		if terminationReason != nil {
+			switch *terminationReason {
+			case "USER_CANCELED":
+				reason = "cancelled"
+			case "ERROR":
+				reason = "error"
+			}
+		}
+		r.antigravityWork.pendingTurnSettle = &reason
+	}
+	return nil
+}
+
+func (r *DurableRelay) AntigravityHookEpoch() uint64 {
+	return r.antigravityWork.hookEpoch
+}
+
+// AntigravitySnapshotChanged applies one scan of Antigravity's databases. It
+// reports false when a hook arrived after the scan began, so the scan's
+// cursor must not be committed.
+func (r *DurableRelay) AntigravitySnapshotChanged(snapshot AntigravitySnapshot, scanHookEpoch uint64) (bool, error) {
+	if r.backgroundWork != BackgroundWorkPolicyAntigravityTasks {
+		return true, nil
+	}
+	work := &r.antigravityWork
+	if scanHookEpoch != work.hookEpoch {
+		return false, nil
+	}
+	if snapshot.SummaryCommitChanged {
+		work.summaryCommitGen++
+	}
+	work.lastSummaryRowDigest = snapshot.SummaryRowDigest
+	indices := map[int64]struct{}{}
+	for _, task := range snapshot.RunningTasks {
+		indices[task.StepIndex] = struct{}{}
+	}
+	if !work.acpEpochActive {
+		known := true
+		r.backgroundWorkKnown = &known
+		if !work.staleStepIndicesSet {
+			work.staleStepIndices = indices
+			work.staleStepIndicesSet = true
+		}
+		return true, r.persistActivityTransition()
+	}
+	known := snapshot.Summary != nil && snapshot.ConversationDBPresent
+	r.backgroundWorkKnown = &known
+
+	if work.staleStepIndicesSet {
+		maps.DeleteFunc(work.staleStepIndices, func(index int64, _ struct{}) bool {
+			_, live := indices[index]
+			return !live
+		})
+	}
+	maps.DeleteFunc(work.taskFirstSeenMs, func(index int64, _ int64) bool {
+		_, live := indices[index]
+		return !live
+	})
+	work.runningTasks = nil
+	for _, task := range snapshot.RunningTasks {
+		if _, stale := work.staleStepIndices[task.StepIndex]; work.staleStepIndicesSet && stale {
+			continue
+		}
+		if work.taskFirstSeenMs == nil {
+			work.taskFirstSeenMs = map[int64]int64{}
+		}
+		firstSeen, seen := work.taskFirstSeenMs[task.StepIndex]
+		if !seen {
+			firstSeen = core.EpochMillis()
+			work.taskFirstSeenMs[task.StepIndex] = firstSeen
+		}
+		startedAtMs := firstSeen
+		if task.StartedAtMs != nil {
+			startedAtMs = *task.StartedAtMs
+		}
+		work.runningTasks = append(work.runningTasks, core.BackgroundCommandAntigravity(task.ID, startedAtMs, task.Command))
+	}
+
+	if summary := snapshot.Summary; summary != nil {
+		status := summary.Status
+		work.summaryStatus = &status
+		work.summaryNotFullyIdle = summary.NotFullyIdle
+		work.summaryHasRunningSubagents = summary.HasRunningSubagents
+		if summary.NotFullyIdle || summary.HasRunningSubagents || summary.Status.IsActive() {
+			if work.summaryBusyStartedAtMs == nil {
+				now := core.EpochMillis()
+				work.summaryBusyStartedAtMs = &now
+			}
+		} else {
+			work.summaryBusyStartedAtMs = nil
+		}
+		if work.hookIdleGen != nil && work.summaryCommitGen > *work.hookIdleGen {
+			work.hookIdleGen = nil
+		}
+		if r.snapshot.ActivePrompt == nil && r.snapshot.AutonomousHarnessTurn() != nil {
+			if summary.Status.IsActive() {
+				work.harnessTurnSawRunning = true
+			} else if work.harnessTurnSawRunning &&
+				work.summaryStatus != nil && *work.summaryStatus == AntigravityRunStatusIdle &&
+				work.pendingTurnSettle == nil {
+				reason := "end_turn"
+				work.pendingTurnSettle = &reason
+			}
+		}
+	}
+	if pending := work.pendingStopWork; pending != nil {
+		summary := snapshot.Summary
+		if len(work.runningTasks) != 0 ||
+			summary != nil && (summary.NotFullyIdle || summary.Status.IsActive() || summary.HasRunningSubagents) {
+			pending.sawBusy = true
+		} else if summary != nil && snapshot.ConversationDBPresent && summary.Status == AntigravityRunStatusIdle &&
+			(pending.sawBusy ||
+				(!antigravityDigestEqual(snapshot.SummaryRowDigest, pending.baselineDigest) &&
+					(pending.minStepCount == nil || summary.StepCount >= *pending.minStepCount))) {
+			work.pendingStopWork = nil
+		}
+	}
+	if err := r.noteBackgroundWork(); err != nil {
+		return false, err
+	}
+	if err := r.persistActivityTransition(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// antigravityDigestEqual is Option<[u8; 32]> equality.
+func antigravityDigestEqual(left, right *[32]byte) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func (r *DurableRelay) AntigravityTasksUnavailable() error {
+	if r.backgroundWork == BackgroundWorkPolicyAntigravityTasks {
+		known := false
+		r.backgroundWorkKnown = &known
+		return r.persistActivityTransition()
+	}
+	return nil
+}
+
+func (r *DurableRelay) HasPendingAntigravityTurnSettle() bool {
+	return r.antigravityWork.pendingTurnSettle != nil
+}
+
+func (r *DurableRelay) SettlePendingAntigravityHarnessTurn() (bool, error) {
+	if r.WorkerWritesHeld() {
+		return false, nil
+	}
+	reason := r.antigravityWork.pendingTurnSettle
+	r.antigravityWork.pendingTurnSettle = nil
+	if reason != nil && r.snapshot.ActivePrompt == nil && r.snapshot.AutonomousHarnessTurn() != nil {
+		origin := "antigravity"
+		if err := r.settleHarnessTurn(&origin, *reason); err != nil {
+			return false, err
+		}
+		r.antigravityWork.harnessTurnSawRunning = false
+		return true, nil
+	}
+	return false, nil
+}
+
 // noteTaskSettled records when a Claude background task completed or
 // failed, while no turn is open to answer it.
 func (r *DurableRelay) noteTaskSettled() {
@@ -784,6 +1137,7 @@ func (r *DurableRelay) retireHarnessProcessState() error {
 // forgetHarnessProcesses: a restart or a close ends the harness process that
 // owned whatever it had left running, so nothing it reported is still alive.
 func (r *DurableRelay) forgetHarnessProcesses() {
+	r.forgetAntigravityState()
 	r.pendingNativeResumes = nil
 	clear(r.airTasks)
 	clear(r.claudePendingStops)

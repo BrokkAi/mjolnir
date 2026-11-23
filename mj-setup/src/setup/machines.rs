@@ -496,6 +496,7 @@ fn machine_runtime(
     kind: RuntimeKind,
 ) -> Option<(String, TargetTemplate)> {
     let container = |machine: &Machine| ContainerTemplate {
+        memory_hard_limit: None,
         // In memory a container runtime carries its machine's cache settings.
         build_cache: machine.build_cache().cloned(),
         image: DEFAULT_IMAGE.to_owned(),

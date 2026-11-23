@@ -150,9 +150,6 @@ func startScriptedHarness(
 	configure func(spec *LaunchSpec),
 ) guardianScriptedSession {
 	t.Helper()
-	if endpoint != nil {
-		t.Skip("needs runWithGuardian (mj-worker/src/acp.rs run_with_guardian), which the acp-drive declarations predate")
-	}
 	script := filepath.Join(root, "harness.py")
 	if err := os.WriteFile(script, []byte(guardianScriptedHarness), 0o644); err != nil {
 		t.Fatal(err)
@@ -185,7 +182,7 @@ func startScriptedHarness(
 	events := make(chan core.RuntimeEvent, 256)
 	ctx, abort := context.WithCancel(context.Background())
 	t.Cleanup(abort)
-	go func() { _ = RunWithShutdown(ctx, spec, requests, events) }()
+	go func() { _ = runWithGuardian(ctx, spec, requests, events, endpoint) }()
 	requests <- CommandRequestPrompt{RequestID: "turn", Prompt: []schema.ContentBlock{acpFeaturesText("tidy up the repository")}}
 	return guardianScriptedSession{requests: requests, events: events, abort: abort, context: turnContext}
 }

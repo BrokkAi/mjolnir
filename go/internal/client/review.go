@@ -6,6 +6,7 @@ package client
 
 import (
 	"iter"
+	"path/filepath"
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -14,10 +15,16 @@ import (
 // RuntimeReviewView is what the host tells a surface about one running
 // review.
 type RuntimeReviewView struct {
-	ChildSessionID *string              `json:"child_session_id,omitempty" serde:"default"`
-	SessionID      string               `json:"session_id"`
-	Phase          core.TurnReviewPhase `json:"phase"`
-	Roles          []core.RoleStatus    `json:"roles"`
+	ChildSessionID *string `json:"child_session_id,omitempty" serde:"default"`
+	SessionID      string  `json:"session_id"`
+	// ReviewID is which of the session's reviews this is. Empty for a review
+	// still being prepared, which has no identity yet.
+	ReviewID string `json:"review_id,omitempty" serde:"default"`
+	// Roots is the repository roots the review covers. Empty until its
+	// capture is known.
+	Roots []string             `json:"roots,omitempty" serde:"default"`
+	Phase core.TurnReviewPhase `json:"phase"`
+	Roles []core.RoleStatus    `json:"roles"`
 	// Status is what the review is doing, in one line.
 	Status string `json:"status"`
 	// Verdict is present once the review has reached a verdict.
@@ -144,6 +151,73 @@ func (v RuntimeReviewView) ActivityLabel() (string, bool) {
 		return "Question", true
 	}
 	return "Reviewing", true
+}
+
+// MostNotable is the review that stands for a session's others: one with a
+// question first, because it waits for a person; then one that is working;
+// otherwise the most severe settled state. Nil when none has an activity
+// label.
+func MostNotable(reviews iter.Seq[*RuntimeReviewView]) *RuntimeReviewView {
+	rank := func(label string) int {
+		switch label {
+		case "Question":
+			return 0
+		case "Reviewing":
+			return 1
+		case "Review failed":
+			return 2
+		case "Findings":
+			return 3
+		}
+		return 4
+	}
+	var best *RuntimeReviewView
+	bestRank := 0
+	for review := range reviews {
+		label, ok := review.ActivityLabel()
+		if !ok {
+			continue
+		}
+		if r := rank(label); best == nil || r < bestRank {
+			best, bestRank = review, r
+		}
+	}
+	return best
+}
+
+// CombinedActivityLabel is the one label a session shows for all of its
+// reviews; false for none.
+func CombinedActivityLabel(reviews iter.Seq[*RuntimeReviewView]) (string, bool) {
+	review := MostNotable(reviews)
+	if review == nil {
+		return "", false
+	}
+	return review.ActivityLabel()
+}
+
+// AnyWorking reports whether any of the reviews is making progress.
+func AnyWorking(reviews iter.Seq[*RuntimeReviewView]) bool {
+	for review := range reviews {
+		if review.IsWorking() {
+			return true
+		}
+	}
+	return false
+}
+
+// RootsLabel is the review's repositories as one short line, for a surface
+// that shows several reviews: the last path component of each root.
+func (v RuntimeReviewView) RootsLabel() string {
+	names := make([]string, len(v.Roots))
+	for i, root := range v.Roots {
+		// Rust's Path::file_name; a root without one is shown whole.
+		name := filepath.Base(filepath.Clean(root))
+		if root == "" || name == "." || name == ".." || name == "/" || name == string(filepath.Separator) {
+			name = root
+		}
+		names[i] = name
+	}
+	return strings.Join(names, ", ")
 }
 
 // VerdictView is a verdict as a surface renders it.

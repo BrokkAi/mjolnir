@@ -378,7 +378,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
   │ hosts under Machines.                                                                        │
   │                                                                                              │
-  │   podman                          10 settings  ›                           Add               │
+  │   podman                          11 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
   │                                                                            Machines          │
   │                                                                                              │
@@ -530,6 +530,38 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
 
 
+=== Podman runtime RAM admission (120x30) ===
+╭ Workspac                                                                                                     ◇   ⋯───╮
+│ default                                                                                                              │
+╰─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮           │
+╭ Sessions  │ Settings › Runtimes › podman                                                                 │           │
+│ Create    │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │           │
+│hel ─────  │                                                                                              │           │
+│› ■ ACP p  │                                                                                              │           │
+│  Stopped  │ ☒ Enabled                                                                           Remove   │           │
+│  │ No me  │ Type                              Podman ▾                                                   │           │
+│  │        │ Machine                           local ▾                                                    │           │
+│           │ Container image                   ubuntu:24.04                                               │           │
+│           │ Download image policy             Pull if missing ▾                                          │  ─────────╯
+│           │ CPU platform                      Default                                                    │  ─────────╮
+│           │ CPU limit                         Default                                                    │           │
+│           │ Memory limit                      Default                                                    │           │
+│           │   Environment variables           0 settings  ›                                              │  ─────────╯
+│           │   Workspace storage               1 setting  ›                                               │  ── ▁   ▄ ╮
+│           │ ☐ Enforce host RAM budget                                                                    │           │
+│           │                                                                                              │  ─────────╯
+│           │                                                                                              │  ── ▁   ▄ ╮
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │  ─────────╯
+│           │   Back     Save and Close                                                                    │  ── ▁   ▄ ╮
+│           ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯           │
+╰─────────                                                                                                    ─────────╯
+Enter open                                                                                                    lette
+
 === runtime collection actions (100x30) ===
 
 
@@ -538,7 +570,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
   │ hosts under Machines.                                                                        │
   │                                                                                              │
-  │   podman                          10 settings  ›                           Add               │
+  │   podman                          11 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
   │                                                                            Machines          │
   │                                                                                              │
@@ -570,7 +602,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
   │ hosts under Machines.                                                                        │
   │                                                                                              │
-  │   podman                          10 settings  ›                           Add               │
+  │   podman                          11 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
   │                                                                            Machines          │
   │                                                                                              │

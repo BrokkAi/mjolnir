@@ -798,6 +798,7 @@ func sshConnectionEqual(a, b SshConnection) bool {
 func targetBuildCacheEqual(a, b TargetBuildCache) bool {
 	return configOptionalEqual(a.Enabled, b.Enabled) && configOptionalEqual(a.Directory, b.Directory) &&
 		configOptionalEqual(a.ToolsDirectory, b.ToolsDirectory) && configOptionalEqual(a.MaxTotalSize, b.MaxTotalSize) &&
+		configOptionalEqual(a.Remote, b.Remote) && configOptionalEqual(a.RemoteRegion, b.RemoteRegion) &&
 		configOptionalEqual(a.Scheduler.CPUs, b.Scheduler.CPUs) && configOptionalEqual(a.Scheduler.Memory, b.Scheduler.Memory)
 }
 

@@ -37,6 +37,7 @@ import (
 	"github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 // Shared is a value several owners share behind one lock: Rust's
@@ -526,6 +527,45 @@ type CommandRequestStopBackgroundTask struct {
 	Resolved chan<- error
 }
 
+// CommandRequestReloadLaunchConfig restarts only the harness bridge process
+// under a new launch configuration without stopping the worker daemon or its
+// non-harness processes. A nil Command or Args keeps the current one. Leases
+// stay held while the replacement bridge runs. Resolved is a oneshot channel
+// as for CommandRequestResolveElicitation: nil once the replacement bridge
+// has opened its session, or the refusal.
+type CommandRequestReloadLaunchConfig struct {
+	LaunchConfig          *core.WorkerLaunchConfig
+	Environment           map[string]string
+	Command               *string
+	Args                  *[]string
+	AdditionalDirectories []string
+	SupervisorSpec        *ReloadSupervisorSpec
+	Leases                ReloadLeases
+	Resolved              chan<- error
+}
+
+// ReloadSupervisorSpec is the supervisor spec a reload writes before its
+// bridge starts, and where.
+type ReloadSupervisorSpec struct {
+	Path string
+	Spec AcpSupervisorSpec
+}
+
+// ReloadLeases is what a reload keeps alive while its bridge runs (Rust a
+// boxed value whose Drop releases it). Release is that Drop; nil holds
+// nothing.
+type ReloadLeases interface {
+	Release()
+}
+
+// releaseReloadLeases drops leases: Rust drops them with the reload that
+// carried them.
+func releaseReloadLeases(leases ReloadLeases) {
+	if leases != nil {
+		leases.Release()
+	}
+}
+
 type CommandRequestCancelTurnFor struct {
 	RequestID      string
 	ActivePromptID string
@@ -555,6 +595,7 @@ func (CommandRequestSetSessionMode) isCommandRequest()       {}
 func (CommandRequestRestoreExecutionMode) isCommandRequest() {}
 func (CommandRequestResolveElicitation) isCommandRequest()   {}
 func (CommandRequestStopBackgroundTask) isCommandRequest()   {}
+func (CommandRequestReloadLaunchConfig) isCommandRequest()   {}
 func (CommandRequestCancelTurnFor) isCommandRequest()        {}
 func (CommandRequestSteer) isCommandRequest()                {}
 func (CommandRequestCancel) isCommandRequest()               {}
@@ -603,7 +644,13 @@ func Run(spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.Run
 // RunWithShutdown stops protocol work cooperatively when ctx ends, while
 // retaining bridge process cleanup.
 func RunWithShutdown(ctx context.Context, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent) error {
-	result := runInner(ctx, spec, requests, events)
+	return runWithGuardian(ctx, spec, requests, events, nil)
+}
+
+// runWithGuardian is RunWithShutdown whose guardian reviews through the
+// worker's daemon guardian endpoint; a nil endpoint reviews over ACP only.
+func runWithGuardian(ctx context.Context, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, guardianEndpoint *GuardianEndpoint) error {
+	result := runInner(ctx, spec, requests, events, guardianEndpoint)
 	// The final reports go out after shutdown too.
 	reporting := context.WithoutCancel(ctx)
 	if result != nil {
@@ -643,19 +690,57 @@ type SessionRestartReloadLogins struct {
 	Value string
 }
 
+// SessionRestartReloadLaunchConfig restarts only the harness bridge under a
+// new launch configuration. ResumeSession is the native session the next
+// bridge reopens, nil for a new one.
+type SessionRestartReloadLaunchConfig struct {
+	LaunchConfig          *core.WorkerLaunchConfig
+	Environment           map[string]string
+	Command               *string
+	Args                  *[]string
+	AdditionalDirectories []string
+	SupervisorSpec        *ReloadSupervisorSpec
+	Leases                ReloadLeases
+	ResumeSession         *string
+	Resolved              chan<- error
+}
+
 type SessionRestartClear struct {
 	Reset    ContextReset
 	Previous string
 }
 
-func (SessionRestartResume) isSessionRestart()       {}
-func (SessionRestartReloadLogins) isSessionRestart() {}
-func (SessionRestartClear) isSessionRestart()        {}
+func (SessionRestartResume) isSessionRestart()             {}
+func (SessionRestartReloadLogins) isSessionRestart()       {}
+func (SessionRestartReloadLaunchConfig) isSessionRestart() {}
+func (SessionRestartClear) isSessionRestart()              {}
+
+// releaseSessionRestart drops a restart nobody acts on: Rust drops the
+// leases of a launch configuration reload with it.
+func releaseSessionRestart(restart SessionRestart) {
+	if reload, ok := restart.(SessionRestartReloadLaunchConfig); ok {
+		releaseReloadLeases(reload.Leases)
+	}
+}
+
+// launchConfigReload is the launch configuration a planned restart applies
+// before the next bridge starts.
+type launchConfigReload struct {
+	launchConfig          *core.WorkerLaunchConfig
+	environment           map[string]string
+	command               *string
+	args                  *[]string
+	additionalDirectories []string
+	supervisorSpec        *ReloadSupervisorSpec
+	leases                ReloadLeases
+	resolved              chan<- error
+}
 
 // BridgeRestart is what runInner needs to start the next bridge.
 type BridgeRestart struct {
-	clearContext  *SessionRestartClear
-	resumeSession *string
+	clearContext       *SessionRestartClear
+	resumeSession      *string
+	reloadLaunchConfig *launchConfigReload
 	// nativeSessionUsed is carried into the next bridge's spec: what the
 	// dead bridge saw is the evidence for whether its thread may be
 	// replaced.
@@ -681,10 +766,24 @@ func (BridgeRestartNoticeUnexpected) isBridgeRestartNotice() {}
 // BridgeSessionOpen says how one bridge opens its native session.
 // firstReplacedUnusedNativeSessionID is Rust's `&mut Option<String>`: the
 // bridge records through it the first unused thread it replaced.
+// pendingReloadAck is likewise Rust's `&mut Option<oneshot::Sender<..>>`: the
+// reload this bridge's open acknowledges, taken (set to nil) once answered.
 type BridgeSessionOpen struct {
 	replacingPreviousBridge            bool
 	replaceUnusedCodexThread           bool
 	firstReplacedUnusedNativeSessionID **string
+	pendingReloadAck                   *chan<- error
+}
+
+// takePendingReloadAck is Rust's `pending_reload_ack.take()`: the waiting
+// reload's resolution, nil when none waits.
+func takePendingReloadAck(pending *chan<- error) chan<- error {
+	if pending == nil {
+		return nil
+	}
+	resolved := *pending
+	*pending = nil
+	return resolved
 }
 
 // clearRollback is what a failed clear restores: the conversation it
@@ -695,8 +794,8 @@ type clearRollback struct {
 	goal     *Shared[core.GoalRecoveryContext]
 }
 
-func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent) error {
-	environment, err := core.WithOverrides(ctx, spec.Environment)
+func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, guardianEndpoint *GuardianEndpoint) error {
+	environment, err := harnessinstall.WithOverrides(ctx, spec.Environment)
 	if err != nil {
 		return err
 	}
@@ -710,9 +809,15 @@ func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandReque
 	// A new worker starts from the relay journal's latest native session ID.
 	// Within this worker, restore readiness can first see any replacement.
 	var firstReplacedUnusedNativeSessionID *string
+	var pendingReloadAck chan<- error
+	var activeReloadLeases ReloadLeases
+	defer func() { releaseReloadLeases(activeReloadLeases) }()
 	var rollback *clearRollback
 	for {
 		if ctx.Err() != nil {
+			if resolved := takePendingReloadAck(&pendingReloadAck); resolved != nil {
+				sendResolution(resolved, errors.New("ACP runtime shut down before replacement bridge opened"))
+			}
 			return nil
 		}
 		replaceUnusedCodexThread := shouldReplaceUnusedCodexThread(&spec)
@@ -738,7 +843,8 @@ func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandReque
 			replacingPreviousBridge:            replacingPreviousBridge,
 			replaceUnusedCodexThread:           replaceUnusedCodexThread,
 			firstReplacedUnusedNativeSessionID: &firstReplacedUnusedNativeSessionID,
-		})
+			pendingReloadAck:                   &pendingReloadAck,
+		}, guardianEndpoint)
 		session, unlock := opened.Lock()
 		openedSession := *session
 		unlock()
@@ -779,9 +885,15 @@ func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandReque
 			continue
 		}
 		if result != nil {
+			if resolved := takePendingReloadAck(&pendingReloadAck); resolved != nil {
+				sendResolution(resolved, errors.New(result.Error()))
+			}
 			return result
 		}
 		if restart == nil {
+			if resolved := takePendingReloadAck(&pendingReloadAck); resolved != nil {
+				sendResolution(resolved, errors.New("ACP runtime stopped before replacement bridge opened"))
+			}
 			return nil
 		}
 		if restart.nativeSessionUsed {
@@ -813,6 +925,54 @@ func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandReque
 			}
 		}
 		restartNotice = restart.notice
+		if reload := restart.reloadLaunchConfig; reload != nil {
+			var resolvedEnvironment map[string]string
+			var environmentErr error
+			if reload.supervisorSpec != nil {
+				// PrepareHarnessLaunch already merged the login environment
+				// and applied `exclude_from_harness_environment`; rerunning
+				// WithOverrides would reintroduce excluded shell variables.
+				resolvedEnvironment = reload.environment
+			} else {
+				resolvedEnvironment, environmentErr = harnessinstall.WithOverrides(ctx, reload.environment)
+			}
+			if supervisor := reload.supervisorSpec; supervisor != nil {
+				if err := supervisor.Spec.writeSpec(supervisor.Path); err != nil {
+					sendResolution(reload.resolved, errors.New("write updated ACP supervisor spec: "+err.Error()))
+					releaseReloadLeases(reload.leases)
+					return err
+				}
+			}
+			if environmentErr != nil {
+				sendResolution(reload.resolved, errors.New(environmentErr.Error()))
+				releaseReloadLeases(reload.leases)
+				return environmentErr
+			}
+			launchConfig := reload.launchConfig
+			spec.applyReloadAcceptedConfig(launchConfig)
+			spec.Environment = resolvedEnvironment
+			if reload.command != nil {
+				spec.Command = *reload.command
+			}
+			if reload.args != nil {
+				spec.Args = *reload.args
+			}
+			spec.Cwd = launchConfig.Cwd
+			spec.AdditionalDirectories = reload.additionalDirectories
+			spec.Harness = launchConfig.Harness
+			spec.InitialModel = launchConfig.InitialModel
+			spec.ExecutionPolicy = launchConfig.ExecutionPolicy
+			// Rust: WorkerLaunchConfig::approval_choices.
+			spec.ApprovalChoices = core.ApprovalChoices{
+				ClaudePermissionMode: launchConfig.ClaudePermissionMode,
+				MjolnirGuardian:      launchConfig.MjolnirGuardian,
+			}
+			spec.InstructionRole = core.InstructionRoleFromLaunch(launchConfig)
+			spec.ProjectMemory = launchConfig.ProjectMemory
+			releaseReloadLeases(activeReloadLeases)
+			activeReloadLeases = reload.leases
+			pendingReloadAck = reload.resolved
+		}
 		goal, unlockGoal := spec.GoalRecovery.Lock()
 		goal.State.Restart()
 		unlockGoal()
@@ -933,7 +1093,7 @@ func startBridgeProcess(spec *LaunchSpec) (*bridgeChild, io.WriteCloser, io.Read
 	command.Stdin = stdinRead
 	command.Stdout = stdoutWrite
 	command.Stderr = stderrWrite
-	startErr := command.Start()
+	startErr := core.SpawnChild(command)
 	// The child holds its own ends now; this side keeps only its ends.
 	stdinRead.Close()
 	stdoutWrite.Close()
@@ -956,7 +1116,7 @@ func startBridgeProcess(spec *LaunchSpec) (*bridgeChild, io.WriteCloser, io.Read
 // runBridge runs one ACP bridge process. A restart means reopen the native
 // session on a fresh bridge: a cancel that never acked, or a dead ACP child.
 // ctx is the runtime's shutdown signal.
-func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, opened *Shared[*OpenedSession], sessionOpen BridgeSessionOpen) (*BridgeRestart, error) {
+func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, opened *Shared[*OpenedSession], sessionOpen BridgeSessionOpen, guardianEndpoint *GuardianEndpoint) (*BridgeRestart, error) {
 	// Before the process starts, not after: a selector the harness reads only
 	// at startup cannot be corrected once it has opened the session.
 	if runtime.GOOS != "windows" && spec.BridgeSpecPath != nil {
@@ -1014,9 +1174,7 @@ func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandReq
 	// Like the terminals, the guardian's reviewer outlives the protocol
 	// driver: it is stopped below, after this bridge's own teardown, on every
 	// exit path, so the next bridge never starts beside a live reviewer.
-	// The daemon guardian endpoint arrives with run_with_guardian in the sync
-	// pass; until then the guardian runs without one, as at 4273087e6.
-	guardian := guardianForLaunch(&launch, nil)
+	guardian := guardianForLaunch(&launch, guardianEndpoint)
 	type driven struct {
 		restart SessionRestart
 		err     error
@@ -1043,6 +1201,7 @@ func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandReq
 	// child's exit.
 	switch {
 	case ctx.Err() != nil:
+		releaseSessionRestart(restart)
 		restart, result = nil, nil
 	case driveDone == nil:
 	default:
@@ -1064,7 +1223,7 @@ func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandReq
 		// Rust drops the driver here; its connection and transport go with
 		// it.
 		stopDrive()
-		<-driveDone
+		releaseSessionRestart((<-driveDone).restart)
 	}
 	session, unlock := opened.Lock()
 	openedNow := *session
@@ -1161,6 +1320,27 @@ func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandReq
 			clearContext:      &restart,
 			nativeSessionUsed: used,
 			notice:            BridgeRestartNoticePlanned{Value: "Clearing context"},
+		}, nil
+	case SessionRestartReloadLaunchConfig:
+		var age time.Duration
+		if openedNow != nil {
+			age = time.Since(openedNow.startedAt)
+		}
+		return &BridgeRestart{
+			resumeSession: restart.ResumeSession,
+			reloadLaunchConfig: &launchConfigReload{
+				launchConfig:          restart.LaunchConfig,
+				environment:           restart.Environment,
+				command:               restart.Command,
+				args:                  restart.Args,
+				additionalDirectories: restart.AdditionalDirectories,
+				supervisorSpec:        restart.SupervisorSpec,
+				leases:                restart.Leases,
+				resolved:              restart.Resolved,
+			},
+			nativeSessionUsed: used,
+			sessionAge:        age,
+			notice:            BridgeRestartNoticePlanned{Value: "Restarting harness under updated launch configuration"},
 		}, nil
 	case SessionRestartResume, SessionRestartReloadLogins:
 		var nativeSessionID, message string
@@ -1301,6 +1481,7 @@ func relayEventChannelError() *acp.RPCError {
 // pair (restart, result).
 func mergeDriveError(restart *SessionRestart, result *error, additional error) {
 	if *result == nil {
+		releaseSessionRestart(*restart)
 		*restart = nil
 		*result = additional
 		return

@@ -215,6 +215,29 @@ fn compound_assignment(op: &BinOp) -> bool {
     )
 }
 
+// Modeled explicit-panic macros from menu-steps.md ("Written macros"):
+// assert!, debug_assert!, panic!, and unreachable! (unqualified or std/core).
+// assert_eq!, assert_ne!, debug_assert_eq!, debug_assert_ne!, todo!, and
+// unimplemented! are outside the modeled macro set.
+fn modeled_panic_macro(path: &syn::Path) -> Option<&syn::Ident> {
+    let mut segments = path.segments.iter();
+    let first = segments.next()?;
+    let ident = match (segments.next(), segments.next()) {
+        (None, None) if path.leading_colon.is_none() => &first.ident,
+        (Some(second), None)
+            if matches!(first.ident.unraw().to_string().as_str(), "std" | "core") =>
+        {
+            &second.ident
+        }
+        _ => return None,
+    };
+    matches!(
+        ident.unraw().to_string().as_str(),
+        "assert" | "debug_assert" | "panic" | "unreachable"
+    )
+    .then_some(ident)
+}
+
 impl Scanner<'_> {
     fn add(&mut self, kind: Kind, node: &impl Spanned, name: Option<String>) {
         self.add_at(kind, node, node.span(), name);
@@ -467,9 +490,6 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
             Expr::MethodCall(call) => {
                 let name = call.method.unraw().to_string();
-                if matches!(name.as_str(), "unwrap" | "expect") {
-                    self.add_at(Kind::Panic, expr, call.method.span(), None);
-                }
                 self.add_at(Kind::Call, expr, call.method.span(), Some(name));
                 self.add(Kind::Argument, &call.receiver, None);
                 for argument in &call.args {
@@ -487,14 +507,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        let ident = &mac.path.segments.last().expect("macro name").ident;
-        let name = ident.unraw().to_string();
-        if matches!(
-            name.as_str(),
-            "panic" | "unreachable" | "todo" | "unimplemented"
-        ) || name.starts_with("assert")
-            || name.starts_with("debug_assert")
-        {
+        if let Some(ident) = modeled_panic_macro(&mac.path) {
             self.add_at(Kind::Panic, mac, ident.span(), None);
             self.add_at(Kind::Raise, mac, ident.span(), None);
         }

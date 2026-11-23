@@ -34,6 +34,8 @@ type SubagentPolicy struct {
 	Mode            SubagentPolicyMode
 	Straightforward *SubagentChoice
 	Subtle          *SubagentChoice
+	// Orchestrators: the parent may spawn orchestrators. Mjolnir mode only.
+	Orchestrators bool
 }
 
 func (p SubagentPolicy) MarshalJSON() ([]byte, error) {
@@ -41,7 +43,8 @@ func (p SubagentPolicy) MarshalJSON() ([]byte, error) {
 		return transcriptMarshalTagged("mode", string(p.Mode), struct {
 			Straightforward *SubagentChoice `json:"straightforward,omitempty"`
 			Subtle          *SubagentChoice `json:"subtle,omitempty"`
-		}{p.Straightforward, p.Subtle})
+			Orchestrators   bool            `json:"orchestrators,omitempty"`
+		}{p.Straightforward, p.Subtle, p.Orchestrators})
 	}
 	if p.Mode == "" {
 		return transcriptMarshalTagged("mode", string(SubagentPolicyNative), nil)
@@ -68,6 +71,7 @@ func (p *SubagentPolicy) UnmarshalJSON(data []byte) error {
 		var wire struct {
 			Straightforward *SubagentChoice `json:"straightforward"`
 			Subtle          *SubagentChoice `json:"subtle"`
+			Orchestrators   bool            `json:"orchestrators" serde:"default"`
 			Model           *string         `json:"model"`
 			Effort          *string         `json:"effort"`
 		}
@@ -83,7 +87,12 @@ func (p *SubagentPolicy) UnmarshalJSON(data []byte) error {
 		if wire.Model == nil && wire.Effort != nil {
 			return errors.New("sub-agent effort requires a model override")
 		}
-		policy := SubagentPolicy{Mode: SubagentPolicyMjolnir, Straightforward: wire.Straightforward, Subtle: wire.Subtle}
+		policy := SubagentPolicy{
+			Mode:            SubagentPolicyMjolnir,
+			Straightforward: wire.Straightforward,
+			Subtle:          wire.Subtle,
+			Orchestrators:   wire.Orchestrators,
+		}
 		if wire.Model != nil {
 			if policy.Straightforward == nil {
 				policy.Straightforward = &SubagentChoice{Model: *wire.Model, Effort: wire.Effort}
@@ -99,16 +108,64 @@ func (p *SubagentPolicy) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// WorkerTaskType is the task type of a worker sub-agent.
+type WorkerTaskType string
+
+const (
+	WorkerTaskTypeStraightforward WorkerTaskType = "straightforward"
+	WorkerTaskTypeSubtle          WorkerTaskType = "subtle"
+)
+
+// UnmarshalJSON accepts only the snake_case variants, as serde's derived
+// Deserialize does.
+func (t *WorkerTaskType) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	switch kind := WorkerTaskType(text); kind {
+	case WorkerTaskTypeStraightforward, WorkerTaskTypeSubtle:
+		*t = kind
+		return nil
+	}
+	return transcriptUnknownVariant(text, "straightforward", "subtle")
+}
+
+// SubagentTaskType is Rust's From<WorkerTaskType> for SubagentTaskType.
+func (t WorkerTaskType) SubagentTaskType() SubagentTaskType {
+	if t == WorkerTaskTypeSubtle {
+		return SubagentTaskTypeSubtle
+	}
+	return SubagentTaskTypeStraightforward
+}
+
+// SubagentTaskType is the kind of work a sub-agent is given. The zero value
+// is the default, straightforward.
 type SubagentTaskType string
 
 const (
 	SubagentTaskTypeStraightforward SubagentTaskType = "straightforward"
 	SubagentTaskTypeSubtle          SubagentTaskType = "subtle"
 	SubagentTaskTypeOracle          SubagentTaskType = "oracle"
+	// SubagentTaskTypeOrchestrator is serialized as "supervisor" and also
+	// read as "orchestrator"; its ID is "orchestrator".
+	SubagentTaskTypeOrchestrator SubagentTaskType = "orchestrator"
 )
 
-// UnmarshalJSON accepts only the snake_case variants, as serde's derived
-// Deserialize does.
+// subagentTaskTypeOrchestratorWire is the orchestrator's serialized name.
+const subagentTaskTypeOrchestratorWire = "supervisor"
+
+// MarshalJSON writes the serde name: the ID, except "supervisor" for the
+// orchestrator.
+func (t SubagentTaskType) MarshalJSON() ([]byte, error) {
+	if t == SubagentTaskTypeOrchestrator {
+		return json.Marshal(subagentTaskTypeOrchestratorWire)
+	}
+	return json.Marshal(t.ID())
+}
+
+// UnmarshalJSON accepts only the serde names and aliases, as serde's
+// derived Deserialize does.
 func (t *SubagentTaskType) UnmarshalJSON(data []byte) error {
 	var text string
 	if err := json.Unmarshal(data, &text); err != nil {
@@ -118,8 +175,11 @@ func (t *SubagentTaskType) UnmarshalJSON(data []byte) error {
 	case SubagentTaskTypeStraightforward, SubagentTaskTypeSubtle, SubagentTaskTypeOracle:
 		*t = kind
 		return nil
+	case subagentTaskTypeOrchestratorWire, SubagentTaskTypeOrchestrator:
+		*t = SubagentTaskTypeOrchestrator
+		return nil
 	}
-	return transcriptUnknownVariant(text, "straightforward", "subtle", "oracle")
+	return transcriptUnknownVariant(text, "straightforward", "subtle", "oracle", "supervisor", "orchestrator")
 }
 
 func (t SubagentTaskType) ID() string {
@@ -134,6 +194,10 @@ func (p *SubagentPolicy) IsNative() bool {
 }
 
 func (p *SubagentPolicy) UsesMjolnir() bool { return p.Mode == SubagentPolicyMjolnir }
+
+func (p *SubagentPolicy) OrchestratorsEnabled() bool {
+	return p.Mode == SubagentPolicyMjolnir && p.Orchestrators
+}
 
 func (p *SubagentPolicy) OverrideChoice(taskType SubagentTaskType) *SubagentChoice {
 	if p.Mode != SubagentPolicyMjolnir {
@@ -182,11 +246,21 @@ func (p *SubagentPolicy) UpdatesRememberedChoice(harness HarnessKind) bool {
 	return harness.SupportsDelegationTools()
 }
 
-func (p *SubagentPolicy) ForLaunch(harness HarnessKind, isChild bool) SubagentPolicy {
+// ForLaunch is the policy a session launches with. A worker child gets
+// none; an orchestrator keeps its parent's policy without the right to start
+// orchestrators of its own.
+func (p *SubagentPolicy) ForLaunch(harness HarnessKind, subagent *SubagentRecord) SubagentPolicy {
 	switch {
 	case !harness.SupportsDelegationTools():
 		return SubagentPolicy{Mode: SubagentPolicyNative}
-	case isChild:
+	case subagent != nil:
+		if subagent.Orchestrator {
+			policy := *p
+			if policy.Mode == SubagentPolicyMjolnir {
+				policy.Orchestrators = false
+			}
+			return policy
+		}
 		return SubagentPolicy{Mode: SubagentPolicyNone}
 	}
 	return *p
@@ -329,20 +403,25 @@ func choiceList(label string, choices []SessionConfigChoice) string {
 // both task types are offered.
 const twoTaskTypes = "Mjolnir supplies the configured\n" +
 	"child model and effort for each task type. Set `task_type` to `straightforward`\n" +
-	"for work with a clear method, including locating code, running commands or\n" +
-	"test suites, and implementing a settled design. Use `subtle` for ambiguous\n" +
-	"diagnosis, design choices, and work with a high risk of subtle bugs. A subtle\n" +
-	"task gets a smarter, more expensive agent. Judge difficulty, not brief length."
+	"for bounded work with a single clear path: locating and mapping code, running\n" +
+	"exact build, test, or gate commands, and small mechanical edits. Use `subtle`\n" +
+	"for multi-file implementation (even from a settled design), multi-stage\n" +
+	"operational runs or troubleshooting, ambiguous diagnosis, design choices, and\n" +
+	"work with a high risk of subtle bugs. A subtle task gets a smarter, more\n" +
+	"expensive agent. Judge by scope and branching, not brief length or command\n" +
+	"runtime. When a `straightforward` child stalls or returns incomplete after one\n" +
+	"correction, escalate that slice to `subtle` rather than taking it over yourself."
 
 // oneTaskType is the same description when only the straightforward type is
 // configured. There is no type to choose, so the parent delegates
 // straightforward work and keeps work that needs judgment.
 const oneTaskType = "Mjolnir supplies the configured\n" +
-	"child model and effort. Delegate straightforward work: work with a clear\n" +
-	"method, including locating code, running commands or test suites, and\n" +
-	"implementing a settled design. Do work that needs judgment yourself, including\n" +
-	"ambiguous diagnosis, design choices, and changes with a high risk of subtle\n" +
-	"bugs. Judge difficulty, not brief length."
+	"child model and effort. Delegate straightforward work: bounded tasks with a\n" +
+	"single clear path, including locating and mapping code, running exact build,\n" +
+	"test, or gate commands, and small mechanical edits. Keep multi-file\n" +
+	"implementation, troubleshooting, ambiguous diagnosis, design choices, and\n" +
+	"changes with a high risk of subtle bugs yourself. Judge by scope and branching,\n" +
+	"not brief length or command runtime."
 
 //go:embed assets/subagent-delegation.md
 var subagentDelegationTemplate string
@@ -357,6 +436,13 @@ func DelegationPolicy(limit int, offersSubtle bool) string {
 	policy := strings.ReplaceAll(subagentDelegationTemplate, "$TASK_TYPES", taskTypes)
 	return strings.ReplaceAll(policy, "$N", strconv.Itoa(limit))
 }
+
+//go:embed assets/orchestrator-delegation.md
+var orchestratorDelegationPolicy string
+
+// OrchestratorDelegationPolicy is the orchestrator's delegation policy
+// document.
+func OrchestratorDelegationPolicy() string { return orchestratorDelegationPolicy }
 
 // SubagentFinishIdentityKind is the "kind" tag of a SubagentFinishIdentity.
 type SubagentFinishIdentityKind string
@@ -585,8 +671,12 @@ type SubagentToolActionAskOracle struct {
 	Message string `json:"message"`
 }
 
+// SubagentToolActionOverrideReview declines findings of the outstanding
+// verdict that covers Path, or of the only outstanding verdict when no path
+// is given.
 type SubagentToolActionOverrideReview struct {
 	Overrides []ReviewOverride `json:"overrides"`
+	Path      *string          `json:"path,omitempty"`
 }
 
 // SubagentToolActionSetReviewBaseline marks commits through Commit as
@@ -609,7 +699,19 @@ type SubagentToolActionSpawn struct {
 	Files            []FileSourceRanges `json:"files,omitempty"`
 }
 
+// SubagentToolActionSpawnOrchestrator starts a depth-1 orchestrator that may
+// delegate to depth-2 workers. Target and Repos are nil when not given.
+type SubagentToolActionSpawnOrchestrator struct {
+	TaskName            string    `json:"task_name"`
+	Instructions        string    `json:"instructions"`
+	Target              *string   `json:"target"`
+	Repos               *[]string `json:"repos"`
+	NoGithubCredentials bool      `json:"no_github_credentials" serde:"default"`
+}
+
 type SubagentToolActionListAgents struct{}
+
+type SubagentToolActionListTargets struct{}
 
 type SubagentToolActionSendInput struct {
 	ChildSessionID string `json:"child_session_id"`
@@ -658,7 +760,9 @@ func (SubagentToolActionAskOracle) isSubagentToolAction()            {}
 func (SubagentToolActionOverrideReview) isSubagentToolAction()       {}
 func (SubagentToolActionSetReviewBaseline) isSubagentToolAction()    {}
 func (SubagentToolActionSpawn) isSubagentToolAction()                {}
+func (SubagentToolActionSpawnOrchestrator) isSubagentToolAction()    {}
 func (SubagentToolActionListAgents) isSubagentToolAction()           {}
+func (SubagentToolActionListTargets) isSubagentToolAction()          {}
 func (SubagentToolActionSendInput) isSubagentToolAction()            {}
 func (SubagentToolActionSendMessage) isSubagentToolAction()          {}
 func (SubagentToolActionLegacyWaitAgents) isSubagentToolAction()     {}
@@ -674,12 +778,14 @@ func (SubagentToolActionAskOracle) MutatesChildState() bool            { return 
 func (SubagentToolActionOverrideReview) MutatesChildState() bool       { return true }
 func (SubagentToolActionSetReviewBaseline) MutatesChildState() bool    { return true }
 func (SubagentToolActionSpawn) MutatesChildState() bool                { return true }
+func (SubagentToolActionSpawnOrchestrator) MutatesChildState() bool    { return true }
 func (SubagentToolActionListAgents) MutatesChildState() bool           { return false }
+func (SubagentToolActionListTargets) MutatesChildState() bool          { return false }
 func (SubagentToolActionSendInput) MutatesChildState() bool            { return true }
 func (SubagentToolActionSendMessage) MutatesChildState() bool          { return true }
 func (SubagentToolActionLegacyWaitAgents) MutatesChildState() bool     { return false }
 func (SubagentToolActionLegacyAwaitChildren) MutatesChildState() bool  { return false }
-func (SubagentToolActionLegacyInterruptAgent) MutatesChildState() bool { return true }
+func (SubagentToolActionLegacyInterruptAgent) MutatesChildState() bool { return false }
 func (SubagentToolActionCloseAgent) MutatesChildState() bool           { return true }
 func (SubagentToolActionHandback) MutatesChildState() bool             { return false }
 
@@ -721,8 +827,21 @@ func (a SubagentToolActionSpawn) MarshalJSON() ([]byte, error) {
 	return transcriptMarshalAdjacent("action", "spawn", "params", v)
 }
 
+func (a SubagentToolActionSpawnOrchestrator) MarshalJSON() ([]byte, error) {
+	type plain SubagentToolActionSpawnOrchestrator
+	v := plain(a)
+	if v.Repos != nil && *v.Repos == nil {
+		v.Repos = &[]string{}
+	}
+	return transcriptMarshalAdjacent("action", "spawn_orchestrator", "params", v)
+}
+
 func (SubagentToolActionListAgents) MarshalJSON() ([]byte, error) {
 	return transcriptMarshalAdjacent("action", "list_agents", "params", nil)
+}
+
+func (SubagentToolActionListTargets) MarshalJSON() ([]byte, error) {
+	return transcriptMarshalAdjacent("action", "list_targets", "params", nil)
 }
 
 func (a SubagentToolActionSendInput) MarshalJSON() ([]byte, error) {
@@ -835,6 +954,7 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		var v struct {
 			Overrides []ReviewOverride `json:"overrides" serde:"default"`
 			Reason    *string          `json:"reason"`
+			Path      *string          `json:"path"`
 		}
 		if err := transcriptStrictDecode(params, &v, true); err != nil {
 			return nil, err
@@ -846,7 +966,7 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		if v.Reason != nil {
 			overrides = append(overrides, ReviewOverride{Finding: LegacyWholeVerdictFinding, Reason: *v.Reason})
 		}
-		return SubagentToolActionOverrideReview{Overrides: overrides}, nil
+		return SubagentToolActionOverrideReview{Overrides: overrides, Path: v.Path}, nil
 	case "set_review_baseline":
 		type plain SubagentToolActionSetReviewBaseline
 		var v plain
@@ -863,8 +983,15 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		v.TaskType = SubagentTaskTypeStraightforward
 		err = transcriptStrictDecode(params, &v, true)
 		return SubagentToolActionSpawn(v.plain), err
+	case "spawn_orchestrator":
+		type plain SubagentToolActionSpawnOrchestrator
+		var v plain
+		err = transcriptStrictDecode(params, &v, true)
+		return SubagentToolActionSpawnOrchestrator(v), err
 	case "list_agents":
 		return unit(SubagentToolActionListAgents{}, "ListAgents")
+	case "list_targets":
+		return unit(SubagentToolActionListTargets{}, "ListTargets")
 	case "send_input":
 		type plain SubagentToolActionSendInput
 		var v plain
@@ -896,8 +1023,9 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		return SubagentToolActionHandback(v), err
 	}
 	return nil, transcriptUnknownVariant(outer.Action, "fetch", "list_profiles", "request_review",
-		"ask_oracle", "override_review", "set_review_baseline", "spawn", "list_agents", "send_input",
-		"send_message", "wait_agents", "await_children", "interrupt_agent", "close_agent", "handback")
+		"ask_oracle", "override_review", "set_review_baseline", "spawn", "spawn_orchestrator", "list_agents",
+		"list_targets", "send_input", "send_message", "wait_agents", "await_children", "interrupt_agent",
+		"close_agent", "handback")
 }
 
 type SubagentToolResult struct {
@@ -1133,6 +1261,12 @@ type SubagentRecord struct {
 	// the tool existed reads as false and keeps reporting through its last
 	// message.
 	HandbackTool bool `json:"handback_tool,omitempty"`
+	// Orchestrator says whether this depth-1 worker is an orchestrator that
+	// may delegate to depth-2 workers. Stored as supervisor.
+	Orchestrator bool `json:"supervisor,omitempty"`
+	// ResumeWithParent: the parent suspended this child and should resume
+	// it with its own worker.
+	ResumeWithParent bool `json:"resume_with_parent,omitempty"`
 }
 
 func (r *SubagentRecord) UnmarshalJSON(data []byte) error {
@@ -1167,13 +1301,28 @@ type SubagentMetadata struct {
 	NoticedTurn      *uint64                 `json:"delivered_turn,omitempty"`
 	ReportedFinish   *SubagentFinishIdentity `json:"reported_finish,omitempty"`
 	HandbackTool     bool                    `json:"handback_tool" serde:"default"`
+	// Orchestrator is serialized as supervisor and also read as
+	// orchestrator.
+	Orchestrator bool `json:"supervisor,omitempty"`
 }
 
 func (m *SubagentMetadata) UnmarshalJSON(data []byte) error {
 	type plain SubagentMetadata
 	v := plain{Kind: SubagentKindWorker}
-	if err := transcriptStrictDecode(data, &v, true); err != nil {
+	if err := transcriptStrictDecode(data, &v, true, "orchestrator"); err != nil {
 		return err
+	}
+	members, err := transcriptObject(data)
+	if err != nil {
+		return err
+	}
+	if alias, ok := members["orchestrator"]; ok {
+		if _, named := members["supervisor"]; named {
+			return errors.New("duplicate field `supervisor`")
+		}
+		if err := json.Unmarshal(alias, &v.Orchestrator); err != nil {
+			return err
+		}
 	}
 	*m = SubagentMetadata(v)
 	return nil
@@ -1194,6 +1343,7 @@ func SubagentMetadataFrom(record *SubagentRecord) SubagentMetadata {
 		NoticedTurn:      record.NoticedTurn,
 		ReportedFinish:   record.ReportedFinish,
 		HandbackTool:     record.HandbackTool,
+		Orchestrator:     record.Orchestrator,
 	}
 }
 
@@ -1212,6 +1362,60 @@ func (m *SubagentMetadata) ApplyTo(record *SubagentRecord) {
 	record.NoticedTurn = m.NoticedTurn
 	record.ReportedFinish = m.ReportedFinish
 	record.HandbackTool = m.HandbackTool
+	record.Orchestrator = m.Orchestrator
+}
+
+// ToRecordView builds a SubagentRecord view for shared validation and
+// launch helpers.
+func (m *SubagentMetadata) ToRecordView() SubagentRecord {
+	return SubagentRecord{
+		ResumeWithParent: false,
+		Kind:             m.Kind,
+		ReviewerLaunch:   nil,
+		ChildSessionID:   m.ChildSessionID,
+		ParentSessionID:  m.ParentSessionID,
+		TaskName:         m.TaskName,
+		ProfileID:        m.ProfileID,
+		Model:            m.Model,
+		Effort:           m.Effort,
+		WorkingDirectory: m.WorkingDirectory,
+		InitialPrompt:    "",
+		RequestKey:       m.RequestKey,
+		CreatedAt:        m.CreatedAt,
+		NoticedTurn:      m.NoticedTurn,
+		ReportedFinish:   m.ReportedFinish,
+		HandbackTool:     m.HandbackTool,
+		Orchestrator:     m.Orchestrator,
+	}
+}
+
+// ValidateSubagentParent is the shared depth-2 delegation invariant
+// checked by both State.ValidateSubagent and the controller's sub-agent
+// registration.
+func ValidateSubagentParent(parentSubagent *SubagentRecord, parentOwnsEnvironment bool, requestedKind SubagentKind, requestedOrchestrator bool) error {
+	// The zero kind is the default, a worker.
+	if requestedKind == "" {
+		requestedKind = SubagentKindWorker
+	}
+	if requestedOrchestrator && requestedKind != SubagentKindWorker {
+		return errors.New("only worker sub-agents can be orchestrators")
+	}
+	if requestedKind == SubagentKindReviewer {
+		return nil
+	}
+	switch {
+	case parentSubagent == nil:
+		return nil
+	case (parentSubagent.Kind == SubagentKindWorker || parentSubagent.Kind == "") && parentSubagent.Orchestrator:
+		if requestedOrchestrator {
+			return errors.New("orchestrators cannot spawn nested orchestrators (maximum depth is 2)")
+		}
+		if requestedKind == SubagentKindOracle && !parentOwnsEnvironment {
+			return errors.New("borrowed orchestrators cannot spawn oracles")
+		}
+		return nil
+	}
+	return errors.New("sub-agent sessions cannot spawn their own sub-agents")
 }
 
 // SubagentStatus is the lifecycle group used by the tool and both user
@@ -1251,13 +1455,16 @@ var ReviewMCPTools = []string{"request_review", "override_review", "set_baseline
 type SubagentMcpRole string
 
 const (
-	SubagentMcpRoleParent      SubagentMcpRole = "parent"
-	SubagentMcpRoleMessageOnly SubagentMcpRole = "message_only"
-	SubagentMcpRoleFetchOnly   SubagentMcpRole = "fetch_only"
-	SubagentMcpRoleChild       SubagentMcpRole = "child"
+	SubagentMcpRoleParent SubagentMcpRole = "parent"
+	// SubagentMcpRoleOrchestrator is serialized as "supervisor" and also
+	// read as "orchestrator"; its ID is "orchestrator".
+	SubagentMcpRoleOrchestrator SubagentMcpRole = "orchestrator"
+	SubagentMcpRoleMessageOnly  SubagentMcpRole = "message_only"
+	SubagentMcpRoleFetchOnly    SubagentMcpRole = "fetch_only"
+	SubagentMcpRoleChild        SubagentMcpRole = "child"
 )
 
-// UnmarshalJSON also accepts the alias fixed_parent.
+// UnmarshalJSON also accepts the aliases fixed_parent and orchestrator.
 func (r *SubagentMcpRole) UnmarshalJSON(data []byte) error {
 	var text string
 	if err := json.Unmarshal(data, &text); err != nil {
@@ -1270,11 +1477,20 @@ func (r *SubagentMcpRole) UnmarshalJSON(data []byte) error {
 	case "fixed_parent":
 		*r = SubagentMcpRoleParent
 		return nil
+	case "supervisor", SubagentMcpRoleOrchestrator:
+		*r = SubagentMcpRoleOrchestrator
+		return nil
 	}
-	return transcriptUnknownVariant(text, "parent", "fixed_parent", "message_only", "fetch_only", "child")
+	return transcriptUnknownVariant(text, "parent", "fixed_parent", "supervisor", "orchestrator", "message_only",
+		"fetch_only", "child")
 }
 
+// MarshalJSON writes the serde name: the ID, except "supervisor" for the
+// orchestrator.
 func (r SubagentMcpRole) MarshalJSON() ([]byte, error) {
+	if r == SubagentMcpRoleOrchestrator {
+		return transcriptMarshal("supervisor")
+	}
 	return transcriptMarshal(r.ID())
 }
 
@@ -1283,7 +1499,7 @@ func (r SubagentMcpRole) MarshalJSON() ([]byte, error) {
 // top-level session's arguments stay as earlier builds wrote them.
 func (r SubagentMcpRole) ReviewServerArgs(socket string, harness string) []string {
 	args := []string{"worker", "subagent-mcp", "--socket", socket, "--harness", harness, "--review-server"}
-	if r == SubagentMcpRoleChild || r == SubagentMcpRoleFetchOnly {
+	if r == SubagentMcpRoleChild || r == SubagentMcpRoleFetchOnly || r == SubagentMcpRoleOrchestrator {
 		args = append(args, "--role", r.ID())
 	}
 	return args
@@ -1296,18 +1512,31 @@ func (r SubagentMcpRole) ID() string {
 	return string(r)
 }
 
-// ToolNames are the tools this role's server lists, in the order it lists
-// them. A harness that asks before an MCP tool is allowed exactly these.
-func (r SubagentMcpRole) ToolNames() []string {
+// ToolNames are the tools advertised, accepted and allowed by the harness
+// for this launch.
+func (r SubagentMcpRole) ToolNames(oracle bool, orchestratorsEnabled bool) []string {
+	var tools []string
 	switch r {
 	case SubagentMcpRoleMessageOnly:
-		return []string{"send_message", "fetch", "ask_oracle"}
+		tools = []string{"send_message", "fetch"}
 	case SubagentMcpRoleFetchOnly:
-		return []string{"fetch", "send_message", "ask_oracle"}
+		tools = []string{"fetch", "send_message"}
 	case SubagentMcpRoleChild:
-		return []string{"handback", "fetch", "send_message"}
+		tools = []string{"handback", "fetch", "send_message"}
+	default:
+		tools = []string{"spawn_worker"}
+		if r != SubagentMcpRoleOrchestrator && orchestratorsEnabled {
+			tools = append(tools, "spawn_orchestrator", "list_targets")
+		}
+		tools = append(tools, "list_agents", "send_message", "close", "fetch")
 	}
-	return []string{"spawn", "list_agents", "send_message", "close", "fetch", "ask_oracle"}
+	if oracle && r != SubagentMcpRoleChild {
+		tools = append(tools, "ask_oracle")
+	}
+	if r == SubagentMcpRoleOrchestrator {
+		tools = append(tools, "handback")
+	}
+	return tools
 }
 
 func (r SubagentMcpRole) String() string { return r.ID() }
@@ -1317,6 +1546,8 @@ func ParseSubagentMcpRole(value string) (SubagentMcpRole, error) {
 	switch value {
 	case "parent", "fixed_parent":
 		return SubagentMcpRoleParent, nil
+	case "orchestrator", "supervisor":
+		return SubagentMcpRoleOrchestrator, nil
 	case "message_only":
 		return SubagentMcpRoleMessageOnly, nil
 	case "fetch_only":
@@ -1711,6 +1942,10 @@ func WakeFailureDecode(text string) (string, *WakeFailure) {
 	}
 	return text[:index], &failure
 }
+
+// FailedChildCloseGuidance is guidance for a parent whose child's lifecycle
+// is in Error.
+const FailedChildCloseGuidance = "Use close_agent to close this child, then spawn a replacement if needed."
 
 // LoginInvalidReason is what a parent is told about a profile whose login
 // the provider refused.

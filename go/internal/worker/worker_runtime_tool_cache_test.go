@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 func toolCacheTestEnvironment(root, checkout string) map[string]string {
@@ -62,7 +63,7 @@ var toolCacheTestNextContainer atomic.Uint64
 func toolCacheTestRun(cwd string, env map[string]string, command string, args ...string) (string, error) {
 	// Resolve like a shell; Command's own PATH search can otherwise consult
 	// the test process PATH instead of the child's explicit environment.
-	executable, found, err := core.FindCommand(command, env)
+	executable, found, err := harnessinstall.FindCommand(command, env)
 	if err != nil {
 		return "", err
 	}

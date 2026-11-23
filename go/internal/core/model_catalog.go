@@ -238,8 +238,7 @@ func NormalizeModel(model string) string {
 }
 
 // ModelProvider maps a model name or identity to its owning QuotaProvider,
-// if it belongs to a known model family. (Ported from the Rust source after
-// this package's base, for the list-shaped [subagents] validation.)
+// if it belongs to a known model family.
 func ModelProvider(model string) QuotaProvider {
 	normalized := NormalizeModel(strings.TrimSpace(model))
 	base, _, _ := strings.Cut(normalized, "[")

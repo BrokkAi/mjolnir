@@ -389,7 +389,7 @@ func requestMailboxDrainForTest(t *testing.T, relay *DurableRelay, requestID str
 // lease ID.
 func drainPostToolBatch(t *testing.T, relay *DurableRelay) (*string, int, *string) {
 	t.Helper()
-	payload := rtMust(relay.DrainMailbox("PostToolBatch"))
+	payload := rtMust(relay.DrainMailbox("PostToolBatch", nil))
 	drained, ok := payload.(core.RelayResponsePayloadMailboxDrained)
 	if !ok {
 		t.Fatalf("unexpected PostToolBatch response: %#v", payload)
@@ -4967,7 +4967,7 @@ func TestClearAdmissionMatchesThePublishedCapabilityPerHarness(t *testing.T) {
 		{core.HarnessKindMuse, false},
 		{core.HarnessKindOpenCode, false},
 		{core.HarnessKindDsh, false},
-		{core.HarnessKindAntigravity, false},
+		{core.HarnessKindAntigravity, true},
 	} {
 		temp := t.TempDir()
 		relay := rtMust(DurableRelayOpen(temp, session, "test"))
@@ -5869,11 +5869,11 @@ func TestACodexSessionIsReplaceableAgainOnceTheRestartedAdapterReports(t *testin
 	}
 	facts := state.Facts()
 	reported := false
-	for _, reason := range core.ReplacementBlockers(&facts, core.HarnessKindCodex) {
+	for _, reason := range core.ReplacementBlockers(&facts, core.HarnessKindCodex, core.WorkerReplacementAutomaticUpgrade) {
 		reported = reported || strings.Contains(reason, "has not reported goal and execution state")
 	}
 	if !reported {
-		t.Fatalf("%v", core.ReplacementBlockers(&facts, core.HarnessKindCodex))
+		t.Fatalf("%v", core.ReplacementBlockers(&facts, core.HarnessKindCodex, core.WorkerReplacementAutomaticUpgrade))
 	}
 
 	configure()
@@ -6015,7 +6015,7 @@ func TestMailboxPostToolUseDrainsFollowTheResolvedDeliveryMode(t *testing.T) {
 	event := mailboxFixtureEvent("codex-mid-turn", false)
 	submitRelay(relay, "codex-event-command", core.RelayCommandDeliverMailboxEvent{Event: event})
 	postToolUseDrain := func() (*string, int, *string) {
-		payload := rtMust(relay.DrainMailbox("PostToolUse"))
+		payload := rtMust(relay.DrainMailbox("PostToolUse", nil))
 		drained, ok := payload.(core.RelayResponsePayloadMailboxDrained)
 		if !ok {
 			t.Fatalf("unexpected PostToolUse response: %#v", payload)
@@ -7689,4 +7689,195 @@ func rtCloneTurnCompletion(completion *core.TurnCompletion) *core.TurnCompletion
 	}
 	copied := *completion
 	return &copied
+}
+
+func TestCheckpointNativeUseReturnsWorkerEvidenceAtCutAndRefusesOffCut(t *testing.T) {
+	temp := t.TempDir()
+	relay := rtMust(DurableRelayOpen(temp, session, "native-use-cut"))
+	rtMust(relay.RecordObservation(core.RelayObservationSessionOpened{NativeSessionID: "native-cut-1"}))
+	barrierID := "barrier-native-use"
+	cut := readyCheckpoint(relay, barrierID)
+	response := relay.Handle(relayRequest("read-native-use", core.RelayRequestReadCheckpointNativeUse{
+		BarrierCommandID: barrierID,
+		Cut:              cut,
+	}))
+	ok, isOk := response.Body.(core.RelayResponseBodyOk)
+	answer, isNativeUse := ok.Payload.(core.RelayResponsePayloadCheckpointNativeUse)
+	if !isOk || !isNativeUse {
+		t.Fatalf("unexpected response: %#v", response.Body)
+	}
+	evidence := answer.NativeUseEvidence
+	if evidence == nil {
+		t.Fatal("worker owns native-use evidence")
+	}
+	rtEqual(t, evidence.Version, uint32(1))
+	rtEqual(t, evidence.NativeSessionID, "native-cut-1")
+	rtEqual(t, evidence.Usage, core.NativeSessionUseUnused)
+
+	// Wrong barrier ID is refused.
+	refused := relay.Handle(relayRequest("read-native-use-refused", core.RelayRequestReadCheckpointNativeUse{
+		BarrierCommandID: "other-barrier",
+		Cut:              cut,
+	}))
+	if _, isError := refused.Body.(core.RelayResponseBodyError); !isError {
+		t.Fatalf("off-cut read was not refused: %#v", refused.Body)
+	}
+}
+
+func TestRestoredSchema15SeedPreservesLoadBeforeReplaceAndUsedOrUnknownEvidence(t *testing.T) {
+	writeSeed := func(root string, seed core.RestoredRelaySeed) {
+		t.Helper()
+		body, err := json.Marshal(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(core.RestoredRelaySeedPath(root), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opened := uint64(2)
+	// 1. Unused evidence restored into a fresh relay (native_session_id ==
+	//    None) must return LoadBeforeReplace, and opening a replacement fresh
+	//    ID must record replaced_unused_native_session_id and reset evidence
+	//    to the fresh ID.
+	temp := t.TempDir()
+	writeSeed(temp, core.RestoredRelaySeed{
+		EventFrontier:       4,
+		EventFrontierDigest: strings.Repeat("a", 64),
+		NativeSessionUnused: true,
+		NativeUseEvidence: &core.NativeSessionUseEvidence{
+			Version:         1,
+			NativeSessionID: "archived-unused",
+			OpenedOrdinal:   &opened,
+			Usage:           core.NativeSessionUseUnused,
+		},
+	})
+	relay := rtMust(DurableRelayOpen(temp, session, "restore-unused-evidence"))
+	if id := relay.OperationalState().NativeSessionID; id != nil {
+		t.Fatalf("native session id = %q, want none", *id)
+	}
+	rtEqual(t, relay.NativeSessionHistory(), NativeSessionHistoryLoadBeforeReplace)
+	rtMust(relay.RecordObservation(core.RelayObservationSessionOpened{
+		NativeSessionID:               "fresh-replacement",
+		ReplacedUnusedNativeSessionID: rtString("archived-unused"),
+	}))
+	replaced := relay.OperationalState().ReplacedUnusedNativeSessionID
+	if replaced == nil || *replaced != "archived-unused" {
+		t.Fatalf("replaced unused native session = %v", replaced)
+	}
+	fresh := relay.snapshot.NativeUseEvidence
+	rtEqual(t, fresh.NativeSessionID, "fresh-replacement")
+	rtEqual(t, fresh.Usage, core.NativeSessionUseUnused)
+
+	// 2. Unknown or Used evidence restored into a fresh relay must return
+	//    MayHaveHistory and preserve Unknown / Used when the archived ID
+	//    opens.
+	for _, usage := range []core.NativeSessionUse{core.NativeSessionUseUnknown, core.NativeSessionUseUsed} {
+		dir := t.TempDir()
+		writeSeed(dir, core.RestoredRelaySeed{
+			EventFrontier:       4,
+			EventFrontierDigest: strings.Repeat("a", 64),
+			NativeUseEvidence: &core.NativeSessionUseEvidence{
+				Version:         1,
+				NativeSessionID: "archived-id",
+				OpenedOrdinal:   &opened,
+				Usage:           usage,
+			},
+		})
+		relay := rtMust(DurableRelayOpen(dir, session, "restore-used-evidence"))
+		rtEqual(t, relay.NativeSessionHistory(), NativeSessionHistoryMayHaveHistory)
+		rtMust(relay.RecordObservation(core.RelayObservationSessionOpened{NativeSessionID: "archived-id"}))
+		evidence := relay.snapshot.NativeUseEvidence
+		rtEqual(t, evidence.NativeSessionID, "archived-id")
+		rtEqual(t, evidence.Usage, usage)
+		rtEqual(t, relay.NativeSessionHistory(), NativeSessionHistoryMayHaveHistory)
+	}
+}
+
+func TestAntigravityHookSteeringAndConversationIDFiltering(t *testing.T) {
+	temp := t.TempDir()
+	relay := rtMust(DurableRelayOpen(temp, session, "test"))
+	relay.SetTurnVerdictHarness(core.HarnessKindAntigravity)
+	relay.SetSteeringDeliveryMode(core.HarnessKindAntigravity, true)
+	relay.SetMailboxDeliveryMode(core.MailboxDeliveryModeToolBoundary)
+	relay.setAcpReady(true)
+	unsupported := false
+	relay.SetSteeringSupported(&unsupported)
+	effective := relay.EffectiveSteeringSupported()
+	automatic := effective != nil && *effective
+	relay.SetAutomaticSteering(automatic)
+	rtMust(relay.RecordObservation(core.RelayObservationSessionOpened{NativeSessionID: "agy-conv-1"}))
+
+	if supported := relay.OperationalState().SteeringSupported; supported == nil || !*supported {
+		t.Fatalf("published steering support = %v, want true", supported)
+	}
+	if !automatic {
+		t.Fatal("hook steering must enable automatic steering")
+	}
+
+	submitRelay(relay, "agy-initial-prompt", prompt("initial task"))
+	rtEqual(t, len(rtMust(relay.ClaimPendingCommands(true))), 1)
+
+	submitRelay(relay, "agy-steer-prompt", prompt("change direction now"))
+	// Automatic steering should queue a hook steer without claiming an ACP
+	// steer dispatch.
+	rtEqual(t, len(rtMust(relay.ClaimPendingCommands(true))), 0)
+
+	drained := func(answer core.RelayResponsePayload) core.RelayResponsePayloadMailboxDrained {
+		t.Helper()
+		payload, ok := answer.(core.RelayResponsePayloadMailboxDrained)
+		if !ok {
+			t.Fatalf("unexpected drain answer: %#v", answer)
+		}
+		return payload
+	}
+	// Mismatched conversation_id (internal sub-agent) must return empty and
+	// not consume the lease.
+	subagent := drained(rtMust(relay.DrainMailbox("PostToolBatch", rtString("agy-subagent-99"))))
+	if subagent.LeaseID != nil || subagent.Text != nil || subagent.Count != 0 {
+		t.Fatalf("a sub-agent drain leased mail: %#v", subagent)
+	}
+
+	// Matching conversation_id drains the steer and acks it to Applied.
+	root := drained(rtMust(relay.DrainMailbox("PostToolBatch", rtString("agy-conv-1"))))
+	if root.LeaseID == nil || root.Text == nil {
+		t.Fatalf("expected Antigravity steer lease, got %#v", root)
+	}
+	rtEqual(t, root.Count, 1)
+	if !strings.Contains(*root.Text, "change direction now") {
+		t.Fatal(*root.Text)
+	}
+	ack := rtMust(relay.ackMailbox(*root.LeaseID))
+	if acknowledged, ok := ack.(core.RelayResponsePayloadMailboxAcknowledged); !ok || !acknowledged.Acknowledged {
+		t.Fatalf("ack = %#v", ack)
+	}
+	if relay.snapshot.Steering == nil || relay.snapshot.Steering.Status != core.SteeringStatusApplied {
+		t.Fatalf("steering = %#v, want applied", relay.snapshot.Steering)
+	}
+
+	// Finish turn 1 and /clear to a new native_session_id.
+	finishPrompt(relay, "agy-initial-prompt")
+	rtNoErr(relay.MarkNativeSessionUsed())
+	submitRelay(relay, "agy-clear-context", core.RelayCommandClearContext{})
+	rtEqual(t, len(rtMust(relay.ClaimPendingCommands(true))), 1)
+	rtMust(relay.RecordCommandCompleted("agy-clear-context", core.RelayCommandOutcomeContextCleared{NativeSessionID: "agy-conv-2"}))
+
+	// Queue a mailbox event in the new conversation: old conversation_id is
+	// ignored, new one drains.
+	submitRelay(relay, "mailbox-after-clear", core.RelayCommandDeliverMailboxEvent{Event: core.MailboxEvent{
+		Key:         "api:after-clear",
+		Source:      "api",
+		Wake:        false,
+		CreatedAtMs: 2,
+		Body:        core.MailboxEventBodyPlainText{Text: "post-clear mailbox note"},
+	}})
+	stale := drained(rtMust(relay.DrainMailbox("PostToolBatch", rtString("agy-conv-1"))))
+	if stale.LeaseID != nil || stale.Count != 0 {
+		t.Fatalf("a stale conversation drained mail: %#v", stale)
+	}
+	current := drained(rtMust(relay.DrainMailbox("PostToolBatch", rtString("agy-conv-2"))))
+	if current.LeaseID == nil || current.Text == nil || current.Count != 1 ||
+		!strings.Contains(*current.Text, "post-clear mailbox note") {
+		t.Fatalf("the current conversation did not drain its mail: %#v", current)
+	}
 }

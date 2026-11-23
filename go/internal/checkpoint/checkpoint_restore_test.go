@@ -155,7 +155,7 @@ func TestLinkedWorktreesInsideACloneSurviveARecoveryCopy(t *testing.T) {
 
 	// A retried restore finds the worktrees it already made and leaves them.
 	snapshot := checkpointMust(archivedRepositorySnapshot(&archive, &archive.Manifest.Repositories[0]))(t)
-	checkpointNoError(t, restoreLinkedWorktrees(SystemGit{}, restored, snapshot.LinkedWorktrees))
+	checkpointMust(restoreLinkedWorktrees(SystemGit{}, restored, snapshot.LinkedWorktrees))(t)
 	if body := checkpointReadFile(t, filepath.Join(restored, ".mj/lanes/a/a.txt")); string(body) != "unstaged in a\n" {
 		t.Fatalf("a.txt = %q", body)
 	}
@@ -222,7 +222,8 @@ func TestALinkedWorktreeThatFailsToRestoreLeavesNothingForARetryToSkip(t *testin
 		UntrackedTar:  []byte{},
 	}
 	restore := func(snapshot LinkedWorktreeSnapshot) error {
-		return restoreLinkedWorktrees(SystemGit{}, repository, []LinkedWorktreeSnapshot{snapshot})
+		_, err := restoreLinkedWorktrees(SystemGit{}, repository, []LinkedWorktreeSnapshot{snapshot})
+		return err
 	}
 	if err := restore(snapshot); err == nil {
 		t.Fatal("a broken patch restored")
@@ -522,7 +523,7 @@ func TestRawCheckpointRestoresReviewRefsAndDeclaresTheNewSchema(t *testing.T) {
 	// The raw archive imports no objects. Missing baseline objects are
 	// skipped, while commit refs whose objects remain locally available are
 	// recreated.
-	checkpointNoError(t, RestoreSingleRepositoryIntoCheckout(spec.OutputPath, destination, SystemGit{}))
+	checkpointMust(RestoreSingleRepositoryIntoCheckout(spec.OutputPath, destination, SystemGit{}))(t)
 	if refs := gitLine(destination, "for-each-ref", baseline); refs != "" {
 		t.Fatalf("baseline = %q", refs)
 	}
@@ -734,7 +735,7 @@ func TestCheckpointWireRequiresTheNewCaptureModeAndRejectsLegacyFields(t *testin
 		"capture": { "mode": "delta_from", "base_commit": "HEAD" },
 		"origin_override": null
 	}`), &repository))
-	if repository.Capture != (CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureDeltaFrom, BaseCommit: "HEAD"}) {
+	if !repository.Capture.Equal(CheckpointRepositoryCapture{Mode: CheckpointRepositoryCaptureDeltaFrom, BaseCommit: "HEAD"}) {
 		t.Fatalf("capture = %+v", repository.Capture)
 	}
 
@@ -1103,5 +1104,72 @@ func TestFailedRecoveryWriteNeverPublishesAPartialFileAndRetryKeepsConcurrentWor
 	}
 	if body := checkpointReadFile(t, destination); string(body) != "concurrent native work" {
 		t.Fatalf("destination = %q", body)
+	}
+}
+
+func TestNativeUseEvidenceOverridesEmptyTranscriptAndContentMatchesDetectsChange(t *testing.T) {
+	lastActivity := int64(10)
+	baseEmpty := core.CanonicalSessionSnapshot{
+		EventFrontier:       2,
+		EventFrontierDigest: strings.Repeat("a", 64),
+		Session: core.CanonicalSessionState{
+			Execution:        core.CanonicalExecutionState{State: core.CanonicalExecutionStateIdle},
+			LastActivityAtMs: &lastActivity,
+		},
+		Transcript:    []core.CanonicalTranscriptItem{},
+		QueuedPrompts: []core.CanonicalQueuedPrompt{},
+	}
+
+	// Legacy archive (no evidence): an empty transcript falls back to
+	// CurrentNativeSessionReceivedPrompt == false.
+	legacySeed := checkpointMust(RelaySeedForRestore(&baseEmpty, true, QueueRestorePolicyRestore))(t)
+	if !legacySeed.NativeSessionUnused {
+		t.Fatal("a legacy empty transcript is not unused")
+	}
+	if legacySeed.NativeUseEvidence != nil {
+		t.Fatalf("evidence = %+v", legacySeed.NativeUseEvidence)
+	}
+
+	// Worker-owned Used or Unknown evidence overrides an empty transcript:
+	// NativeSessionUnused must be false.
+	for _, usage := range []core.NativeSessionUse{core.NativeSessionUseUsed, core.NativeSessionUseUnknown} {
+		withEvidence := baseEmpty
+		withEvidence.NativeUseEvidence = &core.NativeSessionUseEvidence{
+			Version:         1,
+			NativeSessionID: "native-1",
+			OpenedOrdinal:   ptrTo(uint64(1)),
+			Usage:           usage,
+		}
+		seed := checkpointMust(RelaySeedForRestore(&withEvidence, true, QueueRestorePolicyRestore))(t)
+		if seed.NativeSessionUnused {
+			t.Fatalf("evidence %s must refuse unexplained replacement even with empty transcript", usage)
+		}
+		if !reflect.DeepEqual(seed.NativeUseEvidence, withEvidence.NativeUseEvidence) {
+			t.Fatalf("seed evidence %+v, want %+v", seed.NativeUseEvidence, withEvidence.NativeUseEvidence)
+		}
+	}
+
+	// Worker-owned Unused evidence authorizes replacement when native
+	// continuity is kept.
+	unusedSnapshot := baseEmpty
+	unusedSnapshot.NativeUseEvidence = &core.NativeSessionUseEvidence{
+		Version:         1,
+		NativeSessionID: "native-1",
+		OpenedOrdinal:   ptrTo(uint64(1)),
+		Usage:           core.NativeSessionUseUnused,
+	}
+	unusedSeed := checkpointMust(RelaySeedForRestore(&unusedSnapshot, true, QueueRestorePolicyRestore))(t)
+	if !unusedSeed.NativeSessionUnused {
+		t.Fatal("unused evidence did not authorize replacement")
+	}
+
+	// ContentMatches must detect Unused -> Unknown even with an identical
+	// transcript.
+	unknownSnapshot := unusedSnapshot
+	unknownEvidence := *unusedSnapshot.NativeUseEvidence
+	unknownEvidence.Usage = core.NativeSessionUseUnknown
+	unknownSnapshot.NativeUseEvidence = &unknownEvidence
+	if unusedSnapshot.ContentMatches(&unknownSnapshot) {
+		t.Fatal("ContentMatches must not mask Unused -> Unknown evidence flip")
 	}
 }

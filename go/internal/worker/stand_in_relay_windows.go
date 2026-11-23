@@ -1,7 +1,7 @@
 // Port of mj-worker/src/stand_in_relay.rs: the leased relay's journal owner
 // lock on Windows (Rust's File::lock, LockFileEx over the whole file).
 
-//go:build testhooks && windows
+//go:build windows
 
 package worker
 

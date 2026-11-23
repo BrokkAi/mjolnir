@@ -145,6 +145,7 @@ fn ssh_docker_registration_config() -> Config {
                 extra_args: Vec::new(),
             },
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "failimage:never".into(),
                 pull_policy: Default::default(),
@@ -1687,6 +1688,7 @@ fn raw_ssh_targets_select_permissions_and_ssh_podman_is_unconstrained() {
     let podman = TargetTemplate::SshPodman {
         ssh: ssh.clone(),
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: "example.invalid/agent:latest".into(),
             pull_policy: Default::default(),

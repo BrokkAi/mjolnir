@@ -93,15 +93,37 @@ var errRuntimeShuttingDown = errors.New("runtime is shutting down")
 // signalled, and the call then fails with "runtime is shutting down".
 // (Rust's ShutdownState::block_on_with; Go methods cannot be generic.)
 func BlockOnWith[T any](s *ShutdownState, future func(ctx context.Context) T) (T, error) {
-	var zero T
-	if s.signalled.Load() {
+	guard, ok := s.tryRegister()
+	if !ok {
+		var zero T
 		return zero, errRuntimeShuttingDown
 	}
+	return blockOnRegistered(s, guard, future)
+}
+
+// tryRegister registers an in-flight guarded BlockOn before handing work to
+// another goroutine. false once shutdown has begun, so callers never launch
+// work after the drain wait has passed.
+func (s *ShutdownState) tryRegister() (inFlightGuard, bool) {
+	if s.signalled.Load() {
+		return inFlightGuard{}, false
+	}
 	guard := registerInFlight(s)
-	defer guard.release()
 	// Re-check after registering: a shutdown that started in between has
 	// already passed the drain wait, so it must not be given work to wait
 	// for.
+	if s.signalled.Load() {
+		guard.release()
+		return inFlightGuard{}, false
+	}
+	return guard, true
+}
+
+// blockOnRegistered drives future under an already-registered shutdown
+// guard, releasing it when the call returns.
+func blockOnRegistered[T any](s *ShutdownState, guard inFlightGuard, future func(ctx context.Context) T) (T, error) {
+	var zero T
+	defer guard.release()
 	if s.signalled.Load() {
 		return zero, errRuntimeShuttingDown
 	}
@@ -241,11 +263,22 @@ func CurrentRuntime() *Runtime { return currentRuntime }
 func OffAsyncWorker[R any](work func() R) R { return work() }
 
 // SpawnOffAsyncWorkers runs future, whose synchronous waits must not hold an
-// async worker, on its own goroutine through BlockOn. The result is an error
-// when the runtime begins shutting down before the future finishes.
+// async worker, on its own goroutine through BlockOn, outside the blocking
+// work the runtime owns (Rust: a dedicated `mj-off-worker` thread outside
+// Tokio's bounded blocking pool, #1640). The shutdown guard is registered
+// before the goroutine starts. The result is an error when the runtime
+// begins shutting down before the future finishes.
 func SpawnOffAsyncWorkers[T any](future func(ctx context.Context) T) *JoinHandle[T] {
-	return SpawnBlocking(func() T {
-		value, err := BlockOn(future)
+	return spawnOffAsyncWorkersWith(runtimeShutdown, future)
+}
+
+func spawnOffAsyncWorkersWith[T any](s *ShutdownState, future func(ctx context.Context) T) *JoinHandle[T] {
+	guard, ok := s.tryRegister()
+	if !ok {
+		return Spawn(func() T { panic(joinError{err: errRuntimeShuttingDown}) })
+	}
+	return Spawn(func() T {
+		value, err := blockOnRegistered(s, guard, future)
 		if err != nil {
 			panic(joinError{err: err})
 		}
@@ -264,6 +297,38 @@ func Spawn[T any](future func() T) *JoinHandle[T] {
 // `tokio::task::spawn_blocking` does.
 func SpawnBlocking[T any](work func() T) *JoinHandle[T] {
 	return SpawnBlockingOn(currentRuntime, work)
+}
+
+// blockingOwnerKey carries the tracker TrackBlockingWork installs (Rust's
+// task-local BLOCKING_OWNER; Go has no task-locals, so the owner travels in
+// the context).
+type blockingOwnerKey struct{}
+
+// TrackBlockingWork runs future so that every closure it hands to
+// SpawnBlockingIn with the context it was given is counted by tracker until
+// the closure returns.
+//
+// A goroutine blocked in a system call cannot be stopped from outside, and
+// abandoning the future that awaited it detaches it. An owner that cancels
+// future waits on tracker, so nothing the future started is still running
+// when the owner reports it stopped. Tasks the future spawns are their own
+// owners and are not counted.
+func TrackBlockingWork[T any](ctx context.Context, tracker *sync.WaitGroup, future func(ctx context.Context) T) T {
+	return future(context.WithValue(ctx, blockingOwnerKey{}, tracker))
+}
+
+// SpawnBlockingIn is SpawnBlocking for work started under ctx: inside
+// TrackBlockingWork the work is counted by that tracker until it returns.
+func SpawnBlockingIn[T any](ctx context.Context, work func() T) *JoinHandle[T] {
+	owner, _ := ctx.Value(blockingOwnerKey{}).(*sync.WaitGroup)
+	if owner == nil {
+		return SpawnBlocking(work)
+	}
+	owner.Add(1)
+	return SpawnBlocking(func() T {
+		defer owner.Done()
+		return work()
+	})
 }
 
 // SpawnBlockingOn runs blocking work owned by runtime (Rust's

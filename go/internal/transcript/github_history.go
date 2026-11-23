@@ -5,10 +5,14 @@
 //
 // Library replacements: Rust's regex crate becomes regexp (RE2, also
 // leftmost-first); aho_corasick's contiguous NFA becomes historyAutomaton,
-// a small byte-level Aho-Corasick automaton written here; the tokenizers
-// crate is core.HistoryTokenizer; libm::log1p is math.Log1p (a pure Go
-// fdlibm port, the same bits on every platform); chrono's RFC 3339 rendering
-// is time.
+// a small byte-level Aho-Corasick automaton written here; libm::log1p is
+// math.Log1p (a pure Go fdlibm port, the same bits on every platform);
+// chrono's RFC 3339 rendering is time.
+//
+// Budgeting retrieved spans into evidence with the frozen tokenizer
+// (HistoryEvidence, evidence, evidence_from_spans, build_evidence) moved to
+// mj-github-relevance's github_history.rs in Rust; its Go port is in Git
+// history before the sync to 3dde0c11b, for when that crate is ported.
 
 package transcript
 
@@ -1376,174 +1380,6 @@ func Retrieve(item *OrderedValue, text string, session *OrderedValue) []Span {
 	return spansFromWholeText(selected, text)
 }
 
-type HistoryEvidence struct {
-	Evidence         OrderedValue
-	HistoryTokens    int
-	TotalTokens      int
-	BaseTokens       int
-	OriginalSnippets int
-	Retained         []Span
-	Removed          []HistoryRemoval
-	OverLimit        bool
-}
-
-// HistoryRemoval is a span the budget removed: its start and why (Rust's
-// (usize, &'static str)).
-type HistoryRemoval struct {
-	Start  int
-	Reason string
-}
-
-// GithubHistoryEvidence is Rust's github_history::evidence (prefixed: the
-// authorization module's Evidence comes first). Base evidence is already
-// bounded/redacted exactly once; this only budgets history.
-func GithubHistoryEvidence(originalItem *OrderedValue, text string, base *OrderedValue) (HistoryEvidence, error) {
-	session := base.Index("session")
-	return EvidenceFromSpans(base, Retrieve(originalItem, text, &session))
-}
-
-// EvidenceFromSpans budgets already retrieved spans into base; the
-// transcript is used only through them.
-func EvidenceFromSpans(base *OrderedValue, work []Span) (HistoryEvidence, error) {
-	tokenizer, err := core.HistoryTokenizer()
-	if err != nil {
-		return HistoryEvidence{}, err
-	}
-	count := func(a string, b *string, special bool) (int, error) {
-		var ids []uint32
-		var err error
-		if b != nil {
-			first, second := tokenizersInput(a, *b)
-			ids, err = tokenizer.Encode(first, second, special)
-		} else {
-			ids, err = tokenizer.Encode(a, nil, special)
-		}
-		if err != nil {
-			return 0, err
-		}
-		return len(ids), nil
-	}
-	originalSnippets := len(work)
-	work = slices.Clone(work)
-	for i := range work {
-		if work[i].Snippet.Time != nil {
-			redacted := Redact(*work[i].Snippet.Time)
-			work[i].Snippet.Time = &redacted
-		}
-	}
-	sessionValue := base.Index("session")
-	source, ok := sessionValue.AsObject()
-	if !ok {
-		return HistoryEvidence{}, errors.New("session must be object")
-	}
-	session := OrderedValue{Kind: OrderedValueObject, Object: []OrderedMember{}}
-	insert := func(key string, value OrderedValue) {
-		for i := range session.Object {
-			if session.Object[i].Key == key {
-				session.Object[i].Value = value
-				return
-			}
-		}
-		session.Object = append(session.Object, OrderedMember{Key: key, Value: value})
-	}
-	has := func(key string) bool {
-		return slices.ContainsFunc(session.Object, func(member OrderedMember) bool { return member.Key == key })
-	}
-	for _, key := range []string{"conversation", "files", "references", "mentions"} {
-		if value, ok := orderedMember(source, key); ok {
-			insert(key, value)
-		}
-	}
-	var extra []string
-	for _, member := range source {
-		if !has(member.Key) && member.Key != "history" {
-			extra = append(extra, member.Key)
-		}
-	}
-	sort.Strings(extra)
-	for _, key := range extra {
-		value, _ := orderedMember(source, key)
-		insert(key, value)
-	}
-	itemValue := base.Index("item")
-	item := itemValue.String()
-	sessionText := session.String()
-	baseTokens, err := count(item, &sessionText, true)
-	if err != nil {
-		return HistoryEvidence{}, err
-	}
-	var removed []HistoryRemoval
-	for {
-		history := OrderedValue{Kind: OrderedValueArray, Array: make([]OrderedValue, len(work))}
-		for i := range work {
-			stamp := OrderedValue{}
-			if work[i].Snippet.Time != nil {
-				stamp = OrderedValue{Kind: OrderedValueString, Str: *work[i].Snippet.Time}
-			}
-			history.Array[i] = OrderedValue{Kind: OrderedValueObject, Object: []OrderedMember{
-				{Key: "time", Value: stamp},
-				{Key: "text", Value: OrderedValue{Kind: OrderedValueString, Str: work[i].Snippet.Text}},
-			}}
-		}
-		historyTokens, err := count(history.String(), nil, false)
-		if err != nil {
-			return HistoryEvidence{}, err
-		}
-		insert("history", history)
-		sessionText := session.String()
-		total, err := count(item, &sessionText, true)
-		if err != nil {
-			return HistoryEvidence{}, err
-		}
-		if len(work) == 0 || (historyTokens <= 800 && total <= 7999) {
-			return HistoryEvidence{
-				Evidence: OrderedValue{Kind: OrderedValueObject, Object: []OrderedMember{
-					{Key: "item", Value: itemValue},
-					{Key: "session", Value: session},
-				}},
-				HistoryTokens:    historyTokens,
-				TotalTokens:      total,
-				BaseTokens:       baseTokens,
-				OriginalSnippets: originalSnippets,
-				Retained:         work,
-				Removed:          removed,
-				OverLimit:        total > 7999,
-			}, nil
-		}
-		worst := 0
-		for i := 1; i < len(work); i++ {
-			order := totalCompare(work[i].Score, work[worst].Score)
-			if order == 0 {
-				order = cmp.Compare(work[i].Start, work[worst].Start)
-			}
-			if order < 0 {
-				worst = i
-			}
-		}
-		reason := "input_capacity"
-		if historyTokens > 800 {
-			reason = "history_budget"
-		}
-		removed = append(removed, HistoryRemoval{Start: work[worst].Start, Reason: reason})
-		work = slices.Delete(work, worst, worst+1)
-	}
-}
-
-// orderedMember is an object member's value by key.
-func orderedMember(object []OrderedMember, key string) (OrderedValue, bool) {
-	for i := range object {
-		if object[i].Key == key {
-			return object[i].Value, true
-		}
-	}
-	return OrderedValue{}, false
-}
-
-// tokenizersInput is the pair input of core.GithubHistoryTokenizer.Encode.
-func tokenizersInput(a, b string) (string, *string) {
-	return a, &b
-}
-
 // HistoryCounts is the counts that the transcript header reports; they fix
 // the header's length and so every code point position after it.
 type HistoryCounts struct {
@@ -2265,24 +2101,6 @@ func serdeJSON(value any) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
-}
-
-// BuildEvidence builds classifier-ready evidence from the spans a scanner
-// retrieved. Diagnostics retain overflow rather than trimming base.
-func BuildEvidence(base *core.GithubItemEvidence, spans []Span) (core.GithubItemEvidence, HistoryEvidence, error) {
-	baseValue, err := orderedValueOf(base)
-	if err != nil {
-		return core.GithubItemEvidence{}, HistoryEvidence{}, err
-	}
-	result, err := EvidenceFromSpans(&baseValue, spans)
-	if err != nil {
-		return core.GithubItemEvidence{}, HistoryEvidence{}, err
-	}
-	var typed core.GithubItemEvidence
-	if err := json.Unmarshal([]byte(result.Evidence.String()), &typed); err != nil {
-		return core.GithubItemEvidence{}, HistoryEvidence{}, err
-	}
-	return typed, result, nil
 }
 
 // StudentSegments is the training-format segments, item first, with history

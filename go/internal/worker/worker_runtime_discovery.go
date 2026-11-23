@@ -18,6 +18,7 @@ import (
 
 	"github.com/BrokkAi/acp-go/schema"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
@@ -29,18 +30,18 @@ func DiscoverProfileConfig(ctx context.Context, spec core.ProfileProbeSpec) (cor
 	// Resolve the account's login environment first so nvm/Homebrew Node
 	// installations and the cache root (`HOME` or `XDG_CACHE_HOME`) are
 	// visible to the system-or-managed Node decision.
-	environment, err := core.WithOverrides(ctx, spec.Environment)
+	environment, err := harnessinstall.WithOverrides(ctx, spec.Environment)
 	if err != nil {
 		return core.ProfileConfig{}, err
 	}
-	var managedNode *core.ManagedNodeRuntime
+	var managedNode *harnessinstall.ManagedNodeRuntime
 	if spec.HarnessRuntime.MayInstall() {
 		needed, err := needsNodeRuntime(ctx, spec.Harness, environment)
 		if err != nil {
 			return core.ProfileConfig{}, err
 		}
 		if needed {
-			managedNode, err = core.EnsureNodeRuntime(ctx, environment)
+			managedNode, err = harnessinstall.EnsureNodeRuntime(ctx, environment)
 			if err != nil {
 				return core.ProfileConfig{}, fmt.Errorf("prepare Node.js for %s discovery: %w", spec.Harness.DisplayName(), err)
 			}
@@ -54,7 +55,7 @@ func DiscoverProfileConfig(ctx context.Context, spec core.ProfileProbeSpec) (cor
 	// starts the harness a local session would.
 	spec.Harness.ConfigureHomeEnvironment(spec.ProfileHome, environment)
 	builtInCommand, builtInArgs := core.FallbackLaunch(spec.Harness, policy)
-	located, err := core.Locate(ctx, spec.HarnessRuntime, spec.Harness, policy, builtInCommand, builtInArgs, environment)
+	located, err := harnessinstall.Locate(ctx, spec.HarnessRuntime, spec.Harness, policy, builtInCommand, builtInArgs, environment)
 	if err != nil {
 		return core.ProfileConfig{}, err
 	}

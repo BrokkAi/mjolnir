@@ -124,6 +124,9 @@ func planProbeRefusingPolicyMode(t *testing.T, policy core.ExecutionPolicy, conf
 func openPlanProbe(t *testing.T, policy core.ExecutionPolicy, config bool, harness core.HarnessKind, managedSubagent, refuseMode, legacyModes bool) *planProbe {
 	t.Helper()
 	spec := acpDriveSpec("plan-probe", harness, policy, "/workspace")
+	// These probes exercise the person's permission form.
+	spec.ApprovalChoices = core.DefaultApprovalChoices()
+	spec.ApprovalChoices.MjolnirGuardian = false
 	spec.ManagedSubagent = managedSubagent
 	probe := &planProbe{startACPProbe(t, spec, 4096)}
 	initialize := probe.message()

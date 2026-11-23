@@ -14,6 +14,7 @@ import (
 )
 
 // Hard-won: 540c9202: A full target filesystem stopped all workers and recovery repeatedly wrote to the same disk.
+// Hard-won: #1620: an errno name inside a path, such as /work/enospc-repro, read as a full disk.
 func TestRecognisesAFullDiskInEveryToolSWords(t *testing.T) {
 	for _, text := range []string{
 		// scp to a full home directory, as on precision-3260.
@@ -25,6 +26,7 @@ func TestRecognisesAFullDiskInEveryToolSWords(t *testing.T) {
 		"Error response from daemon: ENOSPC: no space left on device, write",
 		"cp: error writing '/home/u/.cache/mjolnir/uploads/x': Disk quota exceeded",
 		"write failed (os error 28)",
+		"write: EDQUOT",
 	} {
 		if !ReportsNoSpace(text) {
 			t.Fatal(text)
@@ -35,6 +37,8 @@ func TestRecognisesAFullDiskInEveryToolSWords(t *testing.T) {
 		"ssh: connect to host precision-3260 port 22: Connection timed out",
 		"No such file or directory",
 		"error 280 while writing",
+		"cat: /work/enospc-repro/log: Permission denied",
+		"open /srv/edquot_tests: No such file or directory",
 	} {
 		if ReportsNoSpace(text) {
 			t.Fatal(text)
@@ -153,6 +157,63 @@ func TestStorageProbeScriptMeasuresMissingPathsAtAnExistingAncestor(t *testing.T
 	}
 	if filesystems[0].TotalBytes == 0 || len(filesystems[0].Paths) != 2 {
 		t.Fatalf("%+v", filesystems[0])
+	}
+}
+
+// recordedQuotaOutput is Linux quota-tools 4.11 on a tmpfs mounted with
+// `usrquota,grpquota`, for a user over a 2000 KiB soft limit, under a 4000
+// KiB hard one.
+const recordedQuotaOutput = "Disk quotas for user u1 (uid 1000): \n" +
+	"     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace\n" +
+	"         MOUNT    3000*   2000    4000 GRACE       2       0       0       0\n" +
+	"Disk quotas for group u1 (gid 1000): \n" +
+	"     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace\n" +
+	"         MOUNT    3000       0       0       0       1       0       0       0\n"
+
+// Hard-won: #1620: `df` cannot see a disk quota, so a worker stopped by one was restarted into it.
+func TestStorageProbeScriptMeasuresTheUserSDiskQuota(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell")
+	}
+	directory := t.TempDir()
+	tools := filepath.Join(directory, "tools")
+	if err := os.Mkdir(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(directory, "quota-output")
+	// Answers for whichever mount `-f` names, as the real tool does.
+	fake := "#!/bin/sh\nfor last; do :; done\nsed \"s|MOUNT|$last|\" '" + output + "'\n"
+	if err := os.WriteFile(filepath.Join(tools, "quota"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(grace string) FilesystemSpace {
+		t.Helper()
+		if err := os.WriteFile(output, []byte(strings.ReplaceAll(recordedQuotaOutput, "GRACE", grace)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("sh", "-c", StorageProbeScript, "mj-storage", directory)
+		command.Env = append(os.Environ(), "PATH="+tools+":"+os.Getenv("PATH"))
+		stdout, err := command.Output()
+		if err != nil {
+			t.Fatalf("%v: %q", err, stdout)
+		}
+		_, filesystems := ParseStorageLines(stdout)
+		if len(filesystems) != 1 {
+			t.Fatalf("%q", stdout)
+		}
+		return filesystems[0]
+	}
+
+	// Within the grace period the hard limit leaves 1000 KiB.
+	withinGrace := probe("4102444800")
+	if !withinGrace.QuotaLimited || withinGrace.AvailableBytes != 1000*1024 {
+		t.Fatalf("within grace %+v", withinGrace)
+	}
+
+	// Once the grace period has run out the soft limit stops writes.
+	expired := probe("1000000000")
+	if !expired.QuotaLimited || expired.AvailableBytes != 0 {
+		t.Fatalf("expired %+v", expired)
 	}
 }
 
