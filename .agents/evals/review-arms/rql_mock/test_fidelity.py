@@ -18,7 +18,8 @@ from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
 from .engine.runner import EngineRunner, SealedRunner
-from .fidelity_live import SONNET, TERRA, candidate_lines, model_usage, planned_calls
+from .fidelity_live import (SONNET, TERRA, adjudication_input, candidate_lines,
+                            model_usage, partition_candidates, planned_calls)
 from .fidelity_symbols import capture_symbols, changed_intervals
 
 
@@ -746,6 +747,101 @@ class ModelIdentity(unittest.TestCase):
                     self.assertEqual(audit["passed"], tool["name"] == "Write")
                     if not audit["passed"]:
                         self.assertIn("tool outside the engine allowlist: 'Bash'", audit["hits"][0]["snippet"])
+
+    def test_adjudication_batches_keep_overlapping_sites_together_and_namespace_keys(self):
+        blobs = {
+            "a.rs": "".join(f"line_a_{i}\n" for i in range(1, 31)).encode(),
+            "b.rs": "".join(f"line_b_{i}\n" for i in range(1, 31)).encode(),
+            "c.rs": "".join(f"line_c_{i}\n" for i in range(1, 31)).encode(),
+        }
+        # 0, 1, 2 connect transitively across a.rs -> b.rs -> c.rs; 3 is disjoint in a.rs.
+        candidates = {
+            "3": {"sites": [{"path": "a.rs", "start_line": 20, "end_line": 21}], "detail": "x" * 120},
+            "2": {"sites": [{"path": "c.rs", "start_line": 4, "end_line": 6}], "detail": "x" * 120},
+            "0": {"sites": [{"path": "a.rs", "start_line": 2, "end_line": 3},
+                            {"path": "b.rs", "start_line": 10, "end_line": 12}], "detail": "x" * 120},
+            "1": {"sites": [{"path": "b.rs", "start_line": 11, "end_line": 13},
+                            {"path": "c.rs", "start_line": 2, "end_line": 4}], "detail": "x" * 120},
+        }
+        lines = candidate_lines(candidates, blobs.get)
+        rendered = adjudication_input("(q)", candidates, lines)
+        self.assertGreater(rendered.count("\n"), 10)
+        decoded = json.loads(rendered)
+        self.assertEqual(decoded["query"], "(q)")
+        self.assertEqual(decoded["candidates"], candidates)
+        self.assertEqual(decoded["source"]["a.rs:2-3"], ["line_a_2", "line_a_3"])
+
+        # With a cap smaller than the whole bundle, transitively linked {0, 1, 2} stay atomic while {3} splits.
+        batches = partition_candidates("(q)", candidates, lines, max_bytes=400)
+        self.assertEqual([list(batch) for batch in batches], [["0", "1", "2"], ["3"]])
+        # Empty sites or a single component cannot be split safely.
+        with_empty = {**candidates, "4": {"sites": []}}
+        self.assertEqual(partition_candidates("(q)", with_empty, candidate_lines(with_empty, blobs.get), max_bytes=10),
+                         [with_empty])
+        single_comp = {key: candidates[key] for key in ("0", "1", "2")}
+        self.assertEqual(partition_candidates("(q)", single_comp, lines, max_bytes=10), [single_comp])
+
+        query = Query("guarded-paths", "random", "fixture", "c" * 40, "(q)")
+        with TemporaryDirectory() as root, patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", 400), \
+                patch.object(fidelity_live, "blob_reader", lambda *args: blobs.get):
+            adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+            adapter.directory = Path(root)
+            adapter.sources = {query.commit: "fixture"}
+            adapter.catalogue = adapter.menu = adapter.rulings = ""
+
+            seen_batches = []
+            fail_second = True
+
+            def fake_sealed_task(commit, directory, model, profile, files, prompt, check_output):
+                directory.mkdir(parents=True, exist_ok=True)
+                output_file = directory / "output.json"
+                if (directory / "completed.json").exists():
+                    return check_output(output_file.read_bytes(), blobs.get), {"reused": True}
+                seen_batches.append(directory.name)
+                if directory.name == "batch-001" and fail_second:
+                    (directory / "failed.json").write_text("{}")
+                    raise RuntimeError("transient batch failure")
+                payload = json.loads(files["input.json"])
+                # Both batches reuse the same raw key "shared" with conflicting in_scope;
+                # cross-batch namespacing must keep them distinct while preserving intra-batch ties.
+                in_scope = directory.name == "batch-000"
+                raw = {cid: {"in_scope": in_scope, "key": "shared", "reason": f"from {directory.name}"}
+                       for cid in payload["candidates"]}
+                raw_bytes = json.dumps(raw).encode()
+                checked = check_output(raw_bytes, blobs.get)
+                output_file.write_bytes(raw_bytes)
+                (directory / "completed.json").write_text("{}")
+                return checked, {"reused": False}
+
+            adapter.sealed_task = fake_sealed_task
+            with self.assertRaisesRegex(RuntimeError, "transient batch failure"):
+                adapter.adjudicate(query, candidates)
+            self.assertEqual(seen_batches, ["batch-000", "batch-001"])
+
+            # Reconciling batch-001 lets resume reuse batch-000 without re-running it.
+            adj_dir = adapter.directory / query.key / "adjudicator"
+            (adj_dir / "batch-001").rename(adj_dir / "batch-001-failed-deadbeef")
+            fail_second = False
+            merged = adapter.adjudicate(query, candidates)
+            self.assertEqual(seen_batches, ["batch-000", "batch-001", "batch-001"])
+            self.assertEqual(merged["0"]["key"], merged["1"]["key"])
+            self.assertEqual(merged["1"]["key"], merged["2"]["key"])
+            self.assertNotEqual(merged["0"]["key"], merged["3"]["key"])
+            self.assertTrue(merged["0"]["in_scope"])
+            self.assertFalse(merged["3"]["in_scope"])
+
+            # Mixed layouts or unexpected active batch directories fail visibly.
+            (adj_dir / "batch-002").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "unexpected adjudication batch directories"):
+                adapter.adjudicate(query, candidates)
+            (adj_dir / "batch-002").rmdir()
+            (adj_dir / "intent.json").write_text("{}")
+            with self.assertRaisesRegex(RuntimeError, "mixed single-session and batched"):
+                adapter.adjudicate(query, candidates)
+            (adj_dir / "intent.json").unlink()
+            with patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", 10_000_000):
+                with self.assertRaisesRegex(RuntimeError, "mixed single-session and batched"):
+                    adapter.adjudicate(query, candidates)
 
     def test_sonnet_alias_and_provider_usage_must_both_match(self):
         manifest = {"models": {"engine": "sonnet/high", "judge": "sonnet/high"},

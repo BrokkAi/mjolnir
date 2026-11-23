@@ -1,9 +1,11 @@
 """Sealed model adapters and the host entry point for the pilot gate."""
 import argparse
+from collections import defaultdict
 from dataclasses import asdict
 from functools import partial
 import json
 from pathlib import Path
+import re
 from uuid import uuid4
 
 import brief_driver
@@ -23,6 +25,12 @@ from .fidelity_symbols import touched_symbols
 TERRA = "gpt-6.1-terra"
 SONNET = driver.PILOT_CLAUDE_MODEL
 EFFORT = driver.PILOT_CLAUDE_EFFORT
+# Claude Code 2.1.326 rejects Read above 256 KiB or 25,000 tokens per call;
+# at the ~2.2 bytes/token density measured on c639f990 (942 KiB = 440,722 tokens),
+# 128 KiB (~58K tokens, 3 Read slices) leaves headroom in Sonnet's 200K window
+# alongside the 130 KiB static docs, source files, and output.json.
+ADJUDICATION_INPUT_LIMIT = 128 * 1024
+BATCH_DIRECTORY = re.compile(r"batch-\d+")
 ADJUDICATION = """Adjudicate every candidate under the supplied RQL semantic documents
 and fidelity rulings. Read the query and candidate bundle from the host's input
 file. The bundle supplies exact source lines for every cited span. Inspect other
@@ -301,10 +309,8 @@ class LiveModels:
 
     def adjudicate(self, query, candidates):
         read = blob_reader(self.sources[query.commit], query.commit)
-        input_data = {"query": query.text, "candidates": candidates,
-                      "source": candidate_lines(candidates, read)}
-        files = {"catalogue.md": self.catalogue, "menu.md": self.menu,
-                 "rulings.md": self.rulings, "input.json": canonical(input_data)}
+        lines = candidate_lines(candidates, read)
+        batches = partition_candidates(query.text, candidates, lines)
 
         def prompt(scratch):
             return (ADJUDICATION + f"\nRead {scratch}/catalogue.md, {scratch}/menu.md, "
@@ -312,14 +318,168 @@ class LiveModels:
                     f"Use Write to save the JSON object to {scratch}/output.json.\n")
 
         directory = self.directory / query.key / "adjudicator"
-        def check_output(output, _read):
-            decisions = decode(output)
-            validate_decisions(query, candidates, decisions)
+        if len(batches) == 1:
+            if directory.is_dir() and any(BATCH_DIRECTORY.fullmatch(path.name) for path in directory.iterdir()):
+                raise RuntimeError(f"mixed single-session and batched adjudication artifacts at {directory}")
+            files = {"catalogue.md": self.catalogue, "menu.md": self.menu,
+                     "rulings.md": self.rulings,
+                     "input.json": adjudication_input(query.text, candidates, lines)}
+
+            def check_output(output, _read):
+                decisions = decode(output)
+                validate_decisions(query, candidates, decisions)
+                return decisions
+
+            decisions, _ = self.sealed_task(
+                query.commit, directory, SONNET, None, files, prompt, check_output)
             return decisions
 
-        decisions, _ = self.sealed_task(
-            query.commit, directory, SONNET, None, files, prompt, check_output)
-        return decisions
+        if any((directory / name).exists() for name in (
+                "intent.json", "session.json", "completed.json", "failed.json", "output.json")):
+            raise RuntimeError(f"mixed single-session and batched adjudication artifacts at {directory}")
+        expected = {f"batch-{index:03d}" for index in range(len(batches))}
+        if directory.is_dir():
+            extra = sorted(path.name for path in directory.iterdir()
+                           if BATCH_DIRECTORY.fullmatch(path.name) and path.name not in expected)
+            if extra:
+                raise RuntimeError(f"unexpected adjudication batch directories at {directory}: {', '.join(extra)}")
+
+        merged = {}
+        for index, batch in enumerate(batches):
+            files = {"catalogue.md": self.catalogue, "menu.md": self.menu,
+                     "rulings.md": self.rulings,
+                     "input.json": adjudication_input(query.text, batch, lines)}
+
+            def check_batch(output, _read, expected_batch=batch):
+                decisions = decode(output)
+                validate_decisions(query, expected_batch, decisions)
+                return decisions
+
+            batch_decisions, _ = self.sealed_task(
+                query.commit, directory / f"batch-{index:03d}", SONNET, None, files, prompt, check_batch)
+            for identifier, decision in batch_decisions.items():
+                merged[identifier] = {**decision, "key": f"b{index}:{decision['key']}"}
+        validate_decisions(query, candidates, merged)
+        return merged
+
+
+def _candidate_id_key(identifier):
+    return (0, int(identifier)) if identifier.isdigit() else (1, identifier)
+
+
+def adjudication_input(query_text, candidates, lines_by_candidate):
+    """Format deduplicated multi-line JSON so Claude's Read can paginate large bundles."""
+    spans = {}
+    for identifier in candidates:
+        if not isinstance(identifier, str):
+            raise TypeError(f"candidate ID must be a string, got {identifier!r}")
+        for span, text in lines_by_candidate[identifier].items():
+            spans.setdefault(span, text)
+    out = [
+        "{",
+        f'  "query": {canonical(query_text)},',
+        '  "candidates": {',
+    ]
+    items = list(candidates.items())
+    for index, (identifier, row) in enumerate(items):
+        comma = "," if index + 1 < len(items) else ""
+        out.append(f"    {canonical(identifier)}: {canonical(row)}{comma}")
+    out.append("  },")
+    out.append('  "source": {')
+    span_items = sorted(spans.items())
+    for index, (span, text) in enumerate(span_items):
+        comma = "," if index + 1 < len(span_items) else ""
+        if not text:
+            out.append(f"    {canonical(span)}: []{comma}")
+        else:
+            out.append(f"    {canonical(span)}: [")
+            for line_index, line in enumerate(text):
+                line_comma = "," if line_index + 1 < len(text) else ""
+                out.append(f"      {canonical(line)}{line_comma}")
+            out.append(f"    ]{comma}")
+    out.append("  }")
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
+def _site_components(candidates):
+    """Group candidates transitively by overlapping site spans in the same file."""
+    if any(not candidate["sites"] for candidate in candidates.values()):
+        return [list(candidates)]
+    parent = {identifier: identifier for identifier in candidates}
+
+    def find(identifier):
+        while parent[identifier] != identifier:
+            parent[identifier] = parent[parent[identifier]]
+            identifier = parent[identifier]
+        return identifier
+
+    def union(left, right):
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    by_path = defaultdict(list)
+    for identifier, candidate in candidates.items():
+        for site in candidate["sites"]:
+            by_path[site["path"]].append((site["start_line"], site["end_line"],
+                                          _candidate_id_key(identifier), identifier))
+
+    for intervals in by_path.values():
+        intervals.sort()
+        active_id = None
+        active_end = -1
+        for start, end, _, identifier in intervals:
+            if active_id is not None and start <= active_end:
+                union(active_id, identifier)
+                if end > active_end:
+                    active_end = end
+            else:
+                active_id = identifier
+                active_end = end
+
+    groups = defaultdict(list)
+    for identifier in candidates:
+        groups[find(identifier)].append(identifier)
+
+    components = [sorted(group, key=_candidate_id_key) for group in groups.values()]
+
+    def component_key(component):
+        earliest = min((site["path"], site["start_line"], site["end_line"])
+                       for identifier in component for site in candidates[identifier]["sites"])
+        return earliest, _candidate_id_key(component[0])
+
+    return sorted(components, key=component_key)
+
+
+def partition_candidates(query_text, candidates, lines_by_candidate, max_bytes=None):
+    """Split oversized candidate bundles into site-disjoint batches without breaking equivalence."""
+    if max_bytes is None:
+        max_bytes = ADJUDICATION_INPUT_LIMIT
+    if len(candidates) <= 1:
+        return [candidates]
+    if len(adjudication_input(query_text, candidates, lines_by_candidate).encode("utf-8")) <= max_bytes:
+        return [candidates]
+    components = _site_components(candidates)
+    if len(components) <= 1:
+        return [candidates]
+
+    batches = []
+    current = []
+    for component in components:
+        if not current:
+            current = list(component)
+            continue
+        trial = current + component
+        trial_candidates = {identifier: candidates[identifier] for identifier in trial}
+        if len(adjudication_input(query_text, trial_candidates, lines_by_candidate).encode("utf-8")) > max_bytes:
+            batches.append({identifier: candidates[identifier] for identifier in current})
+            current = list(component)
+        else:
+            current = trial
+    if current:
+        batches.append({identifier: candidates[identifier] for identifier in current})
+    return [candidates] if len(batches) == 1 else batches
 
 
 def candidate_lines(candidates, read):
