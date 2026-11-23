@@ -17474,6 +17474,83 @@ async fn archive_refuses_parent_with_live_or_resume_eligible_owned_child() {
         mj_controller::database::load_session_state(child_id).unwrap(),
         Some(SessionState::Stopped)
     );
+    // Even after the owning child is manually stopped (resume_with_parent = false),
+    // its foreign-key subagent_sessions row still references the parent, so archive
+    // must keep the parent intact until the child is removed first.
+    mj_controller::database::set_subagent_resume_with_parent(child_id, false).unwrap();
+    assert!(
+        state
+            .archive_stopped_session(parent_id.into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        mj_controller::database::load_session_state(parent_id).unwrap(),
+        Some(SessionState::Stopped)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_parent_suspend_recovery_cascades_to_owned_children_and_keeps_resume_flag() {
+    const NAME: &str =
+        "interrupted_parent_suspend_recovery_cascades_to_owned_children_and_keeps_resume_flag";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Recovery cascade").unwrap();
+    let parent_id = "11111111111111111111111111111111";
+    let pending_child_id = "22222222222222222222222222222222";
+    let closing_child_id = "33333333333333333333333333333333";
+
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.target = None;
+    mj_controller::database::save_session(&parent).unwrap();
+    for (child_id, child_state, resume_flag) in [
+        (pending_child_id, SessionState::Provisioning, false),
+        (closing_child_id, SessionState::Closing, true),
+    ] {
+        let mut child = runtime_test_session(child_id, &workspace.id, child_state);
+        child.target = None;
+        let mut relation = runtime_test_subagent(child_id, parent_id);
+        relation.resume_with_parent = resume_flag;
+        mj_controller::database::register_subagent_with_startup(
+            &child,
+            &relation,
+            vec![],
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+    }
+    parent.state = SessionState::Closing;
+    mj_controller::database::save_lifecycle_session(&parent).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    state
+        .recover_suspension(closing_child_id.into())
+        .await
+        .unwrap();
+    state.recover_suspension(parent_id.into()).await.unwrap();
+
+    for id in [parent_id, pending_child_id, closing_child_id] {
+        assert_eq!(
+            mj_controller::database::load_session_state(id).unwrap(),
+            Some(SessionState::Stopped),
+            "{id} should finish stopping during recovery"
+        );
+    }
+    for id in [pending_child_id, closing_child_id] {
+        assert!(
+            mj_controller::database::load_subagent(id)
+                .unwrap()
+                .unwrap()
+                .resume_with_parent,
+            "{id} should preserve resume_with_parent after recovery"
+        );
+    }
 }
 
 #[cfg(unix)]

@@ -290,11 +290,36 @@ impl RuntimeState {
                             })
                             .await?;
                         }
-                        state
-                            .persist_suspension_intent(&session_id, Some(&consent))
+                        if invocation == SuspendInvocation::Parent {
+                            // Persist parent-resume eligibility before committing the
+                            // Closing intent so daemon restart during or right after child
+                            // suspension still resumes the child with its parent.
+                            let id = session_id.clone();
+                            blocking(move || {
+                                mj_controller::database::set_subagent_resume_with_parent(&id, true)
+                            })
                             .await?;
+                        }
+                        if let Err(error) = state
+                            .persist_suspension_intent(&session_id, Some(&consent))
+                            .await
+                        {
+                            if invocation == SuspendInvocation::Parent {
+                                let id = session_id.clone();
+                                let _ = blocking(move || {
+                                    mj_controller::database::set_subagent_resume_with_parent(
+                                        &id, false,
+                                    )
+                                })
+                                .await;
+                            }
+                            return Err(error);
+                        }
                         accepted.send_replace(Some(Ok(())));
-                        let children = if invocation == SuspendInvocation::Standalone {
+                        let children = if matches!(
+                            invocation,
+                            SuspendInvocation::Standalone | SuspendInvocation::Recovery
+                        ) {
                             let id = session_id.clone();
                             blocking(move || {
                                 Ok(Controller::load()?.state.suspendable_owned_child_ids(&id))
@@ -355,22 +380,26 @@ impl RuntimeState {
                                 control,
                                 consent,
                             )
-                            .await?;
+                            .await;
                         if invocation == SuspendInvocation::Parent {
                             let id = session_id.clone();
-                            blocking(move || {
-                                if mj_controller::database::read_durable_session_record(&id)?
-                                    .is_some_and(|record| record.state == SessionState::Stopped)
-                                {
-                                    mj_controller::database::set_subagent_resume_with_parent(
-                                        &id, true,
-                                    )?;
-                                }
-                                Ok(())
+                            let stopped = blocking(move || {
+                                Ok(mj_controller::database::read_durable_session_record(&id)?
+                                    .is_some_and(|record| record.state == SessionState::Stopped))
                             })
-                            .await?;
+                            .await
+                            .unwrap_or(false);
+                            if !stopped {
+                                let id = session_id.clone();
+                                let _ = blocking(move || {
+                                    mj_controller::database::set_subagent_resume_with_parent(
+                                        &id, false,
+                                    )
+                                })
+                                .await;
+                            }
                         }
-                        Ok(outcome)
+                        outcome
                     }
                     .await;
                     if result.is_err() {

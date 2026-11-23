@@ -306,6 +306,7 @@ impl Controller {
             &local_seed,
             &remote_seed,
         )?;
+        self.prepare_subagent_report_dir(session_id, &backend, executor)?;
         self.prepare_worker_files(
             session_id,
             &backend,
@@ -884,6 +885,7 @@ impl Controller {
                 .execute_concurrent(executor)?;
             }
         }
+        self.prepare_subagent_report_dir(session_id, &backend, executor)?;
         self.prepare_worker_files(
             session_id,
             &backend,
@@ -977,6 +979,7 @@ impl Controller {
             },
         )?;
         executor.begin_resumable_work()?;
+        self.prepare_subagent_report_dir(session_id, &backend, executor)?;
         self.prepare_worker_files(
             session_id,
             &backend,

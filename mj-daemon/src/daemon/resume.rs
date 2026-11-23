@@ -13,13 +13,13 @@ fn archive_protects_owned_sessions(
     {
         return Ok(true);
     }
+    let peers = mj_controller::database::bound_environment_member_ids(session_id)?;
+    // Any child outside this environment is not deleted by the parent's archive
+    // teardown, so its `subagent_sessions.parent_session_id` FK still requires
+    // the parent row to remain intact until that child is removed first.
     Ok(mj_controller::database::list_subagents(session_id)?
         .into_iter()
-        .any(|child| {
-            state.owns_environment(&child.child_session_id) == Some(true)
-                && (child.resume_with_parent
-                    || state.sessions[&child.child_session_id].state.is_active())
-        }))
+        .any(|child| !peers.contains(&child.child_session_id)))
 }
 
 impl RuntimeState {

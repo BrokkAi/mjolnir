@@ -6003,6 +6003,44 @@ fn checkpoint_report_roots_follow_the_environment_binding_after_owned_child_regi
         controller.checkpoint_report_directories(owned_id).unwrap(),
         [report]
     );
+    // Moving the owning child to a new workspace layout (as Resume does) refreshes
+    // its persisted report_dir and launch env before staging worker files.
+    let moved_project = root.path().join("resumed-owned-project");
+    std::fs::create_dir(&moved_project).unwrap();
+    let mut moved = controller.state.sessions[owned_id].clone();
+    moved.project_directory = Some(moved_project.clone());
+    crate::database::save_session(&moved).unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    let (moved_backend, _) = controller.worker_placement(owned_id).unwrap();
+    controller
+        .prepare_subagent_report_dir(owned_id, &moved_backend, &ProcessExecutor)
+        .unwrap();
+    let moved_report = PathBuf::from(
+        crate::database::load_subagent_report(owned_id)
+            .unwrap()
+            .report_dir
+            .unwrap(),
+    );
+    assert!(moved_report.starts_with(moved_project.canonicalize().unwrap()));
+    assert!(moved_report.is_dir());
+    controller.config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            root.path().join("codex-profile"),
+        ),
+    );
+    let (launch, _, _) = controller
+        .session_launch_config(
+            owned_id,
+            &moved_backend,
+            crate::controller::worker_binary::LaunchHistory::Stored,
+        )
+        .unwrap();
+    assert_eq!(
+        launch.environment[mj_core::subagent::CHILD_REPORT_DIR_ENV],
+        moved_report.to_string_lossy()
+    );
     crate::database::delete_session(borrowed_id).unwrap();
     controller.state = crate::database::load_state().unwrap();
     assert_eq!(
