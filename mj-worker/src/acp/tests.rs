@@ -9859,6 +9859,7 @@ for line in sys.stdin:
     let _ = runtime.await;
 }
 
+#[cfg(unix)]
 #[test]
 fn reload_launch_config_clears_stale_accepted_config_selectors() {
     let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {

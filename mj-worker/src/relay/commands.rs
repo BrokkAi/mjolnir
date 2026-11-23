@@ -582,6 +582,7 @@ impl DurableRelay {
         Ok(InPlaceHarnessRestartDecision::Proceed)
     }
 
+    #[cfg(unix)]
     pub(crate) fn cancel_in_place_harness_restart(&mut self, operation_id: &str) {
         if self.in_place_harness_restart_in_flight.as_deref() == Some(operation_id) {
             self.in_place_harness_restart_in_flight = None;
