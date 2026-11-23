@@ -9240,10 +9240,34 @@ esac
                     .1
                     .contains(&completed.operation_id)
             );
-            tokio::time::timeout(Duration::from_secs(30), runtime.suspend_session(id.clone()))
+            if lifecycle == SessionState::Parked {
+                // Placed Parked owners now checkpoint on ordinary suspend instead of
+                // settling workerlessly, while explicit without-checkpoint suspend still
+                // cleans up without tripping interrupted Move recovery.
+                let parked = mj_controller::database::load_session_record(&id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(close_route(&parked, true), CloseRoute::Graceful);
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    runtime.suspend_session_with_consent(
+                        id.clone(),
+                        mj_core::suspend_consent::SuspendConsent {
+                            without_checkpoint: true,
+                            confirm_no_checkpoint: true,
+                            ..Default::default()
+                        },
+                    ),
+                )
                 .await
                 .unwrap()
                 .unwrap();
+            } else {
+                tokio::time::timeout(Duration::from_secs(30), runtime.suspend_session(id.clone()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
             let closed = mj_controller::database::load_session_record(&id)
                 .unwrap()
                 .unwrap();
