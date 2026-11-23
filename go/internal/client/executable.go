@@ -72,5 +72,20 @@ func DescribeDaemonAndClientBuilds(daemonPid uint32, daemon, client BuildDescrip
 // both executables resolved from the operating system and this build's own
 // version on the client side.
 func DescribeRunningDaemonAndClientBuilds(daemonPid uint32, daemonVersion string) string {
-	panic("unported: mj-client/src/executable.rs describe_running_daemon_and_client_builds")
+	// A daemon publishes its revision and times as build metadata; name them
+	// the way a person reads them, and this client's the same way.
+	daemonBuild := daemonVersion
+	if build, err := BuildIdentityParse(daemonVersion); err == nil {
+		daemonBuild = build.Describe()
+	}
+	var daemonExecutable, clientExecutable *string
+	if path, ok := processExecutablePath(daemonPid); ok {
+		daemonExecutable = &path
+	}
+	if path, ok := runningExecutablePath(); ok {
+		clientExecutable = &path
+	}
+	return DescribeDaemonAndClientBuilds(daemonPid,
+		BuildDescription{Executable: daemonExecutable, Version: daemonBuild},
+		BuildDescription{Executable: clientExecutable, Version: ThisBuild().Describe()})
 }

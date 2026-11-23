@@ -2960,21 +2960,18 @@ func (r *SessionRecord) IsYoloTarget(config *Config) bool {
 	return err == nil && settings.IsYolo()
 }
 
-// EffectiveOracle is the oracle this session may consult: none when its
-// Oracle choice is off, else its own override or the global oracle for its
-// target mode.
-func (r *SessionRecord) EffectiveOracle(subagents *SubagentConfig, yolo bool) *SubagentChoice {
+// EffectiveOracle is the oracle choices this session may consult: empty when
+// its Oracle choice is off, else its own override or the global oracle
+// choices. (Ported from the Rust source after this package's base, with the
+// list-shaped SubagentConfig.)
+func (r *SessionRecord) EffectiveOracle(subagents *SubagentConfig) []SubagentChoice {
 	if !r.Oracle {
 		return nil
 	}
-	choice := r.OracleChoice
-	if choice == nil {
-		choice = subagents.ChoiceFor(SubagentTaskTypeOracle, yolo)
+	if choice := r.OracleChoice; choice != nil && strings.TrimSpace(choice.Model) != "" {
+		return []SubagentChoice{*choice}
 	}
-	if choice == nil || strings.TrimSpace(choice.Model) == "" {
-		return nil
-	}
-	return choice
+	return subagents.Choices(SubagentTaskTypeOracle)
 }
 
 // IsCleanlyStopped: a completed close has no failure left to report. A

@@ -832,7 +832,11 @@ func (v *WorkspaceSnapshot) UnmarshalJSON(data []byte) error {
 }
 
 type RuntimeSessionView struct {
-	Attention core.SessionAttention `json:"attention"`
+	// MaterializedOnly marks a retained projection for a session with no
+	// relay view. Never serialized. (Added by the client-rest port: the
+	// runtime feed's scoping reads it.)
+	MaterializedOnly bool                  `json:"-"`
+	Attention        core.SessionAttention `json:"attention"`
 	// PolicyConfigKeys are config selectors owned by the target permission
 	// policy.
 	PolicyConfigKeys           []string                                         `json:"policy_config_keys" serde:"default"`

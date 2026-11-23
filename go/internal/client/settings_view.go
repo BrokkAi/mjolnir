@@ -12,8 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
+
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // SettingsPage is one rendered settings page.
@@ -482,26 +485,213 @@ func themeLabel(value, draft any) string {
 }
 
 func displayed(path []string, value, draft any) string {
-	panic("unported: mj-client/src/settings/view.rs displayed")
+	switch value {
+	case nil:
+		return NullLabel(StoragePath(path), draft)
+	case true:
+		return "On"
+	case false:
+		return "Off"
+	}
+	if IsBuildCacheBudget(path) {
+		size, _ := settingsString(value)
+		return BuildCacheGigabytesLabel(size) + " GB"
+	}
+	return ChoiceLabel(path, value, draft)
 }
 
 // readOnly: settings whose changes the terminal checks against something
 // only it measures or discovers, shown here as they stand.
 func readOnly(path []string, draft any) bool {
-	panic("unported: mj-client/src/settings/view.rs read_only")
+	switch {
+	// The terminal inspects the machine's mbx installation first, which may
+	// own these budgets itself.
+	case len(path) >= 3 && path[0] == "machines" && path[2] == "build_cache":
+		return true
+	case len(path) == 4 && path[0] == "review" && path[1] == "reviewers" &&
+		(path[3] == "model" || path[3] == "effort") &&
+		settingsPath(draft, "_reviewer_options", path[2]) == nil:
+		return true
+	case len(path) == 4 && path[0] == "subagents" && isSettingsTask(path[1]) &&
+		(path[3] == "model" || path[3] == "effort") &&
+		settingsPath(draft, "_subagent_options", path[1], path[2]) == nil:
+		return true
+	}
+	return false
 }
 
 func notices(path []string) []string {
-	panic("unported: mj-client/src/settings/view.rs notices")
+	switch {
+	case settingsPathIs(path, "profiles"):
+		return []string{"Detect profiles and managed setup run in the terminal: open Settings › Agent Profiles in mj."}
+	case settingsPathIs(path, "profiles", "*"):
+		return []string{fmt.Sprintf("To sign this profile in, save it, then run `mj login --profile %s` in a terminal.", path[1])}
+	case settingsPathIs(path, "targets"):
+		return []string{"Detect runtimes runs in the terminal: open Settings › Runtimes in mj."}
+	case len(path) >= 3 && path[0] == "machines" && path[2] == "build_cache":
+		return []string{"Build cache settings change in the terminal Settings, which inspects this machine's mbx installation first."}
+	case settingsPathIs(path, "review"):
+		return []string{"Add reviewer to choose up to three reviewers. Review runs before push when at least one reviewer is set."}
+	}
+	return nil
 }
 
 func row(draft any, pagePath []string, parent any, key string, path []string) SettingsRow {
-	panic("unported: mj-client/src/settings/view.rs row")
+	value, found := settingsPointer(draft, Pointer(path))
+	if !found {
+		panic("a listed setting exists")
+	}
+	fieldParentPath := RowPage(path)
+	fieldParent, found := settingsPointer(draft, Pointer(fieldParentPath))
+	if !found {
+		fieldParent = parent
+	}
+	label := RowLabel(fieldParentPath, fieldParent, key, value)
+	help, _ := SpecificHelp(path)
+	var control SettingsControl
+	switch {
+	case IsMarker(value):
+		if slices.Equal(path, pagePath) {
+			control = SettingsControlHidden{}
+		} else {
+			control = SettingsControlPage{Summary: "Set (hidden)"}
+		}
+	case len(pagePath) == 0:
+		summary, ok := SectionSummary(key, draft, themeLabel)
+		if !ok {
+			summary, ok = ContentsSummary(path, value)
+		}
+		if !ok {
+			summary = displayed(path, value, draft)
+		}
+		control = SettingsControlPage{Summary: summary}
+	default:
+		kind := RowKindOf(draft, pagePath, path)
+		if _, isPage := kind.(RowKindPage); isPage {
+			summary, ok := MachineBuildCacheSummary(path, value)
+			if !ok {
+				summary, ok = ContentsSummary(path, value)
+			}
+			if !ok {
+				summary = displayed(path, value, draft)
+			}
+			control = SettingsControlPage{Summary: summary}
+			break
+		}
+		if readOnly(path, draft) {
+			control = SettingsControlReadOnly{Text: displayed(path, value, draft)}
+			break
+		}
+		switch typed := kind.(type) {
+		case RowKindCheckbox:
+			checked, _ := settingsBool(value)
+			control = SettingsControlCheckbox{Checked: checked}
+		case RowKindChoices:
+			choices := make([]SettingsChoice, len(typed.Value))
+			for i, choice := range typed.Value {
+				choices[i] = SettingsChoice{Value: choice, Label: OptionLabel(path, choice, draft)}
+			}
+			control = SettingsControlChoice{Value: settingsClone(value), Choices: choices}
+		default:
+			_, isNumber := WholeNumberOf(path)
+			control = SettingsControlText{
+				Value:       FieldText(path, value),
+				Placeholder: NullLabel(StoragePath(path), draft),
+				Number:      isNumber || IsBuildCacheBudget(path),
+			}
+		}
+	}
+	return SettingsRow{Path: path, Label: label, Help: help, Control: control}
 }
 
 // RenderPage renders the page at path of draft.
 func RenderPage(draft any, path []string) (SettingsPage, error) {
-	panic("unported: mj-client/src/settings/view.rs render_page")
+	current, found := settingsPointer(draft, Pointer(path))
+	if !found {
+		return SettingsPage{}, settingsError("This settings page no longer exists.")
+	}
+	isFastinoKey := slices.Equal(path, []string{"jev", "fastino_key"})
+	var groups []SettingsGroup
+	if !isFastinoKey && ((settingsIsObject(current) && !IsMarker(current)) || settingsIsArray(current)) {
+		paths := VisiblePaths(path, current)
+		for _, entry := range PagePlan(path, paths) {
+			switch typed := entry.(type) {
+			case PageRowHeading:
+				heading := typed.Value
+				groups = append(groups, SettingsGroup{Heading: &heading, Rows: []SettingsRow{}})
+			case PageRowGap:
+			case PageRowSetting:
+				child := paths[typed.Value]
+				key := ""
+				if len(child) > 0 {
+					key = child[len(child)-1]
+				}
+				if len(groups) == 0 {
+					groups = append(groups, SettingsGroup{Rows: []SettingsRow{}})
+				}
+				group := &groups[len(groups)-1]
+				parent, found := settingsPointer(draft, Pointer(RowPage(child)))
+				if !found {
+					parent = current
+				}
+				group.Rows = append(group.Rows, row(draft, path, parent, key, slices.Clone(child)))
+			}
+		}
+	} else if len(path) > 0 {
+		// An entry holding one value, such as an environment variable, is a
+		// page with that one value on it.
+		key, parentPath := path[len(path)-1], path[:len(path)-1]
+		parent, found := settingsPointer(draft, Pointer(parentPath))
+		if !found {
+			panic("a page's parent exists")
+		}
+		single := row(draft, path, parent, key, slices.Clone(path))
+		single.Label = RowLabel(parentPath, parent, key, current)
+		groups = append(groups, SettingsGroup{Rows: []SettingsRow{single}})
+	}
+	isReview := slices.Equal(path, []string{"review"})
+	isReviewers := slices.Equal(path, []string{"review", "reviewers"})
+	fullReviewers := false
+	if rows, ok := settingsArray(current); ok && isReviewers && len(rows) >= core.MaxReviewers {
+		fullReviewers = true
+	}
+	reviewersUnset := !settingsHas(settingsGet(draft, "review"), "reviewers")
+	var add *AddEntry
+	if (IsCollection(path, current) && !fullReviewers) || (isReview && reviewersUnset) {
+		label := "Add"
+		switch {
+		case slices.Equal(path, []string{"bundles"}):
+			label = "Create"
+		case isReview || isReviewers:
+			label = "Add reviewer"
+		}
+		add = &AddEntry{Label: label, Named: settingsIsObject(current) && !isReview}
+	}
+	help, ok := PageSpecificHelp(path, draft)
+	if !ok {
+		help = "Changes stay in this draft until you save."
+	}
+	var actions []SettingsAction
+	if isReview {
+		actions = []SettingsAction{{ID: "review.autoconfigure", Label: "Autoconfigure"}}
+	}
+	pageNotices := notices(path)
+	if isReview && reviewersUnset {
+		pageNotices = append(pageNotices, "Reviewers will be configured automatically after profile discovery. Choose Add reviewer to set them now.")
+	}
+	if groups == nil {
+		groups = []SettingsGroup{}
+	}
+	return SettingsPage{
+		Path:       slices.Clone(path),
+		Breadcrumb: BreadcrumbSegments(path, draft),
+		Help:       help,
+		Groups:     groups,
+		Actions:    actions,
+		Add:        add,
+		Removable:  Removable(draft, path) || (isFastinoKey && current != nil),
+		Notices:    pageNotices,
+	}, nil
 }
 
 // Apply applies change, sent from the page at page, to draft.
@@ -510,5 +700,101 @@ func RenderPage(draft any, path []string) (SettingsPage, error) {
 // text or a listed choice for a typed or chosen row, a toggle for a
 // checkbox, Add where the page lists entries, Remove on a removable entry.
 func Apply(draft *any, page []string, change SettingsEdit) (EditResult, error) {
-	panic("unported: mj-client/src/settings/view.rs apply")
+	rendered, err := RenderPage(*draft, page)
+	if err != nil {
+		return EditResult{}, err
+	}
+	offered := func(path []string) SettingsControl {
+		for _, group := range rendered.Groups {
+			for _, row := range group.Rows {
+				if slices.Equal(row.Path, path) {
+					return row.Control
+				}
+			}
+		}
+		return nil
+	}
+	stay := func(notice *string) EditResult {
+		return EditResult{Page: slices.Clone(page), Notice: notice}
+	}
+	switch typed := change.(type) {
+	case SettingsEditAction:
+		return EditResult{}, settingsError("This action is available in the web viewer.")
+	case SettingsEditSet:
+		control := offered(typed.Path)
+		switch control.(type) {
+		case SettingsControlText, SettingsControlHidden:
+			if typed.Text != nil && typed.Choice == nil {
+				if kind, ok := PathKindOf(typed.Path); ok && kind == PathKindTarget {
+					needs, err := core.NeedsHome(*typed.Text)
+					if err != nil {
+						return EditResult{}, settingsError(err.Error())
+					}
+					if needs {
+						return EditResult{}, settingsError("Enter the full path on that machine. Only the terminal Settings resolves ~ on another machine.")
+					}
+				}
+				if _, err := ApplyValue(draft, typed.Path, SettingInputText{Value: *typed.Text}); err != nil {
+					return EditResult{}, err
+				}
+				return stay(nil), nil
+			}
+		case SettingsControlChoice:
+			if typed.Text == nil && typed.Choice != nil {
+				choices := control.(SettingsControlChoice).Choices
+				offeredChoice := slices.ContainsFunc(choices, func(choice SettingsChoice) bool {
+					return settingsEqual(choice.Value, *typed.Choice)
+				})
+				if !offeredChoice {
+					return EditResult{}, settingsError("That is not one of this setting's choices.")
+				}
+				if _, err := ApplyValue(draft, typed.Path, SettingInputChoice{Value: *typed.Choice}); err != nil {
+					return EditResult{}, err
+				}
+				return stay(nil), nil
+			}
+		}
+		return EditResult{}, settingsError("This setting cannot be changed that way here.")
+	case SettingsEditToggle:
+		if _, ok := offered(typed.Path).(SettingsControlCheckbox); ok {
+			notice, err := Toggle(draft, typed.Path)
+			if err != nil {
+				return EditResult{}, err
+			}
+			return stay(notice), nil
+		}
+		return EditResult{}, settingsError("This setting is not a checkbox here.")
+	case SettingsEditAdd:
+		if !slices.Equal(typed.Path, page) || rendered.Add == nil {
+			return EditResult{}, settingsError("Entries cannot be added here.")
+		}
+		collection := slices.Clone(typed.Path)
+		if slices.Equal(typed.Path, []string{"review"}) {
+			settingsSet(draft, []any{}, "review", "reviewers")
+			collection = []string{"review", "reviewers"}
+		}
+		next, err := EditAddEntry(draft, collection, typed.Name)
+		if err != nil {
+			return EditResult{}, err
+		}
+		return EditResult{Page: next}, nil
+	case SettingsEditRemove:
+		if !slices.Equal(typed.Path, page) || !rendered.Removable {
+			return EditResult{}, settingsError("This entry cannot be removed.")
+		}
+		var notice *string
+		if slices.Equal(typed.Path, []string{"jev", "fastino_key"}) {
+			if _, err := ApplyValue(draft, typed.Path, SettingInputText{}); err != nil {
+				return EditResult{}, err
+			}
+		} else {
+			removal, err := RemoveEntry(draft, typed.Path)
+			if err != nil {
+				return EditResult{}, err
+			}
+			notice = removal.Notice
+		}
+		return EditResult{Page: slices.Clone(typed.Path[:len(typed.Path)-1]), Notice: notice}, nil
+	}
+	return EditResult{}, fmt.Errorf("unknown settings edit %T", change)
 }

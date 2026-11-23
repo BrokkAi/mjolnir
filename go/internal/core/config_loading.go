@@ -22,7 +22,7 @@ import (
 )
 
 // ConfigVersion is the config.toml schema version this build reads and writes.
-const ConfigVersion = 23
+const ConfigVersion = 24
 
 // ProductDir is the directory name under the platform configuration and data roots.
 const ProductDir = "mjolnir"
@@ -127,6 +127,37 @@ func dropRemovedHarnessProfiles(document map[string]any) []string {
 		}
 	}
 	return removed
+}
+
+// hasLegacySubagentYoloChoices is whether document carried non-empty legacy
+// `[subagents.yolo.*]` choices that this build drops on load. (Ported from
+// the Rust source after this package's base.)
+func hasLegacySubagentYoloChoices(document map[string]any) bool {
+	subagents, ok := document["subagents"].(map[string]any)
+	if !ok {
+		return false
+	}
+	yolo, ok := subagents["yolo"].(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"primary", "straightforward", "subtle", "oracle"} {
+		switch value := yolo[key].(type) {
+		case map[string]any:
+			if len(value) > 0 {
+				return true
+			}
+		case []map[string]any:
+			if len(value) > 0 {
+				return true
+			}
+		case []any:
+			if len(value) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // EnvOverrideOS is Rust's env_override_os. Go environment values are strings,

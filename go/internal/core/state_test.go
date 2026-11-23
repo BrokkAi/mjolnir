@@ -1655,7 +1655,7 @@ func TestActiveSessionsAllowCreationDefaultsButProtectTheirProfileInstallation(t
 	before := stateSampleConfig()
 	profileID := state.Sessions.Index("0123456789abcdef").LastProfile
 	after := stateCloneConfig(before)
-	after.Subagents.Straightforward = &SubagentChoice{Model: "chosen"}
+	after.Subagents.Straightforward = []SubagentChoice{{Model: "chosen"}}
 	if err := state.ValidateSetupUpdate(&before, &after); err != nil {
 		t.Fatal(err)
 	}

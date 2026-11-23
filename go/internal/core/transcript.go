@@ -220,13 +220,37 @@ const (
 // tool call.
 type ToolCallPresentation struct {
 	Summary    string                `json:"summary"`
-	Source     PackedText            `json:"source"`
+	Source     PackedText            `json:"source" serde:"default"`
 	SourceKind ToolSummarySourceKind `json:"source_kind"`
 	ToolKind   acp.ToolKind          `json:"tool_kind"`
 	// SummaryVersion is the version of the parser rules that produced
 	// Summary. A missing value identifies presentation metadata written
 	// before parser versioning.
 	SummaryVersion uint8 `json:"summary_version" serde:"default"`
+	// The fields below are ported from the Rust source after this package's
+	// base (#1637): what a trimmed tool row still says about its call.
+	OutputLineCount *uint64           `json:"output_line_count,omitempty"`
+	FirstErrorLine  *string           `json:"first_error_line,omitempty"`
+	OutputIsError   *bool             `json:"output_is_error,omitempty"`
+	EditSnippets    []ToolEditSnippet `json:"edit_snippets,omitempty"`
+	DetailTrimmed   bool              `json:"detail_trimmed,omitempty"`
+}
+
+// ToolEditKind is which file edit a tool row's snippet shows.
+type ToolEditKind string
+
+const (
+	ToolEditKindEdit         ToolEditKind = "edit"
+	ToolEditKindWrite        ToolEditKind = "write"
+	ToolEditKindMultiEdit    ToolEditKind = "multi_edit"
+	ToolEditKindNotebookEdit ToolEditKind = "notebook_edit"
+)
+
+// ToolEditSnippet is a bounded excerpt of one file edit.
+type ToolEditSnippet struct {
+	Path    string       `json:"path"`
+	Kind    ToolEditKind `json:"kind"`
+	Snippet string       `json:"snippet"`
 }
 
 func (p *ToolCallPresentation) UnmarshalJSON(data []byte) error {
@@ -249,6 +273,11 @@ type toolCallMetadata struct {
 	terminalIDs []string
 	fallback    bool
 	rawResult   *toolCallRawResult
+	// The fields below are ported from the Rust source after this package's
+	// base (#1637), for TranscriptBodyIsLegacyCompactedTool.
+	hasRawInput     bool
+	hasRawOutput    bool
+	hasDroppedPatch bool
 }
 
 // toolCallRawResult is the exit code, output length and output digest of a
@@ -309,8 +338,19 @@ func OpaqueToolCallFromValue(value json.RawMessage) OpaqueToolCall {
 		var stable schema.ToolCall
 		if err := json.Unmarshal(value, &stable); err == nil {
 			metadata.fallback = IsFallbackTerminalToolCall(&stable)
+			for i := range stable.Content {
+				content := &stable.Content[i]
+				if content.Kind != schema.ToolCallContentKindDiff || content.Diff == nil {
+					continue
+				}
+				if patch := StoredPatch(content.Diff); patch != nil && patch.Text == "" && patch.Truncated {
+					metadata.hasDroppedPatch = true
+				}
+			}
 		}
 	}
+	_, metadata.hasRawInput = transcriptGet(parsed, "rawInput")
+	_, metadata.hasRawOutput = transcriptGet(parsed, "rawOutput")
 	metadata.rawResult = toolCallRawResultOf(parsed)
 	return OpaqueToolCall{json: NewPackedText(text), metadata: metadata}
 }
@@ -515,6 +555,66 @@ type TranscriptBodyTool struct {
 // output is never dropped.
 type TranscriptBodyTerminalOutput struct {
 	Record TerminalOutputRecord `json:"record"`
+	// The fields below are ported from the Rust source after this package's
+	// base (#1637): what a trimmed row still says about its output.
+	OutputLineCount *uint64 `json:"output_line_count,omitempty"`
+	FirstErrorLine  *string `json:"first_error_line,omitempty"`
+	DetailTrimmed   bool    `json:"detail_trimmed,omitempty"`
+}
+
+// TranscriptBodyTerminalOutputOf is Rust's TranscriptBody::terminal_output:
+// a standalone record with nothing trimmed.
+func TranscriptBodyTerminalOutputOf(record TerminalOutputRecord) TranscriptBodyTerminalOutput {
+	return TranscriptBodyTerminalOutput{Record: record}
+}
+
+// TranscriptBodyDetailTrimmed is Rust's TranscriptBody::detail_trimmed:
+// whether retention recorded that this row's detail was trimmed.
+func TranscriptBodyDetailTrimmed(body TranscriptBody) bool {
+	switch typed := body.(type) {
+	case TranscriptBodyTool:
+		return typed.Presentation != nil && typed.Presentation.DetailTrimmed
+	case TranscriptBodyTerminalOutput:
+		return typed.DetailTrimmed
+	}
+	return false
+}
+
+// TranscriptBodyIsLegacyCompactedTool is Rust's
+// TranscriptBody::is_legacy_compacted_tool: it recognizes rows compacted
+// before retention recorded an explicit marker.
+func TranscriptBodyIsLegacyCompactedTool(body TranscriptBody) bool {
+	tool, ok := body.(TranscriptBodyTool)
+	if !ok {
+		return false
+	}
+	presentation := tool.Presentation
+	if presentation != nil && presentation.DetailTrimmed {
+		return false
+	}
+	metadata := tool.Call.metadata
+	if metadata == nil {
+		metadata = &toolCallMetadata{}
+	}
+	if presentation != nil {
+		switch presentation.SourceKind {
+		case ToolSummarySourceKindRawInput:
+			if !metadata.hasRawInput {
+				return true
+			}
+		case ToolSummarySourceKindRawOutput:
+			if !metadata.hasRawOutput {
+				return true
+			}
+		}
+	}
+	return metadata.hasDroppedPatch
+}
+
+// TranscriptBodyHasTrimmedDetail is Rust's
+// TranscriptBody::has_trimmed_detail.
+func TranscriptBodyHasTrimmedDetail(body TranscriptBody) bool {
+	return TranscriptBodyDetailTrimmed(body) || TranscriptBodyIsLegacyCompactedTool(body)
 }
 
 type TranscriptBodyPlan struct {
@@ -990,8 +1090,13 @@ type ChatEntry struct {
 	Revision        uint64        `json:"revision"`
 	MessageID       *string       `json:"message_id"`
 	IncomingMessage *MailboxEvent `json:"incoming_message,omitempty"`
-	ToolCallID      *string       `json:"tool_call_id"`
-	ToolStatus      *ToolStatus   `json:"tool_status"`
+	// StableID and ToolDetailTrimmed are ported from the Rust source after
+	// this package's base (#1637): the stored item a row shows, and whether
+	// its detail was trimmed.
+	StableID          *string     `json:"stable_id,omitempty"`
+	ToolDetailTrimmed bool        `json:"tool_detail_trimmed,omitempty"`
+	ToolCallID        *string     `json:"tool_call_id"`
+	ToolStatus        *ToolStatus `json:"tool_status"`
 	// ToolSummary is the compact label used by Rich and browser projections.
 	// Text remains the original provider title for Raw mode.
 	ToolSummary *string `json:"tool_summary,omitempty"`
