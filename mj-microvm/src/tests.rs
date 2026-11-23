@@ -2,20 +2,23 @@
 //! Unix socket pair. The pair is the same byte stream a vsock connection
 //! gives; only the transport differs.
 
+use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::client::{self, Client};
 use super::guest_agent::test_support::RecordingSystem;
-use super::guest_agent::{Agent, DirectSpawner};
+use super::guest_agent::{Agent, DirectSpawner, DockerdConfig};
 use super::protocol::{
     ExecRequest, ExitInfo, FrameKind, FrameReader, FrameSender, Hello, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION, Request,
+    PROTOCOL_VERSION, Request, StartRequest,
 };
 use super::tarcopy::CopyMode;
 
@@ -26,9 +29,22 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let system = Arc::new(RecordingSystem::default());
+        Self::with_dockerd(
+            DockerdConfig {
+                binary: Default::default(),
+                ..DockerdConfig::default()
+            },
+            false,
+        )
+    }
+
+    fn with_dockerd(config: DockerdConfig, check_reaped: bool) -> Self {
+        let system = Arc::new(RecordingSystem {
+            dockerd_pidfile: check_reaped.then(|| config.pidfile.clone()),
+            ..RecordingSystem::default()
+        });
         Self {
-            agent: Agent::new(Arc::new(DirectSpawner), system.clone()),
+            agent: Agent::with_dockerd(Arc::new(DirectSpawner), system.clone(), config),
             system,
         }
     }
@@ -548,4 +564,198 @@ fn stop_flushes_before_it_answers_and_then_powers_off() {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("the agent never powered the machine off");
+}
+
+fn dockerd_config(work: &Path) -> DockerdConfig {
+    DockerdConfig {
+        binary: work.join("dockerd"),
+        socket: work.join("docker.sock"),
+        pidfile: work.join("docker.pid"),
+        log_file: work.join("dockerd.log"),
+    }
+}
+
+fn executable_file(path: &Path, script: &str) {
+    fs::write(path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn wait_for(mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for the guest");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn start_and_stop_without_dockerd() {
+    let work = tempfile::tempdir().unwrap();
+    let config = dockerd_config(work.path());
+    let log_file = config.log_file.clone();
+    let harness = Harness::with_dockerd(config, false);
+    let release = work.path().join("release");
+    let start = Instant::now();
+    harness
+        .client()
+        .start(StartRequest {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                r#"while [ -d "$1" ] && [ ! -f "$2" ]; do sleep 0.05; done"#.into(),
+                "main".into(),
+                work.path().display().to_string(),
+                release.display().to_string(),
+            ],
+            ..StartRequest::default()
+        })
+        .unwrap();
+    harness.client().stop().unwrap();
+    fs::write(release, "").unwrap();
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(!log_file.exists());
+    assert!(harness.system.quiesced.load(Ordering::SeqCst));
+}
+
+#[test]
+fn dockerd_listens_before_main_and_exits_before_quiesce() {
+    for stop_requested in [false, true] {
+        let work = tempfile::tempdir_in("/tmp").unwrap();
+        let config = dockerd_config(work.path());
+        executable_file(
+            &config.binary,
+            r#"#!/usr/bin/env python3
+import os
+import signal
+import socket
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+pidfile = Path(args[args.index("--pidfile") + 1])
+def stop(signum, frame):
+    pidfile.with_name("sigterm").touch()
+    time.sleep(0.1)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, stop)
+pidfile.write_text(str(os.getpid()))
+pidfile.with_name("args").write_text("\n".join(args))
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+# If start merely checks that the socket file exists, main will get refused.
+server.bind(args[args.index("--host") + 1].removeprefix("unix://"))
+time.sleep(0.1)
+server.listen()
+while pidfile.parent.is_dir():
+    time.sleep(0.05)
+"#,
+        );
+        let socket = config.socket.display().to_string();
+        let pidfile = config.pidfile.display().to_string();
+        let harness = Harness::with_dockerd(config, true);
+        let ready = work.path().join("main-connected");
+        let release = work.path().join("release");
+        // SAFETY: geteuid only reads the caller's effective user.
+        let uid = unsafe { libc::geteuid() };
+        let gid = 12345;
+        harness
+            .client()
+            .start(StartRequest {
+                argv: vec![
+                    "python3".into(),
+                    "-c".into(),
+                    r#"
+import socket
+import sys
+import time
+from pathlib import Path
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.connect(sys.argv[1])
+ready, release = map(Path, sys.argv[2:])
+ready.touch()
+while ready.exists() and not release.exists():
+    time.sleep(0.05)
+"#
+                    .into(),
+                    socket.clone(),
+                    ready.display().to_string(),
+                    release.display().to_string(),
+                ],
+                user: format!("{uid}:{gid}"),
+                ..StartRequest::default()
+            })
+            .unwrap();
+        wait_for(|| ready.exists());
+        assert_eq!(
+            fs::read_to_string(work.path().join("args"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "--exec-opt",
+                "native.cgroupdriver=cgroupfs",
+                "--host",
+                &format!("unix://{socket}"),
+                "--group",
+                &gid.to_string(),
+                "--pidfile",
+                &pidfile,
+            ],
+        );
+        if stop_requested {
+            harness.client().stop().unwrap();
+        }
+        fs::write(release, "").unwrap();
+        wait_for(|| harness.system.powered_off.load(Ordering::SeqCst));
+        assert!(work.path().join("sigterm").exists());
+        assert!(harness.system.dockerd_reaped.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn dockerd_early_exit_does_not_block_main() {
+    let work = tempfile::tempdir().unwrap();
+    let config = dockerd_config(work.path());
+    executable_file(
+        &config.binary,
+        "#!/bin/sh\necho 'dockerd failed' >&2\nexit 1\n",
+    );
+    let log_file = config.log_file.clone();
+    let harness = Harness::with_dockerd(config, false);
+    let ran = work.path().join("main-ran");
+    let start = Instant::now();
+    harness
+        .client()
+        .start(StartRequest {
+            argv: vec!["touch".into(), ran.display().to_string()],
+            ..StartRequest::default()
+        })
+        .unwrap();
+    assert!(start.elapsed() < Duration::from_secs(5));
+    wait_for(|| harness.system.powered_off.load(Ordering::SeqCst));
+    assert!(ran.exists());
+    assert_eq!(
+        fs::read_to_string(log_file).unwrap().trim(),
+        "dockerd failed"
+    );
+}
+
+#[test]
+fn rendered_init_prepares_the_guest_for_docker() {
+    let init = super::boot::render_init_script();
+    assert!(init.contains(&format!("for m in {}; do", super::boot::GUEST_DRIVERS)));
+    assert!(!init.contains("@GUEST_DRIVERS@"));
+    let mount = init
+        .find("mount -t cgroup2 cgroup2 /sys/fs/cgroup")
+        .unwrap();
+    let move_init = init
+        .find("echo 0 > /sys/fs/cgroup/init/cgroup.procs")
+        .unwrap();
+    let controllers = init
+        .find(r#"echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control"#)
+        .unwrap();
+    assert!(mount < move_init && move_init < controllers);
+    assert!(init.contains("[ -e /newroot/var/run ] || [ -L /newroot/var/run ] || (mkdir -p /newroot/var && ln -s /run /newroot/var/run)"));
 }

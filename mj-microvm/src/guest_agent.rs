@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
@@ -61,6 +63,23 @@ pub struct Spawned {
 /// `waitpid` and hands exit statuses to whoever started the process.
 pub trait ProcessSpawner: Send + Sync + 'static {
     fn spawn(&self, command: &mut Command) -> io::Result<Spawned>;
+
+    /// Signal a child only if its exit has not been collected.
+    fn terminate(&self, child: &Spawned) -> io::Result<bool> {
+        terminate_child(child)
+    }
+}
+
+fn terminate_child(child: &Spawned) -> io::Result<bool> {
+    if !matches!(child.exit.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+        return Ok(false);
+    }
+    // SAFETY: SIGTERM targets the child identified by its registered PID.
+    if unsafe { libc::kill(child.pid as i32, libc::SIGTERM) } == 0 {
+        Ok(true)
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// Waits for each child on its own thread. Used where the process is not PID 1.
@@ -214,6 +233,13 @@ impl ProcessSpawner for Reaper {
             exit,
         })
     }
+
+    fn terminate(&self, child: &Spawned) -> io::Result<bool> {
+        // Reaping and sending the exit status happen under the same lock.
+        // A PID cannot be reaped and reused between the check and the signal.
+        let _state = self.lock();
+        terminate_child(child)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +335,28 @@ fn resolve_user_in_guest(spec: &str) -> Result<ResolvedUser> {
 // ---------------------------------------------------------------------------
 // The agent
 
+// Docker defaults to a ten-second SIGTERM grace for its containers. Give it
+// that long to stop them and clean up overlay mounts before the kill sweep.
+pub(super) const DOCKER_STOP_GRACE: Duration = Duration::from_secs(10);
+
+pub(super) struct DockerdConfig {
+    pub binary: PathBuf,
+    pub socket: PathBuf,
+    pub pidfile: PathBuf,
+    pub log_file: PathBuf,
+}
+
+impl Default for DockerdConfig {
+    fn default() -> Self {
+        Self {
+            binary: "/usr/bin/dockerd".into(),
+            socket: "/var/run/docker.sock".into(),
+            pidfile: "/run/docker.pid".into(),
+            log_file: "/run/dockerd.log".into(),
+        }
+    }
+}
+
 pub struct Agent {
     defaults: Mutex<StartRequest>,
     started: AtomicBool,
@@ -317,6 +365,8 @@ pub struct Agent {
     shutting_down: std::sync::RwLock<bool>,
     spawner: Arc<dyn ProcessSpawner>,
     system: Arc<dyn GuestSystem>,
+    dockerd_config: DockerdConfig,
+    dockerd: Mutex<Option<Spawned>>,
     /// Where `/run/user/<uid>` directories are made.
     run_user_root: PathBuf,
 }
@@ -329,12 +379,22 @@ struct SpawnFailure {
 
 impl Agent {
     pub fn new(spawner: Arc<dyn ProcessSpawner>, system: Arc<dyn GuestSystem>) -> Arc<Self> {
+        Self::with_dockerd(spawner, system, DockerdConfig::default())
+    }
+
+    pub(super) fn with_dockerd(
+        spawner: Arc<dyn ProcessSpawner>,
+        system: Arc<dyn GuestSystem>,
+        dockerd_config: DockerdConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             defaults: Mutex::new(StartRequest::default()),
             started: AtomicBool::new(false),
             shutting_down: std::sync::RwLock::new(false),
             spawner,
             system,
+            dockerd_config,
+            dockerd: Mutex::new(None),
             run_user_root: PathBuf::from("/run/user"),
         })
     }
@@ -393,6 +453,7 @@ impl Agent {
         }
         let started = self.start_main(&start);
         if started.is_err() {
+            self.stop_dockerd();
             self.started.store(false, Ordering::SeqCst);
         }
         let (pid, powered_off_after) = started?;
@@ -421,6 +482,12 @@ impl Agent {
             detach: true,
             ..ExecRequest::default()
         };
+        if let Err(error) = self.start_dockerd(user.gid) {
+            klog(&format!(
+                "dockerd startup failed: {error:#}. See {}",
+                self.dockerd_config.log_file.display()
+            ));
+        }
         let spawned = self
             .spawn_process(&request, Stdio::null(), Stdio::null(), Stdio::null())
             .map_err(|failure| anyhow!("start the container command: {}", failure.message))?;
@@ -440,11 +507,98 @@ impl Agent {
                 // Returns when `hold` is dropped; nothing is ever sent.
                 let _ = released.recv();
                 agent.begin_shutdown();
+                agent.stop_dockerd();
                 agent.system.quiesce();
                 agent.system.power_off();
             })
             .context("start main-process monitor")?;
         Ok((pid, hold))
+    }
+
+    fn start_dockerd(&self, gid: u32) -> Result<()> {
+        let config = &self.dockerd_config;
+        if !is_executable(&config.binary) {
+            return Ok(());
+        }
+        let log = fs::File::create(&config.log_file).context("open dockerd log")?;
+        let mut socket_url = OsString::from("unix://");
+        socket_url.push(&config.socket);
+        let mut command = Command::new(&config.binary);
+        command
+            .args(["--exec-opt", "native.cgroupdriver=cgroupfs", "--host"])
+            .arg(socket_url)
+            .arg("--group")
+            .arg(gid.to_string())
+            .arg("--pidfile")
+            .arg(&config.pidfile)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log);
+
+        let mut dockerd = self
+            .dockerd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let child = {
+            let admission = self
+                .shutting_down
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ensure!(!*admission, "the VM is shutting down");
+            self.spawner.spawn(&mut command).context("spawn dockerd")?
+        };
+
+        // Docker is optional. Limit its head start so a daemon wedged restoring
+        // containers cannot prevent the VM's main command from starting.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if *self
+                .shutting_down
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                || UnixStream::connect(&config.socket).is_ok()
+            {
+                *dockerd = Some(child);
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                *dockerd = Some(child);
+                bail!("timed out waiting for {}", config.socket.display());
+            }
+            match child
+                .exit
+                .recv_timeout(remaining.min(Duration::from_millis(25)))
+            {
+                Ok(Ok(status)) => bail!("dockerd exited before listening: {status}"),
+                Ok(Err(error)) => bail!("waiting for dockerd failed: {error}"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => bail!("lost dockerd's exit status"),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn stop_dockerd(&self) {
+        // Hold the lock through the wait so simultaneous shutdown paths both
+        // leave Docker time to finish before either begins the kill sweep.
+        let mut dockerd = self
+            .dockerd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(child) = dockerd.take() else {
+            return;
+        };
+        match self.spawner.terminate(&child) {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => klog(&format!("could not send SIGTERM to dockerd: {error}")),
+        }
+        match child.exit.recv_timeout(DOCKER_STOP_GRACE) {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => klog(&format!("dockerd shut down with {status}")),
+            Ok(Err(error)) => klog(&format!("waiting for dockerd shutdown failed: {error}")),
+            Err(error) => klog(&format!("waiting for dockerd shutdown: {error}")),
+        }
     }
 
     /// Refuse new processes from now on. Returns once every spawn in progress
@@ -458,6 +612,7 @@ impl Agent {
 
     fn handle_stop<T: Transport>(&self, sender: &FrameSender<T>) -> Result<()> {
         self.begin_shutdown();
+        self.stop_dockerd();
         self.system.quiesce();
         sender.send_json(
             FrameKind::Exit,
@@ -816,12 +971,13 @@ fn resolve_program(program: &str, path: &str, cwd: &str) -> Option<OsString> {
             }
         })
         .map(|directory| directory.join(program))
-        .find(|candidate| {
-            fs::metadata(candidate)
-                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-        })
+        .find(|candidate| is_executable(candidate))
         .map(PathBuf::into_os_string)
+}
+
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 fn ensure_runtime_directory(directory: &Path, user: &ResolvedUser) -> Result<()> {
@@ -1317,10 +1473,19 @@ pub(super) mod test_support {
     pub struct RecordingSystem {
         pub quiesced: AtomicBool,
         pub powered_off: AtomicBool,
+        pub dockerd_pidfile: Option<PathBuf>,
+        pub dockerd_reaped: AtomicBool,
     }
 
     impl GuestSystem for RecordingSystem {
         fn quiesce(&self) {
+            if let Some(pidfile) = &self.dockerd_pidfile {
+                let pid = fs::read_to_string(pidfile).unwrap();
+                self.dockerd_reaped.store(
+                    !Path::new("/proc").join(pid.trim()).exists(),
+                    Ordering::SeqCst,
+                );
+            }
             self.quiesced.store(true, Ordering::SeqCst);
         }
 
