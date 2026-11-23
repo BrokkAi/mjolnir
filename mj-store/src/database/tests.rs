@@ -6634,7 +6634,7 @@ pub(super) fn register_test_subagent(
     Ok(())
 }
 
-fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
+pub(super) fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     let parent = session("11111111111111111111111111111111", "bundle-1");
     let mut child = session("22222222222222222222222222222222", "bundle-1");
     child.title = "child session".into();
@@ -9658,4 +9658,89 @@ fn load_tool_call_detail_joins_spilled_referenced_standalone_terminal() {
     assert_eq!(terminal_outputs[0].terminal_id, "term-1");
     assert_eq!(terminal_outputs[0].output.text(), full_terminal_output);
     assert_eq!(terminal_outputs[0].exit_code, Some(0));
+}
+
+#[test]
+fn writer_startup_sweeps_tool_details_for_deleted_sessions_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("controller.sqlite");
+    live_sessions(&path, &[("kept", "project"), ("deleted", "project")]);
+    let body = serde_json::to_string(&TranscriptBody::System {
+        text: "details".into(),
+    })
+    .unwrap();
+    let (offset, len) =
+        tool_details::append_tool_detail(directory.path(), "kept", "item", &body).unwrap();
+    tool_details::append_tool_detail(directory.path(), "deleted", "item", &body).unwrap();
+    // Model a crash immediately after SQL commit, before the file is unlinked.
+    open(&path)
+        .unwrap()
+        .execute("DELETE FROM sessions WHERE session_id='deleted'", [])
+        .unwrap();
+    let owner = start_database_writer_at(&path, false).unwrap();
+    assert!(!directory.path().join("tool-details/deleted.mjtd").exists());
+    assert_eq!(
+        serde_json::to_string(
+            &tool_details::read_tool_detail(directory.path(), "kept", "item", offset, len).unwrap()
+        )
+        .unwrap(),
+        body,
+    );
+    owner.shutdown().unwrap();
+}
+
+#[test]
+fn suspend_settlement_rolls_back_transcript_deletes_and_temporary_close_preserves_them() {
+    const CHILD: &str = "MJ_TEST_SUSPEND_BORROWED_TRANSCRIPT_ROLLBACK";
+    const NAME: &str =
+        "suspend_settlement_rolls_back_transcript_deletes_and_temporary_close_preserves_them";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            NAME,
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = install_isolated_test_writer();
+    let mut parent = session("parent", "project");
+    parent.state = SessionState::Running;
+    save_session(&parent).unwrap();
+    let mut child = session("child", "project");
+    child.state = SessionState::Stopped;
+    save_subagent_session(&child, &test_subagent("parent", "child")).unwrap();
+    let data_dir = mj_core::config::data_dir();
+    let detail = data_dir.join("tool-details/child.mjtd");
+    tool_details::append_tool_detail(&data_dir, "child", "detail", "{}").unwrap();
+
+    parent.state = SessionState::Stopped;
+    save_temporary_close(&parent).unwrap();
+    assert!(load_session_record("child").unwrap().is_some() && detail.exists());
+    parent.state = SessionState::Destroying;
+    save_lifecycle_session(&parent).unwrap();
+
+    let connection = open(&database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_child_delete BEFORE DELETE ON sessions
+        WHEN OLD.session_id='child' BEGIN SELECT RAISE(ABORT, 'injected child delete failure'); END;").unwrap();
+    parent.state = SessionState::Stopped;
+    let error = save_closed_session(&parent).unwrap_err();
+    assert!(format!("{error:#}").contains("injected child delete failure"));
+    assert_eq!(
+        load_session_record("parent").unwrap().unwrap().state,
+        SessionState::Destroying
+    );
+    assert!(load_session_record("child").unwrap().is_some() && detail.exists());
+
+    connection
+        .execute_batch("DROP TRIGGER reject_child_delete")
+        .unwrap();
+    save_closed_session(&parent).unwrap();
+    assert_eq!(
+        load_session_record("parent").unwrap().unwrap().state,
+        SessionState::Stopped
+    );
+    assert!(load_session_record("child").unwrap().is_none() && !detail.exists());
 }

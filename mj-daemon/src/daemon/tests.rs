@@ -8742,6 +8742,7 @@ esac
                         id,
                         &RefusingExecutor("a committed destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8753,6 +8754,7 @@ esac
                         id,
                         &RefusingExecutor("a ready destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8787,7 +8789,7 @@ esac
             let (teardown_moves, close_operations) =
                 mj_controller::database::load_move_recovery().unwrap();
             let owners = teardown
-                .recover_moves(teardown_moves, &close_operations)
+                .recover_moves(teardown_moves, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(!owners.moves.contains(id));
@@ -8847,7 +8849,8 @@ esac
                 mj_controller::database::settle_superseded_move_source(
                     &restored,
                     Some(&source_environment.id),
-                    &operation.operation_id
+                    &operation.operation_id,
+                    true,
                 )
                 .is_err()
             );
@@ -8883,7 +8886,7 @@ esac
             let cancelled = test_runtime_state_loading_the_store();
             // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
             let owners = cancelled
-                .recover_moves(operations, &close_operations)
+                .recover_moves(operations, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(owners.moves.contains(id));
@@ -8944,7 +8947,7 @@ esac
             let (operations, close_operations) =
                 mj_controller::database::load_move_recovery().unwrap();
             let owned = state
-                .recover_moves(operations, &close_operations)
+                .recover_moves(operations, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(
@@ -9181,7 +9184,7 @@ esac
                     BTreeSet::new()
                 };
                 let owners = recovering
-                    .recover_moves(vec![completed.clone()], &close_ids)
+                    .recover_moves(vec![completed.clone()], &close_ids, &BTreeSet::new())
                     .await
                     .unwrap();
                 assert!(!owners.moves.contains(&id));
@@ -10228,6 +10231,22 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Missing).await;
 
+    let closed_id = "closed-borrower";
+    let workspace = &parent
+        .state
+        .session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .workspace_id;
+    let closed = runtime_test_session(closed_id, workspace, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+    let data = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(&data, closed_id, "detail", "{}")
+        .unwrap();
+
     let failure = tokio::time::timeout(
         Duration::from_secs(60),
         parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
@@ -10237,6 +10256,8 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     assert!(failure.is_err());
 
     let stored = mj_controller::database::load_state().unwrap();
+    assert!(stored.sessions.contains_key(closed_id));
+    assert!(data.join("tool-details/closed-borrower.mjtd").exists());
     let record = &stored.sessions[LATCH_RELAY_SESSION];
     assert_eq!(record.state, SessionState::Running, "{record:?}");
     assert!(
@@ -10327,6 +10348,7 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
         stored.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Stopped
     );
+    assert!(!stored.sessions.contains_key(stopped_id));
     assert!(
         !stored.sessions.contains_key(WORKING_CHILD)
             && !stored.subagents.contains_key(WORKING_CHILD),
@@ -11039,9 +11061,57 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
         )
         .unwrap()
     );
+    let closed_id = "closed-borrower";
+    let closed = runtime_test_session(closed_id, &workspace.id, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, parent_id),
+    )
+    .unwrap();
+    let item = Arc::new(mj_core::transcript::TranscriptItem {
+        stable_id: "message".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: mj_core::transcript::TranscriptBody::System {
+            text: "closed child history".into(),
+        },
+    });
+    let mut projection = mj_core::state::MaterializedSession::empty(closed_id);
+    projection.applied_event_ordinal = 1;
+    projection.applied_event_digest = format!("{:064x}", 1);
+    projection.transcript.push(item.clone());
+    mj_controller::database::save_materialized_session(&projection).unwrap();
+    let data_dir = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(
+        &data_dir,
+        closed_id,
+        &item.stable_id,
+        &serde_json::to_string(&item.body).unwrap(),
+    )
+    .unwrap();
+    let detail = data_dir
+        .join("tool-details")
+        .join(format!("{closed_id}.mjtd"));
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    let mut view = ready_startup_view();
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.window = mj_core::state::ProjectionWindow::of(&projection);
+    snapshot.materialized = projection;
+    state.owner().publish_view(closed_id.into(), view);
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    let cursor = replica.cursor.clone().unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, &cursor),
+        mj_client::runtime_feed::SessionTailReply::Tail { .. }
+    ));
+    assert!(detail.is_file());
     tokio::time::timeout(
         Duration::from_secs(60),
         state.suspend_session(parent_id.to_owned()),
@@ -11049,6 +11119,23 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     .await
     .unwrap()
     .unwrap();
+
+    replica
+        .apply(state.runtime_changes(Some(cursor), false).await.unwrap())
+        .unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, replica.cursor.as_ref().unwrap()),
+        mj_client::runtime_feed::SessionTailReply::NoTail
+    ));
+    assert!(state.session_record(closed_id).is_none());
+    assert!(!state.owner().sessions.contains_key(closed_id));
+    assert!(!state.owner().transcripts.contains_key(closed_id));
+    assert!(
+        mj_controller::database::load_materialized_session(closed_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!detail.exists());
 
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
@@ -11106,10 +11193,7 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         stored.subagents.contains_key(child_id),
         "the relation stays"
     );
-    assert!(
-        worker_root.exists(),
-        "the shared environment retains the child's private root"
-    );
+    assert!(!worker_root.exists());
     assert!(
         !root.path().join("started").exists(),
         "the parked child's worker was not started"
@@ -11373,10 +11457,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             stored.sessions[LATCH_RELAY_SESSION].state,
             SessionState::Stopped
         );
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
-        );
+        assert!(!worker_root.exists());
         let history = mj_controller::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
@@ -11445,6 +11526,19 @@ async fn exercise_child_close_with_a_nested_workspace(
         worker_root: worker_root.clone(),
     }));
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
+    let profile = mj_controller::targets::local_nested_profile_root(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&profile).unwrap();
+    let detail_data = mj_core::config::data_dir();
+    let detail_body = mj_core::transcript::TranscriptBody::System {
+        text: "spilled child detail".into(),
+    };
+    let (offset, len) = mj_controller::database::tool_details::append_tool_detail(
+        &detail_data,
+        LATCH_RELAY_SESSION,
+        "detail",
+        &serde_json::to_string(&detail_body).unwrap(),
+    )
+    .unwrap();
     let reports = repository
         .path()
         .join(".mj/agents")
@@ -11601,9 +11695,18 @@ async fn exercise_child_close_with_a_nested_workspace(
         let closed = &stored.sessions[LATCH_RELAY_SESSION];
         assert_eq!(closed.state, SessionState::Stopped);
         assert!(closed.target.is_none() && closed.checkpoint.is_none());
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
+        assert!(!worker_root.exists());
+        assert!(!profile.exists());
+        assert_eq!(
+            mj_controller::database::tool_details::read_tool_detail(
+                &detail_data,
+                LATCH_RELAY_SESSION,
+                "detail",
+                offset,
+                len,
+            )
+            .unwrap(),
+            detail_body,
         );
     }
     assert_eq!(stored.sessions[parent_id], parent);
@@ -17684,4 +17787,326 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
     assert_eq!(saved.state, SessionState::Parked);
     assert_eq!(saved.target, record.target);
     assert!(!start_marker.exists());
+}
+
+#[tokio::test]
+async fn retired_harness_requires_explicit_destroy() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_DESTROY";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "retired_harness_requires_explicit_destroy",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "retired-harness-destroy")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let mut session = test_fixtures::checkpoint_test_session("retired-destroy");
+    session.state = SessionState::Destroying;
+    database::save_session(&session).unwrap();
+    test_fixtures::retire_test_harness(&session.id).unwrap();
+    let mut state = test_runtime_state_loading_the_store();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(database::subscribe_committed_state().unwrap());
+
+    let snapshots = state.subscribe_browser_views().unwrap();
+    {
+        let snapshot = snapshots.borrow();
+        assert!(snapshot.sessions.get(&session.id).is_none());
+        assert!(snapshot.retired_session_ids.contains(&session.id));
+    }
+
+    state.recover_destruction(session.id.clone()).await.unwrap();
+    let retained = database::load_retired_harness_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.owned_environment.unwrap().phase,
+        database::EnvironmentPhase::Active
+    );
+
+    let started = state
+        .admit_session_lifecycle(SessionLifecycleRequest::DestroyStopped {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(started.result)
+        .await
+        .unwrap();
+    assert!(
+        database::load_retired_harness_session(&session.id)
+            .unwrap()
+            .is_none()
+    );
+    state.browser_views(None).unwrap();
+    assert!(!snapshots.borrow().retired_session_ids.contains(&session.id));
+}
+
+#[tokio::test]
+async fn retired_harness_child_is_destroyed_during_parent_destruction_recovery() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const TEST: &str = "retired_harness_child_is_destroyed_during_parent_destruction_recovery";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_CHILD_DESTROY";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-child-destroy")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let parent = test_fixtures::checkpoint_test_session("supported-parent");
+    let child = test_fixtures::checkpoint_test_session("retired-child");
+    database::save_session(&parent).unwrap();
+    database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id)).unwrap();
+    database::test_fixtures::retire_test_harness(&child.id).unwrap();
+    assert_eq!(
+        database::begin_session_destroy(&parent.id)
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&child.id)
+    );
+
+    let state = test_runtime_state_loading_the_store();
+    state.recover_destruction(parent.id.clone()).await.unwrap();
+
+    assert!(
+        database::read_durable_session_record(&parent.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        database::load_retired_harness_session(&child.id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn retired_harness_child_is_stopped_before_its_parent_suspends() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const TEST: &str = "retired_harness_child_is_stopped_before_its_parent_suspends";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_CHILD_SUSPEND";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-child-suspend")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let parent = test_fixtures::checkpoint_test_session("supported-parent");
+    let child = test_fixtures::checkpoint_test_session("retired-child");
+    database::save_session(&parent).unwrap();
+    database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id)).unwrap();
+    database::test_fixtures::retire_test_harness(&child.id).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    assert!(
+        state
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .get(&child.id)
+            .is_none()
+    );
+    state
+        .stop_subagents_before_close(&parent.id, None)
+        .await
+        .unwrap();
+
+    assert!(
+        database::load_retired_harness_session(&child.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        database::session_environment(&parent.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        database::EnvironmentPhase::Active
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn retired_harness_stop_keeps_independent_descendants() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+    use mj_core::state::TargetLocator;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const TEST: &str = "retired_harness_stop_keeps_independent_descendants";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_INDEPENDENT_DESCENDANTS";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-independent-descendants")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+
+    for variant in ["supported", "retired"] {
+        let session = |role| {
+            let id = format!("{variant}-{role}");
+            let mut session = runtime_test_session(
+                &id,
+                mj_core::workspace::DEFAULT_WORKSPACE_ID,
+                SessionState::Running,
+            );
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: root.path().join(id),
+            }));
+            session
+        };
+        let parent = session("parent");
+        let child = session("borrower");
+        let sibling = session("sibling");
+        let bound = session("bound-grandchild");
+        let independent = session("independent-grandchild");
+        let worker_root = |id: &str| root.path().join(id);
+        let stopped_marker = |id: &str| root.path().join(format!("{id}.stopped"));
+        for id in [&child.id, &independent.id] {
+            let dir = worker_root(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let worker = dir.join("hel");
+            std::fs::write(
+                &worker,
+                "#!/bin/sh\n[ \"$3\" != --help ] || exit 0\ntouch \"$4.stopped\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = worker_root(&independent.id).join("work");
+        std::fs::write(&data, b"independent work").unwrap();
+
+        database::save_session(&parent).unwrap();
+        let mut borrower = runtime_test_subagent(&child.id, &parent.id);
+        borrower.orchestrator = true;
+        database::save_subagent_session(&child, &borrower).unwrap();
+        database::save_subagent_session(&sibling, &runtime_test_subagent(&sibling.id, &parent.id))
+            .unwrap();
+        database::save_subagent_session(&bound, &runtime_test_subagent(&bound.id, &child.id))
+            .unwrap();
+        database::register_subagent_with_startup(
+            &independent,
+            &runtime_test_subagent(&independent.id, &child.id),
+            Vec::new(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let shared = database::session_environment(&parent.id).unwrap().unwrap();
+        let before = database::session_environment(&independent.id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(before.id, shared.id);
+        test_fixtures::retire_test_harness(&child.id).unwrap();
+        if variant == "retired" {
+            test_fixtures::retire_test_harness(&bound.id).unwrap();
+            test_fixtures::retire_test_harness(&independent.id).unwrap();
+        }
+
+        let state = test_runtime_state_loading_the_store();
+        state
+            .stop_subagents_before_close(&sibling.id, None)
+            .await
+            .unwrap();
+        assert!(!stopped_marker(&child.id).exists());
+        assert!(worker_root(&child.id).exists());
+        assert_eq!(
+            database::session_environment(&child.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            shared.id
+        );
+        assert_eq!(
+            database::load_retired_harness_session(&child.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SessionState::Running
+        );
+
+        state
+            .stop_subagents_before_close(&parent.id, None)
+            .await
+            .unwrap();
+
+        assert!(stopped_marker(&child.id).exists());
+        assert!(!worker_root(&child.id).exists());
+        assert!(database::session_environment(&child.id).unwrap().is_none());
+        assert!(
+            database::load_retired_harness_session(&child.id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            database::environment_workers(&shared.id)
+                .unwrap()
+                .iter()
+                .any(|lease| lease.session_id == child.id)
+        );
+        assert!(
+            database::load_retired_harness_session(&bound.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            database::read_durable_session_record(&bound.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let after = database::session_environment(&independent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.phase, database::EnvironmentPhase::Active);
+        assert_eq!(
+            database::load_subagent(&independent.id)
+                .unwrap()
+                .unwrap()
+                .parent_session_id,
+            child.id
+        );
+        let independent_state = if variant == "retired" {
+            database::load_retired_harness_session(&independent.id)
+                .unwrap()
+                .unwrap()
+                .state
+        } else {
+            database::read_durable_session_record(&independent.id)
+                .unwrap()
+                .unwrap()
+                .state
+        };
+        assert_eq!(independent_state, SessionState::Running);
+        assert!(!stopped_marker(&independent.id).exists());
+        assert_eq!(std::fs::read(&data).unwrap(), b"independent work");
+    }
 }

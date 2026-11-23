@@ -1636,7 +1636,7 @@ impl WakeFailure {
 
 /// Guidance for a parent whose child's lifecycle is in Error.
 pub const FAILED_CHILD_CLOSE_GUIDANCE: &str =
-    "Use close_agent to close this child, then spawn a replacement if needed.";
+    "Use close to close this child, then spawn a replacement if needed.";
 
 /// What a parent is told about a profile whose login the provider refused.
 #[must_use]

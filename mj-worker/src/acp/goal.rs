@@ -378,7 +378,7 @@ pub(super) async fn recover(
     .await?;
     if !context.state.synchronized() {
         emit_runtime_event(events, RuntimeEvent::Warning {
-            message: "The adapter did not synchronize goal execution state; automatic goal recovery and worker replacement are deferred".into(),
+            message: "The adapter did not synchronize goal execution state; goal recovery and worker replacement are deferred".into(),
         }).await?;
         return Ok(None);
     }
@@ -406,6 +406,9 @@ pub(super) async fn recover(
         // A new explicit open or model choice supersedes an older answer.
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
     }
+    if !context.asking() && !model_question {
+        return Ok(None);
+    }
     let Some(goal) = context
         .state
         .snapshot
@@ -422,33 +425,13 @@ pub(super) async fn recover(
     if model_question && goal.active() {
         control(spec, events, connection, session, &goal, false).await?;
     }
-    let mut explanation = None;
-    if !context.asking() && !model_question {
-        if !goal.active() || context.state.running() {
-            return Ok(None);
-        }
-        match control(spec, events, connection, session, &goal, true).await {
-            Ok(()) => return Ok(None),
-            Err(error) => {
-                let message = format!("Goal recovery needs attention: {error:#}");
-                emit_runtime_event(
-                    events,
-                    RuntimeEvent::Warning {
-                        message: message.clone(),
-                    },
-                )
-                .await?;
-                explanation = Some(message);
-            }
-        }
-    }
     let request = ElicitationRequest {
         id: RECOVERY_ID.into(),
         title: Some("Resume this goal?".into()),
         message: goal.objective.clone(),
-        description: Some(explanation.unwrap_or_else(|| {
-            "Resume the existing goal with its remaining budget, or keep it paused.".into()
-        })),
+        description: Some(
+            "Resume the existing goal with its remaining budget, or keep it paused.".into(),
+        ),
         fields: vec![ElicitationField {
             id: "action".into(),
             title: "Goal".into(),
@@ -559,34 +542,74 @@ mod tests {
 
     // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
     #[tokio::test]
-    async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
+    async fn stored_goals_pause_on_reopen_and_only_resume_on_explicit_intent() {
         let _ = mj_harness_install::login_environment::initialize_from_parent();
-        for (asking, running, answer, expected_resumes, status, decision, timed_out, reject_code) in [
-            (false, false, None, 1, "active", false, false, None),
-            (false, true, None, 0, "active", false, false, None),
-            (true, false, Some(true), 1, "active", false, false, None),
-            (true, false, Some(false), 0, "active", false, false, None),
+        enum Reopen {
+            QueuedWork(&'static str, &'static str),
+            Running,
+            Form(Option<bool>, &'static str),
+            SavedAnswer,
+            ResumeTimedOut,
+            ResumeRejected(i32),
+            PauseUnsupported,
+            GoalFreePauseUnsupported,
+        }
+        use Reopen::*;
+        for case in [
+            QueuedWork("resume", "active"),
+            QueuedWork("load", "active"),
+            Running,
+            Form(Some(true), "active"),
+            Form(Some(false), "active"),
             // Hard-won: ba25f84: an unanswered command-loop goal form must survive adoption until bridge exit.
-            (true, false, None, 0, "active", false, false, None),
-            (false, false, None, 0, "paused", false, false, None),
-            (false, false, None, 0, "blocked", false, false, None),
-            (false, false, None, 0, "limited", false, false, None),
-            (false, false, None, 0, "complete", false, false, None),
-            (true, false, None, 0, "complete", false, false, None),
-            (false, false, None, 1, "paused", true, false, None),
-            (false, false, None, 1, "active", false, true, None),
+            Form(None, "active"),
+            QueuedWork("resume", "paused"),
+            QueuedWork("resume", "blocked"),
+            QueuedWork("resume", "limited"),
+            QueuedWork("resume", "complete"),
+            Form(None, "complete"),
+            SavedAnswer,
+            ResumeTimedOut,
             // Hard-won: 655be2b: only proven peer rejection releases its own resume.
-            (false, false, None, 1, "active", false, false, Some(-32600)),
-            (false, false, None, 1, "active", false, false, Some(-32602)),
-            (false, false, None, 1, "active", false, false, Some(-32601)),
-            (false, false, None, 1, "active", false, false, Some(-32603)),
+            ResumeRejected(-32600),
+            ResumeRejected(-32602),
+            ResumeRejected(-32601),
+            ResumeRejected(-32603),
+            PauseUnsupported,
+            GoalFreePauseUnsupported,
         ] {
+            let (method, status) = match case {
+                QueuedWork(method, status) => (method, status),
+                Form(_, status) => ("resume", status),
+                SavedAnswer => ("resume", "paused"),
+                _ => ("resume", "active"),
+            };
+            let timed_out = matches!(case, ResumeTimedOut);
+            let reject_code = match case {
+                ResumeRejected(code) => Some(code),
+                _ => None,
+            };
+            let answer = match case {
+                Form(answer, _) => answer,
+                ResumeTimedOut | ResumeRejected(_) => Some(true),
+                _ => None,
+            };
+            let asking = matches!(case, Form(..) | ResumeTimedOut | ResumeRejected(_));
+            let running = matches!(case, Running);
+            let decision = matches!(case, SavedAnswer);
+            let goal_free = matches!(case, GoalFreePauseUnsupported);
+            let refuse_open = matches!(case, PauseUnsupported);
+            let queued_prompt = matches!(case, QueuedWork(..)) || goal_free;
+            let pause_supported = !refuse_open && !goal_free;
             let root = tempfile::tempdir().unwrap();
             let script = root.path().join("goal.py");
             std::fs::write(&script, r#"
 import json, os, sys, time
 asking = os.environ['ASKING'] == 'true'
 running = os.environ['RUNNING'] == 'true'
+open_method = 'session/' + os.environ['OPEN_METHOD']
+pause_supported = os.environ['PAUSE_SUPPORTED'] == 'true'
+goal_free = os.environ['GOAL_FREE'] == 'true'
 def emit(x): print(json.dumps(x), flush=True)
 def update(meta): emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'session_info_update','_meta':meta}}})
 goal = {'objective':'finish campaign','status':'active','createdAt':123,'tokenBudget':900,'tokensUsed':100,'controlMethod':'_session/goal'}
@@ -594,14 +617,22 @@ for line in sys.stdin:
     r = json.loads(line); method=r.get('method'); ident=r.get('id'); p=r.get('params',{})
     if ident is None: continue
     if method == 'initialize':
-        result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'resume':{}}},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve']}}},'execution':{'version':1}}}
-    elif method == 'session/resume':
-        assert p['_meta']['jetbrains']['air']['goal']['resumePolicy'] == ('pause' if asking else 'preserve')
+        result={'protocolVersion':1,'agentCapabilities':{'loadSession':True,'sessionCapabilities':{'resume':{}} if open_method == 'session/resume' else {}},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve'] if pause_supported else ['preserve']}}},'execution':{'version':1}}}
+    elif method in ('session/load', 'session/resume'):
+        assert method == open_method and (pause_supported or goal_free)
+        assert p['_meta']['jetbrains']['air']['goal']['resumePolicy'] == 'pause'
+        # For ordinary reopen, deliberately report the pre-pause status. Even
+        # with an active snapshot Mjolnir must not issue a second resume.
         goal['status']='paused' if asking and os.environ['GOAL_STATUS']=='active' else os.environ['GOAL_STATUS']
-        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
+        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{} if goal_free else {'goal':goal}},'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
         # Live output is legal before the resume response and exceeds a pipe buffer.
         if running:
             emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*80000}}}})
+    elif method == 'session/prompt':
+        assert p['prompt'][0]['text'] == 'queued work'
+        assert not os.path.exists('resumes'), 'queued prompt was overtaken by a resume'
+        emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'queued work done'}}}})
+        result={'stopReason':'end_turn'}
     elif method == '_session/goal':
         if p['action']=='resume':
             assert p['expectedGoal']=={'objective':'finish campaign','createdAt':123}
@@ -621,6 +652,15 @@ for line in sys.stdin:
             let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext {
                 request: asking.then(|| "explicit-1".into()),
                 state: mj_core::goal::GoalState {
+                    snapshot: refuse_open.then(|| {
+                        serde_json::from_value(serde_json::json!({
+                            "objective": "finish campaign",
+                            "status": "active",
+                            "createdAt": 123,
+                            "controlMethod": "_session/goal",
+                        }))
+                        .unwrap()
+                    }),
                     decision: decision.then(|| mj_core::goal::GoalDecision {
                         goal: serde_json::from_value(serde_json::json!({"objective":"finish campaign","status":"paused","createdAt":123,"controlMethod":"_session/goal"})).unwrap(), resume: true,
                     }),
@@ -628,7 +668,7 @@ for line in sys.stdin:
                 },
                 ..Default::default()
             }));
-            let track_cut = !asking && !running && status == "active";
+            let track_cut = answer == Some(true);
             let mut durable = crate::relay::DurableRelay::open(
                 root.path().join("relay"),
                 crate::relay::test_support::SESSION,
@@ -653,6 +693,9 @@ for line in sys.stdin:
                 args: vec![script.to_string_lossy().into_owned()],
                 environment: BTreeMap::from([
                     ("ASKING".into(), asking.to_string()),
+                    ("OPEN_METHOD".into(), method.into()),
+                    ("PAUSE_SUPPORTED".into(), pause_supported.to_string()),
+                    ("GOAL_FREE".into(), goal_free.to_string()),
                     ("WAIT_FOR_CUT".into(), track_cut.to_string()),
                     (
                         "REJECT_CODE".into(),
@@ -684,18 +727,40 @@ for line in sys.stdin:
             };
             let (tx, rx) = mpsc::channel(8);
             let (events, mut receive) = mpsc::channel(8);
+            if queued_prompt {
+                tx.send(CommandRequest::Prompt {
+                    request_id: "queued-work".into(),
+                    prompt: vec![ContentBlock::from("queued work".to_owned())],
+                })
+                .await
+                .unwrap();
+            }
             let task = mj_core::runtime::spawn(run(spec, rx, events));
-            if track_cut {
-                let mut in_flight = BTreeMap::new();
-                // Reopen's automatic resume is not a relay command. Apply every
-                // preceding runtime event in FIFO order until the reservation
-                // marker arrives, then prove `_session/goal` cannot be sent
-                // before the relay records and acknowledges that reservation.
-                let reservation = tokio::time::timeout(Duration::from_secs(10), async {
+            if refuse_open {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let mut refused = false;
+                    while let Some(event) = receive.recv().await {
+                        assert!(!matches!(event, RuntimeEvent::SessionStarted { .. }));
+                        if let RuntimeEvent::SessionFault { message } = event {
+                            assert!(message.contains("cannot pause a stored goal"), "{message}");
+                            refused = true;
+                        }
+                    }
+                    assert!(refused);
+                    assert!(task.await.unwrap().is_err());
+                })
+                .await
+                .unwrap();
+                continue;
+            }
+            let mut in_flight = BTreeMap::new();
+            let mut bytes = 0;
+            if asking && status == "active" {
+                let request = tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
                         let event = receive.recv().await.unwrap();
-                        if matches!(event, RuntimeEvent::NativeGoalResumeSent { .. }) {
-                            break event;
+                        if let RuntimeEvent::ElicitationRequested { request } = event {
+                            break request;
                         }
                         crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
                             .unwrap();
@@ -703,198 +768,221 @@ for line in sys.stdin:
                 })
                 .await
                 .unwrap();
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                assert!(
-                    !root.path().join("resumes").exists(),
-                    "_session/goal must not be sent before the FIFO reservation is recorded on the relay"
-                );
-                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, reservation)
+                assert_eq!(request.id, RECOVERY_ID);
+                assert!(!root.path().join("resumes").exists());
+                {
+                    let mut state = relay.lock().unwrap();
+                    state.operator_away.set(mj_core::state::OperatorPresence {
+                        away: true,
+                        revision: 1,
+                    });
+                    state
+                        .record_observation(
+                            mj_core::relay::RelayObservation::ElicitationRequested {
+                                request: request.clone(),
+                            },
+                        )
+                        .unwrap();
+                    let cut = state.live_session_baseline().unwrap();
+                    assert_eq!(cut.questions, vec![request.clone()]);
+                    let adopted =
+                        mj_transcript::projection::materialized_session_from_live_baseline(&cut)
+                            .unwrap();
+                    assert_eq!(adopted.pending_elicitations, vec![request]);
+                }
+                if let Some(accept) = answer {
+                    let response = if accept {
+                        ElicitationResponse::Accept {
+                            content: BTreeMap::from([(
+                                "action".into(),
+                                ElicitationValue::String("resume".into()),
+                            )]),
+                        }
+                    } else {
+                        ElicitationResponse::Decline
+                    };
+                    let (resolved, mut ack) = oneshot::channel();
+                    tx.send(CommandRequest::ResolveElicitation {
+                        elicitation_id: RECOVERY_ID.into(),
+                        response,
+                        resolved,
+                    })
+                    .await
                     .unwrap();
-                let mut cut = relay.lock().unwrap().reserve_live_baseline();
-                assert!(
-                    cut.try_recv().is_err(),
-                    "quiescent adoption cut must be blocked as soon as the reservation applies"
-                );
-                assert!(
-                    relay
-                        .observe()
-                        .unwrap()
-                        .adoption_blockers()
-                        .iter()
-                        .any(|blocker| blocker.contains("goal resume")),
-                    "relay must report the goal resume blocker before _session/goal reaches the peer"
-                );
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while !root.path().join("resumes").exists() {
-                        tokio::select! {
-                            event = receive.recv() => {
-                                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap();
+
+                    let mut cut = if track_cut {
+                        // Even an explicit form answer cannot reach ACP until
+                        // the relay has applied its reservation in FIFO order.
+                        let reservation = tokio::time::timeout(Duration::from_secs(10), async {
+                            loop {
+                                let event = receive.recv().await.unwrap();
+                                if matches!(event, RuntimeEvent::NativeGoalResumeSent { .. }) {
+                                    break event;
+                                }
+                                crate::worker_runtime::record_runtime_event(
+                                    &relay,
+                                    &mut in_flight,
+                                    event,
+                                )
+                                .unwrap();
                             }
-                            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        })
+                        .await
+                        .unwrap();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        assert!(
+                            !root.path().join("resumes").exists(),
+                            "_session/goal must wait for the relay reservation"
+                        );
+                        crate::worker_runtime::record_runtime_event(
+                            &relay,
+                            &mut in_flight,
+                            reservation,
+                        )
+                        .unwrap();
+                        let mut cut = relay.lock().unwrap().reserve_live_baseline();
+                        assert!(cut.try_recv().is_err());
+                        assert!(
+                            relay
+                                .observe()
+                                .unwrap()
+                                .adoption_blockers()
+                                .iter()
+                                .any(|blocker| blocker.contains("goal resume"))
+                        );
+                        tokio::time::timeout(Duration::from_secs(10), async {
+                            while !root.path().join("resumes").exists() {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        })
+                        .await
+                        .unwrap();
+                        if timed_out {
+                            tokio::time::pause();
+                            tokio::time::advance(Duration::from_secs(31)).await;
+                            tokio::time::resume();
+                        } else {
+                            std::fs::write(root.path().join("release-resume"), "").unwrap();
+                        }
+                        Some(cut)
+                    } else {
+                        None
+                    };
+
+                    let result = tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            tokio::select! {
+                                result = &mut ack => break result.unwrap(),
+                                event = receive.recv() => {
+                                    crate::worker_runtime::record_runtime_event(
+                                        &relay, &mut in_flight, event.unwrap(),
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    if let Some(cut) = &mut cut {
+                        if timed_out || reject_code == Some(-32603) {
+                            let error = result.unwrap_err();
+                            let expected = if timed_out {
+                                "acknowledgement timed out"
+                            } else {
+                                "recorded rejection"
+                            };
+                            assert!(error.contains(expected), "{error}");
+                            assert!(
+                                cut.try_recv().is_err(),
+                                "an ambiguous resume failure must retain its reservation"
+                            );
+                            if timed_out {
+                                std::fs::write(root.path().join("release-resume"), "").unwrap();
+                            }
+                        } else if reject_code.is_some() {
+                            assert!(result.unwrap_err().contains("recorded rejection"));
+                            tokio::time::timeout(Duration::from_secs(10), async {
+                                loop {
+                                    tokio::select! {
+                                        cut = &mut *cut => {
+                                            assert!(cut.unwrap().is_ok());
+                                            break;
+                                        }
+                                        event = receive.recv() => {
+                                            crate::worker_runtime::record_runtime_event(
+                                                &relay, &mut in_flight, event.unwrap(),
+                                            )
+                                            .unwrap();
+                                        }
+                                    }
+                                }
+                            })
+                            .await
+                            .unwrap();
+                        } else {
+                            result.unwrap();
+                            tokio::time::timeout(Duration::from_secs(10), async {
+                                while !relay.observe().unwrap().turn_in_progress() {
+                                    let event = receive.recv().await.unwrap();
+                                    crate::worker_runtime::record_runtime_event(
+                                        &relay,
+                                        &mut in_flight,
+                                        event,
+                                    )
+                                    .unwrap();
+                                }
+                            })
+                            .await
+                            .unwrap();
+                            assert!(cut.try_recv().is_err());
+                            relay
+                                .lock()
+                                .unwrap()
+                                .record_observation(
+                                    mj_core::relay::RelayObservation::HarnessTurnSettled {
+                                        autonomous: None,
+                                        origin: None,
+                                        prompt_in_flight: false,
+                                    },
+                                )
+                                .unwrap();
+                            assert!(cut.try_recv().unwrap().is_ok());
+                        }
+                    } else {
+                        result.unwrap();
+                    }
+                    assert_eq!(
+                        context.lock().unwrap().state.answered_resume.as_deref(),
+                        Some("explicit-1")
+                    );
+                }
+            }
+            if queued_prompt {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        match receive.recv().await.unwrap() {
+                            RuntimeEvent::PromptFinished {
+                                request_id,
+                                stop_reason,
+                                ..
+                            } => {
+                                assert_eq!(request_id, "queued-work");
+                                assert_eq!(
+                                    mj_core::state::classify_prompt_completion(&stop_reason),
+                                    mj_core::state::PromptCompletion::Finished,
+                                );
+                                break;
+                            }
+                            RuntimeEvent::ElicitationRequested { .. } => {
+                                panic!("ordinary reopen must not ask to resume the goal")
+                            }
+                            _ => {}
                         }
                     }
                 })
                 .await
                 .unwrap();
-                if timed_out {
-                    tokio::time::pause();
-                    tokio::time::advance(Duration::from_secs(31)).await;
-                    tokio::time::resume();
-                    tokio::time::timeout(Duration::from_secs(10), async {
-                        loop {
-                            let event = receive.recv().await.unwrap();
-                            let question =
-                                matches!(&event, RuntimeEvent::ElicitationRequested { .. });
-                            crate::worker_runtime::record_runtime_event(
-                                &relay,
-                                &mut in_flight,
-                                event,
-                            )
-                            .unwrap();
-                            if question {
-                                break;
-                            }
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    assert!(
-                        cut.try_recv().is_err(),
-                        "an ambiguous timeout must not withdraw the resume reservation"
-                    );
-                }
-                std::fs::write(root.path().join("release-resume"), "").unwrap();
-                if let Some(code) = reject_code {
-                    tokio::time::timeout(Duration::from_secs(10), async {
-                        loop {
-                            let event = receive.recv().await.unwrap();
-                            let question =
-                                matches!(&event, RuntimeEvent::ElicitationRequested { .. });
-                            crate::worker_runtime::record_runtime_event(
-                                &relay,
-                                &mut in_flight,
-                                event,
-                            )
-                            .unwrap();
-                            if question {
-                                break;
-                            }
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    if code == -32603 {
-                        assert!(
-                            cut.try_recv().is_err(),
-                            "an internal error remains ambiguous"
-                        );
-                    } else {
-                        assert!(
-                            cut.try_recv().unwrap().is_ok(),
-                            "peer rejected resume without a turn update"
-                        );
-                    }
-                } else {
-                    tokio::time::timeout(Duration::from_secs(10), async {
-                        while !relay.observe().unwrap().turn_in_progress() {
-                            let event = receive.recv().await.unwrap();
-                            crate::worker_runtime::record_runtime_event(
-                                &relay,
-                                &mut in_flight,
-                                event,
-                            )
-                            .unwrap();
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    assert!(cut.try_recv().is_err());
-                    relay
-                        .lock()
-                        .unwrap()
-                        .record_observation(mj_core::relay::RelayObservation::HarnessTurnSettled {
-                            autonomous: None,
-                            origin: None,
-                            prompt_in_flight: false,
-                        })
-                        .unwrap();
-                    assert!(cut.try_recv().unwrap().is_ok());
-                }
-            }
-            let mut bytes = 0;
-            if answer.is_some() || (asking && status == "active") {
-                loop {
-                    let event = tokio::time::timeout(Duration::from_secs(10), receive.recv())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    if let RuntimeEvent::ElicitationRequested { request } = event {
-                        assert_eq!(request.id, RECOVERY_ID);
-                        assert!(!root.path().join("resumes").exists());
-                        {
-                            let mut state = relay.lock().unwrap();
-                            state.operator_away.set(mj_core::state::OperatorPresence {
-                                away: true,
-                                revision: 1,
-                            });
-                            state
-                                .record_observation(
-                                    mj_core::relay::RelayObservation::ElicitationRequested {
-                                        request: request.clone(),
-                                    },
-                                )
-                                .unwrap();
-                            let cut = state.live_session_baseline().unwrap();
-                            assert_eq!(cut.questions, vec![request.clone()]);
-                            let adopted =
-                                mj_transcript::projection::materialized_session_from_live_baseline(
-                                    &cut,
-                                )
-                                .unwrap();
-                            assert_eq!(adopted.pending_elicitations, vec![request.clone()]);
-                        }
-                        let Some(accept) = answer else {
-                            break;
-                        };
-                        let response = if accept {
-                            ElicitationResponse::Accept {
-                                content: BTreeMap::from([(
-                                    "action".into(),
-                                    ElicitationValue::String("resume".into()),
-                                )]),
-                            }
-                        } else {
-                            ElicitationResponse::Decline
-                        };
-                        let (resolved, ack) = oneshot::channel();
-                        tx.send(CommandRequest::ResolveElicitation {
-                            elicitation_id: RECOVERY_ID.into(),
-                            response,
-                            resolved,
-                        })
-                        .await
-                        .unwrap();
-                        // Continue draining while the control response is in flight.
-                        let ack = async { ack.await.unwrap().unwrap() };
-                        tokio::pin!(ack);
-                        loop {
-                            tokio::select! { _ = &mut ack => break, event = receive.recv() => { assert!(event.is_some()); } }
-                        }
-                        assert!(
-                            relay
-                                .observe()
-                                .unwrap()
-                                .operator_away
-                                .live_questions()
-                                .is_empty()
-                        );
-                        assert_eq!(
-                            context.lock().unwrap().state.answered_resume.as_deref(),
-                            Some("explicit-1")
-                        );
-                        break;
-                    }
-                }
             }
             tx.send(CommandRequest::Close {
                 request_id: "close".into(),
@@ -938,7 +1026,7 @@ for line in sys.stdin:
                 .unwrap_or_default()
                 .lines()
                 .count();
-            assert_eq!(count, expected_resumes);
+            assert_eq!(count, usize::from(decision || answer == Some(true)));
             if running {
                 assert_eq!(bytes, 80000);
             }
