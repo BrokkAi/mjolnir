@@ -23,7 +23,9 @@ use super::backend::{
 };
 use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
-use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
+use super::worker_binary::{
+    bridge_readiness_stage, start_worker_durably_with_aws_profile, worker_probe_diagnosis,
+};
 use super::{Controller, execute_checked, now};
 use crate::launch_timing::LaunchPhaseTimer;
 
@@ -146,6 +148,7 @@ struct PreparedWorkerPayload {
     backend: targets::TargetLocator,
     worker_root: String,
     launch: Option<mj_core::worker_launch::WorkerLaunchConfig>,
+    staged_aws_profile: Option<String>,
 }
 
 impl PreparedWorkerPayload {
@@ -153,7 +156,7 @@ impl PreparedWorkerPayload {
         self,
         session_id: &str,
         executor: &impl CommandExecutor,
-    ) -> Result<(targets::TargetLocator, String)> {
+    ) -> Result<(targets::TargetLocator, String, Option<String>)> {
         let _timing = LaunchPhaseTimer::new(session_id, "prepare harness after checkout");
         if let Some(launch) = self.launch {
             let syncing = StagedExecutor::new(executor, ProvisionStage::Syncing);
@@ -164,7 +167,7 @@ impl PreparedWorkerPayload {
                 &launch,
             )?;
         }
-        Ok((self.backend, self.worker_root))
+        Ok((self.backend, self.worker_root, self.staged_aws_profile))
     }
 }
 
@@ -213,7 +216,7 @@ impl Controller {
                         self.prepare_borrowed_create(session_id, executor)
                     };
                     let result = match attempt {
-                        Ok((backend, worker_root)) => {
+                        Ok((backend, worker_root, staged_aws_profile)) => {
                             let gate = (!owns_environment)
                                 .then(|| container_start_gate(&backend))
                                 .flatten();
@@ -227,6 +230,7 @@ impl Controller {
                                 &backend,
                                 &worker_root,
                                 owns_environment,
+                                staged_aws_profile.as_deref(),
                             )
                             .await
                             .map_err(|error| {
@@ -261,7 +265,11 @@ impl Controller {
                 Ok(native_session_id)
             });
             match committed {
-                Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
+                Ok(native_session_id) => {
+                    self.mark_worker_connected(session_id, native_session_id)?;
+                    let owner = crate::worker_lifecycle::require(session_id)?;
+                    crate::database::finish_worker_restart(session_id, owner.operation_id())
+                }
                 Err(error) if child && !interrupted() => {
                     let error = match previous_failure {
                         Some(first) => anyhow::anyhow!("attempt 1: {first}; attempt 2: {error:#}"),
@@ -293,7 +301,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         child: bool,
         remember_launch_choices: bool,
-    ) -> Result<(targets::TargetLocator, String)> {
+    ) -> Result<(targets::TargetLocator, String, Option<String>)> {
         let _total = LaunchPhaseTimer::new(session_id, "provision session");
         let credentials = LaunchPhaseTimer::new(session_id, "resolve GitHub credentials");
         let github_token = self
@@ -332,12 +340,12 @@ impl Controller {
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
-    ) -> Result<(targets::TargetLocator, String)> {
+    ) -> Result<(targets::TargetLocator, String, Option<String>)> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
         targets::verify_locator(&backend, session_id)?;
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         self.prepare_subagent_report_dir(session_id, &backend, syncing)?;
-        self.prepare_worker_files(
+        let staged_aws_profile = self.prepare_worker_files(
             session_id,
             &backend,
             &worker_root,
@@ -345,7 +353,7 @@ impl Controller {
             super::worker_binary::LaunchHistory::Stored,
         )?;
         mj_core::test_hooks::reach_test_hook("subagent_create_before_worker_start")?;
-        Ok((backend, worker_root))
+        Ok((backend, worker_root, staged_aws_profile))
     }
 
     fn record_child_startup_failure(
@@ -385,8 +393,7 @@ impl Controller {
             .state
             .sessions
             .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
+            .with_context(|| format!("unknown session {session_id}"))?;
         ensure!(
             // The states an unfinished create's record can be in.
             crate::database::holds_create_intent(session.state),
@@ -398,16 +405,13 @@ impl Controller {
                 session_id,
                 &super::failed_launch_cleanup_executor(),
             )?;
-        } else if let Some(locator) = &session.target {
-            let backend = backend_locator(locator, &session, &self.config)?;
-            let root = targets::worker_root(&backend, session_id)?;
-            super::worker_binary::stop_worker(
-                &crate::worker_lifecycle::require(session_id)?,
+        } else {
+            super::environment::stop_borrower(
+                session_id,
+                &self.config,
                 &super::failed_launch_cleanup_executor(),
-                &backend,
-                &root,
             )
-            .context("stop the interrupted attempt's worker")?;
+            .context("clean up the interrupted attempt's worker")?;
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         if owns_environment {
@@ -492,16 +496,8 @@ impl Controller {
                 let outcome = (|| -> Result<()> {
                     if owns_environment {
                         self.retire_failed_create_environment(session_id, executor)?;
-                    } else if let Some(locator) = &previous.target {
-                        let backend = backend_locator(locator, &previous, &self.config)?;
-                        targets::verify_locator(&backend, session_id)?;
-                        let root = targets::worker_root(&backend, session_id)?;
-                        super::worker_binary::stop_worker(
-                            &crate::worker_lifecycle::require(session_id)?,
-                            executor,
-                            &backend,
-                            &root,
-                        )?;
+                    } else {
+                        super::environment::stop_borrower(session_id, &self.config, executor)?;
                     }
                     Ok(())
                 })();
@@ -1139,7 +1135,7 @@ impl Controller {
             bail!("session {session_id} has no provisioned target");
         }
         let updated_at = now();
-        crate::database::mark_session_worker_connected(
+        let staged_aws_profile = crate::database::mark_session_worker_connected(
             session_id,
             native_session_id.as_deref(),
             &updated_at,
@@ -1150,6 +1146,7 @@ impl Controller {
             .get_mut(session_id)
             .expect("session disappeared after its worker connection was saved");
         session.state = SessionState::Running;
+        session.staged_aws_profile = staged_aws_profile;
         if native_session_id.is_some() {
             session.native_session_id = native_session_id;
         }
@@ -1167,7 +1164,7 @@ impl Controller {
         // Worker/profile installation is independent of repository cloning.
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         let (backend, worker_root) = self.worker_placement(session_id)?;
-        let (launch, _) = self.stage_worker_files_for(
+        let (launch, staged) = self.stage_worker_files_for(
             session_id,
             &backend,
             &worker_root,
@@ -1180,6 +1177,7 @@ impl Controller {
             backend,
             worker_root,
             launch,
+            staged_aws_profile: staged.aws_profile,
         })
     }
 
@@ -1190,6 +1188,7 @@ impl Controller {
         backend: &targets::TargetLocator,
         worker_root: &str,
         initialize_workspace: bool,
+        staged_aws_profile: Option<&str>,
     ) -> Result<Option<String>> {
         crate::worker_lifecycle::run(session_id, "connect and start worker", executor, async {
             let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
@@ -1215,7 +1214,7 @@ impl Controller {
                     LaunchPhaseTimer::new(session_id, "start worker and await native session");
                 let mut relay = {
                     let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-                    start_worker_durably(
+                    start_worker_durably_with_aws_profile(
                         &crate::worker_lifecycle::require(session_id)?,
                         self.state.sessions[session_id]
                             .target
@@ -1225,6 +1224,7 @@ impl Controller {
                         backend,
                         worker_root,
                         &self.config.github,
+                        Some(staged_aws_profile),
                     )?;
                     connect_started_worker(reconnect, session_id, executor, backend, worker_root)
                         .await?
@@ -1236,8 +1236,6 @@ impl Controller {
                     profile.kind,
                 )
                 .await?;
-                let owner = crate::worker_lifecycle::require(session_id)?;
-                crate::database::finish_worker_restart(session_id, owner.operation_id())?;
                 Ok(Some(native_session_id))
             }
             .await;
@@ -1902,76 +1900,41 @@ pub(super) fn drop_nitro_host_directories(
 /// overlay alone: a failed probe is no evidence of an unsupported filesystem,
 /// and refusing to provision over one would cost the user their session.
 ///
-/// Apple's `container` engine already mounts every extra directory read-only,
-/// and EC2 copies the directory instead of mounting it, so neither is probed.
 pub(super) fn enforce_overlay_capable_mounts(
     target: &targets::TargetTemplate,
     mounts: &mut [targets::AdditionalMount],
     executor: &impl CommandExecutor,
 ) -> Vec<String> {
-    let ssh = match target {
-        targets::TargetTemplate::LocalPodman(_) | targets::TargetTemplate::LocalDocker(_) => None,
-        targets::TargetTemplate::SshPodman { ssh, .. }
-        | targets::TargetTemplate::SshDocker { ssh, .. } => Some(ssh),
-        _ => return Vec::new(),
-    };
     let overlaid = mounts
         .iter()
         .filter(|mount| mount.access == targets::MountAccess::Cow)
         .map(|mount| mount.source.clone())
         .collect::<Vec<_>>();
-    if overlaid.is_empty() {
-        return Vec::new();
-    }
-    // `stat` on this host cannot see what a VM-hosted Docker daemon mounts.
-    if matches!(target, targets::TargetTemplate::LocalDocker(_)) {
-        match targets::local_docker_vm_share(executor) {
-            Ok(Some(reason)) => {
-                return mounts
-                    .iter_mut()
-                    .filter(|mount| mount.access == targets::MountAccess::Cow)
-                    .map(|mount| {
-                        mount.access = mount.access.without_overlay();
-                        format!(
-                            "Mounted {} read-only: {reason}, which cannot back the \
-                             copy-on-write overlay.",
-                            mount.source.display()
-                        )
-                    })
-                    .collect();
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                error = format!("{error:#}"),
-                "could not identify the Docker daemon platform; probing this host's filesystems"
-            ),
-        }
-    }
-    let filesystems = match targets::probe_filesystem_types(ssh, &overlaid, executor) {
-        Ok(filesystems) => filesystems,
+    let reasons = match targets::overlay_read_only_reasons(target, &overlaid, executor) {
+        Ok(reasons) => reasons,
         Err(error) => {
             tracing::warn!(
                 error = format!("{error:#}"),
-                "could not probe attached-directory filesystems; preserving overlay mounts"
+                "could not determine attachment overlay support; preserving overlay mounts"
             );
             return vec![format!(
-                "Could not read the filesystem under the attached directories, so they keep the \
+                "Could not determine overlay support for the attached directories, so they keep the \
                  copy-on-write overlay: {error:#}"
             )];
         }
     };
     let mut notices = Vec::new();
-    for (mount, filesystem) in mounts
+    for (mount, reason) in mounts
         .iter_mut()
         .filter(|mount| mount.access == targets::MountAccess::Cow)
-        .zip(filesystems)
+        .zip(reasons)
     {
-        let Some(reason) = targets::overlay_unsupported_filesystem(&filesystem) else {
+        let Some(reason) = reason else {
             continue;
         };
         mount.access = mount.access.without_overlay();
         notices.push(format!(
-            "Mounted {} read-only: the overlay is unreliable on {filesystem} ({reason}).",
+            "Mounted {} read-only: {reason}.",
             mount.source.display()
         ));
     }

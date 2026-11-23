@@ -149,7 +149,7 @@ for line in sys.stdin:
     if method == 'initialize':
         result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True, 'sessionCapabilities':{'resume':{}}},
             '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions'],
-                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}}}
+                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear'],'resumePolicies':['pause','preserve']}}}}}
     elif method in ('session/new', 'session/resume', 'session/load'):
         assert method == 'session/load', request
         update({'sessionUpdate':'agent_message_chunk', 'content':{'type':'text','text':'old history ' * 12000}})
@@ -373,6 +373,13 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         None,
     ))
     .unwrap();
+    let resume_policy = "/_meta/jetbrains/air/goal/resumePolicy";
+    assert_eq!(
+        request
+            .pointer(resume_policy)
+            .and_then(serde_json::Value::as_str),
+        Some("preserve")
+    );
     assert_eq!(
         request.get("mcpServers"),
         Some(&serde_json::json!([])),
@@ -394,6 +401,12 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         ))
         .unwrap(),
     ] {
+        assert_eq!(
+            opened
+                .pointer(resume_policy)
+                .and_then(serde_json::Value::as_str),
+            Some("pause")
+        );
         assert!(
             opened
                 .get("mcpServers")
@@ -1342,7 +1355,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 
         spec.subagent_policy = mj_core::subagent::SubagentPolicy::Native;
         spec.subagent_mcp_socket = None;
-        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap());
         assert!(
             meta.pointer("/claudeCode/options/disallowedTools")
                 .is_none(),
@@ -1359,7 +1372,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
             subtle: None,
         };
         spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
-        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap());
         let hidden = match harness {
             HarnessKind::Claude => meta.pointer("/claudeCode/options/disallowedTools"),
             _ => meta.pointer("/codex/options/disallowedTools"),
@@ -1381,7 +1394,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         ] {
             spec.subagent_policy = policy;
             spec.subagent_mcp_socket = None;
-            let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
+            let meta = serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap());
             let path = if harness == HarnessKind::Claude {
                 "/claudeCode/options/disallowedTools"
             } else {
@@ -1547,7 +1560,8 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     };
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
         spec.harness = harness;
-        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap_or_default());
+        let meta =
+            serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap_or_default());
         let (pointer, expected) = match harness {
             HarnessKind::Claude => (
                 "/claudeCode/options/disallowedTools",
@@ -2520,6 +2534,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         elicitation_id,
         action,
         reply,
+        answers,
     } = resolution
     else {
         unreachable!()
@@ -2544,6 +2559,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
             elicitation_id,
             action,
             reply,
+            answers,
         })
         .unwrap();
     let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");
@@ -8771,6 +8787,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                     elicitation_id,
                     action,
                     reply,
+                    ..
                 } => {
                     assert!(reply.is_none(), "harness withdrawal is not a user reply");
                     break (requested, (elicitation_id, action));
@@ -8781,8 +8798,9 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     })
     .await
     .expect("a withdrawn form resolves");
-    assert_eq!(requested.as_deref(), Some("elicitation-1"));
-    assert_eq!(resolved, ("elicitation-1".to_owned(), "cancel".to_owned()));
+    let requested = requested.expect("the runtime published the form");
+    assert!(requested.starts_with("elicitation-"));
+    assert_eq!(resolved, (requested, "cancel".to_owned()));
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
     bridge.abort();

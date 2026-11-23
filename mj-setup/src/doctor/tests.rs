@@ -1025,6 +1025,7 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
 }
 
 // Hard-won: ecc10219: doctor omitted the built-in Podman target that the dashboard already listed and checked.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn podman_checks_cover_the_built_in_podman_target() {
     let checks = podman_checks(
@@ -1054,7 +1055,6 @@ fn docker_desktop_smoke_verifies_the_read_only_attachment() {
         Ok(output(b"created\n")),
         Ok(output(b"ok\n")),
         Ok(output(b"removed\n")),
-        Ok(output(b"Docker Desktop 4.40.0 (187762)\n")),
     ]);
 
     let check = docker_image_check("docker", "ubuntu:24.04", &executor, true);
@@ -1066,6 +1066,13 @@ fn docker_desktop_smoke_verifies_the_read_only_attachment() {
             .contains("read-only attachment smoke test passed")
     );
     let commands = executor.commands.borrow();
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.args.first().is_some_and(|arg| arg == "version"))
+            .count(),
+        1
+    );
     assert!(commands.iter().all(|command| {
         !command
             .args
@@ -1472,6 +1479,7 @@ fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
 }
 
 /// Image checks must stop when the host's Podman preflight is unsupported.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
     let executor = FakeExecutor::new([Ok(output(b"")), Ok(output(b"podman version 3.4.7\n"))]);
@@ -1532,6 +1540,7 @@ fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
 /// freshness check for Linux targets was missing (launch finding R5-2). A
 /// built-in target whose engine is unavailable needs no worker.
 // Hard-won: 435bf565: doctor omitted worker and architecture checks for a ready built-in target absent from config.toml.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
     let engines = [
@@ -1684,6 +1693,20 @@ fn session_environment_reports_node_paths_and_installs_missing_with_curl() {
 }
 
 #[test]
+fn macos_doctor_reports_podman_unsupported_without_running_it() {
+    let executor = FakeExecutor::new([]);
+    let platform = ApplePlatform::Macos {
+        architecture: "aarch64".into(),
+        major_version: 26,
+    };
+    let check = local_podman_runtime_check(&executor, &platform);
+    assert_eq!(check.status, CheckStatus::Unsupported);
+    assert!(check.detail.contains("use Apple container or Docker"));
+    assert!(executor.commands.borrow().is_empty());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
 fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
     for response in [
         Err(anyhow!("No such file or directory (os error 2)")),
@@ -1772,7 +1795,8 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
         assert!(instructions.contains("installs its own pinned Node.js"));
     }
     let macos = setup_instructions(InstructionsPlatform::Macos);
-    assert!(macos.contains("podman machine"), "{macos}");
+    assert!(!macos.contains("podman"), "{macos}");
+    assert!(macos.contains("Docker Desktop") && macos.contains("Apple container"));
 }
 
 /// Releases before this one wrote Mjolnir's own refs into user repositories
@@ -2126,6 +2150,22 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
 /// The remote Apple container check runs every probe on the far side of SSH,
 /// and its failure names the one thing that is missing (a running daemon)
 /// rather than an unreachable host.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn remote_apple_without_platform_requires_an_arm_worker() {
+    let mut config = Config::default();
+    config.targets.insert(
+        "mac-apple".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-apple-container",
+            "host": "mac.test",
+            "image": "example.invalid/agent:latest"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(container_worker_architectures(Ok(&config)), ["aarch64"]);
+}
+
 #[test]
 fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
     let ssh = RuntimeSshTarget {
@@ -2137,7 +2177,7 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         Ok(output(b"Darwin arm64\n")),
         Ok(output(b"26.1\n")),
         Ok(output(b"container 1.2.3\n")),
-        Ok(output(b"running\n")),
+        Ok(output(br#"{"status":"running"}"#)),
         Ok(output(b"")),
     ]);
     let check = ssh_apple_container_check(
@@ -2164,7 +2204,11 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         Ok(output(b"Darwin arm64\n")),
         Ok(output(b"26.1\n")),
         Ok(output(b"container 1.2.3\n")),
-        Ok(failed(b"Error: container system service is not running\n")),
+        Ok(CommandOutput {
+            status: 1,
+            stdout: br#"{"status":"unregistered"}"#.to_vec(),
+            stderr: Vec::new(),
+        }),
     ]);
     let check = ssh_apple_container_check(
         "mac-apple",
@@ -2173,16 +2217,97 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         &stopped,
         false,
     );
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(check.detail.contains("not running"), "{}", check.detail);
+    assert_eq!(check.status, CheckStatus::Warning);
     assert!(
-        check
-            .remediation
-            .as_deref()
-            .is_some_and(|fix| fix.contains("container system start") || fix.contains("container")),
-        "{:?}",
-        check.remediation
+        check.detail.contains("service is stopped"),
+        "{}",
+        check.detail
     );
+    assert!(check.remediation.is_none());
+    assert_eq!(stopped.commands.borrow().len(), 5);
+    assert!(
+        stopped.commands.borrow()[4]
+            .args
+            .last()
+            .unwrap()
+            .ends_with("'status' '--format' 'json'")
+    );
+}
+
+#[test]
+fn apple_container_doctor_smoke_starts_stopped_services_before_creating_a_container() {
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_TEST_APPLE_CONTAINER_DOCTOR_SMOKE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "apple_container_doctor_smoke_starts_stopped_services_before_creating_a_container",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "apple-container-doctor-smoke")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    let ssh = RuntimeSshTarget {
+        destination: "dev@mac.example.test".into(),
+        ssh_args: vec![],
+    };
+    let platform = ApplePlatform::Macos {
+        architecture: "arm64".into(),
+        major_version: 27,
+    };
+    let image = "example.invalid/apple-smoke:1";
+    for remote in [false, true] {
+        let stopped = CommandOutput {
+            status: 1,
+            stdout: br#"{"status":"unregistered"}"#.to_vec(),
+            stderr: vec![],
+        };
+        let remote_probes = remote
+            .then(|| {
+                [
+                    Ok(output(b"")),
+                    Ok(output(b"Darwin arm64")),
+                    Ok(output(b"27.0.1")),
+                ]
+            })
+            .into_iter()
+            .flatten();
+        let executor = FakeExecutor::new(remote_probes.chain([
+            Ok(output(b"container 1.7.0")),
+            Ok(stopped.clone()),
+            Ok(stopped),
+            Ok(output(b"")),
+            Ok(output(br#"{"status":"running"}"#)),
+            Ok(output(b"")),
+            Ok(output(b"")),
+            Ok(output(b"")),
+        ]));
+        let check = if remote {
+            ssh_apple_container_check("mac", &ssh, image, &executor, true)
+        } else {
+            apple_container_check(&platform, &executor, true, image.into())
+        };
+        assert_eq!(check.status, CheckStatus::Ready, "{check:?}");
+        let commands = executor.commands.borrow();
+        let purposes = commands
+            .iter()
+            .map(|command| command.purpose.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &purposes[usize::from(remote) * 3 + 2..usize::from(remote) * 3 + 5],
+            [
+                "check Apple container runtime",
+                "start Apple container runtime",
+                "check Apple container runtime",
+            ],
+        );
+        assert!(executor.responses.borrow().is_empty());
+    }
 }
 
 /// A host that does not answer has one problem, not two: its GitHub check
@@ -2422,5 +2547,41 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         env!("CARGO_MANIFEST_DIR"),
         "doctor-aws-scope-checks",
         &String::from_utf8(rendered).unwrap(),
+    );
+}
+
+#[test]
+fn golden_doctor_retired_harness_sessions() {
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+    use mj_store::database::{self, test_fixtures};
+
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_DOCTOR";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "golden_doctor_retired_harness_sessions",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "retired-harness-doctor")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    assert!(retired_harness_sessions_check().is_none());
+    let _writer = database::install_isolated_test_writer();
+    let mut session = test_fixtures::checkpoint_test_session("retired-session");
+    session.target_template_id = "remote-podman".into();
+    database::save_session(&session).unwrap();
+    assert!(retired_harness_sessions_check().is_none());
+    test_fixtures::retire_test_harness(&session.id).unwrap();
+
+    let mut rendered = Vec::new();
+    render_human(&[retired_harness_sessions_check().unwrap()], &mut rendered).unwrap();
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-retired-harness-sessions",
+        std::str::from_utf8(&rendered).unwrap(),
     );
 }

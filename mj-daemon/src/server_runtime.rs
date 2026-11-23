@@ -39,6 +39,21 @@ use crate::daemon::{CreateSessionRequest, LifecycleControl, ResumeSessionRequest
 use crate::pollers::QUOTA_STALE_AFTER;
 use mj_controller::controller::config_only_controller;
 
+fn prompt_submission_error(error: anyhow::Error) -> anyhow::Error {
+    use mj_controller::session_manager::SubmitRefusalCode;
+    use mj_core::relay::RelayErrorCode;
+
+    if error.is::<mj_client::session::Refused>()
+        && error
+            .downcast_ref::<SubmitRefusalCode>()
+            .is_some_and(|code| code.0 == RelayErrorCode::InvalidState)
+    {
+        let message = error.root_cause().to_string();
+        return error.context(Refusal::precondition(message));
+    }
+    error
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerArgs {
     bind: String,

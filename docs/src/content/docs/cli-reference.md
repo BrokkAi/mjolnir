@@ -314,7 +314,7 @@ mj message --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>] 
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-input] [--json]
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>]
              [--role <role>]... [--finished-only] [--json]
-mj diff --session <id> [--base <revision>] [--json]
+mj diff --session <id> [--base <revision>] [--json] [<path>...]
 mj export --session <id> [--kind patch|branch|bundle] [--branch <name>]
            [--out <path>] [--json]
 mj fetch --session <id> --path <path> [--stdout | --ls] [--json]
@@ -504,20 +504,21 @@ mj new --workspace eval --bundle product --target builder \
   command fails and says so. A request that arrives while a dialog is open
   waits until the dialog closes.
 
-`mj diff` compares against the recorded launch base by default. Use `--base`
-to compare against an explicit Git commit or revision, for example after
-checking out an older task base. This does not change the session's recorded
-baseline. `--json` returns `diff`, `base`, `head`, and `head_descends_from_base`;
-`base` and `head` are resolved commit IDs. The patch includes committed, staged,
-unstaged, and untracked work. An unknown base is refused. `mj diff` asks the
-worker for the metadata either way, so both forms need a worker that supports
-it; an older worker reports that the session needs upgrading.
+`mj diff` prints a tracked diffstat and a separate list of untracked files.
+Pass one or more checkout-root-relative paths to see a unified patch for those
+tracked files. The patch includes committed, staged, and unstaged changes.
+Use `--` before a path that starts with a dash. Use `mj fetch` to read untracked
+files.
+
+The comparison uses the recorded launch base. Pass `--base` to compare against
+another Git commit or revision without changing the recorded base. An unknown
+revision is refused. `--json` includes the resolved `base` and `head` commit
+IDs. A summary also includes tracked files and their line counts, up to 500
+untracked paths, and the full untracked count.
 
 When `head_descends_from_base` is false, the session's HEAD is no longer a
-descendant of the base — the agent rebased, amended, or reset — so the diff
-carries history changes as well as session work. Without `--json`, `mj diff`
-writes the patch to standard output and one `warning:` line to standard error
-saying so. An older worker leaves the field out, and no warning is printed.
+descendant of the base, so the diff includes history changes as well as
+session work. In text mode, `mj diff` reports this on standard error.
 
 Every session lives in a workspace that the dashboard and the web viewer list,
 so `mj new` needs `--workspace <name>` (or `--workspace-id <id>`). Without it,
@@ -694,7 +695,8 @@ use `mj interrupt-turn`. Both old names fail with a notice naming their
 replacement and perform no lifecycle action.
 
 `mj export` writes a patch or a bundle to `--out`, or to standard output when
-no file is named; `--kind branch` pushes the session's work and reports the
+no file is named. Patch exports include all tracked changes. Use `mj fetch` to
+read untracked files. `--kind branch` pushes the session's work and reports the
 branch and remote instead. With `--json` and `--out`, `mj export` prints one
 object with the `path`, the `bytes` written, and the `format` (`patch` or
 `bundle`); with `--json` and no `--out` the export itself is still the output.

@@ -53,7 +53,6 @@ mod capacity_tests;
 mod snapshot_tests;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -747,19 +746,10 @@ impl DurableRelay {
             .with_context(|| format!("create relay state directory {}", root.display()))?;
 
         let state_path = root.join(RELAY_STATE_FILE);
+        let mut upgraded_state = false;
         let mut snapshot = if state_path.exists() {
-            // Legacy snapshots stored pretty JSON and duplicated terminal bodies.
-            // Bound the read independently of the compact write budget.
-            let mut bytes = Vec::new();
-            fs::File::open(&state_path)?
-                .take((RELAY_SNAPSHOT_BYTE_BUDGET * 4 + 1) as u64)
-                .read_to_end(&mut bytes)
-                .with_context(|| format!("read {}", state_path.display()))?;
-            ensure_byte_budget(
-                bytes.len(),
-                RELAY_SNAPSHOT_BYTE_BUDGET * 4,
-                "legacy relay snapshot",
-            )?;
+            let bytes =
+                fs::read(&state_path).with_context(|| format!("read {}", state_path.display()))?;
             let mut snapshot: RelaySnapshot = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse {}", state_path.display()))?;
             if snapshot.format_version > RELAY_STATE_VERSION {
@@ -799,6 +789,7 @@ impl DurableRelay {
                 snapshot.legacy_command_retention = true;
             }
             seed_missing_notification_time(&mut snapshot);
+            upgraded_state = snapshot.format_version < RELAY_STATE_VERSION;
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -878,8 +869,8 @@ impl DurableRelay {
                             queued.command_id
                         );
                     }
-                    let payload = match queued.kind {
-                        CanonicalQueuedCommandKind::Prompt => StoredQueuedRelayPayload::Prompt {
+                    let command = match queued.kind {
+                        CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
                             prompt: queued
                                 .content
                                 .into_iter()
@@ -893,24 +884,12 @@ impl DurableRelay {
                                 })?,
                         },
                         CanonicalQueuedCommandKind::SetConfig { key, value } => {
-                            StoredQueuedRelayPayload::SetConfig { key, value }
-                        }
-                    };
-                    let command = match &payload {
-                        StoredQueuedRelayPayload::Prompt { prompt } => RelayCommand::Prompt {
-                            prompt: prompt.clone(),
-                        },
-                        StoredQueuedRelayPayload::SetConfig { key, value } => {
-                            RelayCommand::SetConfig {
-                                key: key.clone(),
-                                value: value.clone(),
-                            }
+                            RelayCommand::SetConfig { key, value }
                         }
                     };
                     snapshot.handled_commands.insert(
                         queued.command_id.clone(),
                         HandledRelayCommand {
-                            command: Some(command.clone()),
                             terminal_identity: None,
                             accepted_ordinal: restored.event_frontier,
                             terminal_ordinal: None,
@@ -925,9 +904,8 @@ impl DurableRelay {
                             state: RelayDispatchState::Queued,
                         },
                     );
-                    snapshot.queued_prompts.push(StoredQueuedRelayCommand {
+                    snapshot.queued_prompts.push(QueuedRelayPrompt {
                         command_id: queued.command_id,
-                        payload,
                         created_at_ms: queued.queued_at_ms,
                     });
                 }
@@ -1230,6 +1208,12 @@ impl DurableRelay {
         relay
             .turn_context
             .set_authorization_context(relay.snapshot.authorization_context());
+        relay
+            .turn_context
+            .set_trusted_user_inputs(relay.snapshot.trusted_user_inputs());
+        relay
+            .turn_context
+            .set_prior_guardian_reviews(relay.snapshot.prior_guardian_reviews());
         // Live-only work cannot be reconstructed on reopen. Nor can replay
         // prove an idle transition that was not yet saved with the snapshot.
         let replayed = relay.snapshot.latest_ordinal > snapshot_ordinal;
@@ -1242,6 +1226,7 @@ impl DurableRelay {
             relay.snapshot.activity_turn_started_at_ms = None;
         }
         if !state_path.exists()
+            || upgraded_state
             || replayed
             || assigned_store_id
             || recovered_native_history
@@ -1371,7 +1356,7 @@ impl DurableRelay {
     /// control path, so a command accepted just before an upgrade would
     /// otherwise stay accepted forever without ever being promoted.
     fn adopt_unqueued_queue_commands(&mut self) -> Result<()> {
-        let mut adopted: Vec<(u64, StoredQueuedRelayCommand)> = Vec::new();
+        let mut adopted: Vec<(u64, QueuedRelayPrompt)> = Vec::new();
         for (command_id, dispatch) in &self.snapshot.dispatches {
             if dispatch.state != RelayDispatchState::Queued
                 || !dispatch.command.is_queue_entry()
@@ -1386,29 +1371,10 @@ impl DurableRelay {
             let Some(handled) = self.snapshot.handled_commands.get(command_id) else {
                 continue;
             };
-            let payload = match &dispatch.command {
-                command @ (RelayCommand::Prompt { .. }
-                | RelayCommand::HandbackReminder { .. }
-                | RelayCommand::HoldFollowUp { .. }
-                | RelayCommand::MailboxWake { .. }
-                | RelayCommand::ContinueAuthorizedWork { .. }
-                | RelayCommand::ResumeAfterQuota { .. }) => StoredQueuedRelayPayload::Prompt {
-                    prompt: command
-                        .prompt_blocks()
-                        .expect("prompt command")
-                        .into_owned(),
-                },
-                RelayCommand::SetConfig { key, value } => StoredQueuedRelayPayload::SetConfig {
-                    key: key.clone(),
-                    value: value.clone(),
-                },
-                _ => continue,
-            };
             adopted.push((
                 handled.accepted_ordinal,
-                StoredQueuedRelayCommand {
+                QueuedRelayPrompt {
                     command_id: command_id.clone(),
-                    payload,
                     created_at_ms: epoch_millis(),
                 },
             ));
@@ -1417,7 +1383,7 @@ impl DurableRelay {
             return Ok(());
         }
         let existing = std::mem::take(&mut self.snapshot.queued_prompts);
-        let mut ordered: Vec<(u64, StoredQueuedRelayCommand)> = existing
+        let mut ordered: Vec<(u64, QueuedRelayPrompt)> = existing
             .into_iter()
             .map(|queued| {
                 let accepted = self
@@ -1456,11 +1422,7 @@ impl DurableRelay {
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.effective_steering_supported();
         state.mailbox_delivery = self.mailbox_delivery_mode;
-        // Harness-initiated turns have no owned prompt ID. Keep their existing
-        // explicit interrupt surface; queue steering always needs an owned turn.
-        state.turn_controls = (self.snapshot.active_prompt.is_some()
-            || self.snapshot.harness_turn.is_none())
-        .then(|| self.turn_controls());
+        state.turn_controls = Some(self.turn_controls());
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
         state.tools_in_flight = self.foreground_tools.snapshot();

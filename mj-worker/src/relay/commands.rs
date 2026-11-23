@@ -85,6 +85,123 @@ impl DurableRelay {
         Ok(())
     }
 
+    fn cancellable_autonomous_turn(&self) -> Option<u64> {
+        if self.snapshot.active_prompt.is_some()
+            || !matches!(
+                self.harness_turns,
+                HarnessTurnPolicy::ClaudeAdapter | HarnessTurnPolicy::Antigravity
+            )
+        {
+            return None;
+        }
+        self.snapshot
+            .autonomous_harness_turn()
+            .map(|turn| turn.first_ordinal)
+    }
+
+    fn goal_resume_in_flight(dispatch: &RelayDispatchRecord) -> bool {
+        dispatch.state == RelayDispatchState::InFlight
+            && matches!(
+                dispatch.command,
+                RelayCommand::GoalControl {
+                    action: mj_core::goal::GoalControlAction::Resume,
+                }
+            )
+    }
+
+    pub(crate) fn owns_unprompted_interrupt(&self, target: &TurnInterruptTarget) -> bool {
+        if self.snapshot.active_prompt.is_some() {
+            return false;
+        }
+        match target {
+            TurnInterruptTarget::Autonomous { start_ordinal } => {
+                self.cancellable_autonomous_turn() == Some(*start_ordinal)
+                    && self
+                        .snapshot
+                        .cancelling_harness_turn
+                        .is_some_and(|stop| stop.first_ordinal == *start_ordinal && !stop.applied)
+            }
+            TurnInterruptTarget::GoalResume { command_id } => self
+                .snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(Self::goal_resume_in_flight),
+            _ => false,
+        }
+    }
+
+    fn resolve_turn_interrupt_target(&self) -> Option<TurnInterruptTarget> {
+        if self.checkpoint_only
+            || self.snapshot.checkpoint_barrier.is_some()
+            || self.snapshot.in_place_move_hold.is_some()
+            || self.close_requested()
+            || matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+            || self.turn_cancellation_pending()
+            || self.snapshot.cancelling_harness_turn.is_some()
+        {
+            return None;
+        }
+        if let Some(active) = &self.snapshot.active_prompt {
+            return Some(TurnInterruptTarget::ActivePrompt {
+                command_id: active.command_id.clone(),
+            });
+        }
+        if let Some(queued) = self
+            .snapshot
+            .queued_prompts
+            .iter()
+            .find(|queued| is_restart_continuation(&queued.command_id))
+        {
+            return Some(TurnInterruptTarget::QueuedRestart {
+                command_id: queued.command_id.clone(),
+            });
+        }
+        if let Some(start_ordinal) = self.cancellable_autonomous_turn() {
+            return Some(TurnInterruptTarget::Autonomous { start_ordinal });
+        }
+        if let Some((command_id, _)) = self
+            .snapshot
+            .dispatches
+            .iter()
+            .find(|(_, dispatch)| Self::goal_resume_in_flight(dispatch))
+        {
+            return Some(TurnInterruptTarget::GoalResume {
+                command_id: command_id.clone(),
+            });
+        }
+        if let Some(retry) = self
+            .snapshot
+            .capacity_retry
+            .as_ref()
+            .filter(|retry| !retry.submitted)
+        {
+            return Some(TurnInterruptTarget::CapacityRetry {
+                command_id: retry.command_id.clone(),
+            });
+        }
+        self.snapshot
+            .continuation
+            .quota_recovery
+            .as_ref()
+            .filter(|recovery| !recovery.submitted)
+            .map(|recovery| TurnInterruptTarget::QuotaRecovery {
+                completed_command_id: recovery.completed_command_id.clone(),
+            })
+    }
+
+    fn resolve_turn_interrupt_command(&self) -> Option<RelayCommand> {
+        let target = self.resolve_turn_interrupt_target()?;
+        if matches!(target, TurnInterruptTarget::ActivePrompt { .. }) && self.has_held_claude_turn()
+        {
+            // Claude has finished the prompt in ACP and started an autonomous turn.
+            return Some(RelayCommand::CancelTurn);
+        }
+        Some(RelayCommand::CancelTurnTarget { target })
+    }
+
     /// One serialized owner chooses the actions we publish and admit.
     pub(super) fn turn_controls(&self) -> TurnControls {
         let mut controls = TurnControls {
@@ -93,8 +210,15 @@ impl DurableRelay {
             interrupt: None,
             message: None,
         };
-        let Some(active) = self.snapshot.active_prompt.as_ref() else {
-            if self
+        let Some(interrupt) = self.resolve_turn_interrupt_command() else {
+            if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
+                controls.message = Some("A checkpoint is in progress.".into());
+            } else if self.turn_cancellation_pending()
+                || self.snapshot.cancelling_harness_turn.is_some()
+            {
+                controls.status = TurnControlStatus::Pending;
+                controls.message = Some("Interrupting…".into());
+            } else if self
                 .snapshot
                 .steering
                 .as_ref()
@@ -104,22 +228,6 @@ impl DurableRelay {
                 controls.message = Some("Delivery unconfirmed".into());
             }
             return controls;
-        };
-        if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
-            controls.message = Some("A checkpoint is in progress.".into());
-            return controls;
-        }
-        if self.turn_cancellation_pending() {
-            controls.status = TurnControlStatus::Pending;
-            controls.message = Some("Interrupting…".into());
-            return controls;
-        }
-        let interrupt = if self.has_held_claude_turn() {
-            RelayCommand::CancelTurn
-        } else {
-            RelayCommand::CancelTurnFor {
-                active_prompt_id: active.command_id.clone(),
-            }
         };
         controls.interrupt = Some(interrupt.clone());
         if let Some(steering) = self.snapshot.steering.as_ref().filter(|s| s.holds_queue()) {
@@ -135,6 +243,14 @@ impl DurableRelay {
             });
             return controls;
         }
+        let Some(active) = self.snapshot.active_prompt.as_ref() else {
+            controls.status = TurnControlStatus::Ready;
+            controls.primary = Some(TurnControlAction {
+                kind: TurnControlKind::Interrupt,
+                command: interrupt,
+            });
+            return controls;
+        };
         controls.status = TurnControlStatus::Ready;
         let mut primary = TurnControlAction {
             kind: TurnControlKind::Interrupt,
@@ -145,26 +261,22 @@ impl DurableRelay {
             return controls;
         }
         if let Some(head) = self.snapshot.queued_prompts.first() {
-            let can_steer = match &head.payload {
-                StoredQueuedRelayPayload::Prompt { prompt } => {
-                    !mj_core::acp::prompt_is_slash_command(prompt)
+            let dispatch = self.snapshot.dispatches.get(&head.command_id);
+            let can_steer = dispatch
+                .filter(|dispatch| dispatch.state == RelayDispatchState::Queued)
+                .and_then(|dispatch| dispatch.command.prompt_blocks())
+                .is_some_and(|prompt| {
+                    !mj_core::acp::prompt_is_slash_command(&prompt)
                         && match self.steering_delivery_mode {
                             SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
                                 self.steering_supported != Some(false)
                             }
                             SteeringDeliveryMode::HookPostToolBatch => {
-                                mj_core::acp::steering_text_context(prompt).is_some()
+                                mj_core::acp::steering_text_context(&prompt).is_some()
                             }
                             SteeringDeliveryMode::HookTurnEnd => false,
                         }
-                        && self
-                            .snapshot
-                            .dispatches
-                            .get(&head.command_id)
-                            .is_some_and(|d| d.state == RelayDispatchState::Queued)
-                }
-                StoredQueuedRelayPayload::SetConfig { .. } => false,
-            };
+                });
             primary = if can_steer {
                 TurnControlAction {
                     kind: TurnControlKind::Steer,
@@ -174,20 +286,19 @@ impl DurableRelay {
                     },
                 }
             } else {
-                controls.message = Some(match &head.payload {
-                    StoredQueuedRelayPayload::SetConfig { .. } => {
+                controls.message = Some(match dispatch.map(|dispatch| &dispatch.command) {
+                    Some(RelayCommand::SetConfig { .. }) => {
                         let settings = self
                             .snapshot
                             .queued_prompts
                             .iter()
-                            .take_while(|q| {
-                                matches!(q.payload, StoredQueuedRelayPayload::SetConfig { .. })
-                            })
-                            .filter_map(|q| match &q.payload {
-                                StoredQueuedRelayPayload::SetConfig { key, value } => {
-                                    Some(format!("{key}: {value}"))
+                            .map_while(|queued| {
+                                match &self.snapshot.dispatches.get(&queued.command_id)?.command {
+                                    RelayCommand::SetConfig { key, value } => {
+                                        Some(format!("{key}: {value}"))
+                                    }
+                                    _ => None,
                                 }
-                                _ => None,
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -224,9 +335,33 @@ impl DurableRelay {
                 }
             }
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
+            RelayCommand::CancelTurnTarget { target } => {
+                let current = self.resolve_turn_interrupt_target();
+                let promoted = matches!((target, current.as_ref()),
+                    (TurnInterruptTarget::QueuedRestart { command_id },
+                     Some(TurnInterruptTarget::ActivePrompt { command_id: active }))
+                    if command_id == active && is_restart_continuation(command_id));
+                let promoted = promoted || matches!((target, current.as_ref()),
+                    (TurnInterruptTarget::CapacityRetry { command_id },
+                     Some(TurnInterruptTarget::ActivePrompt { command_id: active }))
+                    if command_id == active && mj_core::relay::is_capacity_retry_command(command_id));
+
+                let held_claude_turn = matches!(current, Some(TurnInterruptTarget::ActivePrompt { .. }))
+                    && self.has_held_claude_turn();
+                if held_claude_turn || (current.as_ref() != Some(target) && !promoted) {
+                    return Err("Turn or queue changed; refresh the available controls".into());
+                }
+            }
+            RelayCommand::CancelTurnFor { active_prompt_id } => {
+                if self.has_held_claude_turn()
+                    || !matches!(self.resolve_turn_interrupt_target(),
+                        Some(TurnInterruptTarget::ActivePrompt { command_id }) if command_id == *active_prompt_id)
+                {
+                    return Err("Turn or queue changed; refresh the available controls".into());
+                }
+            }
             RelayCommand::Steer { .. }
-            | RelayCommand::ApplyQueuedFor { .. }
-            | RelayCommand::CancelTurnFor { .. } => {
+            | RelayCommand::ApplyQueuedFor { .. } => {
                 let controls = self.turn_controls();
                 if controls.primary.as_ref().is_some_and(|action| &action.command == command)
                     || controls.interrupt.as_ref() == Some(command)
@@ -695,7 +830,8 @@ impl DurableRelay {
         };
         if let Some(handled) = self.snapshot.handled_commands.get(command_id) {
             let accepted_ordinal = {
-                if !handled.matches_command(&command)? {
+                let live_command = self.snapshot.dispatches.get(command_id).map(|d| &d.command);
+                if !handled.matches_command(live_command, &command)? {
                     return Ok(Err(relay_protocol_error(
                         RelayErrorCode::InvalidRequest,
                         "command ID was already used for a different command",
@@ -708,7 +844,7 @@ impl DurableRelay {
             // A journal append can succeed before snapshot persistence reports
             // an error. Retrying the durable command must resume any remaining
             // relay-local transition instead of merely echoing its first ACK.
-            if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
+            if command.is_relay_local() || self.is_relay_local_interrupt(command_id) {
                 self.finish_relay_local_command(command_id)?;
             }
             return Ok(Ok(RelayResponsePayload::Accepted {
@@ -982,15 +1118,11 @@ impl DurableRelay {
                 .as_ref()
                 .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
-            && !self.snapshot.dispatches.values().any(|dispatch| {
-                dispatch.state == RelayDispatchState::InFlight
-                    && matches!(
-                        dispatch.command,
-                        RelayCommand::GoalControl {
-                            action: mj_core::goal::GoalControlAction::Resume,
-                        }
-                    )
-            })
+            && !self
+                .snapshot
+                .dispatches
+                .values()
+                .any(Self::goal_resume_in_flight)
             && !cancellable_harness_turn
             && self
                 .snapshot
@@ -1252,17 +1384,29 @@ impl DurableRelay {
             )));
         }
         let created_at_ms = epoch_millis();
-        let accepted_ordinal = self.append_relay_event(
-            Some(command_id),
-            RelayObservation::CommandQueued {
-                command_id: command_id.to_owned(),
-                command: command.clone(),
-                created_at_ms,
-                insert_at_front,
-            },
-        )?;
+        let observation = RelayObservation::CommandQueued {
+            command_id: command_id.to_owned(),
+            command: command.clone(),
+            created_at_ms,
+            insert_at_front,
+        };
+        self.prepare_journal_append(Some(command_id), &observation)?;
+        let accepted_ordinal = match self
+            .append_relay_event_after_checkpoint_hold(Some(command_id), observation)
+        {
+            Ok(ordinal) => ordinal,
+            Err(error) if error.is::<RelayBudgetExceeded>() => {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "The session queue is full. Wait for queued prompts to run or remove queued input, then try again.",
+                    false,
+                    None,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
 
-        if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
+        if command.is_relay_local() || self.is_relay_local_interrupt(command_id) {
             self.finish_relay_local_command(command_id)?;
         }
         self.promote_next_queued_command()?;
@@ -1311,7 +1455,7 @@ impl DurableRelay {
 
     // The durable target survives until the control completes, including
     // a restart after the queued prompt was already terminalized.
-    pub(super) fn is_queued_recovery_cancel(&self, command_id: &str) -> bool {
+    fn is_queued_recovery_cancel(&self, command_id: &str) -> bool {
         self.snapshot.active_prompt.is_none()
             && self
                 .snapshot
@@ -1322,7 +1466,34 @@ impl DurableRelay {
                 .snapshot
                 .dispatches
                 .get(command_id)
-                .is_some_and(|dispatch| matches!(dispatch.command, RelayCommand::CancelTurn))
+                .is_some_and(|dispatch| match &dispatch.command {
+                    RelayCommand::CancelTurn => true,
+                    RelayCommand::CancelTurnTarget {
+                        target: TurnInterruptTarget::QueuedRestart { command_id },
+                    } => self.snapshot.cancelling_prompt_id.as_ref() == Some(command_id),
+                    _ => false,
+                })
+    }
+
+    pub(super) fn is_relay_local_interrupt(&self, command_id: &str) -> bool {
+        self.is_queued_recovery_cancel(command_id)
+            || self
+                .snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| match &dispatch.command {
+                    RelayCommand::CancelTurnTarget {
+                        target: TurnInterruptTarget::CapacityRetry { command_id },
+                    } => {
+                        // An armed retry has no accepted prompt receipt. If it
+                        // promoted before cancellation, its dispatch is owned by ACP.
+                        !self.snapshot.handled_commands.contains_key(command_id)
+                    }
+                    RelayCommand::CancelTurnTarget {
+                        target: TurnInterruptTarget::QuotaRecovery { .. },
+                    } => true,
+                    _ => false,
+                })
     }
 
     /// Finish a relay-local command from its durable dispatch record. This is
@@ -1359,6 +1530,8 @@ impl DurableRelay {
                     "User cancelled queued restart recovery",
                 )?;
             }
+        }
+        if self.is_relay_local_interrupt(command_id) {
             self.append_relay_event(
                 Some(command_id),
                 RelayObservation::CommandCompleted {
@@ -1500,6 +1673,17 @@ impl DurableRelay {
                     RelayDispatchState::Queued | RelayDispatchState::Pending
                 ) {
                     return None;
+                }
+                if let RelayCommand::CancelTurnTarget { target } = &d.command {
+                    let matches = match target {
+                        TurnInterruptTarget::ActivePrompt { command_id }
+                        | TurnInterruptTarget::QueuedRestart { command_id }
+                        | TurnInterruptTarget::CapacityRetry { command_id } => {
+                            self.snapshot.active_prompt.as_ref().is_some_and(|active| &active.command_id == command_id)
+                        }
+                        _ => self.owns_unprompted_interrupt(target),
+                    };
+                    return (!matches).then_some(id.clone());
                 }
                 let target = match &d.command {
                     RelayCommand::Steer {
@@ -1659,13 +1843,17 @@ impl DurableRelay {
                 ))
             .then(|| next_snapshot.queued_prompts.first())
             .flatten()
-            .and_then(|queued| match &queued.payload {
-                StoredQueuedRelayPayload::Prompt { prompt } => Some(ClaimedSteeringPrompt {
+            .and_then(|queued| {
+                let prompt = next_snapshot
+                    .dispatches
+                    .get(&queued.command_id)?
+                    .command
+                    .prompt_blocks()?;
+                Some(ClaimedSteeringPrompt {
                     attachment_root: None,
                     queued_command_id: queued.command_id.clone(),
-                    prompt: prompt.clone(),
-                }),
-                StoredQueuedRelayPayload::SetConfig { .. } => None,
+                    prompt: prompt.into_owned(),
+                })
             });
             let dispatch = next_snapshot
                 .dispatches
@@ -2021,6 +2209,7 @@ impl DurableRelay {
                         RelayCommand::Cancel
                             | RelayCommand::Steer { .. }
                             | RelayCommand::CancelTurnFor { .. }
+                            | RelayCommand::CancelTurnTarget { .. }
                             | RelayCommand::ApplyQueuedFor { .. }
                             | RelayCommand::CancelTurn
                             | RelayCommand::GoalControl { .. }
@@ -2044,7 +2233,11 @@ impl DurableRelay {
                     return None;
                 }
                 if accepted < before_ordinal
-                    || (running_turn && matches!(dispatch.command, RelayCommand::CancelTurn))
+                    || (running_turn
+                        && matches!(
+                            dispatch.command,
+                            RelayCommand::CancelTurn | RelayCommand::CancelTurnTarget { .. }
+                        ))
                     || matches!(dispatch.command, RelayCommand::GoalControl { .. })
                 {
                     Some((accepted, command_id.clone()))
@@ -2566,6 +2759,7 @@ impl DurableRelay {
                     RelayCommand::Cancel
                         | RelayCommand::CancelTurn
                         | RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::CancelTurnTarget { .. }
                         | RelayCommand::ApplyQueuedFor { .. }
                 ) && matches!(
                     dispatch.state,
@@ -2684,6 +2878,7 @@ impl DurableRelay {
                     RelayCommand::Cancel
                         | RelayCommand::CancelTurn
                         | RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::CancelTurnTarget { .. }
                         | RelayCommand::ApplyQueuedFor { .. }
                 ) && matches!(
                     dispatch.state,
@@ -2717,7 +2912,7 @@ impl DurableRelay {
         Ok(())
     }
 
-    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
+    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, String)> {
         if hook_event != "PostToolBatch"
             || self.steering_delivery_mode != SteeringDeliveryMode::HookPostToolBatch
             // A turn being interrupted discards its input; the prompt runs next.
@@ -2750,10 +2945,13 @@ impl DurableRelay {
         if queued.command_id != operation.queued_prompt_id {
             return None;
         }
-        let StoredQueuedRelayPayload::Prompt { prompt } = &queued.payload else {
-            return None;
-        };
-        let text = mj_core::acp::steering_text_context(prompt)?;
+        let prompt = self
+            .snapshot
+            .dispatches
+            .get(&queued.command_id)?
+            .command
+            .prompt_blocks()?;
+        let text = mj_core::acp::steering_text_context(&prompt)?.to_owned();
         Some((
             MailboxHookSteering {
                 command_id: operation.command_id.clone(),

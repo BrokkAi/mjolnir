@@ -21,7 +21,8 @@ use super::worker_binary::{
     WorkerInstall, install_staged_worker_binary, prepare_managed_harness_for_upgrade,
     replace_installed_worker_binary, replace_installed_worker_launch_config,
     stage_worker_binary_for_upgrade, start_worker, start_worker_durably,
-    stop_worker_after_target_recovery, worker_probe_diagnosis,
+    start_worker_durably_with_aws_profile, stop_worker_after_target_recovery,
+    worker_probe_diagnosis,
 };
 
 /// How long a restarted worker has to recover its journal, bind `control.sock`
@@ -87,6 +88,7 @@ pub(super) struct InstalledWorkerRestart<'a> {
     pub launch: Option<&'a mj_core::worker_launch::WorkerLaunchConfig>,
     pub prepared: bool,
     pub discard_queued_prompts: Option<String>,
+    pub staged_aws_profile: Option<Option<&'a str>>,
     pub swap_admission: Option<crate::upgrade::Work>,
     pub messages: &'a WorkerRestartMessages,
 }
@@ -153,6 +155,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         discard_queue: bool,
+        staged_aws_profile: Option<String>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<mj_core::state::MaterializedSession> {
         let (backend, root) = self.worker_placement(session_id)?;
@@ -209,7 +212,7 @@ impl Controller {
                 let result = self
                     .repair_existing_environment(
                         session_id,
-                        super::resume::RetainedWorker::Reserved(swap),
+                        super::resume::RetainedWorker::Reserved(swap, staged_aws_profile),
                         false,
                         executor,
                     )
@@ -717,6 +720,7 @@ impl Controller {
                 messages,
                 swap_admission,
                 discard_queued_prompts,
+                staged_aws_profile,
             } = restart;
             let owner = crate::worker_lifecycle::require(session_id)?;
             let target = self
@@ -809,13 +813,14 @@ impl Controller {
                     admit_start()?;
                 }
                 let started = match target {
-                    Some(target) => start_worker_durably(
+                    Some(target) => start_worker_durably_with_aws_profile(
                         &owner,
                         target,
                         executor,
                         backend,
                         worker_root,
                         &self.config.github,
+                        staged_aws_profile,
                     ),
                     None => {
                         start_worker(&owner, executor, backend, worker_root, &self.config.github)
@@ -840,6 +845,7 @@ impl Controller {
                     worker_root,
                     reconnect,
                     launch,
+                    staged_aws_profile,
                     prepared,
                     messages,
                     discard_queued_prompts: None,
@@ -866,6 +872,7 @@ impl Controller {
             launch,
             messages,
             discard_queued_prompts,
+            staged_aws_profile,
             ..
         } = restart;
         let owner = crate::worker_lifecycle::require(session_id)?;
@@ -941,9 +948,10 @@ impl Controller {
             }
             return Err(error);
         }
-        if session
-            .and_then(|session| session.target.as_ref())
-            .is_some()
+        if staged_aws_profile.is_none()
+            && session
+                .and_then(|session| session.target.as_ref())
+                .is_some()
         {
             crate::database::finish_worker_restart(session_id, owner.operation_id())?;
         }
@@ -1109,6 +1117,7 @@ mod tests {
                         launch: None,
                         prepared: true,
                         discard_queued_prompts: Some("discard-before-boot".into()),
+                        staged_aws_profile: None,
                         swap_admission: Some(
                             crate::upgrade::activity_unless_draining(LABEL).unwrap(),
                         ),
@@ -1249,6 +1258,7 @@ mod tests {
                     launch: None,
                     prepared: false,
                     discard_queued_prompts: None,
+                    staged_aws_profile: None,
                     swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },

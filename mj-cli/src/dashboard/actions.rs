@@ -24,8 +24,8 @@ use crate::dashboard::io::{
     spawn_dashboard_create_session, spawn_dashboard_notifications_ignored, spawn_dashboard_rename,
     spawn_lifecycle_operation, spawn_quota_preferences_save, spawn_quota_probe_request,
     spawn_remove_bundle, spawn_workspace_close, spawn_workspace_close_cancel,
-    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
-    spawn_workspace_rename,
+    spawn_workspace_create, spawn_workspace_draft_discard, spawn_workspace_draft_recovery,
+    spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -416,9 +416,32 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::RecoverWorkspaceDraft {
             generation,
             draft_id,
+            session_id,
         } => {
-            spawn_workspace_draft_recovery(
+            if let Some(error) = session_id
+                .as_deref()
+                .and_then(|id| context.workspace_draft_recovery_error(id))
+            {
+                context
+                    .dashboard
+                    .finish_workspace_management(generation, Err(error), false);
+            } else {
+                spawn_workspace_draft_recovery(
+                    generation,
+                    draft_id,
+                    context.dashboard_io_tx.clone(),
+                    context.critical_operations.clone(),
+                );
+            }
+        }
+        DashboardAction::DiscardWorkspaceDrafts {
+            generation,
+            workspace_id,
+            draft_id,
+        } => {
+            spawn_workspace_draft_discard(
                 generation,
+                workspace_id,
                 draft_id,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),

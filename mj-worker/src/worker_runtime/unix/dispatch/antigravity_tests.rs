@@ -754,12 +754,24 @@ async fn antigravity_missing_stop_recovers_and_cancel_accepts_an_autonomous_turn
     assert!(!reserve_idle(&mut state));
     assert!(state.settle_pending_antigravity_harness_turn().unwrap());
     pre_invocation(&mut state, Some(NATIVE));
+    let command = state
+        .operational_state()
+        .turn_controls
+        .unwrap()
+        .interrupt
+        .unwrap();
+    assert!(matches!(
+        command,
+        RelayCommand::CancelTurnTarget {
+            target: mj_core::relay::TurnInterruptTarget::Autonomous { .. }
+        }
+    ));
     assert!(matches!(
         request(
             &mut state,
             RelayRequest::Submit {
                 command_id: "test-cancel".into(),
-                command: RelayCommand::Cancel,
+                command,
             }
         ),
         RelayResponsePayload::Accepted { .. },

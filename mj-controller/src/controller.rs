@@ -100,8 +100,8 @@ use crate::targets::{self, AdditionalMount, CommandExecutor, SshTarget};
 pub use crate::targets::image_refresh_plan;
 pub use crate::targets::path_exists_on_managed_target;
 pub use backend::backend_locator;
+pub use backend::is_missing_command;
 pub use backend::validate_resource_allocation;
-pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
 pub use github_app::GithubBundleSelectionError;
 pub use github_app::{
@@ -883,11 +883,9 @@ impl Controller {
     }
 
     /// Verify a mount source on the host where Mjolnir will consume it, and report
-    /// the filesystem reason it must be attached read-only, if there is one.
+    /// why copy-on-write would become read-only, if there is one.
     ///
-    /// The probe runs in the same round trip as the existence check so the
-    /// editor learns both answers without a second wait. A probe that cannot
-    /// answer reports no reason: provisioning decides that authoritatively.
+    /// A failed capability probe leaves the editor without a downgrade reason.
     pub fn validate_mount_source(
         &self,
         target_id: &str,
@@ -931,43 +929,25 @@ impl Controller {
         Ok(self.forced_read_only_reason(target, source, executor))
     }
 
-    /// The `filesystem (reason)` label for a source the runtime cannot overlay.
+    /// Why the runtime cannot overlay this source.
     fn forced_read_only_reason(
         &self,
         target: &TargetTemplate,
         source: &Path,
         executor: &impl CommandExecutor,
     ) -> Option<String> {
-        let ssh = match target {
-            TargetTemplate::LocalPodman { .. } | TargetTemplate::LocalDocker { .. } => None,
-            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-                Some(SshTarget::from(ssh))
-            }
-            // Apple Container already mounts read-only, and EC2 copies instead
-            // of mounting, so neither has an overlay to lose.
-            _ => return None,
-        };
-        if matches!(target, TargetTemplate::LocalDocker { .. })
-            && let Ok(Some(_)) = targets::local_docker_vm_share(executor)
-        {
-            return Some("Docker VM file share (cannot back an overlay)".to_owned());
-        }
-        let filesystem = targets::probe_filesystem_types(
-            ssh.as_ref(),
-            std::slice::from_ref(&source.to_path_buf()),
-            executor,
-        )
-        .map_err(|error| {
-            tracing::debug!(
-                source = %source.display(),
-                error = format!("{error:#}"),
-                "could not probe the filesystem under a mount source"
-            );
-        })
-        .ok()?
-        .pop()?;
-        let reason = targets::overlay_unsupported_filesystem(&filesystem)?;
-        Some(format!("{filesystem} ({reason})"))
+        target.container()?;
+        let target = backend::backend_target(target, None, Default::default()).ok()?;
+        targets::overlay_read_only_reasons(&target, &[source.to_path_buf()], executor)
+            .map_err(|error| {
+                tracing::debug!(
+                    source = %source.display(),
+                    error = format!("{error:#}"),
+                    "could not determine overlay support for a mount source"
+                );
+            })
+            .ok()?
+            .pop()?
     }
 
     pub fn register_session_with_resources(
@@ -1216,6 +1196,7 @@ impl Controller {
             title: title.into(),
             harness_kind: profile.kind,
             last_profile: profile_id.to_string(),
+            staged_aws_profile: None,
             bundle_id,
             project_directory,
             managed_worktree: None,

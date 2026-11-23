@@ -171,15 +171,21 @@ with socket.socket(socket.AF_UNIX) as connection:
             target, = database.execute("SELECT resource_id FROM session_targets WHERE session_id=?", (session,)).fetchone()
             return target
 
-    def create_session(self, workspace, mounts, title, allocation=None):
+    def old_snapshot(self):
+        # The pinned daemon runs this part of the fixture before the handoff.
+        return self.snapshot(endpoint="/api/snapshot")
+
+    def create_session(self, workspace, mounts, title, allocation=None, *, old=False):
         body = {"action": "new", "workspace_id": workspace, "profile_id": "fake", "bundle_id": "fixture",
                 "target_id": "podman", "title": title, "additional_mounts": mounts}
         if allocation is not None:
             body["resource_allocation"] = allocation
-        status, response = self.request("POST", "/api/actions", body)
+        actions = "/api/actions" if old else "/api/v1/actions"
+        status, response = self.request("POST", actions, body)
         assert status == 202, response
+        snapshot = self.old_snapshot if old else self.snapshot
         def ready():
-            return next((row["id"] for row in self.snapshot()["sessions"]
+            return next((row["id"] for row in snapshot()["sessions"]
                          if row.get("title") == title and row.get("state") == "running"), None)
         session = self.wait(ready, title + " ready")
         self.sessions.append(session)
@@ -278,7 +284,7 @@ def unused_timer_wait():
         size = {"kind": "container", "cpus": 3, "memory_bytes": 8 << 30}
         move = json.loads(self.cli("move", "--session", session, "--cpus", "3", "--memory-gib", "8", "--dry-run", "--json").stdout)
         assert move["container_upgrade"]["settings"]["resource_allocation"] == size, move
-        status, preview = self.request("POST", "/api/actions", {
+        status, preview = self.request("POST", "/api/v1/actions", {
             "action": "set-container-settings", "session_id": session,
             "resource_allocation": size, "mounts": [fixture, mount]}, timeout=WAIT)
         assert status == 200 and preview["available"], (status, preview)
@@ -311,7 +317,7 @@ def unused_timer_wait():
         memory, cpu, marker = limits.splitlines()
         quota, period = map(int, cpu.split())
         assert (int(memory), quota, marker) == (8 << 30, 3 * period, "mounted"), limits
-        status, clear = self.request("POST", "/api/actions", {
+        status, clear = self.request("POST", "/api/v1/actions", {
             "action": "set-container-settings", "session_id": session,
             "resource_allocation": None, "mounts": [fixture, mount]}, timeout=WAIT)
         assert status == 200 and clear["available"], (status, clear)
@@ -338,8 +344,8 @@ def unused_timer_wait():
                   {"source": str(self.runtime_root / "build-cache"), "destination": "/build-cache", "access": "rw"}]
         # Daemon protocol registration exposes attached directories on both releases.
         self.authenticate()
-        workspace = self.snapshot()["workspaces"][0]["id"]
-        session = self.create_session(workspace, mounts, "container-preservation")
+        workspace = self.old_snapshot()["workspaces"][0]["id"]
+        session = self.create_session(workspace, mounts, "container-preservation", old=True)
         record = self.record(session)
         assert record.get("build_cache") is None
         assert not (record.get("target_runtime") or {}).get("tool_cache")

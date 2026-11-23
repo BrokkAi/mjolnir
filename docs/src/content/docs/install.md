@@ -62,12 +62,9 @@ user `Path` unless `MJOLNIR_NO_MODIFY_PATH` is set. `MJOLNIR_INSTALL_DIR` and
 `MJOLNIR_VERSION` work as they do for `install.sh`. Re-running it replaces the
 installed files, including a running `mj.exe`.
 
-The Windows build is a preview:
-
-- `mj` does not update itself on Windows. Re-run the installer to upgrade.
-- The bundle carries only Linux session workers, so sessions run on container
-  or SSH targets; there are no local bare sessions. Containers through Docker
-  Desktop's Linux engine have not been verified end to end yet.
+The preview bundle carries only Linux session workers, so sessions run on
+container or SSH targets. Local bare sessions are unavailable. Containers
+through Docker Desktop's Linux engine have not been verified end to end yet.
 
 ## Homebrew
 
@@ -83,11 +80,10 @@ Name the formula in full. A bare `brew install mjolnir` installs an unrelated, d
 
 On every interactive startup, before starting the daemon, `mj` asks the channel it was installed from whether a newer release exists. If one does, mj says what it found and asks `Upgrade now? [Y/n]` before changing anything. Answering `y` runs the upgrade for your install method and restarts mj into the new version:
 
-- Release installer installs: mj downloads the release archive, verifies its SHA-256 sidecar, updates the CLI and all bundled helper binaries, and restarts mj.
+- Release installer installs on Linux, macOS, and Windows download the release archive, verify its SHA-256 sidecar, update the CLI and bundled helper binaries, and restart mj.
 - npm installs: mj runs `npm install -g @brokkai/mjolnir@latest` so npm keeps ownership of `node_modules`. `npx` runs are ephemeral, so mj only prints the command.
 - Homebrew installs: mj runs `brew update` (so the local formula index learns about the release) and then `brew upgrade --formula brokkai/tap/mjolnir` (the bare name `mjolnir` is an unrelated Homebrew cask).
 - Cargo installs: mj prints `cargo install --locked brokk-mjolnir` and leaves the rebuild to you.
-- Native Windows installs: no automatic check yet; re-run `install.ps1`.
 
 When `mj` finds the daemon running a different build, it replaces the daemon only if its own build is newer: a later release or, within one release, a build from a later commit. An older `mj`, such as a stale copy earlier on `PATH`, uses the newer daemon and says so. When `mj` cannot tell which build is newer, it also keeps the running daemon and says so; `mj daemon restart` then replaces it.
 

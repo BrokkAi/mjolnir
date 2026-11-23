@@ -3618,7 +3618,7 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
         mj_core::hex::lower_hex(Sha256::digest(baseline.as_bytes()))
     );
     fs::write(source.join("README.md"), b"review baseline\n").unwrap();
-    let tree = crate::archive::capture_worktree_tree(&SystemGit, &source).unwrap();
+    let tree = crate::test_support::fixture_tree_with_edit(&source, "README.md");
     let point = crate::archive::record_review_point(
         &SystemGit,
         &source,

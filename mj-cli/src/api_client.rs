@@ -89,9 +89,10 @@ impl ApiClient {
         loop {
             let started = std::time::Instant::now();
             let mut client = daemon::connect_or_start().await?;
-            let instance_id = client.identity().await?.instance_id;
+            let identity = client.identity().await?;
+            let instance_id = &identity.instance_id;
             let daemon_ready = started.elapsed();
-            let error = match Self::connect_to(&mut client).await {
+            let error = match Self::connect_to(&mut client, &identity).await {
                 Ok(connected) => {
                     // A slow command after a handoff has to say whether it
                     // waited for the daemon or for its web API.
@@ -115,7 +116,7 @@ impl ApiClient {
                 std::time::Instant::now() < deadline
             } else {
                 replaced += 1;
-                replaced <= 3 && daemon::daemon_was_replaced(&instance_id).await
+                replaced <= 3 && daemon::daemon_was_replaced(instance_id).await
             };
             if !follow {
                 return Err(error);
@@ -129,10 +130,31 @@ impl ApiClient {
     /// diagnostics use this so they never start or replace a daemon.
     pub(crate) async fn connect_running() -> Result<Self> {
         let mut client = mj_client::daemon::connect_existing().await?;
-        Self::connect_to(&mut client).await
+        let identity = client.identity().await?;
+        Self::connect_to(&mut client, &identity).await
     }
 
-    async fn connect_to(client: &mut daemon::DaemonClient) -> Result<Self> {
+    async fn connect_to(
+        client: &mut daemon::DaemonClient,
+        identity: &mj_client::daemon::DaemonIdentity,
+    ) -> Result<Self> {
+        if !client
+            .connector()
+            .is_some_and(|connector| connector.is_ssh())
+            && identity.placement == mj_client::daemon::DaemonPlacement::Host
+            && let Some(endpoint) = mj_client::daemon::read_api_endpoint()?
+            && endpoint.pid == client.pid()
+            && endpoint.instance_id == identity.instance_id
+        {
+            let base_url = format!("http://{}", endpoint.address);
+            let http = http_client(None, None)?;
+            probe_api(&http, &base_url).await?;
+            let mut api = Self::with_http(base_url, endpoint.token, http);
+            api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
+            api.daemon_instance = Some(identity.instance_id.clone());
+            return Ok(api);
+        }
+
         let access = daemon::wait_for_web_access(client).await?;
         let mj_client::web::WebViewerAccess::Ready {
             viewer_url,
@@ -158,9 +180,8 @@ impl ApiClient {
         probe_api(&http, &viewer_url).await?;
         let token = client.api_credential().await?;
         let mut api = Self::with_http(viewer_url, token, http);
-        let identity = client.identity().await?;
-        api.daemon_on_client_filesystem = client.shares_client_filesystem(&identity);
-        api.daemon_instance = Some(identity.instance_id);
+        api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
+        api.daemon_instance = Some(identity.instance_id.clone());
         Ok(api)
     }
 
@@ -700,6 +721,7 @@ impl ApiClient {
         &self,
         session_id: &str,
         base: Option<&str>,
+        paths: &[String],
         json: bool,
     ) -> Result<String> {
         let mut request = self
@@ -711,7 +733,10 @@ impl ApiClient {
         if json {
             request = request.query(&[("json", "true")]);
         }
-        let response = self.send(request.timeout(EXPORT_TIMEOUT)).await?;
+        let paths: Vec<_> = paths.iter().map(|path| ("path", path.as_str())).collect();
+        let response = self
+            .send(request.query(&paths).timeout(EXPORT_TIMEOUT))
+            .await?;
         response.text().await.context("read the session diff")
     }
 
@@ -1322,10 +1347,10 @@ mod tests {
             )
             .route(
                 "/api/v1/sessions/{session_id}/diff",
-                get(|State(seen): State<Seen>, Query(query): Query<std::collections::BTreeMap<String, String>>, headers: HeaderMap| async move {
+                get(|State(seen): State<Seen>, Query(query): Query<Vec<(String, String)>>, headers: HeaderMap| async move {
                     record_authorization(&seen, &headers);
-                    if query.get("json").is_some_and(|value| value == "true") {
-                        seen.lock().unwrap().push(format!("base={}", query["base"]));
+                    if query.iter().any(|(key, value)| key == "json" && value == "true") {
+                        seen.lock().unwrap().extend(query.iter().map(|(key, value)| format!("{key}={value}")));
                         return (StatusCode::OK, Json(serde_json::json!({
                             "diff": "+task work\n", "base": "a".repeat(40), "head": "c".repeat(40),
                             "head_descends_from_base": false
@@ -1370,7 +1395,12 @@ mod tests {
         let (url, seen) = serve(Some("1")).await;
         let client = ApiClient::new(url, "secret-token".into()).unwrap();
         let body = client
-            .diff("session-1", Some("HEAD@{1}"), true)
+            .diff(
+                "session-1",
+                Some("HEAD@{1}"),
+                &["-leading".into(), "src/file & notes".into()],
+                true,
+            )
             .await
             .unwrap();
         let diff: mj_checkpoint::archive::SessionDiff = serde_json::from_str(&body).unwrap();
@@ -1380,7 +1410,13 @@ mod tests {
         assert_eq!(diff.head_descends_from_base, Some(false));
         assert_eq!(
             *seen.lock().unwrap(),
-            vec!["Bearer secret-token", "base=HEAD@{1}"]
+            vec![
+                "Bearer secret-token",
+                "base=HEAD@{1}",
+                "json=true",
+                "path=-leading",
+                "path=src/file & notes"
+            ]
         );
 
         // A worker from before the field answers without it, and the absence
@@ -1427,7 +1463,10 @@ mod tests {
         );
 
         // A refusal reaches the caller as the reason the API gave it.
-        let error = client.diff("session-1", None, false).await.unwrap_err();
+        let error = client
+            .diff("session-1", None, &[], false)
+            .await
+            .unwrap_err();
         assert!(
             format!("{error:#}").contains("no session base recorded"),
             "unexpected error: {error:#}"

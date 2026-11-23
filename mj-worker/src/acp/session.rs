@@ -317,27 +317,37 @@ pub(super) async fn serve_session(
             }
         }
     });
-    let goal_recovery_supported = capability.as_ref().is_some_and(|capability| {
-        capability.supports(mj_core::goal::GoalControlAction::Pause)
-            && capability.supports(mj_core::goal::GoalControlAction::Resume)
-    }) && air_goal
-        .and_then(|goal| goal.get("resumePolicies"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|policies| policies.iter().any(|policy| policy == "pause"));
-    if capability
+    let goal_pause_supported = capability
         .as_ref()
-        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Resume))
-        && spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .asking()
-    {
-        ensure!(
-            goal_recovery_supported,
-            "the installed adapter cannot pause a goal before explicit resume; update the adapter"
-        );
-    }
+        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Pause))
+        && air_goal
+            .and_then(|goal| goal.get("resumePolicies"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|policies| policies.iter().any(|policy| policy == "pause"));
+    let goal_resume_supported = capability
+        .as_ref()
+        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Resume));
+    let reopening_codex = spec.harness == HarnessKind::Codex
+        && spec.resume_session.is_some()
+        && !session_open.replace_unused_codex_thread;
+    let (asking_goal_recovery, has_active_goal) = {
+        let recovery = spec.goal_recovery.lock().expect("goal lock poisoned");
+        (
+            recovery.asking(),
+            recovery
+                .state
+                .snapshot
+                .as_ref()
+                .is_some_and(mj_core::goal::GoalSnapshot::active),
+        )
+    };
+    let needs_goal_pause = (reopening_codex && capability.is_some() && has_active_goal)
+        || (goal_resume_supported && asking_goal_recovery);
+    ensure!(
+        !needs_goal_pause || goal_pause_supported,
+        "the installed adapter cannot pause a stored goal before reopening; update the adapter"
+    );
+    let goal_recovery_supported = goal_pause_supported && goal_resume_supported;
     goal::publish(
         spec,
         events,
@@ -1398,6 +1408,13 @@ pub(super) async fn serve_session(
                                     cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                 }
                             }
+                            Some(CommandRequest::CancelUnpromptedTurn { request_id, .. }) => {
+                                emit_runtime_event(events, RuntimeEvent::CommandRejected {
+                                    reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                                    request_id,
+                                    message: "The requested turn is no longer running".into(),
+                                }).await?;
+                            }
                             Some(CommandRequest::Steer { request_id: steer_id, active_prompt_id, steering_prompt }) => {
                                 if active_prompt_id != request_id || !prompt_running || cancel_deadline.is_some() || pending_steer.is_some() || !steering_supported {
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected {
@@ -1884,6 +1901,32 @@ pub(super) async fn serve_session(
                     },
                 )
                 .await?;
+            }
+            CommandRequest::CancelUnpromptedTurn { request_id, target } => {
+                let outcome = spec.terminal_owner.as_ref().and_then(|owner| {
+                    let relay = owner.upgrade()?;
+                    let relay = relay.lock().expect("relay state lock poisoned");
+                    // Keep the relay's turn identity pinned until the ACP
+                    // notification is sent. The coordinator may settle this
+                    // turn while the request is waiting in the ACP inbox.
+                    relay.owns_unprompted_interrupt(&target).then(|| {
+                        cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
+                    })
+                });
+                if let Some(outcome) = outcome {
+                    pending_elicitations.end_withdrawal();
+                    report_cancel(events, request_id, outcome).await?;
+                } else {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                            request_id,
+                            message: "The requested turn is no longer running".into(),
+                        },
+                    )
+                    .await?;
+                }
             }
             CommandRequest::Cancel { request_id, .. } => {
                 apply_cancel(

@@ -938,8 +938,8 @@ pull_policy = "never"
                 value = payload.decode("utf-8", "replace")
             return error.code, value
 
-    def snapshot(self) -> dict[str, object]:
-        status, value = self.request("GET", "/api/snapshot")
+    def snapshot(self, *, endpoint="/api/v1/snapshot") -> dict[str, object]:
+        status, value = self.request("GET", endpoint)
         if status != 200 or not isinstance(value, dict):
             raise ScenarioFailure(f"invalid snapshot response: {status} {value!r}")
         cursor = value.get("cursor")
@@ -1227,7 +1227,7 @@ pull_policy = "never"
             "title": title,
             "project_directory": str(self.project),
         }
-        status, _ = self.request("POST", "/api/actions", action)
+        status, _ = self.request("POST", "/api/v1/actions", action)
         if status != 202:
             raise ScenarioFailure(f"new action returned {status}")
         self.record_action("new-session", title=title)
@@ -1254,7 +1254,7 @@ pull_policy = "never"
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
             self.snapshot()
-            status, value = self.request("GET", f"/api/conversations/{session_id}")
+            status, value = self.request("GET", f"/api/v1/conversations/{session_id}")
             if status == 200 and isinstance(value, dict):
                 transcript = value
                 lines = [line for entry in value.get("entries", []) for line in entry.get("lines", [])]
@@ -1294,7 +1294,7 @@ pull_policy = "never"
         # needed.
         status, value = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {"action": "start-review", "session_id": session_id},
             timeout=150,
         )
@@ -1316,7 +1316,7 @@ pull_policy = "never"
         started = time.monotonic()
         status, value = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {"action": "start-review", "session_id": session_id},
             timeout=150,
         )
@@ -1337,7 +1337,7 @@ pull_policy = "never"
             raise ScenarioFailure(f"expected clean suspend inventory: {preflight!r}")
         status, value = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {"action": "suspend", "session_id": session_id, "discard_untracked": "None", "abort_operations": "None", "without_checkpoint": False},
         )
         if status != 202:
@@ -1379,7 +1379,7 @@ pull_policy = "never"
         title = f"active-stop-{self.seed}"
         status, _ = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {
                 "action": "new",
                 "workspace_id": workspace["id"],
@@ -1405,7 +1405,7 @@ pull_policy = "never"
         prompt = f"active stop seed={self.seed}"
         status, _ = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {"action": "prompt", "session_id": session_id, "text": prompt},
         )
         if status != 202:
@@ -1419,7 +1419,7 @@ pull_policy = "never"
 
         started = time.monotonic()
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
+            "POST", "/api/v1/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"active close action returned {status}")
@@ -1461,7 +1461,7 @@ pull_policy = "never"
 
         status, _ = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {
                 "action": "resume",
                 "session_id": session_id,
@@ -1479,7 +1479,7 @@ pull_policy = "never"
             and session.get("conversation_available"),
             "resumed session transcript available from active Stop archive",
         )
-        status, transcript = self.request("GET", f"/api/conversations/{session_id}")
+        status, transcript = self.request("GET", f"/api/v1/conversations/{session_id}")
         if status != 200 or not isinstance(transcript, dict):
             raise ScenarioFailure(f"resumed transcript returned {status}: {transcript!r}")
         lines = [
@@ -1496,7 +1496,7 @@ pull_policy = "never"
         )
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
+            "POST", "/api/v1/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"cleanup close returned {status}")
@@ -1535,7 +1535,7 @@ pull_policy = "never"
         title = f"unanswered-{self.seed}"
         status, _ = self.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {
                 "action": "new",
                 "workspace_id": workspace["id"],
@@ -1582,7 +1582,7 @@ pull_policy = "never"
         self.record_action("unanswered-turn", session_id=session_id, report=report)
 
         status, value = self.request(
-            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
+            "POST", "/api/v1/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action returned {status}: {value!r}")
@@ -1614,7 +1614,7 @@ pull_policy = "never"
         while True:
             status, body = self.request(
                 "POST",
-                "/api/actions",
+                "/api/v1/actions",
                 {"action": "prompt", "session_id": session_id, "text": text},
             )
             if status == 202:

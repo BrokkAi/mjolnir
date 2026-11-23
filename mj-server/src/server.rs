@@ -23,7 +23,7 @@ use axum::http::{HeaderMap, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::{get, post, put};
+use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
@@ -145,6 +145,7 @@ pub struct ServerOptions {
     background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
     pub image_builds: ImageBuilds,
+    finish_image_builds_on_stop: bool,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
     /// disabled only for an explicitly trusted HTTP development endpoint.
@@ -154,8 +155,11 @@ pub struct ServerOptions {
     login_token: String,
     cookie_key: Vec<u8>,
     viewer_revocations: Arc<ViewerRevocations>,
+    code_guard: Arc<Mutex<CodeGuard>>,
+    held_prompts: Arc<api::HeldPrompts>,
     browser: BrowserSource,
     api_token: String,
+    loopback_token: String,
     subagent: Option<Arc<dyn api::SubagentBackend>>,
     /// Where the remembered fast-start preferences live. Injected rather than
     /// resolved from the process environment inside a handler, so the
@@ -216,6 +220,7 @@ impl ServerOptions {
             background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
             image_builds: ImageBuilds::default(),
+            finish_image_builds_on_stop: true,
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
             tls_config: None,
@@ -223,10 +228,13 @@ impl ServerOptions {
             login_token: derive_login_token(&cookie_key),
             cookie_key,
             viewer_revocations: Arc::new(ViewerRevocations::default()),
+            code_guard: Arc::new(Mutex::new(CodeGuard::default())),
+            held_prompts: Arc::new(api::HeldPrompts::default()),
             browser,
             // An empty token authenticates nothing: the daemon installs the
             // persisted one, and a server without it serves the viewer only.
             api_token: String::new(),
+            loopback_token: String::new(),
             subagent: None,
             preferences_path: mj_core::go::GoPreferences::path(),
             worker_source_check: None,
@@ -290,6 +298,15 @@ impl ServerOptions {
 
     /// Install the persisted bearer token for the `/api/v1` routes. Rotating
     /// it revokes every client that still holds the old one.
+    /// The shared control loop will finish image builds when it shuts down.
+    pub fn delegate_image_build_shutdown(&mut self) {
+        self.finish_image_builds_on_stop = false;
+    }
+
+    pub fn set_loopback_token(&mut self, token: String) {
+        self.loopback_token = token;
+    }
+
     pub fn set_api_token(&mut self, token: String) {
         self.api_token = token;
     }
@@ -345,7 +362,9 @@ pub async fn run_server_on_listener(
     let shutdown = options.shutdown.clone();
     let viewer_code = options.viewer_code.clone();
     let tls_config = options.tls_config.take();
-    let image_builds = options.image_builds.clone();
+    let image_builds = options
+        .finish_image_builds_on_stop
+        .then(|| options.image_builds.clone());
     let app = router(options);
     mj_core::diagnostic_stdout!("Mjolnir viewer code: {viewer_code}");
     let listener = listener.into_std().context("prepare web viewer listener")?;
@@ -373,7 +392,9 @@ pub async fn run_server_on_listener(
         }
     }
     .with_context(|| format!("serve web viewer on {bind}"));
-    image_builds.finish().await;
+    if let Some(image_builds) = image_builds {
+        image_builds.finish().await;
+    }
     result
 }
 
@@ -406,7 +427,6 @@ use assets::*;
 mod config_view;
 pub use config_view::*;
 mod settings;
-use settings::*;
 
 #[cfg(test)]
 mod tests;

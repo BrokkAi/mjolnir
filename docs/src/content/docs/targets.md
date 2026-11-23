@@ -54,8 +54,8 @@ command exercises container creation and removal.
 | --- | --- | --- | --- | --- | --- | --- |
 | `bare` | `local` (Linux or macOS controller machine) | none | Existing local directory, optionally an isolated Git clone | no | host-owned | Machine and user-selected directory persist; a managed clone is archived and retired on suspend. |
 | `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory, optionally an isolated clone | no | host-owned | Host and user-selected directory persist; the managed clone and staging areas are retired on suspend. |
-| `podman` | `local` (Linux/WSL2, or macOS with a rootless `podman machine`) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
-| `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
+| `podman` | `local` (Linux or WSL2) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
+| `podman` | a Linux `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
 | `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
 | `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
 | `apple-container` | an `ssh` machine (Apple-silicon macOS 26+) | Apple container VM on the remote Mac | Bundle | remote-host read-only mounts | CPU and memory | Remote container is removed after verified stop. |
@@ -236,8 +236,7 @@ project image assignment overrides the target image for its platform. See
 kind = "podman"
 ```
 
-Rootless Podman 4.0 or newer runs on Linux, WSL2, or macOS with a rootless
-`podman machine`. It is the only runtime with configurable workspace backing:
+Rootless Podman 4.0 or newer runs on Linux or WSL2. It is the only runtime with configurable workspace backing:
 a named volume by default, the container layer, or a host path managed through
 an operator-supplied helper. A rootful machine and a manually configured remote
 connection are not supported. See [Podman](/podman/).
@@ -282,8 +281,8 @@ machine = "mac"
 ```
 
 Settings › Runtimes offers that runtime when the probe finds Apple-silicon
-macOS 26 or newer with a running Apple container daemon; `mj doctor` checks it
-the way it checks a local one.
+macOS 26 or newer with a working Apple container installation. Mjolnir starts
+a stopped service when launching a session.
 
 ### Podman on an SSH machine
 
@@ -303,11 +302,10 @@ container field. The container and any workspace volume live on the remote host.
 directory sources are therefore paths on that remote host, not paths on the
 controller. See [SSH and SSH Podman](/ssh/).
 
-The machine can be a Mac running a rootless `podman machine`, or Docker through
-Docker Desktop or Colima. Mjolnir runs each command on a Mac with the
-directories from `/etc/paths`, `/etc/paths.d` and Homebrew's `/opt/homebrew`
-added after the SSH session's own `PATH`, so Homebrew's `podman` and `docker`
-are found without editing shell startup files.
+Podman requires a Linux host. On a Mac reached over SSH, use Docker or Apple
+container. Mjolnir adds the directories from `/etc/paths`, `/etc/paths.d` and
+Homebrew's Apple silicon prefix after the SSH session's own `PATH` so those
+commands are available without editing shell startup files.
 
 ## AWS EC2
 
@@ -395,7 +393,7 @@ These choices are capacity controls. Mjolnir sums the CPU and memory limits of
 live containers that share a physical host, reserving one fifth of physical
 RAM (at least 2 GiB) for the operating system. CPU overcommit always produces
 a warning and the launch proceeds. RAM overcommit also proceeds with a warning
-for Docker and Podman, including on macOS: cgroup limits are ceilings that an
+for Docker and Podman: cgroup limits are ceilings that an
 idle container does not use. Only Apple `container` targets treat RAM as a hard
 commitment, because their VMs do not return freed memory to macOS. For those
 targets, compression, swap, and reclaimable memory do not increase the budget;

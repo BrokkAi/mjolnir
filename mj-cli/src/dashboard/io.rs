@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::{Config, ProjectBundle};
 use mj_core::state::{
     MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord, SessionState, State,
 };
+use mj_core::storage::{DetachedSessionDraft, RetiredDetachedDraft};
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
@@ -477,8 +477,11 @@ pub(crate) struct ActiveLifecycleOperation {
     pub(crate) notice_name: String,
 }
 
+#[derive(Default)]
 pub(crate) struct WorkspaceManagementResult {
-    pub(crate) entries: Vec<WorkspaceManagementEntry>,
+    pub(crate) entries: Option<Vec<WorkspaceManagementEntry>>,
+    pub(crate) recovered_draft: Option<(RetiredDetachedDraft, String, String)>,
+    pub(crate) draft_notice: Option<String>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
     /// The entries carry the workspace list ahead of their drafts: the dialog
@@ -727,10 +730,10 @@ impl DashboardContext {
                     .unwrap_or(generation);
                 let deleted = result.is_ok();
                 let result = result.map(|()| WorkspaceManagementResult {
-                    entries: self.dashboard.workspace_entries_without(&workspace_id),
+                    entries: Some(self.dashboard.workspace_entries_without(&workspace_id)),
                     select_workspace: None,
                     deleted_workspace_id: Some(workspace_id),
-                    details_pending: false,
+                    ..Default::default()
                 });
                 self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
                     generation,
@@ -756,7 +759,18 @@ impl DashboardContext {
                         select_workspace,
                         deleted_workspace_id,
                         details_pending,
+                        recovered_draft,
+                        draft_notice,
                     } = result;
+                    if let Some((source, session_id, text)) = recovered_draft {
+                        self.apply_workspace_draft_recovery(generation, source, session_id, text);
+                    }
+                    if let Some(message) = draft_notice {
+                        self.dashboard.workspace_draft_notice(generation, message);
+                    }
+                    let Some(entries) = entries else {
+                        return;
+                    };
                     // The runtime feed alone owns tab names, layouts and the
                     // active tab. A deletion owns only the composers, because
                     // the feed also hides an empty default it cannot tell
@@ -1492,7 +1506,7 @@ impl DashboardContext {
             }
             DashboardIoUpdate::TerminalDraft { session_id, revision, result } => {
                 self.composer_drafts.complete(&session_id, revision, result.is_ok());
-                match result {
+                match &result {
                     Ok(()) => { self.draft_save_failures.remove(&session_id); }
                     Err(error) => {
                         let message = format!("Could not confirm saved draft for {}: {error}", self.session_notice_name(&session_id));
@@ -1500,6 +1514,7 @@ impl DashboardContext {
                         self.dashboard.set_notice(message);
                     }
                 }
+                self.finish_workspace_draft_saves(&session_id, revision, result.as_ref().map(|_| ()).map_err(String::as_str));
                 self.flush_composer_draft(&session_id, false);
             }
             DashboardIoUpdate::ReadReceipt { session_id, result } => {
@@ -2953,6 +2968,7 @@ mod tests {
             title: id.into(),
             harness_kind: HarnessKind::Codex,
             last_profile: "codex".into(),
+            staged_aws_profile: None,
             bundle_id: "project".into(),
             project_directory: None,
             managed_worktree: None,

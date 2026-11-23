@@ -667,11 +667,16 @@ pub enum RuntimeEvent {
     ElicitationRequested {
         request: ElicitationRequest,
     },
+    GuardianReviewed {
+        review: crate::guardian::PriorGuardianReview,
+    },
     ElicitationResolved {
         elicitation_id: String,
         action: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<crate::guardian::TrustedUserAnswerField>>,
     },
     PromptFinished {
         #[serde(default, skip_serializing_if = "Option::is_none")]

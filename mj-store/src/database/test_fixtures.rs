@@ -119,6 +119,20 @@ pub fn materialized_session(session_id: &str) -> MaterializedSession {
     }
 }
 
+pub fn retire_test_harness(session_id: &str) -> Result<()> {
+    let id = session_id.to_owned();
+    submit_database_write("install retired harness fixture", move |connection| {
+        ensure!(
+            connection.execute(
+                "UPDATE sessions SET harness_kind='legacy-test-harness' WHERE session_id=?1",
+                [&id],
+            )? == 1,
+            "missing session fixture {id}"
+        );
+        Ok(())
+    })
+}
+
 pub fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
@@ -139,6 +153,7 @@ pub fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         id: session_id.into(),
         title: "checkpoint transition".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
+        staged_aws_profile: None,
         last_profile: "codex".into(),
         bundle_id: "project".into(),
         project_directory: None,
@@ -320,4 +335,25 @@ pub fn worker_test_run_blocking<T>(
     worker_test_scope(id, || {
         crate::worker_lifecycle::run_blocking(id, reason, executor, work)
     })
+}
+
+/// Simulate a newer edit to the legacy seed before exercising a compare-clear.
+pub fn seed_session_draft_input(session_id: &str, draft: &str) -> anyhow::Result<()> {
+    let session_id = session_id.to_owned();
+    let draft = draft.to_owned();
+    submit_database_write("seed_session_draft_input", move |_| {
+        set_session_draft_input_at(&database_path(), &session_id, &draft)
+    })
+}
+
+pub(super) fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &str) -> Result<()> {
+    let mut connection = super::open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let updated = tx.execute(
+        "UPDATE sessions SET draft_input = ?2 WHERE session_id = ?1",
+        rusqlite::params![session_id, draft],
+    )?;
+    anyhow::ensure!(updated == 1, "unknown session {session_id}");
+    tx.commit()?;
+    Ok(())
 }

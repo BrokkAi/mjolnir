@@ -1058,7 +1058,11 @@ pub fn serve_leased_relay() {
                 RelayRequest::GuardianRequests => {
                     let path = PathBuf::from(&root).join("guardian-request.json");
                     let requests = match std::fs::read(path) {
-                        Ok(bytes) => vec![serde_json::from_slice(&bytes).unwrap()],
+                        Ok(bytes) => {
+                            let pending: mj_core::guardian::GuardianReviewRequest =
+                                serde_json::from_slice(&bytes).unwrap();
+                            vec![pending.for_protocol(request.protocol_version)]
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
                         Err(error) => panic!("read stand-in guardian queue: {error}"),
                     };

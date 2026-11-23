@@ -457,6 +457,26 @@ pub fn load_materialized_turn_outcome(session_id: &str) -> Result<Option<Materia
     load_materialized_turn_outcome_from(&database_path(), session_id)
 }
 
+/// Read the turn and its queued continuations from the same committed projection.
+pub fn load_materialized_turn_with_queue(
+    session_id: &str,
+) -> Result<Option<(MaterializedTurnState, Vec<String>)>> {
+    load_materialized_turn_with_queue_from(&database_path(), session_id)
+}
+
+pub(super) fn load_materialized_turn_with_queue_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Option<(MaterializedTurnState, Vec<String>)>> {
+    let mut reader = open_reader(path)?;
+    let transaction = reader.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+    let Some(state) = read_materialized_turn_state(&transaction, session_id)? else {
+        return Ok(None);
+    };
+    let queued_command_ids = read_materialized_queued_command_ids(&transaction, session_id)?;
+    Ok(Some((state, queued_command_ids)))
+}
+
 /// Reconcile a replayed input after the worker has collected its command ledger.
 /// Queued, active and historical turns are read from one projection transaction.
 pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Option<u64>> {
@@ -2243,6 +2263,18 @@ pub(super) fn read_materialized_transcript(
         transcript.reverse();
     }
     Ok(transcript)
+}
+
+pub(super) fn read_materialized_queued_command_ids(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT command_id FROM materialized_queued_prompts WHERE session_id = ?1 ORDER BY ordinal",
+    )?;
+    Ok(statement
+        .query_map([session_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 pub(super) fn read_materialized_queued_prompts(

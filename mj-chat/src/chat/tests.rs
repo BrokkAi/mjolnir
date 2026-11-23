@@ -2987,6 +2987,7 @@ mod golden_cases {
                     elicitation_id: question.id,
                     action: "accept".into(),
                     reply: Some(reply),
+                    answers: None,
                 })
                 .unwrap(),
             },

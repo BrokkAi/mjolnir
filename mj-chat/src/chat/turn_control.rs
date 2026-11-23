@@ -36,6 +36,9 @@ impl ChatState {
                 .as_ref()
                 .map(|action| action.command.clone());
         }
+        if self.publishes_interrupt_targets {
+            return None;
+        }
         // Older workers publish no availability; expose interruption only.
         Some(match self.active_prompt_id.clone() {
             Some(active_prompt_id) if self.targeted_turn_control_supported => {
@@ -76,9 +79,16 @@ impl ChatState {
 
     pub(super) fn sync_turn_control(&mut self, state: &RelayOperationalState) {
         self.targeted_turn_control_supported = state.supports_targeted_turn_control();
+        self.publishes_interrupt_targets = state.publishes_interrupt_targets();
         self.turn_controls = state.turn_controls.clone();
         let changed = self.steering != state.steering;
-        if self.turn_control_awaiting_state.as_ref().is_some_and(|id| {
+        if self.turn_control_awaiting_state.as_ref().is_some_and(|(id, exact_target)| {
+            if let Some(target) = exact_target {
+                return state.turn_controls.as_ref().and_then(|controls| controls.interrupt.as_ref())
+                    .is_none_or(|command| !matches!(command,
+                        RelayCommand::CancelTurnTarget { target: current } if current == target
+                    ));
+            }
             state.steering.as_ref().is_some_and(|s| s.command_id == *id)
                 || state
                     .cancelling_prompt_id
@@ -92,7 +102,11 @@ impl ChatState {
         self.active_prompt_id = state.active_prompt.as_ref().map(|p| p.command_id.clone());
         self.steering = state.steering.clone();
         self.cancelling_prompt_id = state.cancelling_prompt_id.clone();
-        let feedback = if self.cancelling_prompt_id.is_some() {
+        let interrupt_pending = self.turn_controls.as_ref().is_some_and(|controls| {
+            controls.status == mj_core::relay::TurnControlStatus::Pending
+                && controls.interrupt.is_none()
+        });
+        let feedback = if self.cancelling_prompt_id.is_some() || interrupt_pending {
             Some("Interrupting turn…")
         } else {
             self.steering.as_ref().and_then(|s| match s.status {

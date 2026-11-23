@@ -91,19 +91,34 @@ pub struct WaitObservation {
 }
 
 impl WaitObservation {
+    pub fn observe_turn(
+        &mut self,
+        execution: MaterializedExecutionState,
+        active_turn: Option<MaterializedTurn>,
+        last_turn_outcome: Option<MaterializedTurnOutcome>,
+        queued_command_ids: Vec<String>,
+    ) {
+        self.execution = execution;
+        self.active_turn = active_turn;
+        self.last_turn_outcome = last_turn_outcome;
+        self.queued = queued_command_ids;
+    }
+
     /// Read turn resolution from one worker publication. Delegation and the
     /// wait API must not announce an ending before this worker finishes its
     /// assessment or retries the request.
     pub fn observe_worker_turn(&mut self, snapshot: &mj_core::state::ManagedSessionSnapshot) {
-        self.execution = snapshot.materialized.execution;
-        self.active_turn = snapshot.materialized.active_turn.clone();
-        self.last_turn_outcome = snapshot.materialized.last_turn_outcome.clone();
-        self.queued = snapshot
-            .materialized
-            .queued_prompts
-            .iter()
-            .map(|prompt| prompt.command_id.clone())
-            .collect();
+        let materialized = &snapshot.materialized;
+        self.observe_turn(
+            materialized.execution,
+            materialized.active_turn.clone(),
+            materialized.last_turn_outcome.clone(),
+            materialized
+                .queued_prompts
+                .iter()
+                .map(|prompt| prompt.command_id.clone())
+                .collect(),
+        );
         self.capacity_retry = snapshot.operational.capacity_retry.clone();
         self.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
         self.turn_assessment = snapshot.operational.assessment.as_deref().cloned();

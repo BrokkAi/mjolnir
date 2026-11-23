@@ -112,7 +112,7 @@ pub fn user_messages_packet(messages: &[UserMessage], current_task: &str) -> Str
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    bound_review_section(&rendered, USER_MESSAGES_LIMIT, "older user messages")
+    bound_review_section(&rendered, USER_MESSAGES_LIMIT, "middle user messages")
 }
 
 /// Each repository's root and the exact command that prints its captured change.

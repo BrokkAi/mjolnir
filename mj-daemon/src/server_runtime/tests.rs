@@ -2283,6 +2283,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         title: "Phone launch".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
         last_profile: "codex".into(),
+        staged_aws_profile: None,
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
@@ -2851,8 +2852,19 @@ fn correlated_prompt_reply_waits_for_relay_submission_without_delaying_legacy_ad
         rx.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    replies.resolve(7, ActionOutcome::accepted());
-    assert_eq!(rx.try_recv().unwrap(), ActionOutcome::accepted());
+    let message = "The session queue is full. Wait for queued prompts to run or remove queued input, then try again.";
+    let rejected = anyhow::Error::msg(message)
+        .context(mj_controller::session_manager::SubmitRefusalCode(
+            mj_core::relay::RelayErrorCode::InvalidState,
+        ))
+        .context(mj_client::session::Refused);
+    let refused = prompt_submission_error(rejected);
+    let failure = PhoneActionFailure::of(&refused);
+    replies.resolve(7, failure.outcome("queue-full-test"));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        ActionOutcome::Refused(Refusal::precondition(message))
+    );
 
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     replies.accept(8, &prompt_action(), tx);

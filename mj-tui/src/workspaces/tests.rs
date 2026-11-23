@@ -107,6 +107,8 @@ fn golden_workspace_manager_drafts() {
     beta.drafts = vec![
         WorkspaceDraftEntry {
             id: "draft-terminal".into(),
+            session_title: Some("Draft session".into()),
+            preview: "Detached draft preview".into(),
             session_id: Some("session-1".into()),
             source: "terminal composer".into(),
             saved_at: "2026-10-01 12:00".into(),
@@ -114,6 +116,8 @@ fn golden_workspace_manager_drafts() {
         },
         WorkspaceDraftEntry {
             id: "draft-web".into(),
+            session_title: None,
+            preview: "Unattached draft preview".into(),
             session_id: None,
             source: "web viewer".into(),
             saved_at: "2026-10-02 09:30".into(),
@@ -147,7 +151,36 @@ fn golden_workspace_manager_drafts() {
         "second draft selected",
         &drawn(&mut dashboard, 110, 32),
     );
-    let action = dashboard.handle_key(key(KeyCode::Enter));
+    let lines = drawn(&mut dashboard, 110, 32);
+    let action = click_workspace_label(&mut dashboard, &lines, "Discard all");
+    assert_eq!(
+        action,
+        DashboardAction::DiscardWorkspaceDrafts {
+            generation,
+            workspace_id: "beta".into(),
+            draft_id: None,
+        }
+    );
+    writeln!(output, "action: {action:?}").unwrap();
+
+    // A new snapshot with the last item removed must clamp the selection.
+    let mut remaining = beta.clone();
+    remaining.drafts.pop();
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("default", "Default"), alpha.clone(), remaining]),
+        false,
+    );
+    let lines = drawn(&mut dashboard, 110, 32);
+    let action = click_workspace_label(&mut dashboard, &lines, "Discard");
+    assert_eq!(
+        action,
+        DashboardAction::DiscardWorkspaceDrafts {
+            generation,
+            workspace_id: "beta".into(),
+            draft_id: Some("draft-terminal".into()),
+        }
+    );
     writeln!(output, "action: {action:?}").unwrap();
 
     beta.drafts.clear();
@@ -156,9 +189,10 @@ fn golden_workspace_manager_drafts() {
         Ok(vec![entry("default", "Default"), alpha, beta]),
         false,
     );
+    dashboard.workspace_draft_notice(generation, "Draft discarded.".into());
     append_workspace_state(
         &mut output,
-        "draft recovery completed",
+        "draft discard completed",
         &drawn(&mut dashboard, 110, 32),
     );
 
@@ -531,6 +565,8 @@ fn delete_with_active_sessions_uses_the_cancellable_suspension_workflow() {
     busy_entry.workspace.session_count = 2;
     busy_entry.drafts.push(WorkspaceDraftEntry {
         id: "draft-a".into(),
+        session_title: Some("Draft session".into()),
+        preview: "Detached draft preview".into(),
         session_id: Some("session-a".into()),
         source: "composer".into(),
         saved_at: "now".into(),
@@ -843,6 +879,8 @@ fn a_close_opened_by_shortcut_returns_to_the_dashboard_when_it_finishes() {
 fn draft() -> WorkspaceDraftEntry {
     WorkspaceDraftEntry {
         id: "draft-a".into(),
+        session_title: Some("Draft session".into()),
+        preview: "Detached draft preview".into(),
         session_id: None,
         source: "composer".into(),
         saved_at: "now".into(),

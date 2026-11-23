@@ -331,6 +331,10 @@ impl RuntimeState {
                 .unwrap_or_default();
             let lifecycles = Self::active_lifecycles_with(&owner);
             let records = owner.projected_records();
+            let no_retired = Default::default();
+            let retired = owner
+                .committed()
+                .map_or(&no_retired, |state| &state.retired_container_allocations);
             let browser = self
                 .browser
                 .lock()
@@ -355,9 +359,11 @@ impl RuntimeState {
                         mount_history: controller.state.mount_history.clone(),
                         last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
-                        container_capacities: history
-                            .capacity
-                            .project(self, &controller.state.sessions),
+                        container_capacities: history.capacity.project(
+                            self,
+                            &controller.state.sessions,
+                            retired,
+                        ),
                         ..Default::default()
                     },
                     ..Default::default()
