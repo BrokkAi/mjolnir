@@ -3,6 +3,7 @@
 package chat
 
 import (
+	"reflect"
 	"slices"
 
 	tea "charm.land/bubbletea/v2"
@@ -242,7 +243,42 @@ func actionLabels[K comparable](buttons []ButtonSpec[K]) []string {
 // Every action layout reads this, so a stacked column and a row cannot
 // disagree about labels or order.
 func (d *Dialog[K]) orderedActions(buttons []ButtonSpec[K]) []ButtonSpec[K] {
-	panic("unported: mj-chat/src/components/dialog.rs Dialog.orderedActions")
+	ordered := slices.Clone(buttons)
+	if d.submissionPending {
+		for i := range ordered {
+			if d.Form.IsDefaultAction(ordered[i].ID) {
+				if ASCII() {
+					ordered[i].Label = "Working.."
+				} else {
+					ordered[i].Label = "Working…"
+				}
+				ordered[i].Enabled = false
+			}
+		}
+	}
+	rank := func(id K) int {
+		role := ActionRoleSecondary
+		if index := slices.IndexFunc(d.actionRoles, func(entry dialogActionRole[K]) bool { return entry.id == id }); index >= 0 {
+			role = d.actionRoles[index].role
+		} else if d.Form.IsDefaultAction(id) {
+			role = ActionRolePrimary
+		} else if slices.Contains(d.dismissActions, id) {
+			role = ActionRoleCancel
+		}
+		switch role {
+		case ActionRoleCancel:
+			return 0
+		case ActionRoleBack:
+			return 1
+		case ActionRoleSecondary:
+			return 2
+		default:
+			return 3
+		}
+	}
+	// Rust's sort_by_key is stable.
+	slices.SortStableFunc(ordered, func(a, b ButtonSpec[K]) int { return rank(a.ID) - rank(b.ID) })
+	return ordered
 }
 
 // SetSubmit declares which action Enter in a single-line field invokes.
@@ -277,19 +313,113 @@ func (d *Dialog[K]) ConfirmationOpen() bool {
 // RequestDismissal passes both explicit Cancel actions and Escape through
 // the draft protection.
 func (d *Dialog[K]) RequestDismissal(action Interaction[K]) EventResult[Interaction[K]] {
-	panic("unported: mj-chat/src/components/dialog.rs Dialog.RequestDismissal")
+	if !d.dismissalEnabled {
+		return EventResultHandled[Interaction[K]]()
+	}
+	dirty := d.dirty
+	if activate, ok := action.(InteractionActivate[K]); ok {
+		index := slices.IndexFunc(d.dismissalScopes, func(scope dialogDismissalScope[K]) bool { return scope.id == activate.ID })
+		if index >= 0 {
+			scope := d.dismissalScopes[index].part
+			dirty = slices.ContainsFunc(d.baselines, func(baseline draftBaseline) bool {
+				return baseline.name == scope && baseline.changed
+			})
+		}
+	}
+	if !dirty {
+		return EventResultWithAction(action)
+	}
+	d.Form.CancelPointer()
+	d.pendingDismissal = action
+	d.confirmation = NewForm[bool]()
+	d.confirmation.Declare(false, ControlKindButton{})
+	d.confirmation.Declare(true, ControlKindButton{})
+	d.confirmation.EndFrame(false)
+	return EventResultHandled[Interaction[K]]()
 }
 
 // Handle routes an event to the discard prompt when it is open, otherwise
 // to the form, applying the dialog's escape, submit, and dismissal rules.
 func (d *Dialog[K]) Handle(event tea.Msg) EventResult[Interaction[K]] {
-	panic("unported: mj-chat/src/components/dialog.rs Dialog.Handle")
+	if d.ConfirmationOpen() {
+		result := d.confirmation.Handle(event)
+		switch action := result.Action.(type) {
+		case InteractionActivate[bool]:
+			if action.ID {
+				d.dirty = false
+				pending := d.pendingDismissal
+				d.pendingDismissal = nil
+				return EventResult[Interaction[K]]{Consumed: true, Action: pending}
+			}
+			d.pendingDismissal = nil
+		case InteractionCancel[bool]:
+			d.pendingDismissal = nil
+		}
+		// The confirmation owns every event while it is open, so an
+		// unrecognized one is consumed rather than reaching the form behind
+		// it.
+		return EventResultHandled[Interaction[K]]()
+	}
+	if kind, button, x, y := classifyMouse(event); kind != mouseKindNone &&
+		d.menu &&
+		d.bounds.Dx() > 0 &&
+		!pointIn(x, y, d.bounds) &&
+		kind == mouseKindDown && button == tea.MouseLeft {
+		d.Form.CancelPointer()
+		return EventResultWithAction[Interaction[K]](InteractionCancel[K]{})
+	}
+	result := d.Form.Handle(event)
+	if _, cancel := result.Action.(InteractionCancel[K]); cancel && d.escapeAction != nil {
+		result.Action = InteractionActivate[K]{ID: *d.escapeAction}
+	}
+	if activate, ok := result.Action.(InteractionActivate[K]); ok {
+		index := slices.IndexFunc(d.submit, func(entry dialogSubmit[K]) bool { return entry.field == activate.ID })
+		if index >= 0 {
+			target := d.submit[index].action
+			if d.Form.IsEnabled(target) {
+				result.Action = InteractionActivate[K]{ID: target}
+			} else {
+				result.Action = nil
+			}
+		}
+	}
+	_, cancel := result.Action.(InteractionCancel[K])
+	activate, isActivate := result.Action.(InteractionActivate[K])
+	if cancel || (isActivate && slices.Contains(d.dismissActions, activate.ID)) {
+		return d.RequestDismissal(result.Action)
+	}
+	if d.submissionPending && isActivate {
+		return EventResultHandled[Interaction[K]]()
+	}
+	switch result.Action.(type) {
+	case InteractionEdit[K], InteractionSelect[K], InteractionToggle[K]:
+		d.submissionPending = false
+	}
+	return result
 }
 
 // RenderConfirmation draws the reusable discard prompt above the owning
 // dialog without losing its focus.
 func (d *Dialog[K]) RenderConfirmation(frame *Frame, area uv.Rectangle, surfaces *FrameSurfaces) {
-	panic("unported: mj-chat/src/components/dialog.rs Dialog.RenderConfirmation")
+	if !d.ConfirmationOpen() {
+		return
+	}
+	popup := CenteredModalFixed(frame, surfaces, 56, 7, area)
+	block := Modal().WithTitle(RawLine(" Discard unsaved changes? "))
+	inner := block.Inner(popup)
+	frame.RenderWidget(block, popup)
+	layout := DialogShellLayout(inner, 1)
+	message := "Your changes have not been saved."
+	if d.confirmationMessage != nil {
+		message = *d.confirmationMessage
+	}
+	frame.RenderWidget(NewParagraph(RawText(message)).WithWrap(Wrap{Trim: false}), layout.Body)
+	d.confirmation.BeginFrame()
+	ButtonRowRender(frame, layout.Actions, []ButtonSpec[bool]{
+		{ID: false, Label: "Keep editing", Enabled: true},
+		{ID: true, Label: "Discard", Enabled: true},
+	}, &d.confirmation)
+	d.confirmation.EndFrame(false)
 }
 
 // DeclareActions declares the dialog's actions with their roles and enabled
@@ -310,12 +440,65 @@ func (d *Dialog[K]) DeclareActions(actions []DialogAction[K]) {
 
 // Clone copies the dialog, cloning its forms (Rust's derived Clone).
 func (d *Dialog[K]) Clone() Dialog[K] {
-	panic("unported: mj-chat/src/components/dialog.rs Dialog.Clone")
+	baselines := make([]draftBaseline, 0, len(d.baselines))
+	for _, baseline := range d.baselines {
+		baselines = append(baselines, draftBaseline{name: baseline.name, values: slices.Clone(baseline.values), changed: baseline.changed})
+	}
+	var confirmationMessage *string
+	if d.confirmationMessage != nil {
+		message := *d.confirmationMessage
+		confirmationMessage = &message
+	}
+	return Dialog[K]{
+		Form:                d.Form.Clone(),
+		dismissActions:      slices.Clone(d.dismissActions),
+		actionRoles:         slices.Clone(d.actionRoles),
+		escapeAction:        optionalKey(d.escapeAction),
+		dismissalScopes:     slices.Clone(d.dismissalScopes),
+		submit:              slices.Clone(d.submit),
+		baselines:           baselines,
+		dirty:               d.dirty,
+		dismissalEnabled:    d.dismissalEnabled,
+		submissionPending:   d.submissionPending,
+		pendingDismissal:    d.pendingDismissal,
+		confirmation:        d.confirmation.Clone(),
+		confirmationMessage: confirmationMessage,
+		menu:                d.menu,
+		bounds:              d.bounds,
+	}
 }
 
 // Equal compares two dialogs field by field (Rust's derived PartialEq).
 func (d *Dialog[K]) Equal(other *Dialog[K]) bool {
-	panic("unported: mj-chat/src/components/dialog.rs Dialog.Equal")
+	baselinesEqual := slices.EqualFunc(d.baselines, other.baselines, func(a, b draftBaseline) bool {
+		return a.name == b.name && slices.Equal(a.values, b.values) && a.changed == b.changed
+	})
+	messagesEqual := (d.confirmationMessage == nil) == (other.confirmationMessage == nil) &&
+		(d.confirmationMessage == nil || *d.confirmationMessage == *other.confirmationMessage)
+	return d.Form.Equal(&other.Form) &&
+		slices.Equal(d.dismissActions, other.dismissActions) &&
+		slices.Equal(d.actionRoles, other.actionRoles) &&
+		optionalKeysEqual(d.escapeAction, other.escapeAction) &&
+		slices.Equal(d.dismissalScopes, other.dismissalScopes) &&
+		slices.Equal(d.submit, other.submit) &&
+		baselinesEqual &&
+		d.dirty == other.dirty &&
+		d.dismissalEnabled == other.dismissalEnabled &&
+		d.submissionPending == other.submissionPending &&
+		interactionsEqual(d.pendingDismissal, other.pendingDismissal) &&
+		d.confirmation.Equal(&other.confirmation) &&
+		messagesEqual &&
+		d.menu == other.menu &&
+		d.bounds == other.bounds
+}
+
+// interactionsEqual compares two optional interactions as Rust's derived
+// PartialEq does. A field edit holding a key press compares the presses.
+func interactionsEqual[K comparable](a, b Interaction[K]) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // DialogShell is the common modal layout that keeps actions out of the
@@ -333,7 +516,9 @@ type DialogLayout struct {
 // borders, none at the bottom. Reserve a status row with
 // `DialogShellLayout(inner, 1)` for the gap above actions.
 func DialogShellPaddedInner(popup uv.Rectangle) uv.Rectangle {
-	panic("unported: mj-chat/src/components/dialog.rs DialogShellPaddedInner")
+	inner := RectInner(popup, Margin{Horizontal: 2, Vertical: 1})
+	top := min(inner.Dy(), 1)
+	return uv.Rect(inner.Min.X, inner.Min.Y+top, inner.Dx(), inner.Dy()-top)
 }
 
 // DialogShellLayout splits inner into the body, statusRows of status, and
@@ -354,5 +539,11 @@ func DialogShellLayout(inner uv.Rectangle, statusRows int) DialogLayout {
 // DialogShellHints is the footer hint line for a command menu (commands) or
 // a selection list.
 func DialogShellHints(commands bool) Line {
-	panic("unported: mj-chat/src/components/dialog.rs DialogShellHints")
+	glyphs := ThemeGlyphs()
+	arrows, separator := glyphs.ArrowsVertical, glyphs.FooterSeparator
+	text := " " + arrows + " select" + separator + "Double-click/Enter opens" + separator + "Tab moves" + separator + "Esc back "
+	if commands {
+		text = " " + arrows + " browse" + separator + "Click/Enter runs" + separator + "Tab moves" + separator + "Esc closes "
+	}
+	return StyledLine(text, Muted())
 }

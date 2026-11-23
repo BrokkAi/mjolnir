@@ -3,6 +3,8 @@
 package chat
 
 import (
+	"math"
+
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 )
@@ -89,16 +91,92 @@ func (d *ScrollbarDrag) Clear() {
 // scrollbar. A drag ends when the track moves. It takes
 // [NewScrollbarGeometry]'s results directly.
 func (d *ScrollbarDrag) SetGeometry(geometry ScrollbarGeometry, ok bool) {
-	panic("unported: mj-chat/src/components/scrollbar.rs ScrollbarDrag.SetGeometry")
+	if !ok {
+		geometry = ScrollbarGeometry{}
+	}
+	sameTrack := d.hasGeometry == ok && (!ok || d.geometry.Track == geometry.Track)
+	if d.dragging && !sameTrack {
+		d.dragging = false
+	}
+	d.geometry, d.hasGeometry = geometry, ok
 }
 
 // HandleMouse offers a mouse event to the scrollbar.
 func (d *ScrollbarDrag) HandleMouse(mouse tea.MouseMsg) ScrollbarPointer {
-	panic("unported: mj-chat/src/components/scrollbar.rs ScrollbarDrag.HandleMouse")
+	kind, button, x, y := classifyMouse(mouse)
+	if d.dragging {
+		switch {
+		case kind == mouseKindDrag && button == tea.MouseLeft:
+			return d.seek(y)
+		case kind == mouseKindUp && button == tea.MouseLeft:
+			d.dragging = false
+			return ScrollbarPointerConsumed{}
+		case kind == mouseKindDown:
+			d.dragging = false
+		default:
+			return ScrollbarPointerConsumed{}
+		}
+	}
+	if kind != mouseKindDown || button != tea.MouseLeft {
+		return ScrollbarPointerIgnored{}
+	}
+	if !d.hasGeometry {
+		return ScrollbarPointerIgnored{}
+	}
+	geometry := d.geometry
+	if geometry.MaxScroll == 0 ||
+		x != geometry.Track.Min.X ||
+		y < geometry.Track.Min.Y ||
+		y >= geometry.Track.Max.Y {
+		return ScrollbarPointerIgnored{}
+	}
+	onThumb := y >= geometry.Thumb.Min.Y && y < geometry.Thumb.Max.Y
+	if onThumb {
+		d.grabOffset = y - geometry.Thumb.Min.Y
+	} else {
+		d.grabOffset = geometry.Thumb.Dy() / 2
+	}
+	d.dragging = true
+	if onThumb {
+		return ScrollbarPointerConsumed{}
+	}
+	return d.seek(y)
 }
 
 func (d ScrollbarDrag) seek(pointerRow int) ScrollbarPointer {
-	panic("unported: mj-chat/src/components/scrollbar.rs ScrollbarDrag.seek")
+	if !d.hasGeometry {
+		return ScrollbarPointerConsumed{}
+	}
+	geometry := d.geometry
+	travel := max(geometry.Track.Dy()-geometry.Thumb.Dy(), 0)
+	thumbTop := min(max(max(pointerRow-geometry.Track.Min.Y, 0)-d.grabOffset, 0), travel)
+	target := 0
+	if travel != 0 {
+		numerator := saturatingMul(thumbTop, geometry.MaxScroll)
+		target = min(saturatingAdd(numerator, travel/2)/travel, geometry.MaxScroll)
+	}
+	return ScrollbarPointerScrollTo{Offset: target}
+}
+
+// saturatingMul is a * b for non-negative operands, saturating at
+// math.MaxInt as Rust's `saturating_mul` does.
+func saturatingMul(a, b int) int {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > math.MaxInt/b {
+		return math.MaxInt
+	}
+	return a * b
+}
+
+// saturatingAdd is a + b for non-negative operands, saturating at
+// math.MaxInt.
+func saturatingAdd(a, b int) int {
+	if a > math.MaxInt-b {
+		return math.MaxInt
+	}
+	return a + b
 }
 
 // ClampOffsetToLastPage clamps a list offset so the viewport never opens on
@@ -110,7 +188,16 @@ func (d ScrollbarDrag) seek(pointerRow int) ScrollbarPointer {
 // `max(0, len - viewport)`, and a list that fits has offset 0. Row heights
 // are in terminal rows.
 func ClampOffsetToLastPage(offset int, rowHeights []int, viewportHeight int) int {
-	panic("unported: mj-chat/src/components/scrollbar.rs ClampOffsetToLastPage")
+	first := len(rowHeights)
+	used := 0
+	for first > 0 {
+		used = saturatingAdd(used, rowHeights[first-1])
+		if used > viewportHeight {
+			break
+		}
+		first--
+	}
+	return min(offset, first)
 }
 
 // CenteredOffset is the offset that centres selected in the viewport,
@@ -120,7 +207,17 @@ func ClampOffsetToLastPage(offset int, rowHeights []int, viewportHeight int) int
 // its last row, and a list that fits never scrolls. With variable row
 // heights the selected row is centred as closely as whole rows allow.
 func CenteredOffset(selected int, rowHeights []int, viewportHeight int) int {
-	panic("unported: mj-chat/src/components/scrollbar.rs CenteredOffset")
+	if selected >= len(rowHeights) {
+		return ClampOffsetToLastPage(math.MaxInt, rowHeights, viewportHeight)
+	}
+	roomAbove := max(viewportHeight-rowHeights[selected], 0) / 2
+	offset := selected
+	above := 0
+	for offset > 0 && saturatingAdd(above, rowHeights[offset-1]) <= roomAbove {
+		offset--
+		above += rowHeights[offset]
+	}
+	return ClampOffsetToLastPage(offset, rowHeights, viewportHeight)
 }
 
 // CenteredUnitOffset is [CenteredOffset] for length rows that are one
@@ -136,7 +233,29 @@ func CenteredUnitOffset(selected int, length int, viewportHeight int) int {
 // than the viewport produces a full-track thumb so callers that need a
 // hidden scrollbar can apply their existing overflow check.
 func NewScrollbarGeometry(track uv.Rectangle, contentLength int, position int, viewportContentLength int) (ScrollbarGeometry, bool) {
-	panic("unported: mj-chat/src/components/scrollbar.rs NewScrollbarGeometry")
+	if track.Dx() == 0 || track.Dy() == 0 {
+		return ScrollbarGeometry{}, false
+	}
+	viewportContentLength = max(viewportContentLength, 1)
+	totalLength := max(contentLength, viewportContentLength)
+	maxScroll := totalLength - viewportContentLength
+	scroll := min(position, maxScroll)
+	trackHeight := track.Dy()
+	thumbHeight := trackHeight
+	if maxScroll != 0 {
+		proportional := max(saturatingMul(trackHeight, viewportContentLength)/totalLength, 1)
+		thumbHeight = min(proportional, trackHeight)
+	}
+	travel := max(trackHeight-thumbHeight, 0)
+	thumbOffset := 0
+	if maxScroll != 0 {
+		thumbOffset = saturatingMul(travel, scroll) / maxScroll
+	}
+	return ScrollbarGeometry{
+		Track:     track,
+		Thumb:     uv.Rect(track.Min.X, track.Min.Y+thumbOffset, track.Dx(), thumbHeight),
+		MaxScroll: maxScroll,
+	}, true
 }
 
 // ScrollbarMarkRow is the track row for a content offset, for a mark drawn
@@ -146,17 +265,36 @@ func NewScrollbarGeometry(track uv.Rectangle, contentLength int, position int, v
 // in proportion to the whole track, so a mark for a visible row lands on or
 // next to the thumb. Offsets past the end land on the last row.
 func ScrollbarMarkRow(geometry ScrollbarGeometry, contentLength int, offset int) int {
-	panic("unported: mj-chat/src/components/scrollbar.rs ScrollbarMarkRow")
+	height := geometry.Track.Dy()
+	row := saturatingMul(offset, height) / max(contentLength, 1)
+	row = min(row, max(height-1, 0))
+	return geometry.Track.Min.Y + row
 }
 
 // RenderScrollbar paints a scrollbar from previously calculated geometry.
 func RenderScrollbar(frame *Frame, geometry ScrollbarGeometry) {
-	panic("unported: mj-chat/src/components/scrollbar.rs RenderScrollbar")
+	glyphs := ThemeGlyphs()
+	palette := ThemePalette()
+	for row := geometry.Track.Min.Y; row < geometry.Track.Max.Y; row++ {
+		isThumb := row >= geometry.Thumb.Min.Y && row < geometry.Thumb.Max.Y
+		symbol, color := glyphs.ScrollTrack, palette.Border
+		if isThumb {
+			symbol, color = glyphs.ScrollThumb, palette.Muted
+		}
+		BufferSetCell(frame.Buffer(), geometry.Track.Min.X, row, symbol, Style{}.Foreground(color))
+	}
 }
 
 // RenderMarkedScrollbar paints a scrollbar with a mark on each of the given
 // track rows. The thumb covers any mark under it, and rows outside the
 // track are ignored.
 func RenderMarkedScrollbar(frame *Frame, geometry ScrollbarGeometry, marks []int, markStyle Style) {
-	panic("unported: mj-chat/src/components/scrollbar.rs RenderMarkedScrollbar")
+	RenderScrollbar(frame, geometry)
+	for _, row := range marks {
+		onTrack := row >= geometry.Track.Min.Y && row < geometry.Track.Max.Y
+		onThumb := row >= geometry.Thumb.Min.Y && row < geometry.Thumb.Max.Y
+		if onTrack && !onThumb {
+			BufferSetCell(frame.Buffer(), geometry.Track.Min.X, row, ThemeGlyphs().ScrollMark, markStyle)
+		}
+	}
 }

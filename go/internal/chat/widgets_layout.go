@@ -18,6 +18,10 @@
 package chat
 
 import (
+	"fmt"
+	"strings"
+	"unicode"
+
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
@@ -32,13 +36,37 @@ type Margin struct {
 // rectangle at r's origin when the margins do not fit (ratatui's
 // `Rect::inner`).
 func RectInner(r uv.Rectangle, margin Margin) uv.Rectangle {
-	panic("unported: ratatui-core layout/rect.rs Rect::inner")
+	doubledHorizontal := margin.Horizontal * 2
+	doubledVertical := margin.Vertical * 2
+	if r.Dx() < doubledHorizontal || r.Dy() < doubledVertical {
+		return uv.Rectangle{}
+	}
+	return uv.Rect(
+		r.Min.X+margin.Horizontal,
+		r.Min.Y+margin.Vertical,
+		r.Dx()-doubledHorizontal,
+		r.Dy()-doubledVertical,
+	)
+}
+
+// RectIntersection is ratatui's `Rect::intersection`: unlike
+// image.Rectangle.Intersect, an empty overlap keeps its corner.
+func RectIntersection(r uv.Rectangle, other uv.Rectangle) uv.Rectangle {
+	x1 := max(r.Min.X, other.Min.X)
+	y1 := max(r.Min.Y, other.Min.Y)
+	x2 := min(r.Max.X, other.Max.X)
+	y2 := min(r.Max.Y, other.Max.Y)
+	return uv.Rect(x1, y1, max(x2-x1, 0), max(y2-y1, 0))
 }
 
 // RectClamp moves and shrinks r so it lies inside other (ratatui's
 // `Rect::clamp`).
 func RectClamp(r uv.Rectangle, other uv.Rectangle) uv.Rectangle {
-	panic("unported: ratatui-core layout/rect.rs Rect::clamp")
+	width := min(r.Dx(), other.Dx())
+	height := min(r.Dy(), other.Dy())
+	x := max(min(r.Min.X, max(other.Max.X-width, 0)), other.Min.X)
+	y := max(min(r.Min.Y, max(other.Max.Y-height, 0)), other.Min.Y)
+	return uv.Rect(x, y, width, height)
 }
 
 // StatefulWidget is ratatui's StatefulWidget: a widget that reads and
@@ -120,9 +148,121 @@ func (l List) Render(area uv.Rectangle, buf *uv.Buffer) {
 }
 
 // RenderStateful draws the list, moving state's offset so the selected item
-// is visible (ratatui's StatefulWidget for List).
+// is visible (ratatui's StatefulWidget for List, with its defaults: top to
+// bottom, no scroll padding, the highlight symbol's column reserved only
+// while an item is selected).
 func (l List) RenderStateful(area uv.Rectangle, buf *uv.Buffer, state *ListState) {
-	panic("unported: ratatui-widgets list/rendering.rs List::render")
+	BufferSetStyle(buf, area, l.Style)
+	listArea := area
+	if l.Block != nil {
+		l.Block.Render(area, buf)
+		listArea = l.Block.Inner(area)
+	}
+	if listArea.Dx() == 0 || listArea.Dy() == 0 {
+		return
+	}
+	if len(l.Items) == 0 {
+		state.selected = nil
+		return
+	}
+	// If the selected index is out of bounds, set it to the last item.
+	if state.selected != nil && *state.selected >= len(l.Items) {
+		last := len(l.Items) - 1
+		state.selected = &last
+	}
+	first, last := l.itemsBounds(state.selected, state.offset, listArea.Dy())
+	// This changes the state's offset to the beginning of the now viewable
+	// items.
+	state.offset = first
+
+	var highlightSymbol Line
+	if l.HighlightSymbol != "" {
+		highlightSymbol = RawLine(l.HighlightSymbol)
+	}
+	symbolWidth := highlightSymbol.Width()
+	emptySymbol := RawLine(strings.Repeat(" ", symbolWidth))
+	selectionSpacing := state.selected != nil
+
+	currentHeight := 0
+	for i := first; i < last; i++ {
+		item := l.Items[i]
+		x, y := listArea.Min.X, listArea.Min.Y+currentHeight
+		currentHeight += item.Height()
+		rowArea := uv.Rect(x, y, listArea.Dx(), item.Height())
+		BufferSetStyle(buf, rowArea, l.Style.Patch(item.Style))
+		isSelected := state.selected != nil && *state.selected == i
+		itemArea := rowArea
+		if selectionSpacing {
+			itemArea = uv.Rect(rowArea.Min.X+symbolWidth, rowArea.Min.Y, max(rowArea.Dx()-symbolWidth, 0), rowArea.Dy())
+		}
+		RenderText(item.Content, itemArea, buf)
+		if isSelected {
+			BufferSetStyle(buf, rowArea, l.HighlightStyle)
+		}
+		if selectionSpacing {
+			for j := range item.Content.Height() {
+				line := emptySymbol
+				if isSelected && j == 0 {
+					line = highlightSymbol
+				}
+				line.Render(uv.Rect(x, y+j, symbolWidth, 1), buf)
+			}
+		}
+	}
+}
+
+// itemsBounds is ratatui's `List::get_items_bounds` without scroll padding:
+// the first item shown and one past the last, keeping the selected item (or
+// else the offset) in view.
+func (l List) itemsBounds(selected *int, offset int, maxHeight int) (int, int) {
+	offset = min(offset, max(len(l.Items)-1, 0))
+	first, last := offset, offset
+	heightFromOffset := 0
+	for _, item := range l.Items[offset:] {
+		if heightFromOffset+item.Height() > maxHeight {
+			break
+		}
+		heightFromOffset += item.Height()
+		last++
+	}
+	indexToDisplay := offset
+	if selected != nil {
+		indexToDisplay = min(*selected, len(l.Items)-1)
+	}
+	for indexToDisplay >= last {
+		heightFromOffset += l.Items[last].Height()
+		last++
+		for heightFromOffset > maxHeight {
+			heightFromOffset = max(heightFromOffset-l.Items[first].Height(), 0)
+			first++
+		}
+	}
+	for indexToDisplay < first {
+		first--
+		heightFromOffset += l.Items[first].Height()
+		for heightFromOffset > maxHeight {
+			last--
+			heightFromOffset = max(heightFromOffset-l.Items[last].Height(), 0)
+		}
+	}
+	return first, last
+}
+
+// RenderText draws text into area as ratatui's Widget for Text does: the
+// text's style over the area, then one line per row, each aligned by its own
+// alignment or else the text's.
+func RenderText(text Text, area uv.Rectangle, buf *uv.Buffer) {
+	area = RectIntersection(area, buf.Bounds())
+	BufferSetStyle(buf, area, text.Style)
+	for row, line := range text.Lines {
+		if row >= area.Dy() {
+			break
+		}
+		if line.Alignment == 0 {
+			line.Alignment = text.Alignment
+		}
+		line.Render(uv.Rect(area.Min.X, area.Min.Y+row, area.Dx(), 1), buf)
+	}
 }
 
 // ListState is ratatui's ListState: the first visible item and the selected
@@ -257,31 +397,89 @@ func (l Layout) WithSpacing(spacing int) Layout {
 }
 
 // Split divides area into one rectangle per constraint, solving the
-// constraints as ratatui's layout solver does (Layout::split).
+// constraints as ratatui's layout solver does (Layout::split; see
+// widgets_layout_solver.go). Like ratatui, it panics if the solver fails,
+// which well-formed constraints never make it do.
 func (l Layout) Split(area uv.Rectangle) []uv.Rectangle {
-	panic("unported: ratatui-core layout/layout.rs Layout::split")
+	rects, err := solveLayout(l, area)
+	if err != nil {
+		panic(fmt.Sprintf("failed to split: %v", err))
+	}
+	return rects
 }
 
 // BufferSetStyle patches style onto every cell of area (Buffer::set_style).
 func BufferSetStyle(buf *uv.Buffer, area uv.Rectangle, style Style) {
-	panic("unported: ratatui-core buffer/buffer.rs Buffer::set_style")
+	area = RectIntersection(area, buf.Bounds())
+	for y := area.Min.Y; y < area.Max.Y; y++ {
+		for x := area.Min.X; x < area.Max.X; x++ {
+			if cell := buf.CellAt(x, y); cell != nil {
+				style.ApplyTo(&cell.Style)
+			}
+		}
+	}
 }
 
 // BufferSetCell sets the symbol of the cell at (x, y) and patches style onto
-// it (`buffer[(x, y)].set_symbol(..).set_style(..)`).
+// it (`buffer[(x, y)].set_symbol(..).set_style(..)`). A position outside the
+// buffer is ignored, where ratatui would panic.
 func BufferSetCell(buf *uv.Buffer, x, y int, symbol string, style Style) {
-	panic("unported: ratatui-core buffer/cell.rs Cell::set_symbol")
+	cell := buf.CellAt(x, y)
+	if cell == nil {
+		return
+	}
+	next := *cell
+	next.Content = symbol
+	next.Width = max(displayWidth(symbol), 1)
+	style.ApplyTo(&next.Style)
+	buf.SetCell(x, y, &next)
 }
 
 // BufferSetString writes text from (x, y) in style, at most maxWidth cells
 // and clipped to the buffer, and returns the position after it
 // (Buffer::set_stringn).
+//
+// Graphemes holding a control character and zero-width graphemes are
+// skipped. A wide grapheme is one uv cell of its width followed by uv's
+// zero-width placeholders, which stand for the cells ratatui resets behind
+// it (so BufferLines reads each as ratatui's blank symbol, a space).
 func BufferSetString(buf *uv.Buffer, x, y int, text string, maxWidth int, style Style) (int, int) {
-	panic("unported: ratatui-core buffer/buffer.rs Buffer::set_stringn")
+	remaining := max(min(buf.Bounds().Max.X-x, maxWidth), 0)
+	for _, symbol := range componentGraphemes(text) {
+		if strings.ContainsFunc(symbol, unicode.IsControl) {
+			continue
+		}
+		width := displayWidth(symbol)
+		if width == 0 {
+			continue
+		}
+		if width > remaining {
+			break
+		}
+		remaining -= width
+		next := uv.Cell{Content: symbol, Width: width}
+		if cell := buf.CellAt(x, y); cell != nil {
+			next.Style = cell.Style
+			next.Link = cell.Link
+		}
+		style.ApplyTo(&next.Style)
+		buf.SetCell(x, y, &next)
+		x += width
+	}
+	return x, y
 }
 
 // BufferSetLine writes line from (x, y), at most maxWidth cells, and returns
 // the position after it (Buffer::set_line).
 func BufferSetLine(buf *uv.Buffer, x, y int, line Line, maxWidth int) (int, int) {
-	panic("unported: ratatui-core buffer/buffer.rs Buffer::set_line")
+	remaining := maxWidth
+	for _, span := range line.Spans {
+		if remaining <= 0 {
+			break
+		}
+		nextX, _ := BufferSetString(buf, x, y, span.Content, remaining, line.Style.Patch(span.Style))
+		remaining = max(remaining-max(nextX-x, 0), 0)
+		x = nextX
+	}
+	return x, y
 }

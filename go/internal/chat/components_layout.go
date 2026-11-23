@@ -38,7 +38,36 @@ func AutocompletePopupRender(
 	title string,
 	preferred PopupSide,
 ) (outer uv.Rectangle, inner uv.Rectangle, ok bool) {
-	panic("unported: mj-chat/src/components/layout.rs AutocompletePopupRender")
+	visible := min(rows, maxRows)
+	if visible == 0 || bounds.Dx() == 0 || bounds.Dy() == 0 {
+		return uv.Rectangle{}, uv.Rectangle{}, false
+	}
+	height := min(min(visible, 0xFFFF)+2, bounds.Dy())
+	width = min(max(width, 4), bounds.Dx())
+	x := max(min(anchor.Min.X, max(bounds.Max.X-width, 0)), bounds.Min.X)
+	below := min(anchor.Max.Y, bounds.Max.Y)
+	above := max(anchor.Min.Y-height, 0)
+	fitsBelow := below+height <= bounds.Max.Y
+	fitsAbove := anchor.Min.Y >= bounds.Min.Y+height
+	var y int
+	switch {
+	case preferred == PopupSideBelow && fitsBelow:
+		y = below
+	case preferred == PopupSideAbove && fitsAbove:
+		y = above
+	case fitsBelow:
+		y = below
+	case fitsAbove:
+		y = above
+	default:
+		y = bounds.Min.Y + max(bounds.Dy()-height, 0)/2
+	}
+	outer = uv.Rect(x, y, width, height)
+	frame.RenderWidget(Clear{}, outer)
+	block := Modal().WithTitle(RawLine(title))
+	inner = block.Inner(outer)
+	frame.RenderWidget(block, outer)
+	return outer, inner, true
 }
 
 // DialogRect returns a centered dialog rectangle using the shared modal
@@ -95,7 +124,16 @@ type FormViewport struct {
 // NewFormViewport computes clipped layout, optionally revealing a half-open
 // content row block.
 func NewFormViewport(area uv.Rectangle, contentHeight int, previous int, focusedBlock *RowRange) FormViewport {
-	panic("unported: mj-chat/src/components/layout.rs NewFormViewport")
+	maxOffset := max(contentHeight-area.Dy(), 0)
+	offset := min(previous, maxOffset)
+	if block := focusedBlock; block != nil && block.Start < block.End {
+		if block.Start < offset || block.End-block.Start > area.Dy() {
+			offset = block.Start
+		} else if block.End > offset+area.Dy() {
+			offset = max(block.End-area.Dy(), 0)
+		}
+	}
+	return FormViewport{area: area, offset: min(offset, maxOffset)}
 }
 
 func (v FormViewport) areaRect() uv.Rectangle {
@@ -109,5 +147,10 @@ func (v FormViewport) Offset() int {
 
 // Row clips a content row or list to this frame's visible body.
 func (v FormViewport) Row(start int, height int) uv.Rectangle {
-	panic("unported: mj-chat/src/components/layout.rs FormViewport.Row")
+	top := max(start, v.offset)
+	bottom := min(start+height, v.offset+v.area.Dy())
+	if top >= bottom {
+		return uv.Rectangle{}
+	}
+	return uv.Rect(v.area.Min.X, v.area.Min.Y+(top-v.offset), v.area.Dx(), bottom-top)
 }

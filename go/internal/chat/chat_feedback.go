@@ -3,6 +3,9 @@
 package chat
 
 import (
+	"log/slog"
+
+	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
@@ -25,7 +28,24 @@ type conversationNotice struct {
 // conversationNotice records a conversation notice, skipping a repeat of
 // the latest one.
 func (c *ChatState) conversationNotice(text string) {
-	panic("unported: mj-chat/src/chat/feedback.rs ChatState.conversationNotice")
+	text = sanitizeTerminalText(text)
+	if n := len(c.conversationNotices); n > 0 && c.conversationNotices[n-1].Text == text {
+		return
+	}
+	id, err := client.NewCommandID("chat-notice")
+	if err != nil {
+		slog.Warn("could not identify conversation notice", "error", err)
+		id = ""
+	}
+	c.conversationNotices = append(c.conversationNotices, conversationNotice{
+		Submitted:    id == "",
+		ID:           id,
+		Text:         text,
+		SentAt:       0,
+		Refused:      false,
+		RecordedAtMs: core.EpochMillis(),
+	})
+	c.invalidateRenderCache()
 }
 
 // reconcileNotices drops notices the session's transcript now carries and
