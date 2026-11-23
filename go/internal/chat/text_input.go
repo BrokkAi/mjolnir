@@ -5,9 +5,13 @@
 package chat
 
 import (
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/clipperhouse/uax29/v2/graphemes"
 )
 
 type EditOutcome int
@@ -20,6 +24,17 @@ const (
 
 func (o EditOutcome) Changed() bool {
 	return o == EditOutcomeChanged
+}
+
+// GoString is Rust's derived Debug.
+func (o EditOutcome) GoString() string {
+	switch o {
+	case EditOutcomeHandled:
+		return "Handled"
+	case EditOutcomeChanged:
+		return "Changed"
+	}
+	return "Unhandled"
 }
 
 type InputFilter int
@@ -100,7 +115,26 @@ func (t *TextInput) EqualStr(other string) bool {
 
 // Equal is Rust's derived PartialEq.
 func (t *TextInput) Equal(other *TextInput) bool {
-	panic("unported: mj-chat/src/text_input.rs Equal")
+	if t.value != other.value || t.cursor != other.cursor || t.killBuffer != other.killBuffer ||
+		t.chainKill != other.chainKill || t.filter != other.filter || t.multiline != other.multiline ||
+		!optionalIntsEqual(t.maxChars, other.maxChars) ||
+		!optionalIntsEqual(t.preferredColumn, other.preferredColumn) {
+		return false
+	}
+	if t.history == nil || other.history == nil {
+		return t.history == nil && other.history == nil
+	}
+	return slices.Equal(t.history.entries, other.history.entries) &&
+		optionalIntsEqual(t.history.index, other.history.index) &&
+		t.history.draft == other.history.draft
+}
+
+// optionalIntsEqual compares two Rust `Option<usize>` values.
+func optionalIntsEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // Extend inserts each character, as Rust's `Extend<char>`.
@@ -135,7 +169,19 @@ func (t *TextInput) Cursor() int {
 // SetCursor places the caret at a grapheme boundary, clamping offsets from a
 // drawn field.
 func (t *TextInput) SetCursor(offset int) {
-	panic("unported: mj-chat/src/text_input.rs SetCursor")
+	cursor := 0
+	for _, index := range textInputGraphemeStarts(t.value) {
+		if index > offset {
+			break
+		}
+		cursor = index
+	}
+	if len(t.value) <= offset {
+		cursor = len(t.value)
+	}
+	t.cursor = cursor
+	t.chainKill = false
+	t.preferredColumn = nil
 }
 
 func (t *TextInput) IsEmpty() bool {
@@ -170,7 +216,14 @@ func (t *TextInput) PushStr(text string) {
 }
 
 func (t *TextInput) Pop() (rune, bool) {
-	panic("unported: mj-chat/src/text_input.rs Pop")
+	if t.cursor != len(t.value) || t.value == "" {
+		return 0, false
+	}
+	character, size := utf8.DecodeLastRuneInString(t.value)
+	t.value = t.value[:len(t.value)-size]
+	t.cursor = len(t.value)
+	t.preferredColumn = nil
+	return character, true
 }
 
 func (t TextInput) IntoValue() string {
@@ -185,7 +238,89 @@ func (t *TextInput) InsertStr(text string) bool {
 }
 
 func (t *TextInput) HandleKey(key tea.KeyPressMsg) EditOutcome {
-	panic("unported: mj-chat/src/text_input.rs HandleKey")
+	code, modifiers := NormalizeKey(KeyPressCode(key), key.Mod)
+	chained := t.chainKill
+	t.chainKill = false
+	if modifiers.Contains(tea.ModCtrl) {
+		var changed bool
+		switch code {
+		case 'a':
+			return t.handleLineStart(true)
+		case 'e':
+			return t.handleLineEnd(true)
+		case 'b':
+			return t.moveTo(PreviousGrapheme(t.value, t.cursor))
+		case 'f':
+			return t.moveTo(NextGrapheme(t.value, t.cursor))
+		case 'h':
+			changed = t.backspace()
+		case 'd':
+			changed = t.delete()
+		case 'u':
+			changed = t.killLineBackward()
+		case 'k':
+			changed = t.killLineForward(chained)
+			t.chainKill = true
+		case 'w', tea.KeyBackspace:
+			changed = t.kill(t.previousWordStart(), t.cursor, false)
+		case 'y':
+			changed = t.yank()
+		case tea.KeyLeft:
+			return t.moveTo(t.previousWordStart())
+		case tea.KeyRight:
+			return t.moveTo(t.nextWordEnd())
+		case tea.KeyDelete:
+			changed = t.kill(t.cursor, t.nextWordEnd(), false)
+		case 'p', tea.KeyUp:
+			return t.handleVertical(-1)
+		case 'n', tea.KeyDown:
+			return t.handleVertical(1)
+		default:
+			return EditOutcomeUnhandled
+		}
+		return textInputChanged(changed)
+	}
+	if modifiers.Contains(tea.ModAlt) {
+		switch code {
+		case 'b', tea.KeyLeft:
+			return t.moveTo(t.previousWordStart())
+		case 'f', tea.KeyRight:
+			return t.moveTo(t.nextWordEnd())
+		case 'd', tea.KeyDelete:
+			return textInputChanged(t.kill(t.cursor, t.nextWordEnd(), false))
+		case tea.KeyBackspace:
+			return textInputChanged(t.kill(t.previousWordStart(), t.cursor, false))
+		}
+		return EditOutcomeUnhandled
+	}
+	switch code {
+	case tea.KeyLeft:
+		return t.moveTo(PreviousGrapheme(t.value, t.cursor))
+	case tea.KeyRight:
+		return t.moveTo(NextGrapheme(t.value, t.cursor))
+	case tea.KeyHome:
+		return t.handleLineStart(false)
+	case tea.KeyEnd:
+		return t.handleLineEnd(false)
+	case tea.KeyBackspace:
+		return textInputChanged(t.backspace())
+	case tea.KeyDelete:
+		return textInputChanged(t.delete())
+	case tea.KeyUp:
+		return t.handleVertical(-1)
+	case tea.KeyDown:
+		return t.handleVertical(1)
+	}
+	if IsCharKeyCode(code) && !modifiers.Contains(tea.ModSuper) && !unicode.IsControl(code) {
+		// A terminal reports composed text (an IME commit, a shifted letter)
+		// as the press's text; insert that rather than the bare code.
+		text := string(code)
+		if key.Text != "" {
+			text = key.Text
+		}
+		return textInputChanged(t.InsertStr(text))
+	}
+	return EditOutcomeUnhandled
 }
 
 // handleLineStart is Ctrl-A and Home. A single-line field has one line, so
@@ -265,7 +400,36 @@ func (t *TextInput) MoveToLineEnd(crossBoundary bool) {
 // the column the first vertical move started from so a short line in between
 // does not pull the caret permanently left.
 func (t *TextInput) MoveVertical(direction int) {
-	panic("unported: mj-chat/src/text_input.rs MoveVertical")
+	start := LineStart(t.value, t.cursor)
+	var column int
+	if t.preferredColumn != nil {
+		column = *t.preferredColumn
+	} else {
+		column = len(textInputGraphemeStarts(t.value[start:t.cursor]))
+	}
+	var targetStart int
+	if direction < 0 {
+		if start == 0 {
+			t.cursor = 0
+			t.preferredColumn = nil
+			return
+		}
+		targetStart = LineStart(t.value, start-1)
+	} else {
+		end := LineEnd(t.value, t.cursor)
+		if end == len(t.value) {
+			t.cursor = len(t.value)
+			t.preferredColumn = nil
+			return
+		}
+		targetStart = end + 1
+	}
+	targetEnd := LineEnd(t.value, targetStart)
+	t.cursor = targetEnd
+	if starts := textInputGraphemeStarts(t.value[targetStart:targetEnd]); column < len(starts) {
+		t.cursor = targetStart + starts[column]
+	}
+	t.preferredColumn = &column
 }
 
 // KillToLineStart kills back to the start of the line, or the preceding
@@ -330,7 +494,20 @@ func (t *TextInput) delete() bool {
 // kill removes value[start:end] into the kill buffer, appending when
 // appendKill is set.
 func (t *TextInput) kill(start, end int, appendKill bool) bool {
-	panic("unported: mj-chat/src/text_input.rs kill")
+	if start >= end {
+		return false
+	}
+	killed := t.value[start:end]
+	if appendKill {
+		t.killBuffer += killed
+	} else {
+		t.killBuffer = killed
+	}
+	t.value = t.value[:start] + t.value[end:]
+	t.cursor = start
+	t.preferredColumn = nil
+	t.leaveHistory()
+	return true
 }
 
 func (t *TextInput) yank() bool {
@@ -349,7 +526,37 @@ func (t *TextInput) nextWordEnd() int {
 }
 
 func (t *TextInput) moveHistory(delta int) EditOutcome {
-	panic("unported: mj-chat/src/text_input.rs moveHistory")
+	if t.history == nil {
+		return EditOutcomeUnhandled
+	}
+	history := *t.history
+	var next *int
+	switch {
+	case history.index == nil && delta < 0:
+		history.draft = t.value
+		last := len(history.entries) - 1
+		next = &last
+	case history.index == nil:
+		next = nil
+	case delta < 0:
+		previous := max(*history.index-1, 0)
+		next = &previous
+	case *history.index+1 < len(history.entries):
+		following := *history.index + 1
+		next = &following
+	default:
+		next = nil
+	}
+	value := history.draft
+	if next != nil && *next >= 0 && *next < len(history.entries) {
+		value = history.entries[*next]
+	}
+	t.history = &history
+	t.SetValue(value)
+	updated := *t.history
+	updated.index = next
+	t.history = &updated
+	return EditOutcomeChanged
 }
 
 func (t *TextInput) leaveHistory() {
@@ -361,25 +568,179 @@ func (t *TextInput) leaveHistory() {
 }
 
 func (t *TextInput) insertFiltered(text string) {
-	panic("unported: mj-chat/src/text_input.rs insertFiltered")
+	t.preferredColumn = nil
+	for _, character := range text {
+		if unicode.IsControl(character) && !(t.multiline && (character == '\n' || character == '\t')) {
+			continue
+		}
+		switch t.filter {
+		case InputFilterAsciiAlphabeticUppercase:
+			if !isASCIIAlphabetic(character) {
+				continue
+			}
+			character = asciiToUpper(character)
+		case InputFilterAsciiHexLowercase:
+			if !isASCIIHexDigit(character) {
+				continue
+			}
+			character = asciiToLower(character)
+		}
+		if t.maxChars != nil && utf8.RuneCountInString(t.value) >= *t.maxChars {
+			break
+		}
+		encoded := string(character)
+		t.value = t.value[:t.cursor] + encoded + t.value[t.cursor:]
+		t.cursor += len(encoded)
+	}
 }
 
 func (t *TextInput) enforceLimit() {
-	panic("unported: mj-chat/src/text_input.rs enforceLimit")
+	if t.maxChars == nil {
+		return
+	}
+	count := 0
+	for index := range t.value {
+		if count == *t.maxChars {
+			t.value = t.value[:index]
+			break
+		}
+		count++
+	}
+	t.cursor = min(t.cursor, len(t.value))
+	t.preferredColumn = nil
+}
+
+func isASCIIAlphabetic(character rune) bool {
+	return ('a' <= character && character <= 'z') || ('A' <= character && character <= 'Z')
+}
+
+func isASCIIHexDigit(character rune) bool {
+	return ('0' <= character && character <= '9') ||
+		('a' <= character && character <= 'f') || ('A' <= character && character <= 'F')
+}
+
+func asciiToUpper(character rune) rune {
+	if 'a' <= character && character <= 'z' {
+		return character - 'a' + 'A'
+	}
+	return character
+}
+
+func asciiToLower(character rune) rune {
+	if 'A' <= character && character <= 'Z' {
+		return character - 'A' + 'a'
+	}
+	return character
+}
+
+// textASCIILower is Rust's `str::to_ascii_lowercase`.
+func textASCIILower(text string) string {
+	return strings.Map(asciiToLower, text)
+}
+
+// textASCIIEqualFold is Rust's `str::eq_ignore_ascii_case`.
+func textASCIIEqualFold(left, right string) bool {
+	return len(left) == len(right) && textASCIILower(left) == textASCIILower(right)
+}
+
+// keyModifierMask is the part of a Bubble Tea KeyMod that crossterm reports
+// as KeyModifiers. Bubble Tea also carries lock states there, which crossterm
+// keeps apart.
+const keyModifierMask = tea.ModShift | tea.ModAlt | tea.ModCtrl | tea.ModMeta | tea.ModHyper | tea.ModSuper
+
+// IsCharKeyCode reports whether code is what crossterm calls
+// `KeyCode::Char`: a character rather than a named key. Bubble Tea gives Tab,
+// Enter, Escape and Backspace character codes; crossterm names them.
+func IsCharKeyCode(code rune) bool {
+	return code < tea.KeyExtended && code != tea.KeyTab && code != tea.KeyEnter &&
+		code != tea.KeyEscape && code != tea.KeyBackspace
+}
+
+// KeyPressCode is the key code crossterm would report for key: the typed
+// character for a printable key (Bubble Tea reports a shifted letter as its
+// lowercase code plus the text it produced), otherwise Bubble Tea's code,
+// with the keypad's navigation keys folded onto the main ones as crossterm
+// reports them.
+func KeyPressCode(key tea.KeyPressMsg) rune {
+	if character, size := utf8.DecodeRuneInString(key.Text); size > 0 && size == len(key.Text) &&
+		character != utf8.RuneError {
+		return character
+	}
+	switch key.Code {
+	case tea.KeyKpUp:
+		return tea.KeyUp
+	case tea.KeyKpDown:
+		return tea.KeyDown
+	case tea.KeyKpLeft:
+		return tea.KeyLeft
+	case tea.KeyKpRight:
+		return tea.KeyRight
+	case tea.KeyKpHome:
+		return tea.KeyHome
+	case tea.KeyKpEnd:
+		return tea.KeyEnd
+	case tea.KeyKpDelete:
+		return tea.KeyDelete
+	case tea.KeyKpPgUp:
+		return tea.KeyPgUp
+	case tea.KeyKpPgDown:
+		return tea.KeyPgDown
+	case tea.KeyKpInsert:
+		return tea.KeyInsert
+	case tea.KeyKpEnter:
+		return tea.KeyEnter
+	}
+	return key.Code
 }
 
 // NormalizeKey folds terminal control characters and capitals into the
 // Control and Shift modifiers the editors match on.
+//
+// code is a crossterm-style key code (see KeyPressCode); the lock states
+// Bubble Tea carries in modifiers are dropped, as crossterm keeps them out of
+// its modifiers.
 func NormalizeKey(code rune, modifiers tea.KeyMod) (rune, tea.KeyMod) {
-	panic("unported: mj-chat/src/text_input.rs NormalizeKey")
+	modifiers &= keyModifierMask
+	if !IsCharKeyCode(code) {
+		return code, modifiers
+	}
+	if modifiers == 0 && code >= 1 && code <= 26 {
+		return code - 1 + 'a', modifiers | tea.ModCtrl
+	}
+	if 'A' <= code && code <= 'Z' {
+		modifiers |= tea.ModShift
+		if modifiers&(tea.ModCtrl|tea.ModAlt|tea.ModSuper) != 0 {
+			return asciiToLower(code), modifiers
+		}
+	}
+	return code, modifiers
+}
+
+// textInputGraphemeStarts is the byte offset of every extended grapheme
+// cluster in text (unicode-segmentation's `grapheme_indices(true)`).
+func textInputGraphemeStarts(text string) []int {
+	var starts []int
+	iterator := graphemes.FromString(text)
+	for iterator.Next() {
+		starts = append(starts, iterator.Start())
+	}
+	return starts
 }
 
 func PreviousGrapheme(input string, cursor int) int {
-	panic("unported: mj-chat/src/text_input.rs PreviousGrapheme")
+	starts := textInputGraphemeStarts(input[:cursor])
+	if len(starts) == 0 {
+		return 0
+	}
+	return starts[len(starts)-1]
 }
 
 func NextGrapheme(input string, cursor int) int {
-	panic("unported: mj-chat/src/text_input.rs NextGrapheme")
+	iterator := graphemes.FromString(input[cursor:])
+	if !iterator.Next() {
+		return len(input)
+	}
+	return cursor + iterator.End()
 }
 
 // PreviousWordStart is the offset of the start of the word before cursor,
@@ -387,13 +748,54 @@ func NextGrapheme(input string, cursor int) int {
 // characters that follows it. "Class" is word characters versus the
 // punctuation in the separator set.
 func PreviousWordStart(text string, cursor int) int {
-	panic("unported: mj-chat/src/text_input.rs PreviousWordStart")
+	trimmed := strings.TrimRightFunc(text[:cursor], unicode.IsSpace)
+	if trimmed == "" {
+		return 0
+	}
+	runStart := 0
+	if index := strings.LastIndexFunc(trimmed, unicode.IsSpace); index >= 0 {
+		_, size := utf8.DecodeRuneInString(trimmed[index:])
+		runStart = index + size
+	}
+	run := trimmed[runStart:]
+	start := runStart + len(run)
+	known, class := false, false
+	for index := len(run); index > 0; {
+		character, size := utf8.DecodeLastRuneInString(run[:index])
+		index -= size
+		next := wordClass(character)
+		if known && class != next {
+			break
+		}
+		known, class = true, next
+		start = runStart + index
+	}
+	return start
 }
 
 // NextWordEnd is the offset of the end of the word after cursor; the mirror
 // of PreviousWordStart.
 func NextWordEnd(text string, cursor int) int {
-	panic("unported: mj-chat/src/text_input.rs NextWordEnd")
+	suffix := text[cursor:]
+	nonSpace := strings.IndexFunc(suffix, func(character rune) bool { return !unicode.IsSpace(character) })
+	if nonSpace < 0 {
+		return len(text)
+	}
+	run := suffix[nonSpace:]
+	end := 0
+	known, class := false, false
+	for index, character := range run {
+		if unicode.IsSpace(character) {
+			break
+		}
+		next := wordClass(character)
+		if known && class != next {
+			break
+		}
+		known, class = true, next
+		end = index + utf8.RuneLen(character)
+	}
+	return cursor + nonSpace + end
 }
 
 // LineStart is the offset just after the newline that precedes cursor, or

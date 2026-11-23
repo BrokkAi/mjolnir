@@ -15,6 +15,9 @@
 package chat
 
 import (
+	"fmt"
+	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +104,27 @@ func SpinnerInkRed(level uint8) SpinnerInk {
 	return SpinnerInk{Kind: SpinnerInkKindRed, Level: level}
 }
 
+// GoString is Rust's derived Debug: `Faint`, `Red(3)`.
+func (i SpinnerInk) GoString() string {
+	switch i.Kind {
+	case SpinnerInkKindFaint:
+		return "Faint"
+	case SpinnerInkKindCool:
+		return "Cool"
+	case SpinnerInkKindBright:
+		return "Bright"
+	case SpinnerInkKindVivid:
+		return "Vivid"
+	case SpinnerInkKindCalm:
+		return "Calm"
+	case SpinnerInkKindWarm:
+		return "Warm"
+	case SpinnerInkKindHot:
+		return "Hot"
+	}
+	return fmt.Sprintf("Red(%d)", i.Level)
+}
+
 // SpinnerRun is one maximal same-ink run of a frame.
 type SpinnerRun struct {
 	Text string
@@ -167,7 +191,27 @@ func spinnerStyleFrameIntervalMs(style SpinnerStyle) uint64 {
 }
 
 func spinnerStyleCompactFrames(style SpinnerStyle) []string {
-	panic("unported: mj-chat/src/spinner.rs spinnerStyleCompactFrames")
+	switch style {
+	case core.SpinnerStylePulse:
+		return []string{"·", "∙", "•", "●", "•", "∙"}
+	case core.SpinnerStyleWave:
+		return []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	case core.SpinnerStyleBars:
+		return []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▅", "▃"}
+	case core.SpinnerStyleShimmer:
+		return []string{"·", "∙", "•", "●", "•", "∙"}
+	case core.SpinnerStyleGlobe:
+		// Moon glyphs are double-width, so the compact slot spins the same
+		// sphere with single-column circles instead. On a dark terminal the
+		// filled half is the lit half, so this tracks globePhases' sweep:
+		// dark → lit on the right → full → lit on the left.
+		return []string{"○", "◑", "●", "◐"}
+	default:
+		// One column can't sweep sideways, so the compact slot keeps the
+		// style's identity — a light bouncing between two walls — by
+		// ping-ponging a braille dot vertically instead.
+		return []string{"⠁", "⠂", "⠄", "⡀", "⠄", "⠂"}
+	}
 }
 
 var spinnerStarted = sync.OnceValue(time.Now)
@@ -189,23 +233,85 @@ var asciiCompactFrames = [4]string{"|", "/", "-", "\\"}
 // ActivityLine is the colored twelve-column activity ornament. Idle always
 // rests on a quiet rule.
 func ActivityLine(style SpinnerStyle, elapsedMs uint64, active bool) Line {
-	panic("unported: mj-chat/src/spinner.rs ActivityLine")
+	if ASCII() {
+		// A marker sweeping a dashed rail: the same width as every style.
+		rail := strings.Repeat("-", SpinnerWidth)
+		faint := Style{}.Foreground(inkColor(SpinnerInkFaint))
+		if !active {
+			return StyledLine(rail, faint)
+		}
+		at := frameIndex(elapsedMs, SpinnerWidth, SpinnerFrameIntervalMs)
+		return LineFrom(
+			StyledSpan(strings.Repeat("-", at), faint),
+			StyledSpan("#", Style{}.Foreground(inkColor(SpinnerInkBright))),
+			StyledSpan(strings.Repeat("-", SpinnerWidth-at-1), faint),
+		)
+	}
+	var frame *SpinnerFrame
+	if active {
+		frames := spinnerStyleFrames(style)
+		frame = &frames[frameIndex(elapsedMs, len(frames), spinnerStyleFrameIntervalMs(style))]
+	} else {
+		frame = spinnerStyleIdleFrame(style)
+	}
+	spans := make([]Span, 0, len(frame.runs))
+	for _, run := range frame.runs {
+		spans = append(spans, StyledSpan(run.Text, Style{}.Foreground(inkColor(run.Ink))))
+	}
+	return LineFrom(spans...)
 }
 
 // CompactFrame is the single-column activity frame for session lists and
 // loading states.
 func CompactFrame(style SpinnerStyle, elapsedMs uint64) string {
-	panic("unported: mj-chat/src/spinner.rs CompactFrame")
+	frames := asciiCompactFrames[:]
+	if !ASCII() {
+		frames = spinnerStyleCompactFrames(style)
+	}
+	return frames[frameIndex(elapsedMs, len(frames), SpinnerFrameIntervalMs)]
 }
 
 // CompactSpan is the compact loading indicator with the same palette as the
 // full ornament.
 func CompactSpan(style SpinnerStyle, elapsedMs uint64) Span {
-	panic("unported: mj-chat/src/spinner.rs CompactSpan")
+	return StyledSpan(CompactFrame(style, elapsedMs), Style{}.Foreground(ThemePalette().Accent))
 }
 
+// inkColor resolves an ink against the shared theme. The scan gradient is
+// drawn over the shared theme's painted surfaces, not an unknown terminal
+// background.
 func inkColor(ink SpinnerInk) Color {
-	panic("unported: mj-chat/src/spinner.rs inkColor")
+	palette := ThemePalette()
+	switch ink.Kind {
+	case SpinnerInkKindFaint:
+		return palette.Border
+	case SpinnerInkKindCool:
+		return palette.Secondary
+	case SpinnerInkKindBright:
+		return palette.Accent
+	case SpinnerInkKindVivid:
+		return palette.Text
+	case SpinnerInkKindCalm:
+		return palette.Success
+	case SpinnerInkKindWarm:
+		return palette.Warning
+	case SpinnerInkKindHot:
+		return palette.Error
+	}
+	level := uint16(min(ink.Level, scanRedMax))
+	maximum := uint16(scanRedMax)
+	startR, startG, startB, ok := palette.ActivityDim.RGB()
+	if !ok {
+		return palette.Error
+	}
+	endR, endG, endB, ok := palette.Error.RGB()
+	if !ok {
+		return palette.Error
+	}
+	blend := func(start, end uint8) uint8 {
+		return uint8((uint16(start)*(maximum-level) + uint16(end)*level) / maximum)
+	}
+	return ColorRGB(blend(startR, endR), blend(startG, endG), blend(startB, endB))
 }
 
 type frameSet struct {
@@ -250,7 +356,26 @@ type spinnerCell struct {
 // row assembles one frame from its (glyph, ink) cells, checking the width
 // contract at the single point where every style's frames are born.
 func row(cells []spinnerCell) SpinnerFrame {
-	panic("unported: mj-chat/src/spinner.rs row")
+	var text strings.Builder
+	var runs []SpinnerRun
+	for _, cell := range cells {
+		text.WriteRune(cell.glyph)
+		if last := len(runs) - 1; last >= 0 && runs[last].Ink == cell.ink {
+			runs[last].Text += string(cell.glyph)
+		} else {
+			runs = append(runs, SpinnerRun{Text: string(cell.glyph), Ink: cell.ink})
+		}
+	}
+	return SpinnerFrame{text: text.String(), runs: runs}
+}
+
+// repeatCell is `vec![cell; count]`.
+func repeatCell(cell spinnerCell, count int) []spinnerCell {
+	cells := make([]spinnerCell, count)
+	for index := range cells {
+		cells[index] = cell
+	}
+	return cells
 }
 
 // idleRow is the rule every style rests on. Faint on purpose: the resting
@@ -269,27 +394,111 @@ func idleRow() SpinnerFrame {
 // hard pip. Color follows the same falloff, giving the dot a hot core and a
 // cold tail.
 func buildPulse() frameSet {
-	panic("unported: mj-chat/src/spinner.rs buildPulse")
+	w := SpinnerWidth
+	// Distance from the head picks the glyph and its ink together, so the
+	// comet's core can never end up shaded like its tail.
+	cell := func(dist int) spinnerCell {
+		switch dist {
+		case 0:
+			return spinnerCell{glyph: '●', ink: SpinnerInkVivid}
+		case 1:
+			return spinnerCell{glyph: '•', ink: SpinnerInkBright}
+		case 2:
+			return spinnerCell{glyph: '∙', ink: SpinnerInkCool}
+		}
+		return spinnerCell{glyph: '·', ink: SpinnerInkFaint}
+	}
+	animated := make([]SpinnerFrame, 0, w)
+	for head := range w {
+		cells := make([]spinnerCell, 0, w)
+		for x := range w {
+			// Ring distance from the head, so the pulse wraps seamlessly.
+			d := min((x+w-head)%w, (head+w-x)%w)
+			cells = append(cells, cell(d))
+		}
+		animated = append(animated, row(cells))
+	}
+	return frameSet{animated: animated, idle: idleRow()}
 }
 
 // buildWave: an undulating braille ribbon that scrolls one full wavelength
 // per loop. Height also drives color, so crests catch the light and troughs
 // sink into the rail.
 func buildWave() frameSet {
-	panic("unported: mj-chat/src/spinner.rs buildWave")
+	w := SpinnerWidth
+	// Horizontal braille bars (both columns lit) at four vertical heights,
+	// top to bottom: ⠉ ⠒ ⠤ ⣀.
+	levels := [4]spinnerCell{
+		{glyph: 0x2800 + 0x09, ink: SpinnerInkBright},
+		{glyph: 0x2800 + 0x12, ink: SpinnerInkCool},
+		{glyph: 0x2800 + 0x24, ink: SpinnerInkCalm},
+		{glyph: 0x2800 + 0xC0, ink: SpinnerInkFaint},
+	}
+	const n = 8
+	animated := make([]SpinnerFrame, 0, n)
+	for i := range n {
+		cells := make([]spinnerCell, 0, w)
+		for x := range w {
+			phase := 2*math.Pi*(float64(x)/float64(w)) - 2*math.Pi*(float64(i)/float64(n))
+			v := math.Sin(phase)
+			level := min(max(int64(math.Round((1.0-(v+1.0)/2.0)*3.0)), 0), 3)
+			cells = append(cells, levels[level])
+		}
+		animated = append(animated, row(cells))
+	}
+	return frameSet{animated: animated, idle: idleRow()}
 }
 
 // buildBars: vertical eighth-block bars whose heights ripple like an
 // equalizer, shaded like one too: green through the low range, amber as it
 // climbs, and red only on the single tallest step.
 func buildBars() frameSet {
-	panic("unported: mj-chat/src/spinner.rs buildBars")
+	w := SpinnerWidth
+	bars := [9]rune{' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+	// Indexed by the same 1..=8 height as bars, so a bar's color and its
+	// height are read off one number.
+	ink := func(height int) SpinnerInk {
+		switch {
+		case height <= 4:
+			return SpinnerInkCalm
+		case height <= 7:
+			return SpinnerInkWarm
+		}
+		return SpinnerInkHot
+	}
+	const n = 10
+	animated := make([]SpinnerFrame, 0, n)
+	for i := range n {
+		cells := make([]spinnerCell, 0, w)
+		for x := range w {
+			phase := 2*math.Pi*(float64(x)/6.0) + 2*math.Pi*(float64(i)/float64(n))
+			v := (math.Sin(phase) + 1.0) / 2.0 // 0..1
+			h := 1 + int(math.Round(v*7.0))    // 1..8 (never blank)
+			cells = append(cells, spinnerCell{glyph: bars[h], ink: ink(h)})
+		}
+		animated = append(animated, row(cells))
+	}
+	return frameSet{animated: animated, idle: idleRow()}
 }
 
 // buildShimmer: the whole row brightens and dims together — a calm,
 // confident "working…". Size and color breathe on the same ramp.
 func buildShimmer() frameSet {
-	panic("unported: mj-chat/src/spinner.rs buildShimmer")
+	ramp := [8]spinnerCell{
+		{glyph: '·', ink: SpinnerInkFaint},
+		{glyph: '·', ink: SpinnerInkFaint},
+		{glyph: '∙', ink: SpinnerInkCool},
+		{glyph: '•', ink: SpinnerInkBright},
+		{glyph: '●', ink: SpinnerInkVivid},
+		{glyph: '●', ink: SpinnerInkVivid},
+		{glyph: '•', ink: SpinnerInkBright},
+		{glyph: '∙', ink: SpinnerInkCool},
+	}
+	animated := make([]SpinnerFrame, 0, len(ramp))
+	for _, cell := range ramp {
+		animated = append(animated, row(repeatCell(cell, SpinnerWidth)))
+	}
+	return frameSet{animated: animated, idle: idleRow()}
 }
 
 // globePhases is one rotation of a lit sphere, ordered so the terminator
@@ -304,7 +513,25 @@ const globeClearance = 2
 // the moons as monochrome text; those that use emoji presentation supply
 // their own color and ignore it.
 func buildGlobe() frameSet {
-	panic("unported: mj-chat/src/spinner.rs buildGlobe")
+	w := SpinnerWidth
+	railCell := spinnerCell{glyph: idleGlyph, ink: SpinnerInkFaint}
+	emptyCell := spinnerCell{glyph: ' ', ink: SpinnerInkFaint}
+	animated := make([]SpinnerFrame, 0, len(globePhases))
+	for _, phase := range globePhases {
+		available := max(w-displayWidth(string(phase)), 0)
+		clearance := min(globeClearance, available/2)
+		rail := max(available-clearance*2, 0)
+		leftRail := rail / 2
+		rightRail := rail - leftRail
+
+		cells := repeatCell(railCell, leftRail)
+		cells = append(cells, repeatCell(emptyCell, clearance)...)
+		cells = append(cells, spinnerCell{glyph: phase, ink: SpinnerInkBright})
+		cells = append(cells, repeatCell(emptyCell, clearance)...)
+		cells = append(cells, repeatCell(railCell, rightRail)...)
+		animated = append(animated, row(cells))
+	}
+	return frameSet{animated: animated, idle: idleRow()}
 }
 
 // scanHeads is the head positions for two complete one-way sweeps. Each
@@ -346,5 +573,29 @@ func scanCell(distance int64) spinnerCell {
 // glow so motion comes from the brighter peak and afterglow rather than cells
 // switching fully off.
 func buildScan() frameSet {
-	panic("unported: mj-chat/src/spinner.rs buildScan")
+	heads := scanHeads()
+	count := len(heads)
+	// One full bounce supplies two uninterrupted one-way sweeps. The dim rail
+	// then holds for one one-way sweep before the next bounce begins.
+	animated := make([]SpinnerFrame, 0, count+SpinnerWidth)
+	for i := range count + SpinnerWidth {
+		if i >= count {
+			animated = append(animated, row(repeatCell(spinnerCell{glyph: '·', ink: SpinnerInkRed(0)}, SpinnerWidth)))
+			continue
+		}
+		head := heads[i]
+		prev := heads[(i+count-1)%count]
+		dir := int64(-1)
+		if head >= prev {
+			dir = 1
+		}
+		cells := make([]spinnerCell, 0, SpinnerWidth)
+		for x := range int64(SpinnerWidth) {
+			// Signed distance behind the head; cells ahead go negative and
+			// fall through to the low, always-on glow.
+			cells = append(cells, scanCell((head-x)*dir))
+		}
+		animated = append(animated, row(cells))
+	}
+	return frameSet{animated: animated, idle: idleRow()}
 }

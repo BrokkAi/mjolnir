@@ -17,6 +17,10 @@
 package chat
 
 import (
+	"fmt"
+	"strings"
+	"unicode"
+
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
@@ -33,7 +37,14 @@ type SelectableText struct {
 // NewSelectableText builds the same rows and soft-wrap boundaries as
 // transcript text.
 func NewSelectableText(source string, width int) SelectableText {
-	panic("unported: mj-chat/src/selection.rs NewSelectableText")
+	var rows []Line
+	var copies []rowCopy
+	for _, line := range strings.Split(source, "\n") {
+		wrapped, _, copied := wrapStyledLineForCopy(RawLine(line), max(width, 1), 0)
+		rows = append(rows, wrapped...)
+		copies = append(copies, copied...)
+	}
+	return SelectableText{source: source, width: width, rows: rows, copies: copies}
 }
 
 // Matches reports whether a cached row space still describes this text and
@@ -50,7 +61,21 @@ func (t *SelectableText) Rows() []Line {
 // SelectionText extracts with the transcript's word/line boundary and
 // Unicode rules.
 func (t *SelectableText) SelectionText(r *SelectionRange) string {
-	panic("unported: mj-chat/src/selection.rs SelectionText")
+	var rows []CopiedRow
+	for row := range min(len(t.rows), len(t.copies)) {
+		if row < r.Start.Row || row > r.End.Row {
+			continue
+		}
+		first, last, selected := r.ColumnsOn(row, t.width)
+		rows = append(rows, CopiedRow{
+			Line:     t.rows[row],
+			Copy:     t.copies[row],
+			Selected: selected,
+			First:    first,
+			Last:     last,
+		})
+	}
+	return copiedRowsText(rows, t.width)
 }
 
 // SurfaceId identifies a surface that can own a selection. Variants are
@@ -111,6 +136,35 @@ func (SurfaceIdResumePreview) isSurfaceId()        {}
 func (SurfaceIdAutocompletePopup) isSurfaceId()    {}
 func (SurfaceIdModalBody) isSurfaceId()            {}
 
+// GoString methods are Rust's derived Debug for SurfaceId.
+func (SurfaceIdTranscript) GoString() string { return "Transcript" }
+func (id SurfaceIdNotificationText) GoString() string {
+	return fmt.Sprintf("NotificationText(%d)", uint64(id))
+}
+func (id SurfaceIdNotificationFormBody) GoString() string {
+	return fmt.Sprintf("NotificationFormBody(%d)", uint64(id))
+}
+func (SurfaceIdElicitationMessage) GoString() string { return "ElicitationMessage" }
+func (SurfaceIdPromptInput) GoString() string        { return "PromptInput" }
+func (id SurfaceIdDashboardPane) GoString() string {
+	return fmt.Sprintf("DashboardPane(%d)", uint8(id))
+}
+func (id SurfaceIdFailurePane) GoString() string {
+	return fmt.Sprintf("FailurePane(%d)", uint32(id))
+}
+func (SurfaceIdResumeList) GoString() string        { return "ResumeList" }
+func (SurfaceIdResumePreview) GoString() string     { return "ResumePreview" }
+func (SurfaceIdAutocompletePopup) GoString() string { return "AutocompletePopup" }
+func (SurfaceIdModalBody) GoString() string         { return "ModalBody" }
+
+// surfaceIdDebug is Rust's Debug for `Option<SurfaceId>`.
+func surfaceIdDebug(id SurfaceId) string {
+	if id == nil {
+		return "None"
+	}
+	return fmt.Sprintf("Some(%#v)", id)
+}
+
 // SurfaceFrame is where a selectable surface sits on screen for one frame.
 //
 // Rect is the content area *inside* any border. TopRow is the content row
@@ -146,7 +200,13 @@ func SurfaceFrameFixed(id SurfaceId, rect uv.Rectangle) SurfaceFrame {
 // then to [0, TotalRows), so a pointer dragged above or below the rect lands
 // on its first or last visible row.
 func (f *SurfaceFrame) ContentPos(column int, row int) ContentPos {
-	panic("unported: mj-chat/src/selection.rs ContentPos")
+	lastColumn := max(f.Rect.Dx()-1, 0)
+	col := min(max(column-f.Rect.Min.X, 0), lastColumn)
+	lastVisible := max(f.Rect.Dy()-1, 0)
+	offset := min(max(row-f.Rect.Min.Y, 0), lastVisible)
+	lastRow := max(f.TotalRows-1, 0)
+	contentRow := min(f.TopRow+offset, lastRow)
+	return ContentPos{Row: contentRow, Col: col}
 }
 
 // ScreenRow is the screen row showing contentRow, or false when it is
@@ -241,6 +301,11 @@ func (p ContentPos) Less(other ContentPos) bool {
 	return p.Col < other.Col
 }
 
+// GoString is Rust's derived Debug.
+func (p ContentPos) GoString() string {
+	return fmt.Sprintf("ContentPos { row: %d, col: %d }", p.Row, p.Col)
+}
+
 // SelectionRange is a normalized selection over one surface, inclusive of
 // both endpoints.
 //
@@ -285,7 +350,35 @@ func NewSelectionRange(anchor ContentPos, cursor ContentPos) SelectionRange {
 //
 // Returns false when row lies outside the range or the surface has no width.
 func (r *SelectionRange) ColumnsOn(row int, width int) (int, int, bool) {
-	panic("unported: mj-chat/src/selection.rs ColumnsOn")
+	if width <= 0 || row < r.Start.Row || row > r.End.Row {
+		return 0, 0, false
+	}
+	last := width - 1
+	firstCol := 0
+	if row == r.Start.Row {
+		firstCol = min(r.Start.Col, last)
+	}
+	lastCol := last
+	if row == r.End.Row {
+		lastCol = min(r.End.Col, last)
+	}
+	if firstCol > lastCol {
+		return 0, 0, false
+	}
+	return firstCol, lastCol, true
+}
+
+// GoString is Rust's derived Debug.
+func (r SelectionRange) GoString() string {
+	return fmt.Sprintf("SelectionRange { start: %#v, end: %#v }", r.Start, r.End)
+}
+
+// selectionRangeDebug is Rust's Debug for `Option<SelectionRange>`.
+func selectionRangeDebug(r SelectionRange, ok bool) string {
+	if !ok {
+		return "None"
+	}
+	return fmt.Sprintf("Some(%#v)", r)
 }
 
 // SelectionAction is what the caller should do after a button release.
@@ -317,6 +410,15 @@ type SelectionActionCopyRequested struct {
 func (SelectionActionNone) isSelectionAction()          {}
 func (SelectionActionClick) isSelectionAction()         {}
 func (SelectionActionCopyRequested) isSelectionAction() {}
+
+// GoString methods are Rust's derived Debug for SelectionAction.
+func (SelectionActionNone) GoString() string { return "None" }
+func (a SelectionActionClick) GoString() string {
+	return fmt.Sprintf("Click { column: %d, row: %d }", a.Column, a.Row)
+}
+func (a SelectionActionCopyRequested) GoString() string {
+	return fmt.Sprintf("CopyRequested { surface: %#v, range: %#v }", a.Surface, a.Range)
+}
 
 // selectionPhase is Rust's private `Phase`.
 type selectionPhase int
@@ -420,7 +522,18 @@ func (s *SelectionState) Range() (SelectionRange, bool) {
 // Any completed selection is dropped. A press that hits no surface leaves
 // the engine idle.
 func (s *SelectionState) OnMouseDown(column int, row int, surfaces *FrameSurfaces) {
-	panic("unported: mj-chat/src/selection.rs OnMouseDown")
+	s.Clear()
+	frame := surfaces.SurfaceAt(column, row)
+	if frame == nil {
+		return
+	}
+	anchor := frame.ContentPos(column, row)
+	s.phase = selectionPhasePressed
+	s.surface = frame.ID
+	s.anchor = anchor
+	s.cursor = anchor
+	s.pressCell = uv.Pos(column, row)
+	s.pointer = uv.Pos(column, row)
 }
 
 // OnMouseDrag extends the selection while the button is held.
@@ -442,7 +555,19 @@ func (s *SelectionState) OnMouseDrag(column int, row int, surfaces *FrameSurface
 // SelectionActionCopyRequested and leaves the highlight in place until the
 // next press or Clear.
 func (s *SelectionState) OnMouseUp(column int, row int, surfaces *FrameSurfaces) SelectionAction {
-	panic("unported: mj-chat/src/selection.rs OnMouseUp")
+	if !s.OwnsPointer() {
+		return SelectionActionNone{}
+	}
+	s.track(column, row, surfaces)
+	if s.phase == selectionPhaseDragging {
+		s.phase = selectionPhaseCompleted
+		if r, ok := s.Range(); ok && s.surface != nil {
+			return SelectionActionCopyRequested{Surface: s.surface, Range: r}
+		}
+		return SelectionActionNone{}
+	}
+	s.Clear()
+	return SelectionActionClick{Column: column, Row: row}
 }
 
 // Retrack re-resolves the held pointer against the current frame, extending
@@ -463,11 +588,43 @@ func (s *SelectionState) Retrack(surfaces *FrameSurfaces) {
 // -1 scrolls up, +1 scrolls down. Surfaces with nothing scrolled out never
 // request a scroll.
 func (s *SelectionState) AutoscrollRequest(surfaces *FrameSurfaces) (SurfaceId, int8, bool) {
-	panic("unported: mj-chat/src/selection.rs AutoscrollRequest")
+	if s.phase != selectionPhaseDragging || s.surface == nil {
+		return nil, 0, false
+	}
+	id := s.surface
+	frame := surfaces.Surface(id)
+	if frame == nil {
+		return nil, 0, false
+	}
+	if frame.Rect.Dy() <= 0 || frame.TotalRows <= frame.Rect.Dy() {
+		return nil, 0, false
+	}
+	row := s.pointer.Y
+	if row <= frame.Rect.Min.Y {
+		return id, -1, true
+	}
+	if row >= max(frame.Rect.Max.Y-1, 0) {
+		return id, 1, true
+	}
+	return nil, 0, false
 }
 
 func (s *SelectionState) track(column int, row int, surfaces *FrameSurfaces) {
-	panic("unported: mj-chat/src/selection.rs track")
+	before := s.VisualState()
+	s.pointer = uv.Pos(column, row)
+	if s.surface == nil {
+		return
+	}
+	frame := surfaces.Surface(s.surface)
+	if frame == nil {
+		return
+	}
+	cursor := frame.ContentPos(column, row)
+	if s.phase == selectionPhasePressed && (uv.Pos(column, row) != s.pressCell || cursor != s.anchor) {
+		s.phase = selectionPhaseDragging
+	}
+	s.cursor = cursor
+	s.bumpVisualRevision(before)
 }
 
 func (s *SelectionState) bumpVisualRevision(before SelectionVisualState) {
@@ -499,7 +656,12 @@ func Highlight(buffer *uv.Buffer, frame *SurfaceFrame, r *SelectionRange) {
 // of trailing whitespace and joined with "\n". Scrollable surfaces extract
 // from their own row cache instead; the engine only reports the range.
 func ExtractRows(buffer *uv.Buffer, frame *SurfaceFrame, r *SelectionRange) string {
-	panic("unported: mj-chat/src/selection.rs ExtractRows")
+	spans := visibleSpans(frame, r)
+	rows := make([]string, 0, len(spans))
+	for index := range spans {
+		rows = append(rows, extractSpan(buffer, frame.Rect.Min.X, &spans[index]))
+	}
+	return strings.Join(rows, "\n")
 }
 
 // visibleSpan is one visible selected row, in screen coordinates.
@@ -510,7 +672,33 @@ type visibleSpan struct {
 }
 
 func visibleSpans(frame *SurfaceFrame, r *SelectionRange) []visibleSpan {
-	panic("unported: mj-chat/src/selection.rs visibleSpans")
+	width, height := frame.Rect.Dx(), frame.Rect.Dy()
+	if width <= 0 || height <= 0 || frame.TotalRows == 0 {
+		return nil
+	}
+	belowViewport := max(frame.TopRow+height-1, 0)
+	firstRow := max(r.Start.Row, frame.TopRow)
+	lastRow := min(r.End.Row, belowViewport, frame.TotalRows-1)
+	if firstRow > lastRow {
+		return nil
+	}
+	var spans []visibleSpan
+	for row := firstRow; row <= lastRow; row++ {
+		first, last, ok := r.ColumnsOn(row, width)
+		if !ok {
+			continue
+		}
+		screenY, ok := frame.ScreenRow(row)
+		if !ok {
+			continue
+		}
+		spans = append(spans, visibleSpan{
+			screenY: screenY,
+			firstX:  frame.Rect.Min.X + first,
+			lastX:   frame.Rect.Min.X + last,
+		})
+	}
+	return spans
 }
 
 // extractSpan reads one row span, emitting each grapheme once.
@@ -520,5 +708,21 @@ func visibleSpans(frame *SurfaceFrame, r *SelectionRange) []visibleSpan {
 // wide/continuation alignment right even when the span starts mid-row, and
 // continuation cells are skipped instead of emitted as spurious spaces.
 func extractSpan(buffer *uv.Buffer, rowStartX int, span *visibleSpan) string {
-	panic("unported: mj-chat/src/selection.rs extractSpan")
+	var text strings.Builder
+	continuation := 0
+	for x := rowStartX; x <= span.lastX; x++ {
+		symbol, width := " ", 1
+		if cell := buffer.CellAt(x, span.screenY); cell != nil {
+			symbol, width = cell.Content, cell.Width
+		}
+		if continuation > 0 {
+			continuation--
+			continue
+		}
+		if x >= span.firstX {
+			text.WriteString(symbol)
+		}
+		continuation = max(width-1, 0)
+	}
+	return strings.TrimRightFunc(text.String(), unicode.IsSpace)
 }
