@@ -20,7 +20,7 @@ func drive(ctx context.Context, transport ByteStreams, spec LaunchSpec, requests
 }
 
 func driveBridge(ctx context.Context, transport ByteStreams, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, opened *Shared[*OpenedSession], sessionOpen BridgeSessionOpen) (SessionRestart, error) {
-	guardian := guardianForLaunch(&spec)
+	guardian := guardianForLaunch(&spec, nil)
 	terminals, err := NewTerminalRegistry()
 	if err != nil {
 		return nil, err
