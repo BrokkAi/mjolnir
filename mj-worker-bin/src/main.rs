@@ -261,11 +261,11 @@ enum WorkerCommand {
         /// `handback`, a child's report to the session that started it.
         #[arg(long, default_value_t = mj_core::subagent::SubagentMcpRole::Parent)]
         role: mj_core::subagent::SubagentMcpRole,
-        /// Accepted for older launch arguments; tool availability is unchanged.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        /// Accepted for older launch arguments.
+        #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::Set)]
         agent_mailboxes_enabled: bool,
         /// False when only the straightforward task type is configured: the
-        /// spawn tool then offers no task type.
+        /// spawn_worker tool then offers no task type.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         subtle_subagents: bool,
         /// Accepted for configurations written by older workers; the review
@@ -927,7 +927,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             socket,
             harness,
             role,
-            agent_mailboxes_enabled,
+            agent_mailboxes_enabled: _,
             subtle_subagents,
             review_gate: _,
             review_server,
@@ -941,7 +941,6 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                     role,
                     mj_worker_mcp::subagent_mcp::ParentTools {
                         oracle: false,
-                        agent_mailboxes_enabled,
                         subtle_subagents,
                         orchestrators_enabled: false,
                     },

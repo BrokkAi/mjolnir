@@ -44,16 +44,16 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
         effort: Some("high".into()),
     };
     session.oracle = true;
-    assert!(!oracle_launch_enabled(&session, false, &choices));
-    choices.oracle = vec![choice.clone()];
-    assert!(oracle_launch_enabled(&session, false, &choices));
     assert!(!oracle_launch_enabled(&session, true, &choices));
-    session.oracle = false;
+    choices.oracle = vec![choice.clone()];
+    assert!(oracle_launch_enabled(&session, true, &choices));
     assert!(!oracle_launch_enabled(&session, false, &choices));
+    session.oracle = false;
+    assert!(!oracle_launch_enabled(&session, true, &choices));
     session.oracle = true;
     session.oracle_choice = Some(Box::new(choice));
     choices.oracle.clear();
-    assert!(oracle_launch_enabled(&session, false, &choices));
+    assert!(oracle_launch_enabled(&session, true, &choices));
 }
 
 #[test]

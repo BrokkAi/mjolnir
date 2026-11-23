@@ -531,8 +531,7 @@ impl WorkerLaunchConfig {
     }
 
     /// Whether this session is offered the `mj-review` tools. The controller
-    /// writes `review_trigger` as push only for top-level sessions, never for
-    /// a sub-agent. This is the one owner of that fact.
+    /// enables `review_trigger` for workspace owners with push review.
     pub fn review_tools(&self) -> bool {
         offers_review_tools(self.review_trigger, self.harness)
     }
@@ -541,19 +540,13 @@ impl WorkerLaunchConfig {
     /// start pin for every session offered the review tools, and the push gate
     /// (or a notice that this harness cannot enforce one) for a primary.
     pub fn prepares_review(&self) -> bool {
-        self.review_trigger == crate::config::ReviewTrigger::Push
-            && self.reviewer_launch.is_none()
-            && (self.review_tools() || (!self.is_managed_subagent() && !self.handback_tool))
+        self.review_trigger == crate::config::ReviewTrigger::Push && self.reviewer_launch.is_none()
     }
 
     /// Whether pushes from this session are held to review: the pre-push
-    /// hook, `MJ_REVIEW_GATE` and the session-start pin. Only top-level
-    /// sessions are gated.
+    /// hook, `MJ_REVIEW_GATE` and the session-start pin.
     pub fn review_gate(&self) -> bool {
-        self.review_tools()
-            && !self.is_managed_subagent()
-            && !self.handback_tool
-            && self.reviewer_launch.is_none()
+        self.review_tools() && self.reviewer_launch.is_none()
     }
 
     /// Managed ownership is independent of the MCP role and historical handback tools.
@@ -905,8 +898,8 @@ mod tests {
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
-                // A sub-agent is never gated.
-                assert!(!launch.review_gate());
+                // Managed identity does not suppress an owning launch's gate.
+                assert_eq!(launch.review_gate(), expected);
                 assert_eq!(
                     launch.subagent_mcp_role(),
                     Some(crate::subagent::SubagentMcpRole::FetchOnly)

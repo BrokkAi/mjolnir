@@ -7,11 +7,19 @@ use anyhow::{Context, Result, ensure};
 
 use super::{Controller, now};
 use mj_core::config::HarnessKind;
-use mj_core::state::{SessionRecord, SessionState, new_session_id};
+use mj_core::state::{SessionRecord, SessionState, State, new_session_id};
 use mj_core::subagent::{SubagentKind, SubagentPolicy, SubagentRecord};
+use mj_store::database::subagent_has_handed_back;
 
 pub use mj_session_types::RegisterSubagentRequest;
-use mj_store::database::subagent_has_handed_back;
+
+pub struct OrchestratorPlacement {
+    pub target_id: String,
+    pub bundle_id: String,
+    pub project: std::sync::Arc<mj_core::repository::ProjectBundleSnapshot>,
+    pub directory: Option<std::path::PathBuf>,
+    pub allocation: Option<mj_core::state::SessionResourceAllocation>,
+}
 
 /// Creates a report directory on a target and prints its absolute path.
 ///
@@ -264,7 +272,7 @@ impl Controller {
         &mut self,
         request: RegisterSubagentRequest,
     ) -> Result<SubagentRecord> {
-        self.register_subagent_inner(request, None)
+        self.register_subagent_inner(request, None, None)
     }
 
     /// Register managed launches before the committed relation becomes addressable.
@@ -273,12 +281,23 @@ impl Controller {
         request: RegisterSubagentRequest,
         manager: &crate::session_manager::SessionManagerControl,
     ) -> Result<SubagentRecord> {
-        self.register_subagent_inner(request, Some(manager))
+        self.register_subagent_inner(request, None, Some(manager))
+    }
+
+    pub fn register_orchestrator_with_manager(
+        &mut self,
+        request: RegisterSubagentRequest,
+        placement: OrchestratorPlacement,
+        manager: &crate::session_manager::SessionManagerControl,
+    ) -> Result<SubagentRecord> {
+        ensure!(request.orchestrator, "owning child must be an orchestrator");
+        self.register_subagent_inner(request, Some(placement), Some(manager))
     }
 
     fn register_subagent_inner(
         &mut self,
         request: RegisterSubagentRequest,
+        placement: Option<OrchestratorPlacement>,
         manager: Option<&crate::session_manager::SessionManagerControl>,
     ) -> Result<SubagentRecord> {
         let request_key = request.kind.request_key(&request.request_key);
@@ -326,6 +345,7 @@ impl Controller {
         let parent_subagent = crate::database::load_subagent(&parent.id)?;
         mj_core::subagent::validate_subagent_parent(
             parent_subagent.as_ref(),
+            self.state.owns_environment(&parent.id) == Some(true),
             request.kind,
             request.orchestrator,
         )?;
@@ -345,7 +365,7 @@ impl Controller {
                 format!("sub-agent profile {:?} is unavailable", request.profile_id)
             })?;
         profile.ensure_ready(&request.profile_id)?;
-        if profile.kind == HarnessKind::Muse {
+        if placement.is_none() && profile.kind == HarnessKind::Muse {
             let multiple_roots = !mj_core::state::applied_container_settings(&parent)
                 .additional_mounts
                 .is_empty()
@@ -363,16 +383,16 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        if !reviewer && !oracle {
-            self.ensure_subagent_slot_available(&parent.id, None)?;
-        }
-
         let child_id = new_session_id()?;
-        let target = borrowed_locator(
-            parent.target.as_ref().expect("live target checked above"),
-            &parent.id,
-            &child_id,
-        )?;
+        let target = if placement.is_none() {
+            Some(Box::new(borrowed_locator(
+                parent.target.as_ref().expect("live target checked above"),
+                &parent.id,
+                &child_id,
+            )?))
+        } else {
+            None
+        };
         let created_at = now();
         let handback_tool = reviewer || child_gets_handback_tool(profile.kind);
         let report_dir = request
@@ -417,7 +437,7 @@ impl Controller {
             handback_tool,
             orchestrator: request.orchestrator,
         };
-        let session = SessionRecord {
+        let mut session = SessionRecord {
             oracle_choice: None,
             oracle: false,
             notifications_ignored: true,
@@ -479,7 +499,7 @@ impl Controller {
                 .additional_mounts
                 .to_vec(),
             state: SessionState::Provisioning,
-            target: Some(Box::new(target)),
+            target,
             native_session_id: None,
             acp_session_title: None,
             session_title_override: Some(request.task_name.clone()),
@@ -493,17 +513,58 @@ impl Controller {
             last_checkpoint_error: None,
             checkpoint: None,
         };
+        let owns_environment = placement.is_some();
+        if let Some(placement) = placement {
+            let template = self.config.ensure_target_enabled(&placement.target_id)?;
+            ensure!(
+                profile.kind.supports_delegation_tools(),
+                "orchestrator profile must support delegation"
+            );
+            ensure!(
+                profile.kind != HarnessKind::Muse
+                    || placement.project.bundle.repositories.len() <= 1,
+                "Muse ACP supports one workspace root. Use a single-repository project"
+            );
+            super::validate_resource_allocation(template, placement.allocation.as_ref())?;
+            session.oracle = parent.oracle;
+            session.oracle_choice.clone_from(&parent.oracle_choice);
+            session.review.clone_from(&parent.review);
+            session.project = Some(placement.project);
+            session.bundle_id = placement.bundle_id;
+            session.target_template_id = placement.target_id;
+            session.target_runtime = Some(template.into());
+            session.project_directory = placement.directory;
+            session.resource_allocation = placement.allocation;
+            session.create_managed_worktree = session.project_directory.as_ref().map(|_| true);
+            session.container_workspace =
+                Some(mj_core::targets::new_container_workspace(&child_id)?);
+            session.additional_mounts.clear();
+            session.build_cache = None;
+            session.no_github_events = true;
+        }
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
         let registration = manager
             .map(|manager| manager.register_starting_blocking(&child_id))
             .transpose()?;
-        crate::database::register_subagent_with_startup(
+        let maximum = self.config.subagents.max_concurrent;
+        crate::database::register_subagent_with_startup_admitted(
             &session,
             &relation,
             startup,
             report_dir.as_deref(),
             Some(request.category.as_str()),
-            false,
+            owns_environment,
+            move |state, relation| {
+                if relation.kind == SubagentKind::Worker {
+                    ensure_subagent_slot_available(
+                        state,
+                        &relation.parent_session_id,
+                        None,
+                        maximum,
+                    )?;
+                }
+                Ok(())
+            },
         )?;
         if let Some(registration) = registration {
             registration.publish()?;
@@ -528,46 +589,53 @@ impl Controller {
         parent_session_id: &str,
         starting: Option<&str>,
     ) -> Result<()> {
-        let owner_id = self
-            .state
-            .environment_owner_id(parent_session_id)
-            .unwrap_or(parent_session_id);
-        let borrowed_workers = self
-            .state
-            .active_borrowers(owner_id)
-            .into_iter()
-            .filter(|id| {
-                self.state
-                    .subagents
-                    .get(id)
-                    .is_some_and(|meta| meta.kind == SubagentKind::Worker)
-            });
-        let owned_orchestrators = self
-            .state
-            .direct_owned_child_ids(owner_id)
-            .into_iter()
-            .filter(|id| {
-                self.state
-                    .subagents
-                    .get(id)
-                    .is_some_and(|meta| meta.orchestrator)
-            });
-        let live: Vec<_> = borrowed_workers
-            .chain(owned_orchestrators)
-            .filter(|id| Some(id.as_str()) != starting)
-            .filter_map(|id| {
-                let session = self.state.sessions.get(&id)?;
-                session.state.has_live_worker().then(|| LiveSubagent {
-                    child_session_id: id,
-                    title: session.message_name(),
-                    state: live_subagent_state(session),
-                })
-            })
-            .collect();
-        let maximum = self.config.subagents.max_concurrent;
-        ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
-        Ok(())
+        ensure_subagent_slot_available(
+            &self.state,
+            parent_session_id,
+            starting,
+            self.config.subagents.max_concurrent,
+        )
     }
+}
+
+fn ensure_subagent_slot_available(
+    state: &State,
+    parent_session_id: &str,
+    starting: Option<&str>,
+    maximum: usize,
+) -> Result<()> {
+    let owner_id = state
+        .environment_owner_id(parent_session_id)
+        .unwrap_or(parent_session_id);
+    let borrowed_workers = state.active_borrowers(owner_id).into_iter().filter(|id| {
+        state
+            .subagents
+            .get(id)
+            .is_some_and(|meta| meta.kind == SubagentKind::Worker)
+    });
+    let owned_orchestrators = state
+        .direct_owned_child_ids(owner_id)
+        .into_iter()
+        .filter(|id| {
+            state
+                .subagents
+                .get(id)
+                .is_some_and(|meta| meta.orchestrator)
+        });
+    let live: Vec<_> = borrowed_workers
+        .chain(owned_orchestrators)
+        .filter(|id| Some(id.as_str()) != starting)
+        .filter_map(|id| {
+            let session = state.sessions.get(&id)?;
+            session.state.has_live_worker().then(|| LiveSubagent {
+                child_session_id: id,
+                title: session.message_name(),
+                state: live_subagent_state(session),
+            })
+        })
+        .collect();
+    ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
+    Ok(())
 }
 
 /// Older daemons registered children before saving their initial input. A
@@ -1419,6 +1487,114 @@ mod tests {
             ))
             .expect("depth-1 orchestrator should register");
         assert!(sup.orchestrator);
+        assert_eq!(
+            controller.state.owns_environment(&sup.child_session_id),
+            Some(false)
+        );
+        assert!(!controller.state.sessions[&sup.child_session_id].oracle);
+        assert!(
+            controller.state.sessions[&sup.child_session_id]
+                .oracle_choice
+                .is_none()
+        );
+        let placement = OrchestratorPlacement {
+            target_id: "localhost".into(),
+            bundle_id: "accepted-project".into(),
+            project: std::sync::Arc::new(mj_core::repository::ProjectBundleSnapshot {
+                bundle: mj_core::config::ProjectBundle {
+                    primary_repo: "test".into(),
+                    repositories: vec![mj_core::config::ProjectRepository {
+                        id: "test".into(),
+                        github: Some("https://example.com/test.git".into()),
+                        destination: "test".into(),
+                        ..Default::default()
+                    }],
+                },
+                identities: std::collections::BTreeMap::from([(
+                    "test".into(),
+                    mj_core::repository::RepositoryIdentity::from_remote(
+                        "https://example.com/test.git",
+                    )
+                    .unwrap(),
+                )]),
+                network_sources: Default::default(),
+                plain_directories: Default::default(),
+            }),
+            directory: Some(workdir.path().to_path_buf()),
+            allocation: None,
+        };
+        // The stale controller sees only the first child. Once the owner
+        // commits, the writer must refuse a second launch at the same cap.
+        let mut stale_controller = Controller {
+            config: controller.config.clone(),
+            state: controller.state.clone(),
+        };
+        stale_controller.config.subagents.max_concurrent = 2;
+        let owner = controller
+            .register_subagent_inner(
+                make_req("primary-enabled", "owning", SubagentKind::Worker, true),
+                Some(placement),
+                None,
+            )
+            .unwrap();
+        stale_controller
+            .ensure_subagent_slot_available("primary-enabled", None)
+            .unwrap();
+        let error = stale_controller
+            .register_subagent_inner(
+                make_req("primary-enabled", "over-cap", SubagentKind::Worker, true),
+                Some(OrchestratorPlacement {
+                    target_id: "localhost".into(),
+                    bundle_id: "accepted-project".into(),
+                    project: controller.state.sessions[&owner.child_session_id]
+                        .project
+                        .clone()
+                        .unwrap(),
+                    directory: Some(workdir.path().to_path_buf()),
+                    allocation: None,
+                }),
+                None,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("the maximum is 2"), "{error:#}");
+        let stored = crate::database::load_state().unwrap();
+        let owner_record = &stored.sessions[&owner.child_session_id];
+        assert_eq!(stored.owns_environment(&owner.child_session_id), Some(true));
+        assert!(owner_record.notifications_ignored && owner_record.no_github_events);
+        assert!(owner_record.subagents.as_ref().unwrap().uses_mjolnir());
+        assert!(
+            !owner_record
+                .subagents
+                .as_ref()
+                .unwrap()
+                .orchestrators_enabled()
+        );
+        assert_eq!(
+            owner_record.workspace_id,
+            stored.sessions["primary-enabled"].workspace_id
+        );
+        assert!(
+            owner_record.target.is_none(),
+            "create provisions the owner target"
+        );
+        assert!(
+            mj_core::subagent::validate_subagent_parent(
+                Some(&owner),
+                true,
+                SubagentKind::Oracle,
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            mj_core::subagent::validate_subagent_parent(
+                Some(&owner),
+                true,
+                SubagentKind::Worker,
+                true
+            )
+            .is_err()
+        );
 
         // Depth-1 orchestrator spawns depth-2 non-orchestrator worker.
         let d2 = controller

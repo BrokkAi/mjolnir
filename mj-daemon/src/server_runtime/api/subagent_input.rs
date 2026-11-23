@@ -338,9 +338,10 @@ impl ApiBackend {
         let delivery = self
             .deliver_subagent_input(&child_session_id, &text, &request)
             .await?;
-        let (via, turn_id) = match delivery {
-            SubagentInputDelivery::Mailbox => ("mailbox", None),
-            SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
+        let via = delivery.via();
+        let turn_id = match delivery {
+            SubagentInputDelivery::Mailbox => None,
+            SubagentInputDelivery::Turn { ordinal } => Some(ordinal),
         };
         let mailbox_delivery = if via == "mailbox" {
             self.published_mailbox_delivery(&child_session_id).await

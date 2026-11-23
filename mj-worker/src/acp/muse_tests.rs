@@ -199,7 +199,8 @@ for line in sys.stdin:
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: root.path().join("subagents.sock"),
             role: mj_core::subagent::SubagentMcpRole::MessageOnly,
-            agent_mailboxes_enabled: true,
+            oracle: false,
+            orchestrators_enabled: false,
             subtle_subagents: false,
             review_tools: false,
             profile_registration: false,

@@ -185,6 +185,253 @@ impl RuntimeState {
         Ok(registered)
     }
 
+    pub(crate) async fn start_orchestrator_session(
+        self: &Arc<Self>,
+        parent_id: String,
+        request: mj_core::subagent::SubagentToolRequest,
+        prepared: Option<mj_controller::database::PreparedDelegation>,
+    ) -> Result<mj_core::subagent::SubagentRecord> {
+        use mj_controller::controller::{OrchestratorPlacement, RegisterSubagentRequest};
+        use mj_core::subagent::{SubagentKind, SubagentTaskType, SubagentToolAction};
+
+        let SubagentToolAction::SpawnOrchestrator {
+            task_name,
+            instructions,
+            target,
+            repos,
+            no_github_credentials,
+        } = request.action
+        else {
+            anyhow::bail!("expected an orchestrator spawn");
+        };
+        let request_id = request.request_id;
+        let existing = blocking({
+            let parent_id = parent_id.clone();
+            let request_id = request_id.clone();
+            move || {
+                mj_controller::database::lookup_subagent_request(
+                    &parent_id,
+                    &SubagentKind::Worker.request_key(&request_id),
+                )
+            }
+        })
+        .await?;
+        if let Some(relation) = existing {
+            self.finish_subagent_registration(
+                &relation,
+                self.session_record(&relation.child_session_id)
+                    .is_none_or(|session| {
+                        session.state == mj_core::state::SessionState::Provisioning
+                    }),
+                false,
+            )
+            .await?;
+            return Ok(relation);
+        }
+
+        let projection = self.runtime_publication()?;
+        let parent = projection
+            .records
+            .get(&parent_id)
+            .context("unknown parent session")?;
+        let policy = parent
+            .subagents
+            .as_ref()
+            .filter(|policy| policy.orchestrators_enabled())
+            .context("orchestrators are not enabled for this session")?;
+        ensure!(
+            !projection.subagents.contains_key(&parent_id),
+            "only top-level sessions can spawn orchestrators"
+        );
+        ensure!(
+            parent.state.can_receive_child_work(),
+            "parent is no longer accepting child work"
+        );
+        ensure!(
+            !task_name.trim().is_empty(),
+            "sub-agent task name cannot be empty"
+        );
+        ensure!(
+            !instructions.trim().is_empty(),
+            "sub-agent instructions cannot be empty"
+        );
+
+        let target_id = target.unwrap_or_else(|| parent.target_template_id.clone());
+        let config = self.with_config(Clone::clone);
+        let template = config.ensure_target_enabled(&target_id)?;
+        let bare = mj_core::config::is_bare_project_target(template);
+        let bare_error = || {
+            let container = config
+                .enabled_targets()
+                .find(|(_, target)| mj_core::config::is_container_target(target))
+                .map(|(id, _)| format!("use container target {id:?}"))
+                .unwrap_or_else(|| "configure and choose a container target".to_owned());
+            anyhow!(
+                "Bare target {target_id:?} requires an existing project directory. Please {container} for repository URLs"
+            )
+        };
+        if let Some(repos) = &repos {
+            ensure!(
+                !repos.is_empty(),
+                "repos must contain at least one repository URL"
+            );
+            for url in repos {
+                mj_core::remote_git::validate_network_url(url).context("invalid repository URL")?;
+            }
+        }
+
+        let directory = if bare {
+            ensure!(repos.is_none(), bare_error());
+            Some(
+                parent
+                    .project_directory
+                    .clone()
+                    .filter(|_| target_id == parent.target_template_id)
+                    .ok_or_else(bare_error)?,
+            )
+        } else {
+            None
+        };
+        let (bundle_id, project) = if let Some(repos) = repos {
+            let created = self.create_bundle_from_sources(repos, false).await?;
+            let id = created.bundle_id;
+            let project = blocking({
+                let id = id.clone();
+                move || {
+                    mj_controller::database::read_project_catalog()?
+                        .projects
+                        .into_iter()
+                        .find(|entry| entry.bundle_id == id)
+                        .map(|entry| Arc::new(entry.project))
+                        .context("created project is missing from the catalog")
+                }
+            })
+            .await?;
+            (id, project)
+        } else {
+            let project = parent.project.clone()
+                .filter(|project| !project.primary_is_plain_directory())
+                .context("parent has no cloneable project bundle. Supply repos with repository URLs on a container target")?;
+            ensure!(
+                bare || project.bundle.repositories.iter().all(|repo| {
+                    repo.github.is_some() || project.network_sources.contains_key(&repo.id)
+                }),
+                "parent has no cloneable project bundle. Supply repos with repository URLs"
+            );
+            (parent.bundle_id.clone(), project)
+        };
+        let allocation = crate::server_runtime::snapshot::target_container_sizing(
+            template,
+            &projection.metadata,
+            crate::server_runtime::snapshot::host_capacity_for_target(
+                &projection.metadata,
+                &target_id,
+            ),
+        )
+        .map(
+            |sizing| mj_core::state::SessionResourceAllocation::Container {
+                cpus: sizing.default.cpus,
+                memory_bytes: sizing.default.memory_bytes,
+            },
+        );
+        if let Some(allocation) = &allocation {
+            validate_minimum_container_allocation(allocation)?;
+        }
+        let durable = prepared.is_some();
+        let prepared = prepared.and_then(|effect| effect.spawn);
+        let (selection, reservation) = if let Some(prepared) = prepared {
+            (prepared, None)
+        } else {
+            let backend: Arc<dyn crate::server::api::SubagentBackend> = self
+                .quota_report_backend()
+                .context("orchestrator placement backend is unavailable")?;
+            let selected = crate::server::api::resolve_subagent_policy_selection(
+                &backend,
+                &parent.last_profile,
+                policy,
+                SubagentTaskType::Orchestrator,
+                template.execution_policy(),
+            )
+            .await
+            .map_err(|failure| anyhow!(failure.message))?;
+            let selection = mj_controller::database::PreparedSpawn {
+                profile_id: selected.profile_id,
+                model: selected.model,
+                effort: selected.effort,
+                fast_mode: selected.fast_mode,
+                prompt: instructions,
+            };
+            let selection = if durable {
+                blocking({
+                    let parent_id = parent_id.clone();
+                    let request_id = request_id.clone();
+                    move || {
+                        mj_controller::database::prepare_delegation_spawn(
+                            parent_id, request_id, selection,
+                        )
+                    }
+                })
+                .await?
+            } else {
+                selection
+            };
+            (selection, Some(selected.reservation))
+        };
+        let capacity = self
+            .admit_container_launch(&target_id, allocation.clone(), None, BTreeSet::new(), None)
+            .await?;
+        let _upgrade_work = mj_controller::upgrade::activity("orchestrator admission")?;
+        let manager = self.session_manager.clone();
+        let relation = blocking(move || {
+            let mut controller = Controller::load()?;
+            let directory = directory
+                .as_deref()
+                .map(|directory| {
+                    controller.resolve_project_directory(
+                        &target_id,
+                        directory,
+                        &CancellableProcessExecutor::with_timeout(REPORT_ROOT_TIMEOUT),
+                    )
+                })
+                .transpose()?;
+            controller.register_orchestrator_with_manager(
+                RegisterSubagentRequest {
+                    kind: SubagentKind::Worker,
+                    orchestrator: true,
+                    reviewer_launch: None,
+                    parent_session_id: parent_id,
+                    task_name,
+                    profile_id: selection.profile_id,
+                    model: Some(selection.model),
+                    effort: selection.effort,
+                    fast_mode: selection.fast_mode,
+                    working_directory: Default::default(),
+                    initial_prompt: selection.prompt,
+                    request_key: request_id,
+                    report_root: None,
+                    category: SubagentTaskType::Orchestrator.id().to_owned(),
+                    no_github_credentials,
+                },
+                OrchestratorPlacement {
+                    target_id,
+                    bundle_id,
+                    project,
+                    directory,
+                    allocation,
+                },
+                &manager,
+            )
+        })
+        .await?;
+        if let Some(reservation) = reservation {
+            reservation.commit(Some(relation.child_session_id.clone()));
+        }
+        drop(capacity);
+        self.finish_subagent_registration(&relation, true, true)
+            .await?;
+        Ok(relation)
+    }
+
     /// Register and start a child worker on its parent's existing target.
     ///
     /// Once the registration has committed, any failure before the worker's
@@ -236,8 +483,19 @@ impl RuntimeState {
                 .map(|relation| (relation, true, true))
         })
         .await?;
+        self.finish_subagent_registration(&relation, needs_provisioning, registered_here)
+            .await?;
+        Ok(relation)
+    }
+
+    async fn finish_subagent_registration(
+        self: &Arc<Self>,
+        relation: &mj_core::subagent::SubagentRecord,
+        needs_provisioning: bool,
+        registered_here: bool,
+    ) -> Result<()> {
         if let Err(error) = self
-            .start_registered_subagent(&relation, needs_provisioning)
+            .start_registered_subagent(relation, needs_provisioning)
             .await
         {
             if registered_here {
@@ -265,7 +523,7 @@ impl RuntimeState {
             return Err(error);
         }
         self.reload_controller().await?;
-        Ok(relation)
+        Ok(())
     }
 
     /// Everything a registered child needs before its own lifecycle owns it:

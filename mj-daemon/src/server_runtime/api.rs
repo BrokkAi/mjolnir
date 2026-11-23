@@ -205,6 +205,22 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent creation is unavailable") })
     }
 
+    fn spawn_orchestrator(
+        self: Arc<Self>,
+        _parent: String,
+        _request: mj_core::subagent::SubagentToolRequest,
+        _prepared: Option<mj_controller::database::PreparedDelegation>,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async { anyhow::bail!("orchestrator creation is unavailable") })
+    }
+
+    fn close_orchestrator(
+        self: Arc<Self>,
+        _session_id: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value>> {
+        Box::pin(async { anyhow::bail!("orchestrator close is unavailable") })
+    }
+
     fn close_subagent_request(
         self: Arc<Self>,
         _session_id: String,
@@ -502,6 +518,25 @@ impl ExportRuntime for RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move { self.start_subagent_session(request).await })
+    }
+
+    fn spawn_orchestrator(
+        self: Arc<Self>,
+        parent: String,
+        request: mj_core::subagent::SubagentToolRequest,
+        prepared: Option<mj_controller::database::PreparedDelegation>,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async move {
+            self.start_orchestrator_session(parent, request, prepared)
+                .await
+        })
+    }
+
+    fn close_orchestrator(
+        self: Arc<Self>,
+        session_id: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value>> {
+        Box::pin(async move { RuntimeState::close_orchestrator(&self, session_id).await })
     }
 
     fn close_subagent_request(
@@ -1351,6 +1386,7 @@ impl ApiBackend {
                         .await?;
                         mj_core::subagent::validate_subagent_parent(
                             parent_subagent.as_ref(),
+                            false,
                             mj_core::subagent::SubagentKind::Worker,
                             requested_orchestrator,
                         )?;
@@ -1471,6 +1507,23 @@ impl ApiBackend {
                     "report_dir":report_dir,
                 }))
             }
+            SubagentToolAction::SpawnOrchestrator { .. } => {
+                let relation = Arc::clone(&self.exports)
+                    .spawn_orchestrator(
+                        parent_session_id.to_owned(),
+                        request.clone(),
+                        prepared.cloned(),
+                    )
+                    .await?;
+                Ok(serde_json::json!({
+                    "child_session_id": relation.child_session_id,
+                    "task_name": relation.task_name,
+                    "name": relation.task_name,
+                    "profile_id": relation.profile_id,
+                    "model": relation.model,
+                    "effort": relation.effort,
+                }))
+            }
             SubagentToolAction::ListTargets => {
                 let projection = self
                     .exports
@@ -1556,6 +1609,15 @@ impl ApiBackend {
                             "state":state,
                             "active_children": active_children.get(relation.child_session_id.as_str()).copied().unwrap_or(0),
                         });
+                        if relation.orchestrator
+                            && projection.as_ref().is_some_and(|projection| {
+                                projection.environment_owners.get(&relation.child_session_id)
+                                    == Some(&relation.child_session_id)
+                            })
+                            && let Some(report_dir) = &progress.report_dir
+                        {
+                            entry["report_dir"] = report_dir.clone().into();
+                        }
                         let selection = live_agent_selection(projection.as_ref(), &detail);
                         entry["model"] = serde_json::json!(selection.model);
                         entry["effort"] = serde_json::json!(selection.effort);
@@ -1594,46 +1656,21 @@ impl ApiBackend {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
                 let delivery = self
-                    .deliver_subagent_input(child_session_id, message, request)
+                    .deliver_to_own_child(
+                        child_session_id.clone(),
+                        message.clone(),
+                        request.request_id.clone(),
+                        request_created_at_ms,
+                    )
                     .await?;
-                let via = delivery.via();
-                let mailbox_delivery = if via == "mailbox" {
-                    self.published_mailbox_delivery(child_session_id).await
-                } else {
-                    None
-                };
-                let note = subagent_input::mailbox_delivery_note(mailbox_delivery.as_ref());
-                match delivery {
-                    subagent_input::SubagentInputDelivery::Mailbox => {
-                        let mut result = serde_json::json!({
-                            "child_session_id":child_session_id,
-                            "status":"queued",
-                            "via":via
-                        });
-                        if let Some(mode) = mailbox_delivery {
-                            result["mailbox_delivery"] = serde_json::to_value(mode)?;
-                        }
-                        if let Some(note) = note {
-                            result["note"] = note.into();
-                        }
-                        Ok(result)
-                    }
-                    subagent_input::SubagentInputDelivery::Turn { ordinal } => {
-                        blocking("record sub-agent prompt", {
-                            let child_id = child_session_id.clone();
-                            move || {
-                                mj_controller::database::record_subagent_prompt(&child_id, ordinal)
-                            }
-                        })
-                        .await?;
-                        Ok(serde_json::json!({
-                            "child_session_id":child_session_id,
-                            "turn_id":ordinal,
-                            "status":"submitted",
-                            "via":via
-                        }))
-                    }
+                if let Some(ordinal) = delivery.turn_id {
+                    blocking("record legacy sub-agent prompt", {
+                        let child = delivery.session_id.clone();
+                        move || mj_controller::database::record_subagent_prompt(&child, ordinal)
+                    })
+                    .await?;
                 }
+                subagent_message_result(delivery)
             }
             SubagentToolAction::SendMessage {
                 child_session_id,
@@ -1648,42 +1685,7 @@ impl ApiBackend {
                         request_created_at_ms,
                     )
                     .await?;
-                let status = if delivery.via == "mailbox" || delivery.via == "queued" {
-                    "queued"
-                } else {
-                    "submitted"
-                };
-                if delivery.managed_child {
-                    let mut result = serde_json::json!({
-                        "child_session_id": delivery.session_id,
-                        "status": status,
-                        "via": delivery.via,
-                    });
-                    if let Some(mode) = delivery.mailbox_delivery {
-                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
-                    }
-                    if let Some(note) = delivery.note {
-                        result["note"] = note.into();
-                    }
-                    if let Some(turn_id) = delivery.turn_id {
-                        result["turn_id"] = turn_id.into();
-                    }
-                    Ok(result)
-                } else {
-                    let mut result = serde_json::json!({
-                        "session_id": delivery.session_id,
-                        "status": status,
-                        "via": delivery.via,
-                        "turn_id": delivery.turn_id,
-                    });
-                    if let Some(mode) = delivery.mailbox_delivery {
-                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
-                    }
-                    if let Some(note) = delivery.note {
-                        result["note"] = note.into();
-                    }
-                    Ok(result)
-                }
+                subagent_message_result(delivery)
             }
             SubagentToolAction::LegacyWaitAgents | SubagentToolAction::LegacyAwaitChildren => {
                 Ok(serde_json::json!({
@@ -1698,6 +1700,16 @@ impl ApiBackend {
                 let child_session_id = self
                     .resolve_owned_child(parent_session_id, child_session_id)
                     .await?;
+                let owns_environment = blocking("read child environment ownership", {
+                    let child_session_id = child_session_id.clone();
+                    move || mj_controller::database::session_owns_environment(&child_session_id)
+                })
+                .await?;
+                if owns_environment {
+                    return Arc::clone(&self.exports)
+                        .close_orchestrator(child_session_id)
+                        .await;
+                }
                 if prepared.is_some() {
                     Arc::clone(&self.exports)
                         .close_subagent_request(
@@ -5189,6 +5201,33 @@ where
         None => choices,
     };
     Ok((choices, default))
+}
+
+fn subagent_message_result(
+    delivery: crate::server::api::SessionMessageResponse,
+) -> Result<serde_json::Value> {
+    let status = if matches!(delivery.via.as_str(), "mailbox" | "queued") {
+        "queued"
+    } else {
+        "submitted"
+    };
+    let mut result = serde_json::json!({"status": status, "via": delivery.via});
+    if delivery.managed_child {
+        result["child_session_id"] = delivery.session_id.into();
+        if let Some(turn_id) = delivery.turn_id {
+            result["turn_id"] = turn_id.into();
+        }
+    } else {
+        result["session_id"] = delivery.session_id.into();
+        result["turn_id"] = serde_json::json!(delivery.turn_id);
+    }
+    if let Some(mode) = delivery.mailbox_delivery {
+        result["mailbox_delivery"] = serde_json::to_value(mode)?;
+    }
+    if let Some(note) = delivery.note {
+        result["note"] = note.into();
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

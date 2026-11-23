@@ -140,7 +140,7 @@ pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,
 };
-pub use subagents::{RegisterSubagentRequest, stopped_subagent};
+pub use subagents::{OrchestratorPlacement, RegisterSubagentRequest, stopped_subagent};
 pub use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,

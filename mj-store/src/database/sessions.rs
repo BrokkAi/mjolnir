@@ -196,6 +196,28 @@ pub fn register_subagent_with_startup(
     category: Option<&str>,
     own_environment: bool,
 ) -> Result<()> {
+    register_subagent_with_startup_admitted(
+        session,
+        subagent,
+        startup,
+        report_dir,
+        category,
+        own_environment,
+        |_, _| Ok(()),
+    )
+}
+
+/// Run the controller's admission policy against the latest committed state
+/// in the same serialized write that registers the child.
+pub fn register_subagent_with_startup_admitted(
+    session: &SessionRecord,
+    subagent: &mj_core::subagent::SubagentRecord,
+    startup: Vec<super::startup::StartupDelivery>,
+    report_dir: Option<&str>,
+    category: Option<&str>,
+    own_environment: bool,
+    admit: impl FnOnce(&State, &mj_core::subagent::SubagentRecord) -> Result<()> + Send + 'static,
+) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
     let report_dir = report_dir.map(str::to_owned);
@@ -203,6 +225,9 @@ pub fn register_subagent_with_startup(
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let committed =
+            committed_state()?.context("sub-agent admission requires the database writer")?;
+        admit(&committed.state, &subagent)?;
         let parent_state = tx.query_row(
             "SELECT state FROM sessions WHERE session_id=?1",
             [&subagent.parent_session_id],

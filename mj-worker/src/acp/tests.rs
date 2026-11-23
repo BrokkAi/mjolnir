@@ -671,6 +671,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
         ] {
             for role in [
                 SubagentMcpRole::Parent,
+                SubagentMcpRole::Orchestrator,
                 SubagentMcpRole::MessageOnly,
                 SubagentMcpRole::FetchOnly,
                 SubagentMcpRole::Child,
@@ -679,6 +680,10 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 spec.execution_policy = policy;
                 let mut socket = worker_socket(role);
                 socket.review_tools = true;
+                let oracle = role == SubagentMcpRole::Orchestrator;
+                let orchestrators_enabled = role == SubagentMcpRole::Parent;
+                socket.oracle = oracle;
+                socket.orchestrators_enabled = orchestrators_enabled;
                 spec.subagent_mcp_socket = Some(socket);
                 spec.project_memory = Some(ProjectMemoryLaunchConfig {
                     history_socket: Some("/worker/history.sock".into()),
@@ -757,7 +762,12 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                             assert_eq!(&args[..2], ["worker", "subagent-mcp"]);
                             assert!(args.contains(&"--socket"));
                             assert!(args.contains(&harness.id()));
-                            if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
+                            if matches!(
+                                role,
+                                SubagentMcpRole::Child
+                                    | SubagentMcpRole::FetchOnly
+                                    | SubagentMcpRole::Orchestrator
+                            ) {
                                 assert_eq!(
                                     args[args.len() - 3..],
                                     ["--review-server", "--role", role.id()]
@@ -804,7 +814,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                             let mut expected =
                                 vec!["Bash(gh:*)".to_owned(), "mcp__mj-memory__*".to_owned()];
                             expected.extend(
-                                role.tool_names()
+                                role.tool_names(oracle, orchestrators_enabled)
                                     .iter()
                                     .map(|tool| format!("mcp__mj-agents__{tool}")),
                             );
@@ -825,9 +835,14 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 }
                 if harness == HarnessKind::Dsh {
                     let approvals = OwnedMcpApprovals::for_launch(&spec);
-                    let offers = |tool: &str| role.tool_names().contains(&tool);
+                    let offers = |tool: &str| {
+                        role.tool_names(oracle, orchestrators_enabled)
+                            .contains(&tool)
+                    };
                     for (title, owned) in [
-                        ("mcp  mj-agents  spawn", offers("spawn")),
+                        ("mcp  mj-agents  spawn worker", offers("spawn_worker")),
+                        ("mcp  mj-agents  spawn orchestrator", orchestrators_enabled),
+                        ("mcp  mj-agents  ask oracle", oracle),
                         ("mcp  mj-agents  list agents", offers("list_agents")),
                         ("mcp  mj-agents  list targets", offers("list_targets")),
                         ("mcp  mj-review  request review", offers_review),
@@ -1485,7 +1500,8 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
     SubagentMcpSocket {
         path: "/worker/subagents.sock".into(),
         role,
-        agent_mailboxes_enabled: true,
+        oracle: false,
+        orchestrators_enabled: false,
         subtle_subagents: true,
         review_tools: false,
         profile_registration: false,
@@ -1551,12 +1567,8 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     };
     assert_eq!(server.name, "mj-agents");
     assert_eq!(
-        server.args.iter().rev().skip(2).take(2).collect::<Vec<_>>(),
-        ["child", "--role"]
-    );
-    assert_eq!(
         server.args.iter().rev().take(2).collect::<Vec<_>>(),
-        ["true", "--agent-mailboxes-enabled"]
+        ["child", "--role"]
     );
 }
 
@@ -6312,7 +6324,8 @@ for line in sys.stdin:
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
-            agent_mailboxes_enabled: true,
+            oracle: false,
+            orchestrators_enabled: false,
             subtle_subagents: true,
             review_tools: false,
             profile_registration: false,

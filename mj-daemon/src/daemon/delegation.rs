@@ -342,6 +342,7 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
+                                    | SubagentToolAction::SpawnOrchestrator { .. }
                                     | SubagentToolAction::RequestReview { .. }
                                     | SubagentToolAction::AskOracle { .. }
                                     | SubagentToolAction::OverrideReview { .. }

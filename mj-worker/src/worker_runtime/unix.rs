@@ -392,7 +392,8 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,
-            agent_mailboxes_enabled: config.agent_mailboxes_enabled,
+            oracle: config.oracle,
+            orchestrators_enabled: config.orchestrators_enabled,
             subtle_subagents: config.subtle_subagents,
             review_tools,
             profile_registration,
@@ -2747,7 +2748,6 @@ async fn prepare_and_start_harness(
             let mut environment = config.environment.clone();
             let role = subagent_role;
             let policy = config.execution_policy;
-            let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
             let (registered, environment, mode) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
@@ -2761,12 +2761,7 @@ async fn prepare_and_start_harness(
                         &mut environment,
                         role,
                         policy,
-                        mj_worker_mcp::subagent_mcp::ParentTools {
-                            oracle: false,
-                            agent_mailboxes_enabled: mailboxes_enabled,
-                            subtle_subagents,
-                            orchestrators_enabled: false,
-                        },
+                        subtle_subagents,
                         review_tools,
                         managed_subagent,
                     )?;
@@ -2802,7 +2797,7 @@ async fn prepare_and_start_harness(
             let root = root.to_owned();
             let session_id = config.session_id.clone();
             let role = subagent_role;
-            let mailboxes_enabled = config.agent_mailboxes_enabled;
+            let capabilities = (config.oracle, config.orchestrators_enabled);
             let subtle_subagents = config.subtle_subagents;
             if managed_subagent {
                 // Marketplace refreshes on every child start fetch from Git or
@@ -2840,7 +2835,7 @@ async fn prepare_and_start_harness(
                         &session_id,
                         &home,
                         role,
-                        mailboxes_enabled,
+                        capabilities,
                         subtle_subagents,
                         review_tools,
                     )?;

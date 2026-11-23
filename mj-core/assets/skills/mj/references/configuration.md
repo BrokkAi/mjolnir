@@ -533,7 +533,7 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn_worker` tool. Create and Move offer
 Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
 as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
 no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
@@ -580,14 +580,14 @@ by that model when specified; omitted effort uses the harness default. Adaptive
 effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
-With both types configured, set the `spawn` tool's `task_type` to
+With both types configured, set the `spawn_worker` tool's `task_type` to
 `straightforward` for bounded work with a single clear path, such as locating
 and mapping code, running exact build, test, or gate commands, and small
 mechanical edits. Choose `subtle` for
 multi-file implementation, including settled designs, multi-stage operational
 runs or troubleshooting, ambiguous diagnosis, design choices, and work with a
 high risk of subtle bugs. Choose by scope and branching. With only
-straightforward configured, `spawn` omits `task_type` and every child uses that
+straightforward configured, `spawn_worker` omits `task_type` and every child uses that
 choice. The parent delegates bounded work and handles the more involved work
 itself. Mjolnir chooses the enabled profile offering that task type's model
 and effort with the strongest quota headroom paced against its reset times.
@@ -751,7 +751,7 @@ working everywhere.
 
 Use `mj new --no-github-credentials` to withhold GitHub authentication from a
 session and all its Mjolnir children, including oracles and reviewers. The API
-creation payload and child `spawn` tool accept `no_github_credentials: true`.
+creation payload and child `spawn_worker` tool accept `no_github_credentials: true`.
 A child can also opt out individually; it cannot undo its parent's opt-out.
 This choice is saved with the session and survives restart, resume and Move.
 `--no-github-events` independently controls watcher delivery.

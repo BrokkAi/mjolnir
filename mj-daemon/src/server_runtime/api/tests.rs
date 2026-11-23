@@ -8642,7 +8642,7 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
         .await;
     assert!(from_child.is_error);
     assert!(
-        from_child.message.contains("top-level"),
+        from_child.message.contains("workspace owners"),
         "{}",
         from_child.message
     );
@@ -8674,6 +8674,41 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
         );
     }
     assert!(exports.requests().is_empty());
+}
+
+#[tokio::test]
+async fn ask_oracle_starts_an_advisor_for_an_owning_orchestrator() {
+    if !isolated_parked_test("ask_oracle_starts_an_advisor_for_an_owning_orchestrator") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = parent_record("root-agents", "parent");
+    mj_controller::database::save_session(&root).unwrap();
+    let exports = OracleExports::new();
+    let owner = exports.session_record("parent-1").unwrap();
+    let mut relation = crate::daemon::tests::runtime_test_subagent(&owner.id, &root.id);
+    relation.orchestrator = true;
+    mj_controller::database::register_subagent_with_startup(
+        &owner,
+        &relation,
+        vec![],
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let backend = oracle_backend(exports.clone()).await;
+    let answer = backend
+        .execute_subagent_tool(
+            owner.id.clone(),
+            ask_oracle_request("owner-question", "What are the tradeoffs?"),
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let requests = exports.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].parent_session_id, owner.id);
+    assert_eq!(requests[0].kind, mj_core::subagent::SubagentKind::Oracle);
 }
 
 #[test]

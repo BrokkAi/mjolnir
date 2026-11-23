@@ -3177,6 +3177,7 @@ impl State {
             });
         crate::subagent::validate_subagent_parent(
             parent_subagent.as_ref(),
+            self.owns_environment(&subagent.parent_session_id) == Some(true),
             subagent.kind,
             subagent.orchestrator,
         )?;

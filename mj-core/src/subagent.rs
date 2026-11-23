@@ -90,6 +90,22 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerTaskType {
+    Straightforward,
+    Subtle,
+}
+
+impl From<WorkerTaskType> for SubagentTaskType {
+    fn from(task: WorkerTaskType) -> Self {
+        match task {
+            WorkerTaskType::Straightforward => Self::Straightforward,
+            WorkerTaskType::Subtle => Self::Subtle,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentTaskType {
@@ -525,6 +541,16 @@ pub enum SubagentToolAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<FileSourceRanges>,
     },
+    SpawnOrchestrator {
+        task_name: String,
+        instructions: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        repos: Option<Vec<String>>,
+        #[serde(default)]
+        no_github_credentials: bool,
+    },
     ListAgents,
     ListTargets,
     SendInput {
@@ -623,6 +649,16 @@ enum SubagentToolActionWire {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<FileSourceRanges>,
     },
+    SpawnOrchestrator {
+        task_name: String,
+        instructions: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        repos: Option<Vec<String>>,
+        #[serde(default)]
+        no_github_credentials: bool,
+    },
     ListAgents,
     ListTargets,
     SendInput {
@@ -657,13 +693,13 @@ impl SubagentToolAction {
         matches!(
             self,
             Self::Spawn { .. }
+                | Self::SpawnOrchestrator { .. }
                 | Self::RequestReview { .. }
                 | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
                 | Self::SetReviewBaseline { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
-                | Self::LegacyInterruptAgent { .. }
                 | Self::CloseAgent { .. }
         )
     }
@@ -751,6 +787,19 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 working_directory,
                 context,
                 files,
+            },
+            SubagentToolActionWire::SpawnOrchestrator {
+                task_name,
+                instructions,
+                target,
+                repos,
+                no_github_credentials,
+            } => Self::SpawnOrchestrator {
+                task_name,
+                instructions,
+                target,
+                repos,
+                no_github_credentials,
             },
             SubagentToolActionWire::ListAgents => Self::ListAgents,
             SubagentToolActionWire::ListTargets => Self::ListTargets,
@@ -1074,6 +1123,7 @@ impl SubagentMetadata {
 /// and `Controller::register_subagent_inner`.
 pub fn validate_subagent_parent(
     parent_subagent: Option<&SubagentRecord>,
+    parent_owns_environment: bool,
     requested_kind: SubagentKind,
     requested_orchestrator: bool,
 ) -> anyhow::Result<()> {
@@ -1091,8 +1141,8 @@ pub fn validate_subagent_parent(
                     "orchestrators cannot spawn nested orchestrators (maximum depth is 2)"
                 );
             }
-            if requested_kind == SubagentKind::Oracle {
-                anyhow::bail!("orchestrators cannot spawn oracles");
+            if requested_kind == SubagentKind::Oracle && !parent_owns_environment {
+                anyhow::bail!("borrowed orchestrators cannot spawn oracles");
             }
             Ok(())
         }
@@ -1185,32 +1235,29 @@ impl SubagentMcpRole {
         }
     }
 
-    /// Tools this role can offer, for harness approval rules. Some tools
-    /// also require a capability in the session's launch settings.
+    /// Tools advertised, accepted and allowed by the harness for this launch.
     #[must_use]
-    pub fn tool_names(self) -> &'static [&'static str] {
-        match self {
-            Self::Parent => &[
-                "spawn",
-                "list_agents",
-                "list_targets",
-                "send_message",
-                "close",
-                "fetch",
-                "ask_oracle",
-            ],
-            Self::Orchestrator => &[
-                "spawn",
-                "list_agents",
-                "send_message",
-                "close",
-                "fetch",
-                "handback",
-            ],
-            Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
-            Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
-            Self::Child => &["handback", "fetch", "send_message"],
+    pub fn tool_names(self, oracle: bool, orchestrators_enabled: bool) -> Vec<&'static str> {
+        let mut tools = match self {
+            Self::Parent | Self::Orchestrator => {
+                let mut tools = vec!["spawn_worker"];
+                if self == Self::Parent && orchestrators_enabled {
+                    tools.extend(["spawn_orchestrator", "list_targets"]);
+                }
+                tools.extend(["list_agents", "send_message", "close", "fetch"]);
+                tools
+            }
+            Self::MessageOnly => vec!["send_message", "fetch"],
+            Self::FetchOnly => vec!["fetch", "send_message"],
+            Self::Child => vec!["handback", "fetch", "send_message"],
+        };
+        if oracle && self != Self::Child {
+            tools.push("ask_oracle");
         }
+        if self == Self::Orchestrator {
+            tools.push("handback");
+        }
+        tools
     }
 }
 
@@ -2227,8 +2274,12 @@ mod tests {
                 child_session_id: "child".into(),
                 message: "legacy note".into(),
             },
-            SubagentToolAction::LegacyInterruptAgent {
-                child_session_id: "child".into(),
+            SubagentToolAction::SpawnOrchestrator {
+                task_name: "task".into(),
+                instructions: "work".into(),
+                target: None,
+                repos: None,
+                no_github_credentials: false,
             },
             SubagentToolAction::CloseAgent {
                 child_session_id: "child".into(),
@@ -2251,6 +2302,9 @@ mod tests {
                 .all(SubagentToolAction::mutates_child_state)
         );
         for observation in [
+            SubagentToolAction::LegacyInterruptAgent {
+                child_session_id: "child".into(),
+            },
             SubagentToolAction::ListProfiles,
             SubagentToolAction::ListAgents,
             SubagentToolAction::LegacyWaitAgents,
@@ -2438,18 +2492,27 @@ mod tests {
             }
             // Depth-2 invariant: top-level -> orchestrator ok; orchestrator -> worker ok;
             // orchestrator -> orchestrator/oracle refused; worker -> worker refused.
-            assert!(validate_subagent_parent(None, SubagentKind::Worker, true).is_ok());
+            assert!(validate_subagent_parent(None, true, SubagentKind::Worker, true).is_ok());
             assert!(
-                validate_subagent_parent(Some(&orchestrator), SubagentKind::Worker, false).is_ok()
+                validate_subagent_parent(Some(&orchestrator), false, SubagentKind::Worker, false)
+                    .is_ok()
             );
             assert!(
-                validate_subagent_parent(Some(&orchestrator), SubagentKind::Worker, true).is_err()
+                validate_subagent_parent(Some(&orchestrator), false, SubagentKind::Worker, true)
+                    .is_err()
             );
             assert!(
-                validate_subagent_parent(Some(&orchestrator), SubagentKind::Oracle, false).is_err()
+                validate_subagent_parent(Some(&orchestrator), false, SubagentKind::Oracle, false)
+                    .is_err()
             );
-            assert!(validate_subagent_parent(Some(&worker), SubagentKind::Worker, false).is_err());
-            assert!(validate_subagent_parent(Some(&worker), SubagentKind::Reviewer, false).is_ok());
+            assert!(
+                validate_subagent_parent(Some(&worker), false, SubagentKind::Worker, false)
+                    .is_err()
+            );
+            assert!(
+                validate_subagent_parent(Some(&worker), false, SubagentKind::Reviewer, false)
+                    .is_ok()
+            );
             // Keep existing serde round-trip check below for completeness.
             for policy in [SubagentPolicy::Native, SubagentPolicy::None] {
                 assert_eq!(
@@ -2957,7 +3020,10 @@ mod tests {
             SubagentMcpRole::Child,
         ] {
             for tool in REVIEW_MCP_TOOLS {
-                assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
+                assert!(
+                    !role.tool_names(true, true).contains(tool),
+                    "{role} lists {tool}"
+                );
             }
         }
     }
@@ -2974,7 +3040,11 @@ mod tests {
                 child_session_id: "child".into()
             }
         );
-        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+        assert!(
+            !SubagentMcpRole::Parent
+                .tool_names(true, true)
+                .contains(&"interrupt")
+        );
     }
 
     #[test]
@@ -3010,11 +3080,19 @@ mod tests {
         );
         assert!(
             SubagentMcpRole::Parent
-                .tool_names()
+                .tool_names(true, true)
                 .contains(&"send_message")
         );
-        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"send_input"));
-        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+        assert!(
+            !SubagentMcpRole::Parent
+                .tool_names(true, true)
+                .contains(&"send_input")
+        );
+        assert!(
+            !SubagentMcpRole::Parent
+                .tool_names(true, true)
+                .contains(&"interrupt")
+        );
     }
 
     #[test]
@@ -3044,8 +3122,8 @@ mod tests {
             SubagentToolAction::LegacyAwaitChildren
         );
         for role in [SubagentMcpRole::Parent, SubagentMcpRole::Child] {
-            assert!(!role.tool_names().contains(&"wait"));
-            assert!(!role.tool_names().contains(&"await_children"));
+            assert!(!role.tool_names(true, true).contains(&"wait"));
+            assert!(!role.tool_names(true, true).contains(&"await_children"));
         }
 
         for old_shape in [

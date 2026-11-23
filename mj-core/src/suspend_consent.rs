@@ -412,6 +412,28 @@ impl SuspendPreflight {
     }
 }
 
+/// Report a sample of what the final checkpoint inventory discarded.
+pub fn format_dropped_untracked(items: &[UntrackedItem]) -> String {
+    // A summary samples paths; its count covers the entire inventory.
+    let sample = items
+        .iter()
+        .take(5)
+        .map(|item| match item {
+            UntrackedItem::Path { path, .. } | UntrackedItem::NestedRepository { path, .. } => {
+                format!("{:?}", path)
+            }
+            UntrackedItem::KeepDirFile { path, .. } => {
+                format!("{:?}", std::path::Path::new(".mj/keep").join(path))
+            }
+            UntrackedItem::Stash { commit, .. } => {
+                format!("stash {}", &commit[..commit.len().min(8)])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} ({sample})", items.len())
+}
+
 /// Format the canonical agent/CLI refusal message for untracked files.
 pub fn format_untracked_refusal(count: usize, first_paths: &[String]) -> String {
     let preview: Vec<&str> = first_paths.iter().take(5).map(String::as_str).collect();
