@@ -145,26 +145,22 @@ impl DurableRelay {
             return controls;
         }
         if let Some(head) = self.snapshot.queued_prompts.first() {
-            let can_steer = match &head.payload {
-                StoredQueuedRelayPayload::Prompt { prompt } => {
-                    !mj_core::acp::prompt_is_slash_command(prompt)
+            let dispatch = self.snapshot.dispatches.get(&head.command_id);
+            let can_steer = dispatch
+                .filter(|dispatch| dispatch.state == RelayDispatchState::Queued)
+                .and_then(|dispatch| dispatch.command.prompt_blocks())
+                .is_some_and(|prompt| {
+                    !mj_core::acp::prompt_is_slash_command(&prompt)
                         && match self.steering_delivery_mode {
                             SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
                                 self.steering_supported != Some(false)
                             }
                             SteeringDeliveryMode::HookPostToolBatch => {
-                                mj_core::acp::steering_text_context(prompt).is_some()
+                                mj_core::acp::steering_text_context(&prompt).is_some()
                             }
                             SteeringDeliveryMode::HookTurnEnd => false,
                         }
-                        && self
-                            .snapshot
-                            .dispatches
-                            .get(&head.command_id)
-                            .is_some_and(|d| d.state == RelayDispatchState::Queued)
-                }
-                StoredQueuedRelayPayload::SetConfig { .. } => false,
-            };
+                });
             primary = if can_steer {
                 TurnControlAction {
                     kind: TurnControlKind::Steer,
@@ -174,20 +170,19 @@ impl DurableRelay {
                     },
                 }
             } else {
-                controls.message = Some(match &head.payload {
-                    StoredQueuedRelayPayload::SetConfig { .. } => {
+                controls.message = Some(match dispatch.map(|dispatch| &dispatch.command) {
+                    Some(RelayCommand::SetConfig { .. }) => {
                         let settings = self
                             .snapshot
                             .queued_prompts
                             .iter()
-                            .take_while(|q| {
-                                matches!(q.payload, StoredQueuedRelayPayload::SetConfig { .. })
-                            })
-                            .filter_map(|q| match &q.payload {
-                                StoredQueuedRelayPayload::SetConfig { key, value } => {
-                                    Some(format!("{key}: {value}"))
+                            .map_while(|queued| {
+                                match &self.snapshot.dispatches.get(&queued.command_id)?.command {
+                                    RelayCommand::SetConfig { key, value } => {
+                                        Some(format!("{key}: {value}"))
+                                    }
+                                    _ => None,
                                 }
-                                _ => None,
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -695,7 +690,8 @@ impl DurableRelay {
         };
         if let Some(handled) = self.snapshot.handled_commands.get(command_id) {
             let accepted_ordinal = {
-                if !handled.matches_command(&command)? {
+                let live_command = self.snapshot.dispatches.get(command_id).map(|d| &d.command);
+                if !handled.matches_command(live_command, &command)? {
                     return Ok(Err(relay_protocol_error(
                         RelayErrorCode::InvalidRequest,
                         "command ID was already used for a different command",
@@ -1252,15 +1248,27 @@ impl DurableRelay {
             )));
         }
         let created_at_ms = epoch_millis();
-        let accepted_ordinal = self.append_relay_event(
-            Some(command_id),
-            RelayObservation::CommandQueued {
-                command_id: command_id.to_owned(),
-                command: command.clone(),
-                created_at_ms,
-                insert_at_front,
-            },
-        )?;
+        let observation = RelayObservation::CommandQueued {
+            command_id: command_id.to_owned(),
+            command: command.clone(),
+            created_at_ms,
+            insert_at_front,
+        };
+        self.prepare_journal_append(Some(command_id), &observation)?;
+        let accepted_ordinal = match self
+            .append_relay_event_after_checkpoint_hold(Some(command_id), observation)
+        {
+            Ok(ordinal) => ordinal,
+            Err(error) if error.is::<RelayBudgetExceeded>() => {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "The session queue is full. Wait for queued prompts to run or remove queued input, then try again.",
+                    false,
+                    None,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
 
         if command.is_relay_local() || self.is_queued_recovery_cancel(command_id) {
             self.finish_relay_local_command(command_id)?;
@@ -1659,13 +1667,17 @@ impl DurableRelay {
                 ))
             .then(|| next_snapshot.queued_prompts.first())
             .flatten()
-            .and_then(|queued| match &queued.payload {
-                StoredQueuedRelayPayload::Prompt { prompt } => Some(ClaimedSteeringPrompt {
+            .and_then(|queued| {
+                let prompt = next_snapshot
+                    .dispatches
+                    .get(&queued.command_id)?
+                    .command
+                    .prompt_blocks()?;
+                Some(ClaimedSteeringPrompt {
                     attachment_root: None,
                     queued_command_id: queued.command_id.clone(),
-                    prompt: prompt.clone(),
-                }),
-                StoredQueuedRelayPayload::SetConfig { .. } => None,
+                    prompt: prompt.into_owned(),
+                })
             });
             let dispatch = next_snapshot
                 .dispatches
@@ -2717,7 +2729,7 @@ impl DurableRelay {
         Ok(())
     }
 
-    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
+    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, String)> {
         if hook_event != "PostToolBatch"
             || self.steering_delivery_mode != SteeringDeliveryMode::HookPostToolBatch
             // A turn being interrupted discards its input; the prompt runs next.
@@ -2750,10 +2762,13 @@ impl DurableRelay {
         if queued.command_id != operation.queued_prompt_id {
             return None;
         }
-        let StoredQueuedRelayPayload::Prompt { prompt } = &queued.payload else {
-            return None;
-        };
-        let text = mj_core::acp::steering_text_context(prompt)?;
+        let prompt = self
+            .snapshot
+            .dispatches
+            .get(&queued.command_id)?
+            .command
+            .prompt_blocks()?;
+        let text = mj_core::acp::steering_text_context(&prompt)?.to_owned();
         Some((
             MailboxHookSteering {
                 command_id: operation.command_id.clone(),

@@ -13820,6 +13820,36 @@ fn startup_image_draft(label: &str, reference: &mj_core::attachment::AttachmentR
 }
 
 #[tokio::test]
+async fn oversized_startup_prompt_is_refused_before_persistence() {
+    let Some(_writer) =
+        startup_prompt_test_store("oversized_startup_prompt_is_refused_before_persistence")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let mut action = queued_prompt_action("oversized");
+    let DaemonAction::QueueStartupPrompt { prompt, .. } = &mut action else {
+        unreachable!()
+    };
+    *prompt = vec![ContentBlock::Text(TextContent::new(
+        "x".repeat(mj_core::relay::RELAY_COMMAND_BYTE_BUDGET),
+    ))];
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let result = handle_action(action, &metadata, &state, &CancellationToken::new()).await;
+    let Err(error) = result else {
+        panic!("oversized startup prompt was accepted");
+    };
+    assert!(error.is::<mj_core::relay::RelayBudgetExceeded>());
+    assert!(
+        mj_controller::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable() {
     const NAME: &str =
         "startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable";

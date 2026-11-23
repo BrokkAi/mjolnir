@@ -1001,6 +1001,15 @@ pub(super) async fn handle_action(
                     _ => bail!("startup prompts support text and installed images"),
                 }
             }
+            let command = RelayCommand::Prompt { prompt };
+            mj_core::relay::ensure_serialized_budget(
+                &command,
+                mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+                "startup prompt",
+            )?;
+            let RelayCommand::Prompt { prompt } = command else {
+                unreachable!("just constructed a prompt");
+            };
             match state
                 .queue_startup_steps_with_ids(
                     &session_id,
