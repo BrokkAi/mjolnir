@@ -391,6 +391,8 @@ func TestImageBytesReachTheSessionActorAndOversizedPromptsAreRefusedIntact(t *te
 	if !decoded.Images[0].Image.Equal(&valid) {
 		t.Fatal("the saved draft lost the legacy image")
 	}
+	// Dropping the composer in Rust cancels its uploads; Close is the Go stand-in.
+	composer.Close()
 	composer = grokChat() // Exit with an unacknowledged legacy upload.
 	composer.setPromptImagesSupported(true)
 	composer.restoreDraft(saved)
@@ -526,6 +528,7 @@ func TestImageBytesReachTheSessionActorAndOversizedPromptsAreRefusedIntact(t *te
 	if !strings.Contains(saved, valid.DataBase64) {
 		t.Fatal("the receipt's bytes are not durable during preparation")
 	}
+	composer.Close()
 	composer = grokChat()
 	composer.restoreDraft(saved)
 	if composer.input != "different visible draft" {

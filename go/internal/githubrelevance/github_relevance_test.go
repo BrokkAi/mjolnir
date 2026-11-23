@@ -58,9 +58,10 @@ func TestGithubRelevanceExactBoundariesAndFailureEpisodes(t *testing.T) {
 	const child = "MJ_GITHUB_RELEVANCE_TEST_CHILD"
 	if _, ok := os.LookupEnv(child); !ok {
 		root := t.TempDir()
+		// The child selects the Go test named by the last `::` segment.
 		targets.NewIsolatedTest(targets.TestName(
 			"mj_github_relevance::github_relevance::tests",
-			"github_relevance_exact_boundaries_and_failure_episodes",
+			"TestGithubRelevanceExactBoundariesAndFailureEpisodes",
 		)).
 			Env(child, "1").
 			IsolatedStore(root).
