@@ -2094,6 +2094,11 @@ impl DaemonClient {
         .await
     }
 
+    /// Exchange one request on this connection, exposing an upgrade refusal to the caller.
+    pub async fn request_single(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        self.request_once(action).await
+    }
+
     async fn request_with_reconnect<F, Fut>(
         &mut self,
         action: DaemonAction,
@@ -4236,7 +4241,7 @@ mod tests {
             let mut client = DaemonClient::connect(metadata).await.unwrap();
             client.request(DaemonAction::Ping).await.unwrap();
             {
-                let request = client.identity();
+                let request = client.request_single(DaemonAction::Identity);
                 tokio::pin!(request);
                 tokio::select! {
                     biased;
