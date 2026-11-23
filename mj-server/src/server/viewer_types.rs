@@ -346,6 +346,7 @@ impl ViewerSnapshot {
                     quota_recovery: None,
                     is_subagent_session: state.is_subagent_session(&session.id),
                     supports_open_request: false,
+                    relay_state: None,
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
@@ -677,6 +678,9 @@ pub struct ViewerSession {
     /// the notification message rule needs it, the JSON contract does not.
     #[serde(skip, default)]
     pub supports_open_request: bool,
+    /// Session-detail diagnostics from the same observation as `is_idle`.
+    #[serde(skip)]
+    pub relay_state: Option<crate::server::api::RelayState>,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.

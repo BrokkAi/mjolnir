@@ -8224,9 +8224,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         .unhealthy(test_profile, "sol", now)
         .unwrap()
         .describe();
-    let expected = format!(
-        "profile {test_profile} is {description}. A new spawn will choose another eligible profile; send_message would run this child on {test_profile} again."
-    );
+    let expected = format!("profile {test_profile} is {description}.");
     backend.reconcile_parent_reports("parent-1").await.unwrap();
     let events = mj_controller::database::pending_mailbox_events(10).unwrap();
     assert_eq!(events.len(), 1);

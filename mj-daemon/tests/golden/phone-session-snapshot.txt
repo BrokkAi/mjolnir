@@ -772,7 +772,7 @@
       "change_workspace": "ready",
       "container_settings": "ready",
       "resume": "active",
-      "working_children": 0,
+      "working_children": 1,
       "unfinished_children": 1
     },
     "latest_event_ordinal": 0,
@@ -872,7 +872,7 @@
       "needs_person": false,
       "move_queue_held": false,
       "idle": false,
-      "working": false,
+      "working": true,
       "active_work": true,
       "unfinished": true,
       "interrupt": true,

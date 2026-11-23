@@ -1967,6 +1967,33 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
         listed_state(session),
         session.title
     )];
+    if let Some(operation) = &session.operation {
+        use mj_daemon::server::ViewerOperationKind;
+        let kind = match operation.kind {
+            ViewerOperationKind::Create => "create",
+            ViewerOperationKind::Resume => "resume",
+            ViewerOperationKind::Move => "move",
+            ViewerOperationKind::Suspend => "suspend",
+            ViewerOperationKind::Destroy => "destroy",
+            ViewerOperationKind::Stop => "stop",
+            ViewerOperationKind::Cleanup => "cleanup",
+            ViewerOperationKind::Checkpoint => "checkpoint",
+        };
+        lines.push(format!(
+            "{kind} started {}",
+            operation_start_time(operation.started_at_epoch_seconds)
+        ));
+        lines.extend(operation.stages.iter().map(|stage| {
+            format!(
+                "  {} since {}",
+                stage.label,
+                operation_start_time(stage.started_at_epoch_seconds)
+            )
+        }));
+    }
+    if let Some(relay) = &session.relay {
+        lines.push(format!("worker relay is {}", relay_state_name(relay.state)));
+    }
     // Silence is reported, never acted on. A turn waiting on a long build
     // is quiet and healthy, so this says what is true and leaves the
     // decision — keep waiting, or `mj interrupt-turn` — to the reader.
@@ -1990,6 +2017,14 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
         lines.push(format!("last turn {}", outcome.outcome));
     }
     lines
+}
+
+fn operation_start_time(seconds: u64) -> String {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| format!("{seconds} seconds since the Unix epoch"))
 }
 
 fn relay_state_name(state: RelayState) -> &'static str {
@@ -4834,6 +4869,42 @@ mod tests {
         assert_eq!(listed_state(&session), "running (important) (disk full)");
         session.attention = mj_core::attention::SessionAttention::Unreachable;
         assert_eq!(listed_state(&session), "running (unreachable) (disk full)");
+    }
+
+    // Hard-won: #1209: session detail could not show startup progress or loss of worker contact.
+    #[test]
+    fn session_detail_renders_lifecycle_and_worker_relay() {
+        let mut session = wait_response("finished", serde_json::json!({})).session;
+        session.state = "launching".into();
+        session.operation = Some(
+            serde_json::from_value(serde_json::json!({
+                "id": "create-s1", "session_id": "s1", "kind": "create",
+                "started_at_epoch_seconds": 100, "cancellable": true,
+                "stages": [{"label": "Sync", "started_at_epoch_seconds": 110}],
+            }))
+            .unwrap(),
+        );
+        session.relay = Some(mj_daemon::server::api::RelayHealth {
+            state: RelayState::Disconnected,
+            detail: None,
+        });
+        assert_eq!(
+            session_report_lines(&session, 0),
+            [
+                "s1  launching  t",
+                "create started 1970-01-01T00:01:40Z",
+                "  Sync since 1970-01-01T00:01:50Z",
+                "worker relay is not attached",
+            ]
+        );
+
+        session.state = "running".into();
+        session.operation = None;
+        session.relay.as_mut().unwrap().state = RelayState::Unreachable;
+        assert_eq!(
+            session_report_lines(&session, 0),
+            ["s1  running  t", "worker relay is unreachable",]
+        );
     }
 
     // Hard-won: #1529: refused unexpired logins were absent from session and doctor diagnostics.
