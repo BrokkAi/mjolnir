@@ -1,0 +1,377 @@
+=== search hits on each tab (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 1   Import · 2   Archived · 1                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: the phrase                                                                               │         │
+│         │                                                                                                  │         │
+│         │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · no hits ────────────────────────────────────────────────────────────────────────╮ │  ───────╯
+│         │ │Loading the matching passages…                                                                │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+tab hit counts: [0, 1, 2, 1]
+=== search result on another tab (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 1   Archived · 0                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: the phrase                                                                               │         │
+│         │                                                                                                  │         │
+│         │ ╭ 0 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │No matches here · 1 on Import                                                                 │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+tab hit counts after refresh: [0, 0, 1, 0]
+empty tab message: "No matches here · 1 on Import"
+=== preview opens at first matching passage (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 3                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: needle                                                                                   │         │
+│         │                                                                                                  │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  │ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · hit 1/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │  ───────╯
+│         │ │User: needle                                                                                  ▐ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │Assistant: filler line 0                                                                      │ │         │
+│         │ │filler line 1                                                                                 │ │  ───────╯
+│         │ │filler line 2                                                                                 │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+=== n selects and scrolls to second match (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 3                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: needle                                                                                   │         │
+│         │                                                                                                  │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  │ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · hit 2/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │  ───────╯
+│         │ │filler line 57                                                                                │ │  ───────╮
+│         │ │filler line 58                                                                                │ │         │
+│         │ │filler line 59                                                                                │ │         │
+│         │ │needle                                                                                        │ │  ───────╯
+│         │ │*[… 2 messages omitted …]*                                                                    ▐ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+=== previous-hit arrow (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 3                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: needle                                                                                   │         │
+│         │                                                                                                  │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  │ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · hit 1/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │  ───────╯
+│         │ │User: needle                                                                                  ▐ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │Assistant: filler line 0                                                                      │ │         │
+│         │ │filler line 1                                                                                 │ │  ───────╯
+│         │ │filler line 2                                                                                 │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+=== next-hit arrow (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 3                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: needle                                                                                   │         │
+│         │                                                                                                  │         │
+│         │ ╭ 3 matches · ? Syncing session index… ────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  │ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · hit 2/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │  ───────╯
+│         │ │filler line 57                                                                                │ │  ───────╮
+│         │ │filler line 58                                                                                │ │         │
+│         │ │filler line 59                                                                                │ │         │
+│         │ │needle                                                                                        │ │  ───────╯
+│         │ │*[… 2 messages omitted …]*                                                                    ▐ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+=== archived briefing without a query (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Archived sessions · newest first · ? Syncing session index… ─────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Archived transcript ─────────────────────────────────────────────────────────────────────────╮ │  ───────╯
+│         │ │Loading the archived transcript…                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+briefing request action: None
+=== archived hit query (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 1                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: needle                                                                                   │         │
+│         │                                                                                                  │         │
+│         │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · no hits ────────────────────────────────────────────────────────────────────────╮ │  ───────╯
+│         │ │Loading the matching passages…                                                                │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+hit request action: LoadArchivedHits { wiki_id: "archive-0", query: "needle" }
+duplicate hit request: None
+cached hit request: None
+new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other" }
+=== new archived hit query (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create                                                                                                               │
+│No sess                                                                                                               │
+│Create   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 1                                                  │         │
+│         │                                                                                                  │         │
+│         │ Search: other                                                                                    │         │
+│         │                                                                                                  │         │
+│         │ ╭ 1 match · ? Syncing session index… ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │         │
+│         │ ╭ Transcript · no hits ────────────────────────────────────────────────────────────────────────╮ │  ───────╯
+│         │ │Loading the matching passages…                                                                │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
+│         │                          archived · 7 messages · the last thing it said                          │         │
+│         │                                                                                                  │         │
+│         │   Cancel     Restore                                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                               ───────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
