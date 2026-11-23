@@ -540,7 +540,11 @@ fn bootstrap_login_environment(
             // The fetch command is a separate process and does not repeat this
             // login-environment setup. Record the temporary directory this
             // session will actually use so fetch can allow it explicitly.
-            record_session_temp_dir(root, &environment)?;
+            // A checkpoint-only restart uses the bootstrap environment, not the
+            // session's login environment, so it keeps the session's record.
+            if needs_login {
+                record_session_temp_dir(root, &environment)?;
+            }
             record_startup_step(root, "re-exec");
         }
         let mut arguments = std::env::args_os();
@@ -984,9 +988,10 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 mj_checkpoint::archive::FetchMode::Content
             };
-            // An older worker never wrote this file. `--temp` then keeps
-            // today's rule: this process's temporary directory and `/tmp`.
-            if let Some(session_temp) = recorded_session_temp_dir() {
+            // The session temporary directory is part of the caller's `--temp`
+            // permission. An older worker never wrote this file; `--temp` then
+            // keeps today's rule: this process's temporary directory and `/tmp`.
+            if temp && let Some(session_temp) = recorded_session_temp_dir() {
                 roots.push(session_temp);
             }
             let fetched = mj_checkpoint::archive::fetch_session_path(
@@ -1120,11 +1125,10 @@ fn record_session_temp_dir(
     let text = directory
         .to_str()
         .context("session temporary directory is not UTF-8")?;
-    mj_core::config::atomic_write(
-        &root.join(SESSION_TEMP_DIR_FILE),
-        format!("{text}\n").as_bytes(),
-    )
-    .context("record the session temporary directory")
+    // The file holds the path exactly: no newline, so a reader never trims a
+    // directory name that legitimately starts or ends with whitespace.
+    mj_core::config::atomic_write(&root.join(SESSION_TEMP_DIR_FILE), text.as_bytes())
+        .context("record the session temporary directory")
 }
 
 /// The session temporary directory recorded next to this worker binary.
@@ -1133,12 +1137,19 @@ fn record_session_temp_dir(
 /// file is absent when an older worker started the session.
 fn recorded_session_temp_dir() -> Option<PathBuf> {
     let argv0 = PathBuf::from(std::env::args_os().next()?);
-    let install_dir = argv0.parent()?;
-    if !install_dir.is_absolute() {
+    let parent = argv0.parent()?;
+    // SSH and EC2 targets launch `.local/share/hel/workers/<id>/hel` relative to
+    // the directory the command runs in, so resolve a relative parent against
+    // it. An empty parent means `hel` came from a `PATH` search: there is no
+    // worker root to read, and the working directory must not stand in for it.
+    let install_dir = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else if parent.as_os_str().is_empty() {
         return None;
-    }
-    let text = std::fs::read_to_string(install_dir.join(SESSION_TEMP_DIR_FILE)).ok()?;
-    let directory = text.trim();
+    } else {
+        std::env::current_dir().ok()?.join(parent)
+    };
+    let directory = std::fs::read_to_string(install_dir.join(SESSION_TEMP_DIR_FILE)).ok()?;
     if directory.is_empty() {
         None
     } else {
@@ -1416,11 +1427,7 @@ mod tests {
             .parent()
             .unwrap()
             .join(SESSION_TEMP_DIR_FILE);
-        std::fs::write(
-            &marker,
-            format!("{}\n", session_temp.path().to_str().unwrap()),
-        )
-        .unwrap();
+        std::fs::write(&marker, session_temp.path().to_str().unwrap()).unwrap();
         struct Remove(PathBuf);
         impl Drop for Remove {
             fn drop(&mut self) {
