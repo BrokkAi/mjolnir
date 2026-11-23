@@ -1558,13 +1558,7 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
         if matches!(source, std::borrow::Cow::Owned(_)) {
             tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
         }
-        (
-            Some(mj_core::remote_git::normalize_project_source(
-                &source,
-                mj_core::remote_git::Shorthand::Allowed,
-            )),
-            None,
-        )
+        (Some(source.into_owned()), None)
     };
     Ok(ProjectRepository {
         id: id.to_owned(),

@@ -449,12 +449,12 @@ mod tests {
         let result = config_only_controller(config)
             .preflight_new_session("bundle", "podman", None, &executor)
             .unwrap();
-        // Operational ls-remote keeps SSH transport and embedded HTTP credentials.
+        // Operational ls-remote keeps the exact configured URLs, transports, and HTTP credentials.
         assert_eq!(
             executor.ls_remote_urls.borrow().as_slice(),
             [
                 "git@github.com:BrokkAi/mjolnir.git",
-                "https://github.com/jbellis/sessionwiki.git",
+                "https://github.com/jbellis/sessionwiki",
                 "https://user:secret@github.com/owner/private.git",
             ]
         );
