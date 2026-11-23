@@ -8988,13 +8988,13 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
     );
     let cookie = login_cookie(&app).await;
 
-    for (route, cookie_only) in [
+    for (route, use_cookie) in [
         ("/api/v1/sessions/session-1/items", false),
         (
             "/api/v1/sessions/session-1/native-agents/child/items",
             false,
         ),
-        ("/api/sessions/session-1/items", true),
+        ("/api/v1/sessions/session-1/items", true),
     ] {
         let edit = format!("{route}/tool%3Aedit/detail");
         let request = |builder: axum::http::request::Builder| {
@@ -9002,14 +9002,8 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
         };
         let response = request(Request::get(&edit)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
-        if cookie_only {
-            assert_eq!(
-                request(bearer(Request::get(&edit))).await.unwrap().status(),
-                StatusCode::UNAUTHORIZED
-            );
-        }
         let authenticated = |path: &str| {
-            if cookie_only {
+            if use_cookie {
                 Request::get(path).header(COOKIE, &cookie)
             } else {
                 bearer(Request::get(path))

@@ -69,7 +69,7 @@ Effort:
 xhigh
 Session settings
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Model:\nGPT-5\nEffort:\nxhigh\nSession settings","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
-action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+action: POST /api/v1/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":671.45,"width":370,"height":40},"summary":{"x":11,"y":672.45,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":672.45,"composer":{"x":10,"y":715.45,"width":370,"height":90.55},"composerText":{"x":10,"y":748,"width":370,"height":42},"conversation":{"x":10,"y":52,"width":370,"height":754},"conversationScroll":{"height":574,"scrollHeight":574},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
 === updated model and effort settings (390x844) ===
 Plan mode browser test
@@ -94,7 +94,7 @@ Effort:
 High
 Session settings
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Model:\nGPT-5 mini\nEffort:\nHigh\nSession settings","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
-action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+action: POST /api/v1/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":671.45,"width":370,"height":40},"summary":{"x":11,"y":672.45,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":672.45,"composer":{"x":10,"y":715.45,"width":370,"height":90.55},"composerText":{"x":10,"y":748,"width":370,"height":42},"conversation":{"x":10,"y":52,"width":370,"height":754},"conversationScroll":{"height":574,"scrollHeight":574},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
 === settings removed by refresh (390x844) ===
 Plan mode browser test
@@ -113,7 +113,7 @@ A prompt sent from the phone layout test
 Queued
 Tasks 1 · Shells 1 · Queue 1
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
-action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+action: POST /api/v1/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":695,"width":370,"height":40},"summary":{"x":11,"y":696,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":696,"composer":{"x":10,"y":739,"width":370,"height":67},"composerText":{"x":10,"y":748,"width":370,"height":42},"conversation":{"x":10,"y":52,"width":370,"height":754},"conversationScroll":{"height":609,"scrollHeight":609},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
 === help lists Mjolnir and harness commands (390x844) ===
 Plan mode browser test
@@ -142,7 +142,7 @@ Tasks 1 · Shells 1 · Queue 1
 /help
 Show available commands
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
-action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+action: POST /api/v1/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 === review status describes automatic review (390x844) ===
 Plan mode browser test
 Live
@@ -170,7 +170,7 @@ Tasks 1 · Shells 1 · Queue 1
 
 Review trigger is before push; 1 reviewer
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
-action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+action: POST /api/v1/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 === mailbox events are one line each on the phone (390x844) ===
 Plan mode browser test
 Live
@@ -351,7 +351,7 @@ Agent
 
 Ready to plan.
 controls: [{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          \n            Subagents · 0\n            Reviewers · 0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
-action: POST /api/actions [{"action":"respond-elicitation","session_id":"plan-session","elicitation_id":"long-question","response":{"action":"accept","content":{"question_0":"0","question_1":"0","question_2":"4"}},"command_id":null}]
+action: POST /api/v1/actions [{"action":"respond-elicitation","session_id":"plan-session","elicitation_id":"long-question","response":{"action":"accept","content":{"question_0":"0","question_1":"0","question_2":"4"}},"command_id":null}]
 layout: {"viewport":{"width":320,"height":568},"status":{"x":0,"y":0,"width":0,"height":0},"summary":{"x":0,"y":0,"width":0,"height":0},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":0,"composer":{"x":10,"y":439,"width":300,"height":91},"composerText":{"x":10,"y":448,"width":300,"height":66},"conversation":{"x":10,"y":52,"width":300,"height":478},"conversationScroll":{"height":16,"scrollHeight":220},"elicitation":{"height":341,"scrollHeight":1025,"scrollTop":457},"documentWidth":320}
 === multiline phone question remains reachable (320x568) ===
 Plan mode browser test

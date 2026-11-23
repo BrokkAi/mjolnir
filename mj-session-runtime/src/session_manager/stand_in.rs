@@ -71,6 +71,7 @@ pub fn register_leased_relay_session() {
         title: "leased relay".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
         last_profile: "codex".into(),
+        staged_aws_profile: None,
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,

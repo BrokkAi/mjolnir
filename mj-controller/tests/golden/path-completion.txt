@@ -1,4 +1,4 @@
-=== POST /api/paths/complete: local-bare (JSON) ===
+=== POST /api/v1/paths/complete: local-bare (JSON) ===
 {
   "candidates": [
     "/fixture/projects/"
@@ -7,7 +7,7 @@
   "truncated": false
 }
 
-=== POST /api/paths/complete: ec2 (JSON) ===
+=== POST /api/v1/paths/complete: ec2 (JSON) ===
 {
   "candidates": [
     "/fixture/projects/"

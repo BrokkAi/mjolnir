@@ -1,0 +1,541 @@
+=== Pulse timing and compact frames (12x1) ===
+frame interval: 250ms; loop: 3000ms; compact: ["·", "∙", "•", "●", "•", "∙"]
+=== Pulse compact styled span at zero (1x1) ===
+width: 1; style: Style::new().fg(Color::Rgb(157, 229, 202))
+·
+
+=== Pulse animated frame 0 at 0ms (12x1) ===
+frame: "●•∙·······∙•"; runs: [("●", Vivid), ("•", Bright), ("∙", Cool), ("·······", Faint), ("∙", Cool), ("•", Bright)]
+spans: "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202))
+●•∙·······∙•
+=== Pulse animated frame 1 at 250ms (12x1) ===
+frame: "•●•∙·······∙"; runs: [("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("·······", Faint), ("∙", Cool)]
+spans: "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238))
+•●•∙·······∙
+=== Pulse animated frame 2 at 500ms (12x1) ===
+frame: "∙•●•∙·······"; runs: [("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("·······", Faint)]
+spans: "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·······" fg=Some(Rgb(62, 74, 78))
+∙•●•∙·······
+=== Pulse animated frame 3 at 750ms (12x1) ===
+frame: "·∙•●•∙······"; runs: [("·", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("······", Faint)]
+spans: "·" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "······" fg=Some(Rgb(62, 74, 78))
+·∙•●•∙······
+=== Pulse animated frame 4 at 1000ms (12x1) ===
+frame: "··∙•●•∙·····"; runs: [("··", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("·····", Faint)]
+spans: "··" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·····" fg=Some(Rgb(62, 74, 78))
+··∙•●•∙·····
+=== Pulse animated frame 5 at 1250ms (12x1) ===
+frame: "···∙•●•∙····"; runs: [("···", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("····", Faint)]
+spans: "···" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "····" fg=Some(Rgb(62, 74, 78))
+···∙•●•∙····
+=== Pulse animated frame 6 at 1500ms (12x1) ===
+frame: "····∙•●•∙···"; runs: [("····", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("···", Faint)]
+spans: "····" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "···" fg=Some(Rgb(62, 74, 78))
+····∙•●•∙···
+=== Pulse animated frame 7 at 1750ms (12x1) ===
+frame: "·····∙•●•∙··"; runs: [("·····", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("··", Faint)]
+spans: "·····" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "··" fg=Some(Rgb(62, 74, 78))
+·····∙•●•∙··
+=== Pulse animated frame 8 at 2000ms (12x1) ===
+frame: "······∙•●•∙·"; runs: [("······", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool), ("·", Faint)]
+spans: "······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·" fg=Some(Rgb(62, 74, 78))
+······∙•●•∙·
+=== Pulse animated frame 9 at 2250ms (12x1) ===
+frame: "·······∙•●•∙"; runs: [("·······", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright), ("∙", Cool)]
+spans: "·······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238))
+·······∙•●•∙
+=== Pulse animated frame 10 at 2500ms (12x1) ===
+frame: "∙·······∙•●•"; runs: [("∙", Cool), ("·······", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid), ("•", Bright)]
+spans: "∙" fg=Some(Rgb(158, 194, 238)) | "·······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202))
+∙·······∙•●•
+=== Pulse animated frame 11 at 2750ms (12x1) ===
+frame: "•∙·······∙•●"; runs: [("•", Bright), ("∙", Cool), ("·······", Faint), ("∙", Cool), ("•", Bright), ("●", Vivid)]
+spans: "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232))
+•∙·······∙•●
+=== Pulse first frame before cadence (12x1) ===
+active at interval minus one
+spans: "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "·······" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202))
+●•∙·······∙•
+=== Pulse frame after three intervals (12x1) ===
+active after three intervals
+spans: "·" fg=Some(Rgb(62, 74, 78)) | "∙" fg=Some(Rgb(158, 194, 238)) | "•" fg=Some(Rgb(157, 229, 202)) | "●" fg=Some(Rgb(239, 237, 232)) | "•" fg=Some(Rgb(157, 229, 202)) | "∙" fg=Some(Rgb(158, 194, 238)) | "······" fg=Some(Rgb(62, 74, 78))
+·∙•●•∙······
+=== Pulse idle at zero (12x1) ===
+idle frame
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Pulse idle at 100000ms (12x1) ===
+idle frame at a later clock
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Pulse compact frame 0 at 0ms (1x1) ===
+source: ·; rendered: ·
+=== Pulse compact frame 1 at 250ms (1x1) ===
+source: ∙; rendered: ∙
+=== Pulse compact frame 2 at 500ms (1x1) ===
+source: •; rendered: •
+=== Pulse compact frame 3 at 750ms (1x1) ===
+source: ●; rendered: ●
+=== Pulse compact frame 4 at 1000ms (1x1) ===
+source: •; rendered: •
+=== Pulse compact frame 5 at 1250ms (1x1) ===
+source: ∙; rendered: ∙
+=== Wave timing and compact frames (12x1) ===
+frame interval: 250ms; loop: 2000ms; compact: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+=== Wave compact styled span at zero (1x1) ===
+width: 1; style: Style::new().fg(Color::Rgb(157, 229, 202))
+⠋
+
+=== Wave animated frame 0 at 0ms (12x1) ===
+frame: "⠤⠒⠉⠉⠉⠒⠒⠤⣀⣀⣀⠤"; runs: [("⠤", Calm), ("⠒", Cool), ("⠉⠉⠉", Bright), ("⠒⠒", Cool), ("⠤", Calm), ("⣀⣀⣀", Faint), ("⠤", Calm)]
+spans: "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202))
+⠤⠒⠉⠉⠉⠒⠒⠤⣀⣀⣀⠤
+=== Wave animated frame 1 at 250ms (12x1) ===
+frame: "⣀⠤⠒⠉⠉⠉⠉⠒⠤⣀⣀⣀"; runs: [("⣀", Faint), ("⠤", Calm), ("⠒", Cool), ("⠉⠉⠉⠉", Bright), ("⠒", Cool), ("⠤", Calm), ("⣀⣀⣀", Faint)]
+spans: "⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀" fg=Some(Rgb(62, 74, 78))
+⣀⠤⠒⠉⠉⠉⠉⠒⠤⣀⣀⣀
+=== Wave animated frame 2 at 500ms (12x1) ===
+frame: "⣀⣀⠤⠤⠒⠉⠉⠉⠒⠒⠤⣀"; runs: [("⣀⣀", Faint), ("⠤⠤", Calm), ("⠒", Cool), ("⠉⠉⠉", Bright), ("⠒⠒", Cool), ("⠤", Calm), ("⣀", Faint)]
+spans: "⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⣀" fg=Some(Rgb(62, 74, 78))
+⣀⣀⠤⠤⠒⠉⠉⠉⠒⠒⠤⣀
+=== Wave animated frame 3 at 750ms (12x1) ===
+frame: "⣀⣀⣀⣀⠤⠒⠉⠉⠉⠉⠒⠤"; runs: [("⣀⣀⣀⣀", Faint), ("⠤", Calm), ("⠒", Cool), ("⠉⠉⠉⠉", Bright), ("⠒", Cool), ("⠤", Calm)]
+spans: "⣀⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202))
+⣀⣀⣀⣀⠤⠒⠉⠉⠉⠉⠒⠤
+=== Wave animated frame 4 at 1000ms (12x1) ===
+frame: "⠤⠤⣀⣀⣀⠤⠤⠒⠉⠉⠉⠒"; runs: [("⠤⠤", Calm), ("⣀⣀⣀", Faint), ("⠤⠤", Calm), ("⠒", Cool), ("⠉⠉⠉", Bright), ("⠒", Cool)]
+spans: "⠤⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238))
+⠤⠤⣀⣀⣀⠤⠤⠒⠉⠉⠉⠒
+=== Wave animated frame 5 at 1250ms (12x1) ===
+frame: "⠉⠒⠤⣀⣀⣀⣀⠤⠒⠉⠉⠉"; runs: [("⠉", Bright), ("⠒", Cool), ("⠤", Calm), ("⣀⣀⣀⣀", Faint), ("⠤", Calm), ("⠒", Cool), ("⠉⠉⠉", Bright)]
+spans: "⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉" fg=Some(Rgb(157, 229, 202))
+⠉⠒⠤⣀⣀⣀⣀⠤⠒⠉⠉⠉
+=== Wave animated frame 6 at 1500ms (12x1) ===
+frame: "⠉⠉⠒⠤⠤⣀⣀⣀⠤⠤⠒⠉"; runs: [("⠉⠉", Bright), ("⠒", Cool), ("⠤⠤", Calm), ("⣀⣀⣀", Faint), ("⠤⠤", Calm), ("⠒", Cool), ("⠉", Bright)]
+spans: "⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠤⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉" fg=Some(Rgb(157, 229, 202))
+⠉⠉⠒⠤⠤⣀⣀⣀⠤⠤⠒⠉
+=== Wave animated frame 7 at 1750ms (12x1) ===
+frame: "⠉⠉⠉⠉⠒⠤⣀⣀⣀⣀⠤⠒"; runs: [("⠉⠉⠉⠉", Bright), ("⠒", Cool), ("⠤", Calm), ("⣀⣀⣀⣀", Faint), ("⠤", Calm), ("⠒", Cool)]
+spans: "⠉⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238))
+⠉⠉⠉⠉⠒⠤⣀⣀⣀⣀⠤⠒
+=== Wave first frame before cadence (12x1) ===
+active at interval minus one
+spans: "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202))
+⠤⠒⠉⠉⠉⠒⠒⠤⣀⣀⣀⠤
+=== Wave frame after three intervals (12x1) ===
+active after three intervals
+spans: "⣀⣀⣀⣀" fg=Some(Rgb(62, 74, 78)) | "⠤" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠉⠉⠉⠉" fg=Some(Rgb(157, 229, 202)) | "⠒" fg=Some(Rgb(158, 194, 238)) | "⠤" fg=Some(Rgb(157, 229, 202))
+⣀⣀⣀⣀⠤⠒⠉⠉⠉⠉⠒⠤
+=== Wave idle at zero (12x1) ===
+idle frame
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Wave idle at 100000ms (12x1) ===
+idle frame at a later clock
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Wave compact frame 0 at 0ms (1x1) ===
+source: ⠋; rendered: ⠋
+=== Wave compact frame 1 at 250ms (1x1) ===
+source: ⠙; rendered: ⠙
+=== Wave compact frame 2 at 500ms (1x1) ===
+source: ⠹; rendered: ⠹
+=== Wave compact frame 3 at 750ms (1x1) ===
+source: ⠸; rendered: ⠸
+=== Wave compact frame 4 at 1000ms (1x1) ===
+source: ⠼; rendered: ⠼
+=== Wave compact frame 5 at 1250ms (1x1) ===
+source: ⠴; rendered: ⠴
+=== Wave compact frame 6 at 1500ms (1x1) ===
+source: ⠦; rendered: ⠦
+=== Wave compact frame 7 at 1750ms (1x1) ===
+source: ⠧; rendered: ⠧
+=== Wave compact frame 8 at 2000ms (1x1) ===
+source: ⠇; rendered: ⠇
+=== Wave compact frame 9 at 2250ms (1x1) ===
+source: ⠏; rendered: ⠏
+=== Bars timing and compact frames (12x1) ===
+frame interval: 250ms; loop: 2500ms; compact: ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▅", "▃"]
+=== Bars compact styled span at zero (1x1) ===
+width: 1; style: Style::new().fg(Color::Rgb(157, 229, 202))
+▁
+
+=== Bars animated frame 0 at 0ms (12x1) ===
+frame: "▅██▅▁▁▄██▅▁▁"; runs: [("▅", Warm), ("██", Hot), ("▅", Warm), ("▁▁▄", Calm), ("██", Hot), ("▅", Warm), ("▁▁", Calm)]
+spans: "▅" fg=Some(Rgb(232, 189, 123)) | "██" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▁▁▄" fg=Some(Rgb(157, 229, 202)) | "██" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▁▁" fg=Some(Rgb(157, 229, 202))
+▅██▅▁▁▄██▅▁▁
+=== Bars animated frame 1 at 250ms (12x1) ===
+frame: "▇█▆▂▁▃▇█▆▂▁▃"; runs: [("▇", Warm), ("█", Hot), ("▆", Warm), ("▂▁▃", Calm), ("▇", Warm), ("█", Hot), ("▆", Warm), ("▂▁▃", Calm)]
+spans: "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▆" fg=Some(Rgb(232, 189, 123)) | "▂▁▃" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▆" fg=Some(Rgb(232, 189, 123)) | "▂▁▃" fg=Some(Rgb(157, 229, 202))
+▇█▆▂▁▃▇█▆▂▁▃
+=== Bars animated frame 2 at 500ms (12x1) ===
+frame: "█▇▄▁▂▅█▇▄▁▂▅"; runs: [("█", Hot), ("▇", Warm), ("▄▁▂", Calm), ("▅", Warm), ("█", Hot), ("▇", Warm), ("▄▁▂", Calm), ("▅", Warm)]
+spans: "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▄▁▂" fg=Some(Rgb(157, 229, 202)) | "▅" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▄▁▂" fg=Some(Rgb(157, 229, 202)) | "▅" fg=Some(Rgb(232, 189, 123))
+█▇▄▁▂▅█▇▄▁▂▅
+=== Bars animated frame 3 at 750ms (12x1) ===
+frame: "█▅▂▁▄▇█▅▂▁▄▇"; runs: [("█", Hot), ("▅", Warm), ("▂▁▄", Calm), ("▇", Warm), ("█", Hot), ("▅", Warm), ("▂▁▄", Calm), ("▇", Warm)]
+spans: "█" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▂▁▄" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▂▁▄" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123))
+█▅▂▁▄▇█▅▂▁▄▇
+=== Bars animated frame 4 at 1000ms (12x1) ===
+frame: "▇▃▁▂▆█▇▃▁▂▆█"; runs: [("▇", Warm), ("▃▁▂", Calm), ("▆", Warm), ("█", Hot), ("▇", Warm), ("▃▁▂", Calm), ("▆", Warm), ("█", Hot)]
+spans: "▇" fg=Some(Rgb(232, 189, 123)) | "▃▁▂" fg=Some(Rgb(157, 229, 202)) | "▆" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▃▁▂" fg=Some(Rgb(157, 229, 202)) | "▆" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165))
+▇▃▁▂▆█▇▃▁▂▆█
+=== Bars animated frame 5 at 1250ms (12x1) ===
+frame: "▅▁▁▄██▅▁▁▄██"; runs: [("▅", Warm), ("▁▁▄", Calm), ("██", Hot), ("▅", Warm), ("▁▁▄", Calm), ("██", Hot)]
+spans: "▅" fg=Some(Rgb(232, 189, 123)) | "▁▁▄" fg=Some(Rgb(157, 229, 202)) | "██" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▁▁▄" fg=Some(Rgb(157, 229, 202)) | "██" fg=Some(Rgb(244, 154, 165))
+▅▁▁▄██▅▁▁▄██
+=== Bars animated frame 6 at 1500ms (12x1) ===
+frame: "▂▁▃▇█▆▂▁▃▇█▆"; runs: [("▂▁▃", Calm), ("▇", Warm), ("█", Hot), ("▆", Warm), ("▂▁▃", Calm), ("▇", Warm), ("█", Hot), ("▆", Warm)]
+spans: "▂▁▃" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▆" fg=Some(Rgb(232, 189, 123)) | "▂▁▃" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▆" fg=Some(Rgb(232, 189, 123))
+▂▁▃▇█▆▂▁▃▇█▆
+=== Bars animated frame 7 at 1750ms (12x1) ===
+frame: "▁▂▅█▇▄▁▂▅█▇▄"; runs: [("▁▂", Calm), ("▅", Warm), ("█", Hot), ("▇", Warm), ("▄▁▂", Calm), ("▅", Warm), ("█", Hot), ("▇", Warm), ("▄", Calm)]
+spans: "▁▂" fg=Some(Rgb(157, 229, 202)) | "▅" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▄▁▂" fg=Some(Rgb(157, 229, 202)) | "▅" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▄" fg=Some(Rgb(157, 229, 202))
+▁▂▅█▇▄▁▂▅█▇▄
+=== Bars animated frame 8 at 2000ms (12x1) ===
+frame: "▁▄▇█▅▂▁▄▇█▅▂"; runs: [("▁▄", Calm), ("▇", Warm), ("█", Hot), ("▅", Warm), ("▂▁▄", Calm), ("▇", Warm), ("█", Hot), ("▅", Warm), ("▂", Calm)]
+spans: "▁▄" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▂▁▄" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▂" fg=Some(Rgb(157, 229, 202))
+▁▄▇█▅▂▁▄▇█▅▂
+=== Bars animated frame 9 at 2250ms (12x1) ===
+frame: "▂▆█▇▃▁▂▆█▇▃▁"; runs: [("▂", Calm), ("▆", Warm), ("█", Hot), ("▇", Warm), ("▃▁▂", Calm), ("▆", Warm), ("█", Hot), ("▇", Warm), ("▃▁", Calm)]
+spans: "▂" fg=Some(Rgb(157, 229, 202)) | "▆" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▃▁▂" fg=Some(Rgb(157, 229, 202)) | "▆" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▇" fg=Some(Rgb(232, 189, 123)) | "▃▁" fg=Some(Rgb(157, 229, 202))
+▂▆█▇▃▁▂▆█▇▃▁
+=== Bars first frame before cadence (12x1) ===
+active at interval minus one
+spans: "▅" fg=Some(Rgb(232, 189, 123)) | "██" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▁▁▄" fg=Some(Rgb(157, 229, 202)) | "██" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▁▁" fg=Some(Rgb(157, 229, 202))
+▅██▅▁▁▄██▅▁▁
+=== Bars frame after three intervals (12x1) ===
+active after three intervals
+spans: "█" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▂▁▄" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123)) | "█" fg=Some(Rgb(244, 154, 165)) | "▅" fg=Some(Rgb(232, 189, 123)) | "▂▁▄" fg=Some(Rgb(157, 229, 202)) | "▇" fg=Some(Rgb(232, 189, 123))
+█▅▂▁▄▇█▅▂▁▄▇
+=== Bars idle at zero (12x1) ===
+idle frame
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Bars idle at 100000ms (12x1) ===
+idle frame at a later clock
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Bars compact frame 0 at 0ms (1x1) ===
+source: ▁; rendered: ▁
+=== Bars compact frame 1 at 250ms (1x1) ===
+source: ▂; rendered: ▂
+=== Bars compact frame 2 at 500ms (1x1) ===
+source: ▃; rendered: ▃
+=== Bars compact frame 3 at 750ms (1x1) ===
+source: ▄; rendered: ▄
+=== Bars compact frame 4 at 1000ms (1x1) ===
+source: ▅; rendered: ▅
+=== Bars compact frame 5 at 1250ms (1x1) ===
+source: ▆; rendered: ▆
+=== Bars compact frame 6 at 1500ms (1x1) ===
+source: ▇; rendered: ▇
+=== Bars compact frame 7 at 1750ms (1x1) ===
+source: █; rendered: █
+=== Bars compact frame 8 at 2000ms (1x1) ===
+source: ▅; rendered: ▅
+=== Bars compact frame 9 at 2250ms (1x1) ===
+source: ▃; rendered: ▃
+=== Shimmer timing and compact frames (12x1) ===
+frame interval: 250ms; loop: 2000ms; compact: ["·", "∙", "•", "●", "•", "∙"]
+=== Shimmer compact styled span at zero (1x1) ===
+width: 1; style: Style::new().fg(Color::Rgb(157, 229, 202))
+·
+
+=== Shimmer animated frame 0 at 0ms (12x1) ===
+frame: "············"; runs: [("············", Faint)]
+spans: "············" fg=Some(Rgb(62, 74, 78))
+············
+=== Shimmer animated frame 1 at 250ms (12x1) ===
+frame: "············"; runs: [("············", Faint)]
+spans: "············" fg=Some(Rgb(62, 74, 78))
+············
+=== Shimmer animated frame 2 at 500ms (12x1) ===
+frame: "∙∙∙∙∙∙∙∙∙∙∙∙"; runs: [("∙∙∙∙∙∙∙∙∙∙∙∙", Cool)]
+spans: "∙∙∙∙∙∙∙∙∙∙∙∙" fg=Some(Rgb(158, 194, 238))
+∙∙∙∙∙∙∙∙∙∙∙∙
+=== Shimmer animated frame 3 at 750ms (12x1) ===
+frame: "••••••••••••"; runs: [("••••••••••••", Bright)]
+spans: "••••••••••••" fg=Some(Rgb(157, 229, 202))
+••••••••••••
+=== Shimmer animated frame 4 at 1000ms (12x1) ===
+frame: "●●●●●●●●●●●●"; runs: [("●●●●●●●●●●●●", Vivid)]
+spans: "●●●●●●●●●●●●" fg=Some(Rgb(239, 237, 232))
+●●●●●●●●●●●●
+=== Shimmer animated frame 5 at 1250ms (12x1) ===
+frame: "●●●●●●●●●●●●"; runs: [("●●●●●●●●●●●●", Vivid)]
+spans: "●●●●●●●●●●●●" fg=Some(Rgb(239, 237, 232))
+●●●●●●●●●●●●
+=== Shimmer animated frame 6 at 1500ms (12x1) ===
+frame: "••••••••••••"; runs: [("••••••••••••", Bright)]
+spans: "••••••••••••" fg=Some(Rgb(157, 229, 202))
+••••••••••••
+=== Shimmer animated frame 7 at 1750ms (12x1) ===
+frame: "∙∙∙∙∙∙∙∙∙∙∙∙"; runs: [("∙∙∙∙∙∙∙∙∙∙∙∙", Cool)]
+spans: "∙∙∙∙∙∙∙∙∙∙∙∙" fg=Some(Rgb(158, 194, 238))
+∙∙∙∙∙∙∙∙∙∙∙∙
+=== Shimmer first frame before cadence (12x1) ===
+active at interval minus one
+spans: "············" fg=Some(Rgb(62, 74, 78))
+············
+=== Shimmer frame after three intervals (12x1) ===
+active after three intervals
+spans: "••••••••••••" fg=Some(Rgb(157, 229, 202))
+••••••••••••
+=== Shimmer idle at zero (12x1) ===
+idle frame
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Shimmer idle at 100000ms (12x1) ===
+idle frame at a later clock
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Shimmer compact frame 0 at 0ms (1x1) ===
+source: ·; rendered: ·
+=== Shimmer compact frame 1 at 250ms (1x1) ===
+source: ∙; rendered: ∙
+=== Shimmer compact frame 2 at 500ms (1x1) ===
+source: •; rendered: •
+=== Shimmer compact frame 3 at 750ms (1x1) ===
+source: ●; rendered: ●
+=== Shimmer compact frame 4 at 1000ms (1x1) ===
+source: •; rendered: •
+=== Shimmer compact frame 5 at 1250ms (1x1) ===
+source: ∙; rendered: ∙
+=== Globe timing and compact frames (12x1) ===
+frame interval: 250ms; loop: 2000ms; compact: ["○", "◑", "●", "◐"]
+=== Globe compact styled span at zero (1x1) ===
+width: 1; style: Style::new().fg(Color::Rgb(157, 229, 202))
+○
+
+=== Globe animated frame 0 at 0ms (12x1) ===
+frame: "───  🌑  ───"; runs: [("───  ", Faint), ("🌑", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌑" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌑   ───
+=== Globe animated frame 1 at 250ms (12x1) ===
+frame: "───  🌒  ───"; runs: [("───  ", Faint), ("🌒", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌒" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌒   ───
+=== Globe animated frame 2 at 500ms (12x1) ===
+frame: "───  🌓  ───"; runs: [("───  ", Faint), ("🌓", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌓" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌓   ───
+=== Globe animated frame 3 at 750ms (12x1) ===
+frame: "───  🌔  ───"; runs: [("───  ", Faint), ("🌔", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌔" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌔   ───
+=== Globe animated frame 4 at 1000ms (12x1) ===
+frame: "───  🌕  ───"; runs: [("───  ", Faint), ("🌕", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌕" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌕   ───
+=== Globe animated frame 5 at 1250ms (12x1) ===
+frame: "───  🌖  ───"; runs: [("───  ", Faint), ("🌖", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌖" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌖   ───
+=== Globe animated frame 6 at 1500ms (12x1) ===
+frame: "───  🌗  ───"; runs: [("───  ", Faint), ("🌗", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌗" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌗   ───
+=== Globe animated frame 7 at 1750ms (12x1) ===
+frame: "───  🌘  ───"; runs: [("───  ", Faint), ("🌘", Bright), ("  ───", Faint)]
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌘" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌘   ───
+=== Globe first frame before cadence (12x1) ===
+active at interval minus one
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌑" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌑   ───
+=== Globe frame after three intervals (12x1) ===
+active after three intervals
+spans: "───  " fg=Some(Rgb(62, 74, 78)) | "🌔" fg=Some(Rgb(157, 229, 202)) | "  ───" fg=Some(Rgb(62, 74, 78))
+───  🌔   ───
+=== Globe idle at zero (12x1) ===
+idle frame
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Globe idle at 100000ms (12x1) ===
+idle frame at a later clock
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Globe compact frame 0 at 0ms (1x1) ===
+source: ○; rendered: ○
+=== Globe compact frame 1 at 250ms (1x1) ===
+source: ◑; rendered: ◑
+=== Globe compact frame 2 at 500ms (1x1) ===
+source: ●; rendered: ●
+=== Globe compact frame 3 at 750ms (1x1) ===
+source: ◐; rendered: ◐
+=== Scan timing and compact frames (12x1) ===
+frame interval: 90ms; loop: 3150ms; compact: ["⠁", "⠂", "⠄", "⡀", "⠄", "⠂"]
+=== Scan compact styled span at zero (1x1) ===
+width: 1; style: Style::new().fg(Color::Rgb(157, 229, 202))
+⠁
+
+=== Scan animated frame 0 at 0ms (12x1) ===
+frame: "●···········"; runs: [("●", Red(11)), ("···········", Red(0))]
+spans: "●" fg=Some(Rgb(244, 154, 165)) | "···········" fg=Some(Rgb(67, 44, 48))
+●···········
+=== Scan animated frame 1 at 90ms (12x1) ===
+frame: "•●··········"; runs: [("•", Red(10)), ("●", Red(11)), ("··········", Red(0))]
+spans: "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "··········" fg=Some(Rgb(67, 44, 48))
+•●··········
+=== Scan animated frame 2 at 180ms (12x1) ===
+frame: "••●·········"; runs: [("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("·········", Red(0))]
+spans: "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "·········" fg=Some(Rgb(67, 44, 48))
+••●·········
+=== Scan animated frame 3 at 270ms (12x1) ===
+frame: "•••●········"; runs: [("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("········", Red(0))]
+spans: "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "········" fg=Some(Rgb(67, 44, 48))
+•••●········
+=== Scan animated frame 4 at 360ms (12x1) ===
+frame: "••••●·······"; runs: [("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("·······", Red(0))]
+spans: "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "·······" fg=Some(Rgb(67, 44, 48))
+••••●·······
+=== Scan animated frame 5 at 450ms (12x1) ===
+frame: "∙••••●······"; runs: [("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("······", Red(0))]
+spans: "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "······" fg=Some(Rgb(67, 44, 48))
+∙••••●······
+=== Scan animated frame 6 at 540ms (12x1) ===
+frame: "∙∙••••●·····"; runs: [("∙", Red(5)), ("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("·····", Red(0))]
+spans: "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "·····" fg=Some(Rgb(67, 44, 48))
+∙∙••••●·····
+=== Scan animated frame 7 at 630ms (12x1) ===
+frame: "∙∙∙••••●····"; runs: [("∙", Red(4)), ("∙", Red(5)), ("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("····", Red(0))]
+spans: "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "····" fg=Some(Rgb(67, 44, 48))
+∙∙∙••••●····
+=== Scan animated frame 8 at 720ms (12x1) ===
+frame: "∙∙∙∙••••●···"; runs: [("∙", Red(3)), ("∙", Red(4)), ("∙", Red(5)), ("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("···", Red(0))]
+spans: "∙" fg=Some(Rgb(115, 74, 79)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "···" fg=Some(Rgb(67, 44, 48))
+∙∙∙∙••••●···
+=== Scan animated frame 9 at 810ms (12x1) ===
+frame: "·∙∙∙∙••••●··"; runs: [("·", Red(2)), ("∙", Red(3)), ("∙", Red(4)), ("∙", Red(5)), ("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("··", Red(0))]
+spans: "·" fg=Some(Rgb(99, 64, 69)) | "∙" fg=Some(Rgb(115, 74, 79)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "··" fg=Some(Rgb(67, 44, 48))
+·∙∙∙∙••••●··
+=== Scan animated frame 10 at 900ms (12x1) ===
+frame: "··∙∙∙∙••••●·"; runs: [("·", Red(1)), ("·", Red(2)), ("∙", Red(3)), ("∙", Red(4)), ("∙", Red(5)), ("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11)), ("·", Red(0))]
+spans: "·" fg=Some(Rgb(83, 54, 58)) | "·" fg=Some(Rgb(99, 64, 69)) | "∙" fg=Some(Rgb(115, 74, 79)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "·" fg=Some(Rgb(67, 44, 48))
+··∙∙∙∙••••●·
+=== Scan animated frame 11 at 990ms (12x1) ===
+frame: "···∙∙∙∙••••●"; runs: [("·", Red(0)), ("·", Red(1)), ("·", Red(2)), ("∙", Red(3)), ("∙", Red(4)), ("∙", Red(5)), ("∙", Red(6)), ("•", Red(7)), ("•", Red(8)), ("•", Red(9)), ("•", Red(10)), ("●", Red(11))]
+spans: "·" fg=Some(Rgb(67, 44, 48)) | "·" fg=Some(Rgb(83, 54, 58)) | "·" fg=Some(Rgb(99, 64, 69)) | "∙" fg=Some(Rgb(115, 74, 79)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(163, 104, 111)) | "•" fg=Some(Rgb(179, 114, 122)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165))
+···∙∙∙∙••••●
+=== Scan animated frame 12 at 1080ms (12x1) ===
+frame: "··········●•"; runs: [("··········", Red(0)), ("●", Red(11)), ("•", Red(10))]
+spans: "··········" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154))
+··········●•
+=== Scan animated frame 13 at 1170ms (12x1) ===
+frame: "·········●••"; runs: [("·········", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9))]
+spans: "·········" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143))
+·········●••
+=== Scan animated frame 14 at 1260ms (12x1) ===
+frame: "········●•••"; runs: [("········", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8))]
+spans: "········" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133))
+········●•••
+=== Scan animated frame 15 at 1350ms (12x1) ===
+frame: "·······●••••"; runs: [("·······", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7))]
+spans: "·······" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122))
+·······●••••
+=== Scan animated frame 16 at 1440ms (12x1) ===
+frame: "······●••••∙"; runs: [("······", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6))]
+spans: "······" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111))
+······●••••∙
+=== Scan animated frame 17 at 1530ms (12x1) ===
+frame: "·····●••••∙∙"; runs: [("·····", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6)), ("∙", Red(5))]
+spans: "·····" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111)) | "∙" fg=Some(Rgb(147, 94, 101))
+·····●••••∙∙
+=== Scan animated frame 18 at 1620ms (12x1) ===
+frame: "····●••••∙∙∙"; runs: [("····", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6)), ("∙", Red(5)), ("∙", Red(4))]
+spans: "····" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(131, 84, 90))
+····●••••∙∙∙
+=== Scan animated frame 19 at 1710ms (12x1) ===
+frame: "···●••••∙∙∙∙"; runs: [("···", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6)), ("∙", Red(5)), ("∙", Red(4)), ("∙", Red(3))]
+spans: "···" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(115, 74, 79))
+···●••••∙∙∙∙
+=== Scan animated frame 20 at 1800ms (12x1) ===
+frame: "··●••••∙∙∙∙·"; runs: [("··", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6)), ("∙", Red(5)), ("∙", Red(4)), ("∙", Red(3)), ("·", Red(2))]
+spans: "··" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(115, 74, 79)) | "·" fg=Some(Rgb(99, 64, 69))
+··●••••∙∙∙∙·
+=== Scan animated frame 21 at 1890ms (12x1) ===
+frame: "·●••••∙∙∙∙··"; runs: [("·", Red(0)), ("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6)), ("∙", Red(5)), ("∙", Red(4)), ("∙", Red(3)), ("·", Red(2)), ("·", Red(1))]
+spans: "·" fg=Some(Rgb(67, 44, 48)) | "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(115, 74, 79)) | "·" fg=Some(Rgb(99, 64, 69)) | "·" fg=Some(Rgb(83, 54, 58))
+·●••••∙∙∙∙··
+=== Scan animated frame 22 at 1980ms (12x1) ===
+frame: "●••••∙∙∙∙···"; runs: [("●", Red(11)), ("•", Red(10)), ("•", Red(9)), ("•", Red(8)), ("•", Red(7)), ("∙", Red(6)), ("∙", Red(5)), ("∙", Red(4)), ("∙", Red(3)), ("·", Red(2)), ("·", Red(1)), ("·", Red(0))]
+spans: "●" fg=Some(Rgb(244, 154, 165)) | "•" fg=Some(Rgb(227, 144, 154)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(179, 114, 122)) | "∙" fg=Some(Rgb(163, 104, 111)) | "∙" fg=Some(Rgb(147, 94, 101)) | "∙" fg=Some(Rgb(131, 84, 90)) | "∙" fg=Some(Rgb(115, 74, 79)) | "·" fg=Some(Rgb(99, 64, 69)) | "·" fg=Some(Rgb(83, 54, 58)) | "·" fg=Some(Rgb(67, 44, 48))
+●••••∙∙∙∙···
+=== Scan animated frame 23 at 2070ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 24 at 2160ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 25 at 2250ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 26 at 2340ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 27 at 2430ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 28 at 2520ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 29 at 2610ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 30 at 2700ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 31 at 2790ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 32 at 2880ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 33 at 2970ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan animated frame 34 at 3060ms (12x1) ===
+frame: "············"; runs: [("············", Red(0))]
+spans: "············" fg=Some(Rgb(67, 44, 48))
+············
+=== Scan first frame before cadence (12x1) ===
+active at interval minus one
+spans: "●" fg=Some(Rgb(244, 154, 165)) | "···········" fg=Some(Rgb(67, 44, 48))
+●···········
+=== Scan frame after three intervals (12x1) ===
+active after three intervals
+spans: "•" fg=Some(Rgb(195, 124, 133)) | "•" fg=Some(Rgb(211, 134, 143)) | "•" fg=Some(Rgb(227, 144, 154)) | "●" fg=Some(Rgb(244, 154, 165)) | "········" fg=Some(Rgb(67, 44, 48))
+•••●········
+=== Scan idle at zero (12x1) ===
+idle frame
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Scan idle at 100000ms (12x1) ===
+idle frame at a later clock
+spans: "────────────" fg=Some(Rgb(62, 74, 78))
+────────────
+=== Scan compact frame 0 at 0ms (1x1) ===
+source: ⠁; rendered: ⠁
+=== Scan compact frame 1 at 250ms (1x1) ===
+source: ⠂; rendered: ⠂
+=== Scan compact frame 2 at 500ms (1x1) ===
+source: ⠄; rendered: ⠄
+=== Scan compact frame 3 at 750ms (1x1) ===
+source: ⡀; rendered: ⡀
+=== Scan compact frame 4 at 1000ms (1x1) ===
+source: ⠄; rendered: ⠄
+=== Scan compact frame 5 at 1250ms (1x1) ===
+source: ⠂; rendered: ⠂
+scan crossing: 990ms; redraw interval: 90ms; heads: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]; first trail: [('●', Red(11)), ('•', Red(10)), ('•', Red(9)), ('•', Red(8)), ('•', Red(7)), ('∙', Red(6)), ('∙', Red(5)), ('∙', Red(4)), ('∙', Red(3)), ('·', Red(2)), ('·', Red(1)), ('·', Red(0))]

@@ -83,14 +83,14 @@ test('conversation deltas carry the last presentation key and accept older respo
   );
 
   await vm.runInContext('loadConversation(false)', context);
-  assert.equal(requests[0].url, '/api/conversations/session%2F1');
+  assert.equal(requests[0].url, '/api/v1/conversations/session%2F1');
   assert.equal(context.presentationKey, 'key one');
   assert.deepEqual(renders[0], { entries: [{ id: 1 }], replace: true });
 
   await vm.runInContext('loadConversation(true)', context);
   assert.equal(
     requests[1].url,
-    '/api/conversations/session%2F1?after_seq=5&presentation_key=key+one',
+    '/api/v1/conversations/session%2F1?after_seq=5&presentation_key=key+one',
   );
   assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
   assert.deepEqual(renders[1], { entries: [{ id: 2 }], replace: false });
@@ -262,9 +262,9 @@ ${detailLoader}
     refreshedDetail: 'version-3',
   });
   assert.deepEqual(requests, [
-    '/api/sessions/summary/row',
-    '/api/sessions/summary/row',
-    '/api/sessions/summary/row',
+    '/api/v1/sessions/summary/row',
+    '/api/v1/sessions/summary/row',
+    '/api/v1/sessions/summary/row',
   ]);
 });
 
@@ -703,7 +703,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   }
 
   operations.length = 0;
-  assert.equal(dispatchFetch('/api/snapshot'), undefined);
+  assert.equal(dispatchFetch('/api/v1/snapshot'), undefined);
   assert.equal(dispatchFetch('/auth/login'), undefined);
   assert.deepEqual(operations, []);
 
@@ -1066,7 +1066,7 @@ test('path suggestions abort superseded requests and drop stale replies', async 
 
 // Hard-won: 69a3c1d3: A signed-out auth-session response renders login without a protected snapshot request
 test('a signed-out load shows the login form without requesting the snapshot', async () => {
-  // Finding G-3: learning "signed out" from a 401 on /api/snapshot put a
+  // Finding G-3: learning "signed out" from a 401 on /api/v1/snapshot put a
   // console error on every load of the login page.
   const run = async statusResponse => {
     const calls = [];
@@ -1126,7 +1126,7 @@ test('a request answered without content still reads the empty body to its end',
     });
     vm.runInContext(sourceBetween('async function request(', '/// Upload one image'), context);
     const result = await vm.runInContext(
-      "request('/api/actions', { method: 'POST', body: '{}' })",
+      "request('/api/v1/actions', { method: 'POST', body: '{}' })",
       context,
     ).catch(error => error);
     return { read, result };
@@ -1532,7 +1532,7 @@ test('conversation receipts require a visible focused caught-up conversation and
   vm.runInContext('scheduleConversationRead(); scheduleConversationRead(); scheduleConversationRead()', context);
   assert.equal(frames.length, 1);
   frames.shift()();
-  assert.deepEqual(sent, [['/api/conversations/s/read', 42]]);
+  assert.deepEqual(sent, [['/api/v1/conversations/s/read', 42]]);
   context.cursor = 43;
   context.session.unread_frontier = 43;
   await vm.runInContext('persistVisibleConversationRead()', context);

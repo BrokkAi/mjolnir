@@ -153,6 +153,7 @@ pub fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         id: session_id.into(),
         title: "checkpoint transition".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
+        staged_aws_profile: None,
         last_profile: "codex".into(),
         bundle_id: "project".into(),
         project_directory: None,

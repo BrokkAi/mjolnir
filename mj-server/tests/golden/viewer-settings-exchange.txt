@@ -1,6 +1,6 @@
 [
   {
-    "uri": "/api/settings",
+    "uri": "/api/v1/settings",
     "request": null,
     "status": 200,
     "response": {
@@ -215,7 +215,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "profiles",
@@ -403,7 +403,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": []
     },
@@ -596,7 +596,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "phone"
@@ -681,7 +681,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "phone"
@@ -782,7 +782,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": []
     },
@@ -975,7 +975,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "subagents"
@@ -1060,7 +1060,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents"
@@ -1163,7 +1163,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "subagents",
@@ -1199,7 +1199,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -1296,7 +1296,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -1401,7 +1401,7 @@
     }
   },
   {
-    "uri": "/api/settings/save",
+    "uri": "/api/v1/settings/save",
     "request": {
       "page": [
         "subagents",
@@ -1415,7 +1415,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "subagents"
@@ -1528,7 +1528,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "subagents",
@@ -1592,7 +1592,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -1689,7 +1689,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -1794,7 +1794,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -1899,7 +1899,7 @@
     }
   },
   {
-    "uri": "/api/settings/page",
+    "uri": "/api/v1/settings/page",
     "request": {
       "path": [
         "subagents",
@@ -2006,7 +2006,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -2103,7 +2103,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -2203,7 +2203,7 @@
     }
   },
   {
-    "uri": "/api/settings/save",
+    "uri": "/api/v1/settings/save",
     "request": {
       "page": [
         "subagents",
@@ -2217,7 +2217,7 @@
     }
   },
   {
-    "uri": "/api/settings/edit",
+    "uri": "/api/v1/settings/edit",
     "request": {
       "page": [
         "subagents",
@@ -2286,7 +2286,7 @@
     }
   },
   {
-    "uri": "/api/settings/save",
+    "uri": "/api/v1/settings/save",
     "request": {
       "page": [
         "subagents",

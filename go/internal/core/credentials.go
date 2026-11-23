@@ -1198,12 +1198,9 @@ const (
 	// SyncStepSession is not a step: the session's whole sync failed (its
 	// connection, say) before any step ran. Reported without a step.
 	SyncStepSession SyncStep = iota
-	// SyncStepAws is the role-scoped AWS credentials, renewed by the
+	// SyncStepAws is the AWS credentials, renewed by the
 	// session's own task.
 	SyncStepAws
-	// SyncStepAwsExport is the profile's one AWS export, reconciled with its
-	// login pass.
-	SyncStepAwsExport
 	SyncStepHarnessLogin
 	SyncStepSkills
 	SyncStepGithubToken

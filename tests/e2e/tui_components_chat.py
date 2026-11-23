@@ -97,7 +97,7 @@ def run_chat_controls(lab, tmux, evidence, session_id):
     tmux.wait_until(lambda: config_set("high"), "effort action received by fake ACP")
     record("chat-effort-mouse", "/effort; SGR click High", "one click on a menu row applies it")
 
-    status, _ = lab.request("POST", "/api/actions", {"action": "prompt", "session_id": session_id, "text": "live component form"})
+    status, _ = lab.request("POST", "/api/v1/actions", {"action": "prompt", "session_id": session_id, "text": "live component form"})
     if status != 202:
         raise ScenarioFailure(f"form prompt returned {status}")
     tmux.wait_for("Component form")
@@ -134,7 +134,7 @@ def run_chat_controls(lab, tmux, evidence, session_id):
     tmux.wait_for("component form response:")
     record("chat-elicitation-submit", "SGR click Answer & Next twice", "question response received by ACP")
 
-    status, _ = lab.request("POST", "/api/actions", {"action": "prompt", "session_id": session_id, "text": "live component plan"})
+    status, _ = lab.request("POST", "/api/v1/actions", {"action": "prompt", "session_id": session_id, "text": "live component plan"})
     if status != 202:
         raise ScenarioFailure(f"plan prompt returned {status}")
     click_text("Keep planning")

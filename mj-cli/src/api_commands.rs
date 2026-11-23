@@ -510,6 +510,11 @@ fn turn_cost_usd(ticks: u64) -> String {
 
 fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     let coverage = &tree.summary.coverage;
+    let prefix = if coverage.is_partial() {
+        "lower bound: totals"
+    } else {
+        "totals"
+    };
     let mut lines = vec![
         format!(
             "usage tree {}: {} sessions",
@@ -517,7 +522,7 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
             tree.sessions.len()
         ),
         format!(
-            "totals from the {} of {} turns that reported a whole turn; {} started turns without a completion report",
+            "{prefix} from the {} of {} turns that reported a whole turn; {} started turns without a completion report",
             coverage.full_turn_reports, coverage.recorded_turns, coverage.unfinished_turns
         ),
     ];
@@ -570,8 +575,18 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
 /// partial count read as the whole session's.
 fn usage_lines(page: &mj_core::storage::UsagePage) -> Vec<String> {
     let coverage = &page.coverage;
+    let prefix = if coverage.is_partial() {
+        "lower bound: totals"
+    } else {
+        "totals"
+    };
+    let unfinished = match coverage.unfinished_turns {
+        0 => String::new(),
+        1 => " (1 started turn without a completion report)".to_owned(),
+        count => format!(" ({count} started turns without a completion report)"),
+    };
     let mut lines = vec![format!(
-        "totals from the {} of {} turns that reported a whole turn:",
+        "{prefix} from the {} of {} turns that reported a whole turn{unfinished}:",
         coverage.full_turn_reports, coverage.recorded_turns
     )];
     if page.totals.is_empty() {
@@ -5631,7 +5646,7 @@ mod tests {
     /// F-16: `mj usage` added text output while keeping partial coverage visible.
     #[test]
     fn usage_text_keeps_the_coverage_beside_the_totals() {
-        let page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
+        let mut page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
             "session_id": "s1",
             "turns": [],
             "next_after_seq": 4,
@@ -5647,10 +5662,29 @@ mod tests {
         assert_eq!(
             lines[..3],
             [
-                "totals from the 2 of 3 turns that reported a whole turn:",
+                "lower bound: totals from the 2 of 3 turns that reported a whole turn:",
                 "  input_tokens  1200  (2 turns)",
                 "not in the totals: 1 reported only their last request (turns)",
             ]
+        );
+
+        page.coverage.full_turn_reports = 3;
+        page.coverage.last_request_reports = 0;
+        page.totals.get_mut("input_tokens").unwrap().reported_turns = 3;
+        assert_eq!(
+            usage_lines(&page)[0],
+            "totals from the 3 of 3 turns that reported a whole turn:"
+        );
+
+        page.coverage.unfinished_turns = 1;
+        let lines = usage_lines(&page);
+        assert_eq!(
+            lines[0],
+            "lower bound: totals from the 3 of 3 turns that reported a whole turn (1 started turn without a completion report):"
+        );
+        assert_eq!(
+            lines[lines.len() - 2],
+            "1 started turns without a completion report"
         );
     }
 

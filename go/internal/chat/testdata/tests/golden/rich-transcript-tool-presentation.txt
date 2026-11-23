@@ -1,0 +1,1794 @@
+=== tool status labels and emphasis (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ ● Tool · running                                                            ▐│
+│ │ pending command                                                           ▐│
+│                                                                             ▐│
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│ ? Tool · waiting for approval                                               ▐│
+│ │ approval command                                                          ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+completed command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
+pending command style: header=Some(Rgb(232, 189, 123)), body=None
+running command style: header=Some(Rgb(232, 189, 123)), body=None
+failed command style: header=Some(Rgb(244, 154, 165)), body=None
+approval command style: header=Some(Rgb(240, 205, 145)), body=None
+
+=== every tool has a click target (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│                                                                             ▐│
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+tool click targets: {1, 2, 3}
+
+=== completed command expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│                                                                             ▐│
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+expanded tools: {2}
+
+=== running command expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│ │ running command --with every argument                                     ▐│
+│                                                                             ▐│
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+expanded tools: {1, 2}
+
+=== thought text does not expand tools (60x24) ===
+╭ Conversation ────────────────────────────────────────────╮
+│ ○ Thinking                                              ▐│
+│ │ thinking about tools                                  ▐│
+│                                                         ▐│
+│ ✓ Tool · done                                           ▐│
+│ │ first-command, second-command                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+expanded tools: {}
+
+=== execute pending (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                                                ▐│
+│ │ git add && cargo test | cat                                                                   ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== execute running (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                                                ▐│
+│ │ git add && cargo test | cat                                                                   ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== execute completed (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                                                   ▐│
+│ │ git add && cargo test | cat                                                                   ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== raw keeps provider title (100x24) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                                                   ▐│
+│ │ Bash                                                                                          ▐│
+│ │ Input arguments                                                                               ▐│
+│ │ {                                                                                             ▐│
+│ │   "command": "git add src && cargo test --workspace | cat"                                    ▐│
+│ │ }                                                                                             ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== message input arrives while running (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ mj_send_message                                                           ▐│
+│ │ Input arguments                                                           ▐│
+│ │ session_id:                                                               ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Answer on the 48 s reverse queries: yes, that is the expected shape of    ▐│
+│ │ today's target-scoped reverse design on Vector, not a regression, and two ▐│
+│ │ levers exist, one cheap.                                                  ▐│
+│ │ Try a larger reader page cache.                                           ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== message input survives result update (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ mj_send_message                                                           ▐│
+│ │ Input arguments                                                           ▐│
+│ │ session_id:                                                               ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Answer on the 48 s reverse queries: yes, that is the expected shape of    ▐│
+│ │ today's target-scoped reverse design on Vector, not a regression, and two ▐│
+│ │ levers exist, one cheap.                                                  ▐│
+│ │ Try a larger reader page cache.                                           ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw message includes arguments and receipt (80x28) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ mj_send_message                                                           ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {                                                                         ▐│
+│ │   "session_id": "peer-session",                                           ▐│
+│ │   "message": "Answer on the 48 s reverse queries: yes, that is the        ▐│
+│ │   expected shape of today's target-scoped reverse design on Vector, not a ▐│
+│ │   regression, and two levers exist, one cheap.\nTry a larger reader page  ▐│
+│ │   cache."                                                                 ▐│
+│ │ }                                                                         ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== restored message includes original arguments (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done · 15:00                                                       ▐│
+│ │ mj_send_message                                                           ▐│
+│ │ Input arguments                                                           ▐│
+│ │ session_id:                                                               ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Answer on the 48 s reverse queries: yes, that is the expected shape of    ▐│
+│ │ today's target-scoped reverse design on Vector, not a regression, and two ▐│
+│ │ levers exist, one cheap.                                                  ▐│
+│ │ Try a larger reader page cache.                                           ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== empty input replaces earlier message arguments (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done · 15:00                                                       ▐│
+│ │ mj_send_message                                                           ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {}                                                                        ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== streamed terminal output expanded while running (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ command:                                                                  ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │                                                                           ▐│
+│ │ cwd:                                                                      ▐│
+│ │ /home/jonathan/Projects/bifrost                                           ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== failed terminal metadata expanded with exit code (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ command:                                                                  ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │                                                                           ▐│
+│ │ cwd:                                                                      ▐│
+│ │ /home/jonathan/Projects/bifrost                                           ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│ │                                                                           ▐│
+│ │ exited 128                                                                ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== failed terminal metadata reopened in raw mode (80x28) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ × Tool · failed                                                             ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {                                                                         ▐│
+│ │   "command": "git fetch origin master && git worktree add -b              ▐│
+│ │   experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance   ▐│
+│ │   origin/master",                                                         ▐│
+│ │   "cwd": "/home/jonathan/Projects/bifrost"                                ▐│
+│ │ }                                                                         ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│ │                                                                           ▐│
+│ │ exited 128                                                                ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure pending expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure running expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure failed expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│ │ Error                                                                     ▐│
+│ │ {                                                                         ▐│
+│ │   "message": "permission denied while contacting peer"                    ▐│
+│ │ }                                                                         ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure replayed and reopened (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│ │ Error                                                                     ▐│
+│ │ {                                                                         ▐│
+│ │   "message": "permission denied while contacting peer"                    ▐│
+│ │ }                                                                         ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== clean fallback terminal in rich mode (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== clean fallback terminal in raw mode (80x24) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ cargo build                                                               ▐│
+│ │ cargo build finished                                                      ▐│
+│ │ exited 0                                                                  ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== unclaimed live terminal (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ cargo mutants --in-diff diff                                              ▐│
+│ │ Running · 0s                                                              ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== live terminal removed after exit (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== older tool groups collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭  mic ────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+│                                  │
+╰──────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== older group expanded (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older provider title          ▐│
+│ │ older tool details            ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-companion               ▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭  mic ────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+│                                  │
+╰──────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+expanded tools: {2}
+
+=== older group collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭  mic ────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+│                                  │
+╰──────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+expanded tools: {}
+
+=== newer tool groups collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭  mic ────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+│                                  │
+╰──────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== newer group expanded (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer provider title          ▐│
+│ │ newer tool details            ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-companion               ▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭  mic ────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+│                                  │
+╰──────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+expanded tools: {6}
+
+=== newer group collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭  mic ────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+│                                  │
+╰──────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+expanded tools: {}
+
+=== wrapped summary member expands from continuation row (30x24) ===
+╭ Conversation ──────────────╮
+│ ✓ Tool · done             ▐│
+│ │ first command with a    ▐│
+│ │ long argument           ▐│
+│                           ▐│
+│ ✓ Tool · done             ▐│
+│ │ second command with a   ▐│
+│ │ long argument           ▐│
+│                           ▐│
+│ ✓ Tool · done             ▐│
+│ │ third command with a    ▐│
+│ │ long argument           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭  mic ──────────────────────╮
+│> Message the agent, or /   │
+│  for commands              │
+│                            │
+╰────────────────────────────╯
+q detach · : / ? palette
+second member hitboxes: 3
+expanded tools: {2}
+
+=== tool call status update (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ read                                                                      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw markdown markers (30x24) ===
+╭ Conversation · raw source ─╮
+│ ● Agent                   ▐│
+│ │ **bold**                ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭  mic ──────────────────────╮
+│> Message the agent, or /   │
+│  for commands              │
+│                            │
+╰────────────────────────────╯
+q detach · : / ? palette
+
+=== inline tool calls (80x36) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ │ first thought                                                             ││
+│                                                                             ▐│
+│ ✓ Ran cargo test -p brokk-mj-chat --lib                                     ▐│
+│   └ running 12 tests                                                        ▐│
+│     test case_1 ... ok                                                      ▐│
+│     … +9 lines                                                              ▐│
+│     test result: ok. 12 passed                                              ▐│
+│     exited 0                                                                ▐│
+│                                                                             ▐│
+│ ○ Thinking                                                                  ▐│
+│ │ second thought                                                            ▐│
+│                                                                             ▐│
+│ ✓ Read src/lib.rs                                                           ▐│
+│                                                                             ▐│
+│ ✓ Edit src/lib.rs                                                           ▐│
+│   └ src/lib.rs +3 -1                                                        ▐│
+│                                                                             ▐│
+│ × Ran cat missing.txt                                                       ▐│
+│   └ cat: missing.txt: No such file or directory xxxxxxxxxxxxxxxxxxxxxxxxxxx…▐│
+│     exited 1                                                                ▐│
+│                                                                             ▐│
+│ ● Running sleep 30 && echo done                                             ▐│
+│   └ waiting                                                                 ▐│
+│                                                                             ▐│
+│ ? waiting for approval: cargo fmt                                           ▐│
+│                                                                             ▐│
+│ ? waiting for approval: Read private.txt                                    ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== inline call expanded (80x36) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ │ test case_5 ... ok                                                        ││
+│ │ test case_6 ... ok                                                        ││
+│ │ test case_7 ... ok                                                        ││
+│ │ test case_8 ... ok                                                        ││
+│ │ test case_9 ... ok                                                        ││
+│ │ test case_10 ... ok                                                       ││
+│ │ test result: ok. 12 passed                                                ││
+│ │ exited 0                                                                  ││
+│                                                                             ▐│
+│ ○ Thinking                                                                  ▐│
+│ │ second thought                                                            ▐│
+│                                                                             ▐│
+│ ✓ Read src/lib.rs                                                           ▐│
+│                                                                             ▐│
+│ ✓ Edit src/lib.rs                                                           ▐│
+│   └ src/lib.rs +3 -1                                                        ▐│
+│                                                                             ▐│
+│ × Ran cat missing.txt                                                       ▐│
+│   └ cat: missing.txt: No such file or directory xxxxxxxxxxxxxxxxxxxxxxxxxxx…▐│
+│     exited 1                                                                ▐│
+│                                                                             ▐│
+│ ● Running sleep 30 && echo done                                             ▐│
+│   └ waiting                                                                 ▐│
+│                                                                             ▐│
+│ ? waiting for approval: cargo fmt                                           ▐│
+│                                                                             ▐│
+│ ? waiting for approval: Read private.txt                                    ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+expanded tools: {2}
+
+=== inline with one output line and ASCII symbols (80x36) ===
++ Conversation ----------------------------------------------------------------+
+| o Thinking                                                                  #|
+| | first thought                                                             #|
+|                                                                             #|
+| x Ran cargo test -p brokk-mj-chat --lib                                     #|
+|   `- .. +13 lines                                                           #|
+|                                                                             #|
+| o Thinking                                                                  #|
+| | second thought                                                            #|
+|                                                                             #|
+| x Read src/lib.rs                                                           #|
+|                                                                             #|
+| x Edit src/lib.rs                                                           #|
+|   `- src/lib.rs +3 -1                                                       #|
+|                                                                             #|
+| x Ran cat missing.txt                                                       #|
+|   `- .. +2 lines                                                            #|
+|                                                                             #|
+| * Running sleep 30 && echo done                                             #|
+|   `- waiting                                                                #|
+|                                                                             #|
+| ? waiting for approval: cargo fmt                                           #|
+|                                                                             #|
+| ? waiting for approval: Read private.txt                                    #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
++------------------------------------------------------------------------------+
++  mic ------------------------------------------------------------------------+
+|> Message the agent, or / for commands                                        |
+|                                                                              |
+|                                                                              |
++--------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send | ctrl+b then q detach - : / ? palette
+
+=== mailbox events collapsed (60x36) ===
+╭ Conversation ────────────────────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macro values for CQ07▐│
+│ ▸ Comment on your PR #4623 by alice: Please check the ‹…▐│
+│ ▸ New issue #4624 Per-unit resolution summary: shared t…▐│
+│ ▸ Review on your PR #4623 by bob (changes requested): C…▐│
+│ ▸ Review comment on your PR #4623 by carol: This assert…▐│
+│ ▸ Your PR #4623 was merged by dana.                     ▐│
+│ ▸ Your PR #4623 was closed without merging.             ▐│
+│ ▸ Your PR #4624 was merged.                             ▐│
+│ ▸ Your PR #4623 was reopened.                           ▐│
+│ ▸ External event: A plain event from the CLI.           ▐│
+│ ▸ Child task Check parser finished: failed              ▐│
+│ ▸ PR #4623 was merged by dana.                          ▐│
+│ ▸ Child task Check parser finished: failed              ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== an expanded event without a report wraps its header once (44x24) ===
+╭ Conversation ────────────────────────────╮
+│ ▾ New PR #4623 Model Rust built-in macro▐│
+│   values for CQ07                       ▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== only the second repeated event expands after resize (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macr…▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ▐│
+│ │ - A report bullet stays in this event.▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+copied report: "支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
+
+
+=== mailbox update retains the open event (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macr…▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ▐│
+│ │ - A report bullet stays in this event.▐│
+│ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== both reports expand independently (44x48) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macr…▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
+│ │ State: failed                         ▐│
+│ │ Failure: verification timed out       ▐│
+│ │ Report directory: /reports/child-1    ▐│
+│ │ Report truncated; see the report      ▐│
+│ │ directory for details.                ▐│
+│ │ Fixed ‹parser›.                       ▐│
+│ │ Tests passed: "parser".               ▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ▐│
+│ │ - A report bullet stays in this event.▐│
+│ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== mailbox report scrolled before collapse (44x24) ===
+╭ Conversation · message 1 of 1 · End to f…╮
+│ ▸ External event: A plain event from th…││
+│ ▾ Child task Check parser finished:     ││
+│   failed                                ││
+│ │ State: failed                         ││
+│ │ Failure: verification timed out       ││
+│ │ Report directory: /reports/child-1    ▐│
+│ │ Report truncated; see the report      ▐│
+│ │ directory for details.                ▐│
+│ │ Fixed ‹parser›.                       ▐│
+│ │ Tests passed: "parser".               ▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
+│ ▾ Child task Check parser finished:     ▐│
+│   failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ││
+│ │ - A report bullet stays in this event.││
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== one report collapsed from wrapped body with ASCII arrows (44x48) ===
++ Conversation ----------------------------+
+| ▸ New PR #4623 Model Rust built-in macr.#|
+| ▸ Comment on your PR #4623 by alice: Pl.#|
+| ▸ New issue #4624 Per-unit resolution s.#|
+| ▸ Review on your PR #4623 by bob (chang.#|
+| ▸ Review comment on your PR #4623 by ca.#|
+| ▸ Your PR #4623 was merged by dana.     #|
+| ▸ Your PR #4623 was closed without merg.#|
+| ▸ Your PR #4624 was merged.             #|
+| ▸ Your PR #4623 was reopened.           #|
+| ▸ External event: A plain event from th.#|
+| v Child task Check parser finished:     #|
+|   failed                                #|
+| | State: failed                         #|
+| | Failure: verification timed out       #|
+| | Report directory: /reports/child-1    #|
+| | Report truncated; see the report      #|
+| | directory for details.                #|
+| | Fixed ‹parser›.                       #|
+| | Tests passed: "parser".               #|
+| ▸ PR #4623 was merged by dana.          #|
+| ▸ Child task Check parser finished: fai.#|
+| ▸ Your PR #4625 was merged.             #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
++------------------------------------------+
++  mic ------------------------------------+
+|> Message the agent, or / for commands    |
+|                                          |
+|                                          |
++------------------------------------------+
+ctrl+b then q detach - : / ? palette
+
+=== mailbox header scrolled out of view (44x14) ===
+╭ Conversation · message 1 of 1 · End to f…╮
+│ │ Failure: verification timed out       ││
+│ │ Report directory: /reports/child-1    ││
+│ │ Report truncated; see the report      ││
+│ │ directory for details.                ▐│
+│ │ Fixed ‹parser›.                       ││
+│ │ Tests passed: "parser".               ││
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== body click collapses the report and restores its header (44x14) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ External event: A plain event from th…││
+│ ▸ Child task Check parser finished: fai…││
+│ ▸ PR #4623 was merged by dana.          ││
+│ ▸ Child task Check parser finished: fai…││
+│ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== raw mailbox text remains complete (60x48) ===
+╭ Conversation · raw source ───────────────────────────────╮
+│ ─ Mjolnir                                               ▐│
+│ │ Mailbox events:                                       ▐│
+│ │   - New PR #4623 Model Rust built-in macro values for ▐│
+│ │   CQ07                                                ▐│
+│ │   - Comment on your PR #4623 by alice: Please check   ▐│
+│ │   the ‹macro› case.                                   ▐│
+│ │   - New issue #4624 Per-unit resolution summary:      ▐│
+│ │   shared tables, driver and Go producer (Milestone 1) ▐│
+│ │   - Review on your PR #4623 by bob (changes           ▐│
+│ │   requested): Could you revise the error path?        ▐│
+│ │   - Review comment on your PR #4623 by carol: This    ▐│
+│ │   assertion needs a case.                             ▐│
+│ │   - Your PR #4623 was merged by dana.                 ▐│
+│ │   - Your PR #4623 was closed without merging.         ▐│
+│ │   - Your PR #4624 was merged.                         ▐│
+│ │   - Your PR #4623 was reopened.                       ▐│
+│ │   - External event: A plain event from the CLI.       ▐│
+│ │   - Child task Check parser finished: failed          ▐│
+│ │     State: failed                                     ▐│
+│ │     Failure: verification timed out                   ▐│
+│ │     Report directory: /reports/child-1                ▐│
+│ │     Report truncated; see the report directory for    ▐│
+│ │     details.                                          ▐│
+│ │     Fixed ‹parser›.                                   ▐│
+│ │     Tests passed: "parser".                           ▐│
+│ │   - PR #4623 was merged by dana.                      ▐│
+│ │   - Child task Check parser finished: failed          ▐│
+│ │     支 持  Unicode and <script>literal text</script>.   ▐│
+│ │     - A report bullet stays in this event.            ▐│
+│ │   - Your PR #4625 was merged.                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane │ ctrl+b then q detach · : / ? palette
+
+=== incoming messages start collapsed between agent replies (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ▸ Message from Review agent · 15:00     ▐│
+│                                         ▐│
+│ ▸ Message from Build agent · 15:00      ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== header text opens only one message in a shared delivery (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ▾ Message from Review agent · 15:00     ▐│
+│ │ This report has one item.             ▐│
+│ │ The actual message continues here,    ▐│
+│ │ with markdown and enough words to wrap▐│
+│ │ on a narrow terminal.                 ▐│
+│                                         ▐│
+│ ▸ Message from Build agent · 15:00      ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== both incoming messages stay open after update and resize (32x36) ===
+╭ Conversation ────────────────╮
+│ ● Agent · 15:00             ▐│
+│ │ I am checking the report. ▐│
+│                             ▐│
+│ ▾ Message from Review agent ▐│
+│   · 15:00                   ▐│
+│ │ This report has one item. ▐│
+│ │ The actual message        ▐│
+│ │ continues here, with      ▐│
+│ │ markdown and enough words ▐│
+│ │ to wrap on a narrow       ▐│
+│ │ terminal.                 ▐│
+│                             ▐│
+│ ▾ Message from Build agent ·▐│
+│   15:00                     ▐│
+│ │ The checks passed.        ▐│
+│ │ Keep this second message  ▐│
+│ │ visible too.              ▐│
+│                             ▐│
+│ ● Agent · 15:00             ▐│
+│ │ I will address that item. ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+╰──────────────────────────────╯
+╭  mic ────────────────────────╮
+│> Message the agent, or / for │
+│  commands                    │
+│                              │
+╰──────────────────────────────╯
+q detach · : / ? palette
+
+=== wrapped message body collapses only that message (32x36) ===
+╭ Conversation ────────────────╮
+│ ● Agent · 15:00             ▐│
+│ │ I am checking the report. ▐│
+│                             ▐│
+│ ▸ Message from Review agent…▐│
+│                             ▐│
+│ ▾ Message from Build agent ·▐│
+│   15:00                     ▐│
+│ │ The checks passed.        ▐│
+│ │ Keep this second message  ▐│
+│ │ visible too.              ▐│
+│                             ▐│
+│ ● Agent · 15:00             ▐│
+│ │ I will address that item. ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+╰──────────────────────────────╯
+╭  mic ────────────────────────╮
+│> Message the agent, or / for │
+│  commands                    │
+│                              │
+╰──────────────────────────────╯
+q detach · : / ? palette
+
+=== raw mode keeps complete incoming messages (44x36) ===
+╭ Conversation · raw source ───────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ← Message from Review agent · 15:00     ▐│
+│ │ This report has one item.             ▐│
+│ │ The actual message continues here,    ▐│
+│ │ with **markdown** and enough words to ▐│
+│ │ wrap on a narrow terminal.            ▐│
+│                                         ▐│
+│ ← Message from Build agent · 15:00      ▐│
+│ │ The checks passed.                    ▐│
+│ │ Keep this second message visible too. ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+
+=== restored anchor distinguishes messages in one delivery (44x24) ===
+╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ▸ Message from Review agent · 15:00     ▐│
+│                                         ▐│
+│ ▸ Message from Build agent · 15:00      ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭  mic ────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+│                                          │
+╰──────────────────────────────────────────╯
+ctrl+b then q detach · : / ? palette
+{"Entry":{"start_seq":2,"stable_id":"message:review-two","row":0}}
+
+=== incoming message ASCII marks (44x36) ===
++ Conversation ----------------------------+
+| * Agent - 15:00                         #|
+| | I am checking the report.             #|
+|                                         #|
+| ▸ Message from Review agent - 15:00     #|
+|                                         #|
+| ▸ Message from Build agent - 15:00      #|
+|                                         #|
+| * Agent - 15:00                         #|
+| | I will address that item.             #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
++------------------------------------------+
++  mic ------------------------------------+
+|> Message the agent, or / for commands    |
+|                                          |
+|                                          |
++------------------------------------------+
+ctrl+b then q detach - : / ? palette

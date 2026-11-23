@@ -213,6 +213,7 @@ mod tests {
                 title: "Presentation test".into(),
                 harness_kind: HarnessKind::Codex,
                 last_profile: "profile-1".into(),
+                staged_aws_profile: None,
                 bundle_id: "bundle-1".into(),
                 project_directory: None,
                 managed_worktree: None,

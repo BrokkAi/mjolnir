@@ -41,9 +41,9 @@ async function mount(page, { signedIn = true, snapshotResponse }) {
       body: JSON.stringify(value),
     });
     if (pathname === '/auth/session') return json({ signed_in: signedIn });
-    if (pathname === '/api/snapshot') return snapshotResponse(route);
+    if (pathname === '/api/v1/snapshot') return snapshotResponse(route);
     if (pathname === '/api/v1/options') return json({ default: null });
-    if (pathname === '/api/events') {
+    if (pathname === '/api/v1/viewer/events') {
       return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
     }
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);

@@ -1,0 +1,33 @@
+# default policy
+aws sts
+  assume-role
+  --role-arn
+  arn:aws:iam::123456789012:role/mj-bedrock
+  --role-session-name
+  mj-0123456789abcdef0123456789abcdef
+  --policy
+  {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream","bedrock:ListInferenceProfiles","bedrock:GetInferenceProfile","bedrock:ListFoundationModels","bedrock:GetFoundationModel"],"Resource":"*"}]}
+  --output
+  json
+  --profile
+  work
+# everything configured
+aws sts
+  assume-role
+  --role-arn
+  arn:aws:iam::123456789012:role/mj-bedrock
+  --role-session-name
+  mj-0123456789abcdef0123456789abcdef
+  --policy
+  {"Version":"2012-10-17","Statement":[]}
+  --policy-arns
+  arn=arn:aws:iam::aws:policy/AmazonBedrockReadOnly
+  arn=arn:aws:iam::123456789012:policy/team-boundary
+  --duration-seconds
+  900
+  --source-identity
+  mj-0123456789abcdef0123456789abcdef
+  --output
+  json
+  --profile
+  work

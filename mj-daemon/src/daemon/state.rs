@@ -1242,14 +1242,13 @@ impl RuntimeState {
                     .subagents
                     .get(session_id)
                     .is_some_and(|child| {
-                        child.kind != mj_core::subagent::SubagentKind::Reviewer
-                            && step.group_id.as_deref()
-                                == Some(
-                                    mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
-                                        &child.request_key,
-                                    )
-                                    .as_str(),
+                        step.group_id.as_deref()
+                            == Some(
+                                mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                                    &child.request_key,
                                 )
+                                .as_str(),
+                            )
                     });
             let ready = if !delivers || worker_initial {
                 None
@@ -1432,12 +1431,9 @@ impl RuntimeState {
                             })
                             .await
                             {
-                                // The group failed as a whole, and was never
-                                // accepted: say so, and settle its other rows.
-                                Ok(()) => {
-                                    self.reject_startup(session_id, &reason).await;
-                                    continue;
-                                }
+                                // Re-read the durable rejection so the same
+                                // path settles it after daemon replacement.
+                                Ok(()) => continue,
                                 Err(persistence) => {
                                     tracing::error!(session_id, %persistence, "could not persist startup rejection");
                                 }
@@ -1493,6 +1489,12 @@ impl RuntimeState {
                     .await;
                     return;
                 }
+            }
+            if step.phase == "rejecting"
+                && step.group_id.is_some()
+                && let Some(reason) = &step.error
+            {
+                self.reject_startup(session_id, reason).await;
             }
             let settled_id = command_id;
             let final_phase = match step.phase.as_str() {
@@ -1590,7 +1592,11 @@ impl RuntimeState {
                         tokio::time::Instant::now() + Duration::from_secs(60)
                     });
                 }
-                Some(SessionState::Provisioning | SessionState::Checkpointing) => {}
+                Some(
+                    SessionState::Provisioning
+                    | SessionState::StartupCleanup
+                    | SessionState::Checkpointing,
+                ) => {}
                 state => {
                     let reason = self
                         .owner()
@@ -2105,15 +2111,44 @@ impl RuntimeState {
     }
 
     /// An API startup group failed for good: its step was refused, or kept
-    /// failing until it was given up. Nothing of it was accepted, so the
-    /// notice says the startup failed, not that work remains saved. A
-    /// sub-agent whose first prompt can therefore never run is recorded as
-    /// failed and its worker stopped (I1-2); its parent reads the same cause
-    /// from `wait` and `list_agents`.
+    /// failing until it was given up. Stop a sub-agent whose first prompt
+    /// cannot run and record the failure for `wait` and `list_agents`.
+    /// The worker can already have journaled the prompt in its initial FIFO.
     async fn reject_startup(self: &Arc<Self>, session_id: &str, reason: &str) {
         tracing::warn!(session_id, reason, "session startup failed");
         self.push_notice(session_id, format!("Session startup failed: {reason}"));
+        let create = self
+            .owner()
+            .lifecycle
+            .get(session_id)
+            .filter(|active| active.kind == LifecycleKind::Create && active.is_running())
+            .map(|active| active.result.clone());
+        if let Some(create) = create
+            && Self::wait_lifecycle_result(create).await.is_err()
+        {
+            // Create owns startup teardown and records the failure.
+            return;
+        }
         self.fail_subagent_start(session_id, reason).await;
+        self.report_reviewer_startup_rejection(session_id, reason);
+    }
+
+    pub(super) fn report_reviewer_startup_rejection(&self, session_id: &str, reason: &str) {
+        if self
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .get(session_id)
+            .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
+        {
+            // A rejected initial command ends the role even when worker
+            // cleanup had to stop short (for example, a disconnected worker).
+            self.review_host().child_ended(
+                session_id.to_owned(),
+                format!("the reviewer's startup failed: {reason}"),
+            );
+        }
     }
 
     /// A prompt the worker will not take is the user's text again, not a

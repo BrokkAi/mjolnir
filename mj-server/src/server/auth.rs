@@ -77,6 +77,7 @@ pub(super) fn session_cookie_valid(key: &[u8], value: &str, now: u64) -> bool {
 }
 
 /// The viewer a cookie names, or `None` when the cookie is not valid.
+#[cfg(test)]
 pub(super) fn cookie_viewer(key: &[u8], value: &str, now: u64) -> Option<String> {
     validate_cookie(key, Some(value), now)
         .ok()
@@ -253,11 +254,9 @@ pub(super) fn clear_cookie_header(secure: bool) -> HeaderValue {
 
 /// The stored-state key for the viewer making this request.
 pub(super) fn viewer_client_id(state: &ServerState, headers: &HeaderMap) -> Option<String> {
-    let cookie = headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|header| cookie_value(header, COOKIE_NAME))?;
-    cookie_viewer(&state.cookie_key, cookie, now_unix()).map(|viewer| format!("phone:{viewer}"))
+    authenticated_viewer(state, headers)
+        .ok()
+        .map(|cookie| format!("phone:{}", cookie.viewer))
 }
 
 pub(super) fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {

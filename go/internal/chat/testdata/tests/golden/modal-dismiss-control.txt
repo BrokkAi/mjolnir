@@ -1,0 +1,64 @@
+=== available close affordance (40x16) ===
+enabled: true
+title spans: " × "=Style::new().fg(Color::Rgb(239, 237, 232)).bg(Color::Rgb(42, 58, 57)) | "Settings"=Style::new().yellow().italic() | " "=Style::new().yellow().italic()
+hit cells: 5:true 6:true 7:true
+outside: false false
+
+
+    ┌ × Settings ────────────────┐
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    └────────────────────────────┘
+
+
+
+
+
+
+=== armed close affordance (40x16) ===
+enabled: true
+title spans: " × "=Style::new().fg(Color::Rgb(15, 18, 20)).bg(Color::Rgb(157, 229, 202)).bold() | "Settings"=Style::new().yellow().italic() | " "=Style::new().yellow().italic()
+hit cells: 5:true 6:true 7:true
+outside: false false
+
+
+    ┌ × Settings ────────────────┐
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    └────────────────────────────┘
+
+
+
+
+
+
+=== disabled close affordance (40x16) ===
+enabled: false
+title spans: " × "=Style::new().fg(Color::Rgb(151, 163, 163)).bg(Color::Rgb(32, 39, 43)) | "Settings"=Style::new().yellow().italic() | " "=Style::new().yellow().italic()
+hit cells: 5:true 6:true 7:true
+outside: false false
+
+
+    ┌ × Settings ────────────────┐
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    │                            │
+    └────────────────────────────┘
+
+
+
+
+
+
+=== end of rendered states ===
