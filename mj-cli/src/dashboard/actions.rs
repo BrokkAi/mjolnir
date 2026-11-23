@@ -275,9 +275,9 @@ pub(crate) async fn apply_dashboard_action(
             let updates = context.dashboard_io_tx.clone();
             mj_core::runtime::spawn(async move {
                 let result = async {
-                    let mut client = daemon::connect_existing().await?;
+                    let client = daemon::connect_existing().await?.http().await?;
                     client
-                        .stop_background_task(owner.clone(), format!("native-agent:{child}"))
+                        .stop_background_task(&owner, format!("native-agent:{child}"))
                         .await
                 }
                 .await
@@ -1362,7 +1362,9 @@ pub(crate) async fn apply_dashboard_action(
                 let result = async {
                     daemon::connect_or_start()
                         .await?
-                        .preview_container_upgrade(session_id.clone())
+                        .http()
+                        .await?
+                        .preview_container_upgrade(&session_id)
                         .await
                 }
                 .await
@@ -1387,7 +1389,9 @@ pub(crate) async fn apply_dashboard_action(
                 let result = async {
                     daemon::connect_or_start()
                         .await?
-                        .upgrade_container(request)
+                        .http()
+                        .await?
+                        .upgrade_container(&request)
                         .await
                 }
                 .await

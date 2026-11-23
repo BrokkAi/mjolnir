@@ -459,6 +459,43 @@ fn app_with_background_stop_receiver(
 }
 
 #[tokio::test]
+async fn both_bearer_credentials_authenticate_api_reads_but_settings_require_a_cookie() {
+    let mut options = detached_options();
+    options.set_api_token("test-api-token".into());
+    options.set_loopback_token("loopback-token".into());
+    let app = router(options);
+
+    for (path, token, status) in [
+        ("/api/v1/sessions", "test-api-token", StatusCode::OK),
+        ("/api/v1/sessions", "loopback-token", StatusCode::OK),
+        ("/api/v1/sessions", "", StatusCode::UNAUTHORIZED),
+        ("/api/v1/sessions", "wrong-token", StatusCode::UNAUTHORIZED),
+        (
+            "/api/v1/settings",
+            "test-api-token",
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "/api/v1/settings",
+            "loopback-token",
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
     let (app, mut requests) = app_with_background_stop_receiver(true);
     let body = r#"{"background_task_id":"terminal:background-1"}"#;
@@ -3017,6 +3054,61 @@ async fn browser_attachment_upload_returns_a_stored_reference_without_inline_byt
     }
 }
 
+#[tokio::test]
+async fn terminal_upload_can_stage_before_image_capability_is_published() {
+    if !in_isolated_store("terminal_upload_can_stage_before_image_capability_is_published") {
+        return;
+    }
+    let mut options =
+        detached_options().with_test_credentials("123456", b"01234567890123456789012345678901");
+    options.set_loopback_token("test-direct-token".into());
+    let app = router(options);
+    let cookie = login_cookie(&app).await;
+    let image = sample_valid_image();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data_base64)
+        .unwrap();
+    for (id, header, value, expected) in [
+        ("session-1", COOKIE, cookie, StatusCode::BAD_REQUEST),
+        (
+            "session-1",
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-direct-token".into(),
+            StatusCode::OK,
+        ),
+        (
+            "starting-session",
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-direct-token".into(),
+            StatusCode::OK,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/sessions/{id}/attachments"))
+                    .header(header, value)
+                    .header(CONTENT_TYPE, "image/png")
+                    .body(Body::from(bytes.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let image: ViewerPromptImage = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                AttachmentStore::controller(id)
+                    .unwrap()
+                    .read(&image.attachment.unwrap())
+                    .unwrap(),
+                bytes
+            );
+        }
+    }
+}
+
 /// Base64 inflates an upload by a third, so two ordinary photographs pass
 /// the general body limit even when each one fits it. The action route
 /// carries prompts, so it is the route that gets the larger bound.
@@ -4639,6 +4731,37 @@ async fn repeated_wrong_codes_lock_the_login_endpoint() {
     // Even the right code waits out the lockout, so guessing cannot be
     // hidden behind a correct-looking attempt.
     assert_eq!(attempt("123456").await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn cloned_listener_options_share_code_lockouts_and_keep_cookie_security_local() {
+    let phone_options = detached_options();
+    let code = phone_options.viewer_code().to_owned();
+    let mut loopback_options = phone_options.clone();
+    loopback_options.secure_cookie = false;
+    let loopback = router(loopback_options);
+    let phone = router(phone_options);
+    let login = |app: &Router, code| {
+        app.clone().oneshot(
+            Request::post("/auth/session")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "code": code }).to_string()))
+                .unwrap(),
+        )
+    };
+    for (app, secure) in [(&phone, true), (&loopback, false)] {
+        let response = login(app, code.as_str()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let cookie = response.headers()[SET_COOKIE].to_str().unwrap();
+        assert_eq!(cookie.split("; ").any(|part| part == "Secure"), secure);
+    }
+
+    for _ in 0..MAX_CODE_FAILURES {
+        let response = login(&loopback, "invalid").await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = login(&phone, code.as_str()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[test]

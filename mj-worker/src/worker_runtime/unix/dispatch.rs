@@ -20,6 +20,14 @@ impl SessionConfiguration {
 /// typed startup failure.
 pub(super) struct HarnessStartup {
     deadline: Option<tokio::time::Instant>,
+    phase: StartupPhase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StartupPhase {
+    Launching,
+    Initialized,
+    Opened,
 }
 
 impl HarnessStartup {
@@ -28,11 +36,20 @@ impl HarnessStartup {
             deadline: Some(
                 tokio::time::Instant::now() + mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT,
             ),
+            phase: StartupPhase::Launching,
         }
     }
 
-    fn observe_event(&mut self, restarting: bool, ready: bool) {
+    fn observe_event(&mut self, restarting: bool, phase: Option<StartupPhase>, ready: bool) {
+        // The ACP runtime serializes bridge retirement, restart, and milestones
+        // on one event stream. A restart begins the next launch's sequence.
         if restarting {
+            *self = Self::new();
+        } else if self.deadline.is_some()
+            && let Some(phase) = phase
+            && phase > self.phase
+        {
+            self.phase = phase;
             self.deadline =
                 Some(tokio::time::Instant::now() + mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT);
         }
@@ -385,7 +402,7 @@ fn run_relay_coordinator(
                         dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                         continue;
                     }
-                    let cause = format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
+                    let cause = format!("the harness made no session startup progress for {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
                     {
                         let mut state = relay.lock().expect("relay state lock poisoned");
                         // A control request may have acquired a cut since
@@ -948,6 +965,17 @@ fn record_runtime_event_with_startup(
         event,
         RuntimeEvent::HarnessRestarting { .. } | RuntimeEvent::ContextClearing { .. }
     );
+    let milestone = match &event {
+        RuntimeEvent::Connected {
+            protocol_version: Some(_),
+            capabilities: Some(_),
+            ..
+        } => Some(StartupPhase::Initialized),
+        RuntimeEvent::SessionStarted { .. } | RuntimeEvent::ContextCleared { .. } => {
+            Some(StartupPhase::Opened)
+        }
+        _ => None,
+    };
     let configured = matches!(event, RuntimeEvent::SessionConfigured { .. });
     let failure = match &event {
         RuntimeEvent::SessionFault { message }
@@ -988,6 +1016,7 @@ fn record_runtime_event_with_startup(
     if let Some(startup) = startup {
         startup.observe_event(
             restarting,
+            milestone,
             session_configuration.is_ready()
                 && relay
                     .lock()
@@ -1252,15 +1281,20 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
         }
+        RuntimeEvent::GuardianReviewed { review } => {
+            relay.record_observation(RelayObservation::GuardianReviewed { review })?;
+        }
         RuntimeEvent::ElicitationResolved {
             elicitation_id,
             action,
             reply,
+            answers,
         } => {
             relay.record_observation(RelayObservation::ElicitationResolved {
                 elicitation_id,
                 action,
                 reply,
+                answers,
             })?;
         }
         RuntimeEvent::PromptFinished {
@@ -2005,6 +2039,7 @@ mod startup_tests {
             CheckpointExpiry,
             CheckpointReady,
             CloseAtReleasedCut,
+            AdvancesThenStalls,
         }
         let allowance = mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
         for arrival in [
@@ -2016,6 +2051,7 @@ mod startup_tests {
             Arrival::CheckpointExpiry,
             Arrival::CheckpointReady,
             Arrival::CloseAtReleasedCut,
+            Arrival::AdvancesThenStalls,
         ] {
             let temp = tempfile::tempdir().unwrap();
             let relay = Arc::new(RelayCell::new(
@@ -2094,6 +2130,7 @@ mod startup_tests {
                     allowance - std::time::Duration::from_secs(1)
                 }
                 Arrival::ReadyQueuedAtExpiry => allowance,
+                Arrival::AdvancesThenStalls => allowance / 2,
                 _ => allowance + std::time::Duration::from_secs(1),
             })
             .await;
@@ -2146,6 +2183,44 @@ mod startup_tests {
                 Some(startup),
             ));
             match arrival {
+                Arrival::AdvancesThenStalls => {
+                    let initialized = || RuntimeEvent::Connected {
+                        agent_name: None,
+                        agent_version: None,
+                        protocol_version: Some(agent_client_protocol::schema::ProtocolVersion::V1),
+                        capabilities: Some(Box::default()),
+                        agent_info: None,
+                        steering_supported: None,
+                    };
+                    let opened = || RuntimeEvent::SessionStarted {
+                        native_session_id: "native".into(),
+                        resumed: false,
+                        execution_mode: None,
+                        native_continuity_lost: false,
+                        replaced_unused_native_session_id: None,
+                    };
+                    let before_deadline = allowance - std::time::Duration::from_secs(1);
+                    events.send(initialized()).await.unwrap();
+                    consumed(&events, &coordinator).await;
+                    tokio::time::advance(before_deadline).await;
+                    assert!(!coordinator.is_finished());
+                    events.send(opened()).await.unwrap();
+                    consumed(&events, &coordinator).await;
+                    tokio::time::advance(before_deadline).await;
+                    assert!(!coordinator.is_finished());
+                    // Neither a stale phase nor a duplicate opening extends the stall window.
+                    events.send(initialized()).await.unwrap();
+                    events.send(opened()).await.unwrap();
+                    consumed(&events, &coordinator).await;
+                    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                    for _ in 0..8 {
+                        tokio::task::yield_now().await;
+                    }
+                    assert!(
+                        coordinator.is_finished(),
+                        "repeated milestones extended the deadline"
+                    );
+                }
                 Arrival::CheckpointExpiry => {
                     events
                         .send(RuntimeEvent::Connected {

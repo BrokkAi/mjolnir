@@ -1,11 +1,30 @@
 use super::*;
+use crate::archive::git::{
+    collect_file_backed_git_snapshot, collect_git_metadata_snapshot_with,
+    collect_plain_directory_snapshot_with,
+};
+use crate::archive::{RepositoryPayload, StagedPayload, write_archive_hashed_repository_payloads};
 use mj_core::hex::lower_hex;
+
+use super::restore::prepare_private_destination;
 
 pub(super) const CHECKPOINT_STAGE_MANIFEST: &str = "stage.json";
 
 /// The name a capture gives the directory it fills before sealing it as the
 /// stage, beside the stage. A capture that is killed leaves it behind.
 pub const CHECKPOINT_CAPTURE_TEMPORARY_PREFIX: &str = ".checkpoint-capture-";
+
+fn create_capture_directory(parent: &Path) -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    Ok(builder
+        .prefix(CHECKPOINT_CAPTURE_TEMPORARY_PREFIX)
+        .tempdir_in(parent)?)
+}
 
 /// Capture mutable target-owned state into a sealed, uncompressed generation.
 /// The caller holds the relay barrier only for this operation; packaging the
@@ -78,9 +97,7 @@ pub fn capture_checkpoint_with_native_state(
         "checkpoint stage already exists at {}",
         resolved.stage_path.display()
     );
-    let temporary = tempfile::Builder::new()
-        .prefix(CHECKPOINT_CAPTURE_TEMPORARY_PREFIX)
-        .tempdir_in(parent)
+    let temporary = create_capture_directory(parent)
         .with_context(|| format!("create temporary checkpoint stage in {}", parent.display()))?;
 
     let mut staged_native = Vec::with_capacity(native_artifacts.len());
@@ -102,8 +119,12 @@ pub fn capture_checkpoint_with_native_state(
     // Native bytes are copied before repository collection, which can take
     // long enough for the harness to append more history; the stage must hold
     // the native state selected above, as it did when bodies were read eagerly.
-    let repositories =
-        collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
+    let repositories = collect_checkpoint_repositories(
+        &resolved.workspace_root,
+        &resolved.repositories,
+        git,
+        temporary.path(),
+    )?;
     let repository_bytes = checkpoint_repository_bytes(&repositories)?;
     let staged_repositories = write_staged_repositories(temporary.path(), repositories)?;
     let source_fingerprint_after = checkpoint_source_fingerprint(
@@ -165,8 +186,17 @@ pub(super) fn refresh_checkpoint_stage(
         return Ok(None);
     }
 
-    let repositories =
-        collect_checkpoint_repositories(&spec.workspace_root, &spec.repositories, git)?;
+    let temporary = create_capture_directory(
+        spec.stage_path
+            .parent()
+            .context("checkpoint stage has no parent")?,
+    )?;
+    let repositories = collect_checkpoint_repositories(
+        &spec.workspace_root,
+        &spec.repositories,
+        git,
+        temporary.path(),
+    )?;
     let repository_bytes = checkpoint_repository_bytes(&repositories)?;
     let source_fingerprint_after = checkpoint_source_fingerprint(
         &spec.harness_home,
@@ -207,45 +237,59 @@ pub(super) fn refresh_checkpoint_stage(
     }))
 }
 
-pub(super) fn checkpoint_repository_bytes(repositories: &[RepositorySnapshot]) -> Result<u64> {
-    repositories
-        .iter()
-        .try_fold(0_u64, |total, repository| {
+pub(super) fn checkpoint_repository_bytes(
+    repositories: &[RepositorySnapshot<StagedPayload>],
+) -> Result<u64> {
+    repositories.iter().try_fold(0_u64, |total, repository| {
+        [
+            &repository.committed_bundle,
+            &repository.staged_patch,
+            &repository.unstaged_patch,
+            &repository.untracked_tar,
+        ]
+        .into_iter()
+        .chain(
+            repository
+                .operation_payloads
+                .iter()
+                .flat_map(|payloads| [&payloads.conflicted_worktree_tar, &payloads.state_tar]),
+        )
+        .chain(repository.linked_worktrees.iter().flat_map(|worktree| {
             [
-                repository.committed_bundle.len(),
-                repository.staged_patch.len(),
-                repository.unstaged_patch.len(),
-                repository.untracked_tar.len(),
+                &worktree.staged_patch,
+                &worktree.unstaged_patch,
+                &worktree.untracked_tar,
             ]
             .into_iter()
-            .chain(repository.operation_payloads.iter().flat_map(|payloads| {
-                [
-                    payloads.conflicted_worktree_tar.len(),
-                    payloads.state_tar.len(),
-                ]
-            }))
-            .chain(repository.linked_worktrees.iter().flat_map(|worktree| {
-                [
-                    worktree.staged_patch.len(),
-                    worktree.unstaged_patch.len(),
-                    worktree.untracked_tar.len(),
-                ]
-                .into_iter()
-                .chain(worktree.operation_payloads.iter().flat_map(|payloads| {
-                    [
-                        payloads.conflicted_worktree_tar.len(),
-                        payloads.state_tar.len(),
-                    ]
-                }))
-            }))
-            .try_fold(total, |total, size| total.checked_add(size as u64))
+            .chain(
+                worktree
+                    .operation_payloads
+                    .iter()
+                    .flat_map(|payloads| [&payloads.conflicted_worktree_tar, &payloads.state_tar]),
+            )
+        }))
+        .try_fold(total, |total, payload| {
+            total
+                .checked_add(payload.size()?)
+                .context("repository checkpoint size overflow")
         })
-        .context("repository checkpoint size overflow")
+    })
+}
+
+fn install_staged_payload(root: &Path, relative: &Path, payload: &StagedPayload) -> Result<()> {
+    match payload {
+        StagedPayload::Inline(bytes) => write_private_file(root, relative, bytes, 0o600),
+        StagedPayload::File(source) => {
+            let destination = prepare_private_destination(root, relative)?;
+            fs::rename(source, &destination)
+                .with_context(|| format!("stage repository payload at {}", destination.display()))
+        }
+    }
 }
 
 pub(super) fn write_staged_repositories(
     stage_root: &Path,
-    repositories: Vec<RepositorySnapshot>,
+    repositories: Vec<RepositorySnapshot<StagedPayload>>,
 ) -> Result<Vec<StagedRepository>> {
     repositories
         .into_iter()
@@ -256,43 +300,26 @@ pub(super) fn write_staged_repositories(
             let staged_patch_path = root.join("staged.patch");
             let unstaged_patch_path = root.join("unstaged.patch");
             let untracked_tar_path = root.join("untracked.tar");
-            write_private_file(
+            install_staged_payload(
                 stage_root,
                 &committed_bundle_path,
                 &repository.committed_bundle,
-                0o600,
             )?;
-            write_private_file(
-                stage_root,
-                &staged_patch_path,
-                &repository.staged_patch,
-                0o600,
-            )?;
-            write_private_file(
-                stage_root,
-                &unstaged_patch_path,
-                &repository.unstaged_patch,
-                0o600,
-            )?;
-            write_private_file(
-                stage_root,
-                &untracked_tar_path,
-                &repository.untracked_tar,
-                0o600,
-            )?;
+            install_staged_payload(stage_root, &staged_patch_path, &repository.staged_patch)?;
+            install_staged_payload(stage_root, &unstaged_patch_path, &repository.unstaged_patch)?;
+            install_staged_payload(stage_root, &untracked_tar_path, &repository.untracked_tar)?;
             let (conflicted_worktree_tar_path, operation_state_tar_path) =
                 match &repository.operation_payloads {
                     None => (None, None),
                     Some(payloads) => {
                         let worktree_path = root.join("conflicted-worktree.tar");
                         let state_path = root.join("operation-state.tar");
-                        write_private_file(
+                        install_staged_payload(
                             stage_root,
                             &worktree_path,
                             &payloads.conflicted_worktree_tar,
-                            0o600,
                         )?;
-                        write_private_file(stage_root, &state_path, &payloads.state_tar, 0o600)?;
+                        install_staged_payload(stage_root, &state_path, &payloads.state_tar)?;
                         (Some(worktree_path), Some(state_path))
                     }
                 };
@@ -310,29 +337,24 @@ pub(super) fn write_staged_repositories(
                         (&unstaged_patch_path, &worktree.unstaged_patch),
                         (&untracked_tar_path, &worktree.untracked_tar),
                     ] {
-                        write_private_file(stage_root, path, data, 0o600)?;
+                        install_staged_payload(stage_root, path, data)?;
                     }
-                    let (conflicted_worktree_tar_path, operation_state_tar_path) =
-                        match &worktree.operation_payloads {
-                            None => (None, None),
-                            Some(payloads) => {
-                                let worktree_path = worktree_root.join("conflicted-worktree.tar");
-                                let state_path = worktree_root.join("operation-state.tar");
-                                write_private_file(
-                                    stage_root,
-                                    &worktree_path,
-                                    &payloads.conflicted_worktree_tar,
-                                    0o600,
-                                )?;
-                                write_private_file(
-                                    stage_root,
-                                    &state_path,
-                                    &payloads.state_tar,
-                                    0o600,
-                                )?;
-                                (Some(worktree_path), Some(state_path))
-                            }
-                        };
+                    let (conflicted_worktree_tar_path, operation_state_tar_path) = match &worktree
+                        .operation_payloads
+                    {
+                        None => (None, None),
+                        Some(payloads) => {
+                            let worktree_path = worktree_root.join("conflicted-worktree.tar");
+                            let state_path = worktree_root.join("operation-state.tar");
+                            install_staged_payload(
+                                stage_root,
+                                &worktree_path,
+                                &payloads.conflicted_worktree_tar,
+                            )?;
+                            install_staged_payload(stage_root, &state_path, &payloads.state_tar)?;
+                            (Some(worktree_path), Some(state_path))
+                        }
+                    };
                     Ok(StagedLinkedWorktree {
                         metadata: worktree.metadata,
                         staged_patch_path,
@@ -603,114 +625,19 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             .collect::<Result<Vec<_>>>()?;
         let native_ms = native_started.elapsed().as_millis() as u64;
         let repositories_started = std::time::Instant::now();
-        let repositories = manifest
-            .repositories
-            .into_iter()
-            .map(|repository| {
-                Ok(RepositorySnapshot {
-                    origin_delta_pack: None,
-                    metadata: repository.metadata,
-                    committed_bundle: read_staged_file(
-                        &stage_path,
-                        &repository.committed_bundle_path,
-                        u64::MAX,
-                    )?,
-                    staged_patch: read_staged_file(
-                        &stage_path,
-                        &repository.staged_patch_path,
-                        u64::MAX,
-                    )?,
-                    unstaged_patch: read_staged_file(
-                        &stage_path,
-                        &repository.unstaged_patch_path,
-                        u64::MAX,
-                    )?,
-                    untracked_tar: read_staged_file(
-                        &stage_path,
-                        &repository.untracked_tar_path,
-                        u64::MAX,
-                    )?,
-                    operation_payloads: match (
-                        &repository.conflicted_worktree_tar_path,
-                        &repository.operation_state_tar_path,
-                    ) {
-                        (None, None) => None,
-                        (Some(worktree_path), Some(state_path)) => {
-                            Some(crate::archive::GitOperationPayloads {
-                                conflicted_worktree_tar: read_staged_file(
-                                    &stage_path,
-                                    worktree_path,
-                                    u64::MAX,
-                                )?,
-                                state_tar: read_staged_file(&stage_path, state_path, u64::MAX)?,
-                            })
-                        }
-                        _ => bail!("staged repository has only one of its Git operation payloads"),
-                    },
-                    linked_worktrees: repository
-                        .linked_worktrees
-                        .into_iter()
-                        .map(|worktree| {
-                            Ok(crate::archive::LinkedWorktreeSnapshot {
-                                metadata: worktree.metadata,
-                                staged_patch: read_staged_file(
-                                    &stage_path,
-                                    &worktree.staged_patch_path,
-                                    u64::MAX,
-                                )?,
-                                unstaged_patch: read_staged_file(
-                                    &stage_path,
-                                    &worktree.unstaged_patch_path,
-                                    u64::MAX,
-                                )?,
-                                untracked_tar: read_staged_file(
-                                    &stage_path,
-                                    &worktree.untracked_tar_path,
-                                    u64::MAX,
-                                )?,
-                                operation_payloads: match (
-                                    &worktree.conflicted_worktree_tar_path,
-                                    &worktree.operation_state_tar_path,
-                                ) {
-                                    (None, None) => None,
-                                    (Some(worktree_path), Some(state_path)) => {
-                                        Some(crate::archive::GitOperationPayloads {
-                                            conflicted_worktree_tar: read_staged_file(
-                                                &stage_path,
-                                                worktree_path,
-                                                u64::MAX,
-                                            )?,
-                                            state_tar: read_staged_file(
-                                                &stage_path,
-                                                state_path,
-                                                u64::MAX,
-                                            )?,
-                                        })
-                                    }
-                                    _ => bail!(
-                                        "staged linked worktree has only one of its Git operation payloads"
-                                    ),
-                                },
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let repositories = read_sealed_checkpoint_repositories(&stage_path, manifest.repositories)?;
         let repositories_ms = repositories_started.elapsed().as_millis() as u64;
         let event_frontier = spec.canonical_session.event_frontier;
         let event_frontier_digest = spec.canonical_session.event_frontier_digest.clone();
         let archive_started = std::time::Instant::now();
-        let (sha256, archive_manifest) = write_archive_hashed_with_manifest(
+        let (sha256, archive_manifest) = write_archive_hashed_repository_payloads(
             &output_path,
-            &ArchiveInput {
-                session: manifest.session,
-                target: manifest.target,
-                bundle: manifest.bundle,
-                canonical_session: spec.canonical_session.clone(),
-                native_artifacts,
-                repositories,
-            },
+            &manifest.session,
+            &manifest.target,
+            &manifest.bundle,
+            &spec.canonical_session,
+            &native_artifacts,
+            &repositories,
         )?;
         let archive_ms = archive_started.elapsed().as_millis() as u64;
         Ok(TargetCheckpoint {
@@ -743,6 +670,73 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
     result
 }
 
+pub(super) fn read_sealed_checkpoint_repositories(
+    stage_path: &Path,
+    repositories: Vec<StagedRepository>,
+) -> Result<Vec<RepositorySnapshot<StagedPayload>>> {
+    repositories
+        .into_iter()
+        .map(|repository| {
+            Ok(RepositorySnapshot {
+                origin_delta_pack: None,
+                metadata: repository.metadata,
+                committed_bundle: staged_payload(stage_path, &repository.committed_bundle_path)?,
+                staged_patch: staged_payload(stage_path, &repository.staged_patch_path)?,
+                unstaged_patch: staged_payload(stage_path, &repository.unstaged_patch_path)?,
+                untracked_tar: staged_payload(stage_path, &repository.untracked_tar_path)?,
+                operation_payloads: staged_operation(
+                    stage_path,
+                    repository.conflicted_worktree_tar_path.as_deref(),
+                    repository.operation_state_tar_path.as_deref(),
+                )?,
+                linked_worktrees: repository
+                    .linked_worktrees
+                    .into_iter()
+                    .map(|worktree| {
+                        Ok(crate::archive::LinkedWorktreeSnapshot {
+                            metadata: worktree.metadata,
+                            staged_patch: staged_payload(stage_path, &worktree.staged_patch_path)?,
+                            unstaged_patch: staged_payload(
+                                stage_path,
+                                &worktree.unstaged_patch_path,
+                            )?,
+                            untracked_tar: staged_payload(
+                                stage_path,
+                                &worktree.untracked_tar_path,
+                            )?,
+                            operation_payloads: staged_operation(
+                                stage_path,
+                                worktree.conflicted_worktree_tar_path.as_deref(),
+                                worktree.operation_state_tar_path.as_deref(),
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            })
+        })
+        .collect()
+}
+
+fn staged_operation(
+    stage_path: &Path,
+    worktree: Option<&Path>,
+    state: Option<&Path>,
+) -> Result<Option<crate::archive::GitOperationPayloads<StagedPayload>>> {
+    match (worktree, state) {
+        (None, None) => Ok(None),
+        (Some(worktree), Some(state)) => Ok(Some(crate::archive::GitOperationPayloads {
+            conflicted_worktree_tar: staged_payload(stage_path, worktree)?,
+            state_tar: staged_payload(stage_path, state)?,
+        })),
+        _ => bail!("staged snapshot has only one of its Git operation payloads"),
+    }
+}
+
+fn staged_payload(root: &Path, relative: &Path) -> Result<StagedPayload> {
+    let (path, _) = inspect_staged_file(root, relative)?;
+    Ok(StagedPayload::File(path))
+}
+
 pub(super) fn validate_stage_path(relay_root: &Path, path: &Path, name: &str) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     ensure!(
@@ -752,26 +746,23 @@ pub(super) fn validate_stage_path(relay_root: &Path, path: &Path, name: &str) ->
     Ok(())
 }
 
-pub(super) fn read_staged_file(root: &Path, relative: &Path, maximum: u64) -> Result<Vec<u8>> {
+fn inspect_staged_file(root: &Path, relative: &Path) -> Result<(PathBuf, fs::Metadata)> {
     validate_relative_path(relative)?;
     ensure_no_symlink_ancestors(root, relative)?;
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path)
         .with_context(|| format!("inspect staged checkpoint file {}", path.display()))?;
     ensure!(metadata.is_file(), "staged checkpoint path is not a file");
+    Ok((path, metadata))
+}
+
+pub(super) fn read_staged_file(root: &Path, relative: &Path, maximum: u64) -> Result<Vec<u8>> {
+    let (path, metadata) = inspect_staged_file(root, relative)?;
     ensure!(
         metadata.len() <= maximum,
         "staged checkpoint file is too large"
     );
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&path)
+    let mut file = mj_core::archive::NativeArtifactData::open_file(&path)
         .with_context(|| format!("open staged checkpoint file {}", path.display()))?;
     let mut body = Vec::with_capacity(metadata.len().min(usize::MAX as u64) as usize);
     std::io::Read::read_to_end(&mut file, &mut body)
@@ -847,9 +838,7 @@ pub fn export_checkpoint_with_native_state(
         .parent()
         .context("checkpoint archive has no parent")?;
     fs::create_dir_all(parent)?;
-    let native_snapshot = tempfile::Builder::new()
-        .prefix(CHECKPOINT_CAPTURE_TEMPORARY_PREFIX)
-        .tempdir_in(parent)?;
+    let native_snapshot = create_capture_directory(parent)?;
     for (index, artifact) in native_artifacts.iter_mut().enumerate() {
         if matches!(artifact.data, mj_core::archive::NativeArtifactData::File(_)) {
             let relative = PathBuf::from(index.to_string());
@@ -875,7 +864,7 @@ pub fn export_checkpoint_with_native_state(
         &spec.repositories,
         git,
         Some(spec.session.id.as_str()),
-        Some(native_snapshot.path()),
+        native_snapshot.path(),
         crate::archive::UntrackedFiles::Include,
         &spec.consent,
     )?;
@@ -885,7 +874,7 @@ pub fn export_checkpoint_with_native_state(
     // `CheckpointTransfer::execute` checks the controller's copy against this
     // digest; resume/import performs full structural verification when read.
     let archive_started = std::time::Instant::now();
-    let (sha256, archive_manifest) = write_archive_hashed_borrowed_with_manifest(
+    let (sha256, archive_manifest) = write_archive_hashed_repository_payloads(
         &output_path,
         &spec.session,
         &spec.target,
@@ -914,13 +903,14 @@ pub(super) fn collect_checkpoint_repositories(
     workspace_root: &Path,
     specifications: &[CheckpointRepositorySpec],
     git: &dyn GitCommandRunner,
-) -> Result<Vec<RepositorySnapshot>> {
+    snapshot_directory: &Path,
+) -> Result<Vec<RepositorySnapshot<StagedPayload>>> {
     collect_checkpoint_repositories_with_policy(
         workspace_root,
         specifications,
         git,
         None,
-        None,
+        snapshot_directory,
         crate::archive::UntrackedFiles::Include,
         &crate::snapshot::CaptureConsent::default(),
     )
@@ -1015,7 +1005,7 @@ fn collect_origin_delta(
     session_id: Option<&str>,
     snapshot_directory: &Path,
     consent: &crate::snapshot::CaptureConsent,
-) -> Result<RepositorySnapshot> {
+) -> Result<RepositorySnapshot<StagedPayload>> {
     use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
 
     let location = crate::archive::git::locate_checkout(git, path)?;
@@ -1062,10 +1052,10 @@ fn collect_origin_delta(
             origin_delta: Some(Box::new(snapshot.metadata)),
         },
         origin_delta_pack: snapshot.pack.take(),
-        committed_bundle: Vec::new(),
-        staged_patch: Vec::new(),
-        unstaged_patch: Vec::new(),
-        untracked_tar: Vec::new(),
+        committed_bundle: StagedPayload::default(),
+        staged_patch: StagedPayload::default(),
+        unstaged_patch: StagedPayload::default(),
+        untracked_tar: StagedPayload::default(),
         operation_payloads: None,
         linked_worktrees: Vec::new(),
     })
@@ -1098,7 +1088,7 @@ fn collect_origin_delta_raw(
     session_id: &str,
     snapshot_directory: &Path,
     consent: &crate::snapshot::CaptureConsent,
-) -> Result<RepositorySnapshot> {
+) -> Result<RepositorySnapshot<StagedPayload>> {
     use crate::snapshot::{
         LaunchRecord, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
     };
@@ -1145,10 +1135,10 @@ fn collect_origin_delta_raw(
             origin_delta: Some(Box::new(snapshot.metadata)),
         },
         origin_delta_pack: snapshot.pack.take(),
-        committed_bundle: Vec::new(),
-        staged_patch: Vec::new(),
-        unstaged_patch: Vec::new(),
-        untracked_tar: Vec::new(),
+        committed_bundle: StagedPayload::default(),
+        staged_patch: StagedPayload::default(),
+        unstaged_patch: StagedPayload::default(),
+        untracked_tar: StagedPayload::default(),
         operation_payloads: None,
         linked_worktrees: Vec::new(),
     })
@@ -1182,7 +1172,7 @@ fn collect_origin_delta_cutoff(
     exclude_commits: Vec<String>,
     snapshot_directory: &Path,
     consent: &crate::snapshot::CaptureConsent,
-) -> Result<RepositorySnapshot> {
+) -> Result<RepositorySnapshot<StagedPayload>> {
     use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
 
     let location = crate::archive::git::locate_checkout(git, path)?;
@@ -1226,10 +1216,10 @@ fn collect_origin_delta_cutoff(
             origin_delta: Some(Box::new(snapshot.metadata)),
         },
         origin_delta_pack: snapshot.pack.take(),
-        committed_bundle: Vec::new(),
-        staged_patch: Vec::new(),
-        unstaged_patch: Vec::new(),
-        untracked_tar: Vec::new(),
+        committed_bundle: StagedPayload::default(),
+        staged_patch: StagedPayload::default(),
+        unstaged_patch: StagedPayload::default(),
+        untracked_tar: StagedPayload::default(),
         operation_payloads: None,
         linked_worktrees: Vec::new(),
     })
@@ -1240,10 +1230,10 @@ fn collect_checkpoint_repositories_with_policy(
     specifications: &[CheckpointRepositorySpec],
     git: &dyn GitCommandRunner,
     session_id: Option<&str>,
-    snapshot_directory: Option<&Path>,
+    snapshot_directory: &Path,
     untracked_files: crate::archive::UntrackedFiles,
     consent: &crate::snapshot::CaptureConsent,
-) -> Result<Vec<RepositorySnapshot>> {
+) -> Result<Vec<RepositorySnapshot<StagedPayload>>> {
     // Indexed parallel iteration preserves the spec order, which in turn keeps
     // the manifest and ZIP entry order deterministic.
     specifications
@@ -1253,13 +1243,16 @@ fn collect_checkpoint_repositories_with_policy(
             ensure!(path.is_dir(), "repository {} is missing", path.display());
             let (history, remote_base) = match &repository.capture {
                 CheckpointRepositoryCapture::OriginDelta => {
+                    ensure!(
+                        session_id.is_some(),
+                        "origin-delta suspend requires a single-shot export"
+                    );
                     return collect_origin_delta(
                         git,
                         &path,
                         repository,
                         session_id,
-                        snapshot_directory
-                            .context("origin-delta suspend requires a single-shot export")?,
+                        snapshot_directory,
                         consent,
                     );
                 }
@@ -1269,26 +1262,27 @@ fn collect_checkpoint_repositories_with_policy(
                         &path,
                         repository,
                         session_id.context("raw origin-delta export requires a session id")?,
-                        snapshot_directory
-                            .context("raw origin-delta export requires a single-shot export")?,
+                        snapshot_directory,
                         consent,
                     );
                 }
                 CheckpointRepositoryCapture::OriginDeltaCutoff { exclude_commits } => {
+                    ensure!(
+                        session_id.is_some(),
+                        "history-cutoff origin-delta export requires a single-shot export"
+                    );
                     return collect_origin_delta_cutoff(
                         git,
                         &path,
                         repository,
                         session_id,
                         exclude_commits.clone(),
-                        snapshot_directory.context(
-                            "history-cutoff origin-delta export requires a single-shot export",
-                        )?,
+                        snapshot_directory,
                         consent,
                     );
                 }
                 CheckpointRepositoryCapture::PlainDirectory => {
-                    return collect_plain_directory_snapshot(&GitCollectionSpec {
+                    return collect_plain_directory_snapshot_with(&GitCollectionSpec {
                         id: repository.id.clone(),
                         relative_destination: repository.relative_destination.clone(),
                         history: GitHistoryMode::NoBundle,
@@ -1297,7 +1291,7 @@ fn collect_checkpoint_repositories_with_policy(
                     .with_context(|| format!("repository '{}'", repository.id));
                 }
                 CheckpointRepositoryCapture::MetadataOnly => {
-                    return collect_git_metadata_snapshot(
+                    return collect_git_metadata_snapshot_with(
                         git,
                         &path,
                         &GitCollectionSpec {
@@ -1347,7 +1341,7 @@ fn collect_checkpoint_repositories_with_policy(
                     )
                 })?;
             }
-            let mut snapshot = crate::archive::collect_git_snapshot_with_progress(
+            let mut snapshot = collect_file_backed_git_snapshot(
                 git,
                 &path,
                 &GitCollectionSpec {
@@ -1357,7 +1351,7 @@ fn collect_checkpoint_repositories_with_policy(
                     origin_override: repository.origin_override.clone(),
                 },
                 untracked_files,
-                &|_| Ok(()),
+                snapshot_directory,
             )
             .with_context(|| format!("repository '{}'", repository.id))?;
             if let Some(base_commit) = remote_base {

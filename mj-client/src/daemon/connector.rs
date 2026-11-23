@@ -72,7 +72,7 @@ impl DaemonConnector {
             let lease = self.lease.lock().await;
             let path = lease
                 .as_ref()
-                .and_then(|lease| lease.endpoint.config_path.as_ref())
+                .and_then(|lease| lease.remote_config_path())
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "the remote config.toml".into());
             anyhow::bail!(

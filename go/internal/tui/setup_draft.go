@@ -7,9 +7,16 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
 	"github.com/BrokkAi/mjolnir/go/internal/client"
@@ -125,7 +132,7 @@ func (d *SetupDialog) focusPath(path []string) {
 
 func (d *SetupDialog) openPage(path []string) {
 	d.reviewEditor = nil
-	d.path = path
+	d.path = slices.Clone(path)
 	d.combo = chat.ComboBoxState[SetupControl]{}
 	d.form = chat.NewDialog[SetupControl]()
 }
@@ -156,7 +163,44 @@ func (d *SetupDialog) closeSearch() {
 
 // jumpTo: search navigates to pages and only focuses scalar controls.
 func (d *SetupDialog) jumpTo(path []string) Jump {
-	panic("unported: mj-tui/src/setup/draft.rs jump_to")
+	if len(path) == 0 {
+		return JumpDone
+	}
+	parent := path[:len(path)-1]
+	d.closeSearch()
+	if slices.Equal(path, []string{"review"}) {
+		return JumpOpenReview
+	}
+	if len(path) >= 3 && isSubagentCategoryPage(path[:2]) {
+		d.openPage(path[:2])
+		modelPath := []string{"subagents", path[1], path[2], "model"}
+		d.prepare()
+		if len(path) == 4 && slices.ContainsFunc(d.descriptors, func(control SettingControl) bool {
+			return slices.Equal(control.path, path)
+		}) {
+			d.focusPath(path)
+		} else {
+			d.focusPath(modelPath)
+		}
+		return JumpDone
+	}
+	target, found := setupLookup(d.draft, path)
+	targetIsPage := found && (setupValueIsObject(target) || setupValueIsArray(target))
+	parentValue, found := setupLookup(d.draft, parent)
+	targetIsCollectionItem := found && client.IsCollection(parent, parentValue)
+	if targetIsPage || targetIsCollectionItem {
+		d.openPage(path)
+	} else {
+		d.openPage(setupPageForPath(path))
+		d.focusPath(path)
+	}
+	return JumpDone
+}
+
+// setupHasPrefix is Rust's slice starts_with: prefix is path's first
+// segments.
+func setupHasPrefix(path, prefix []string) bool {
+	return len(path) >= len(prefix) && slices.Equal(path[:len(prefix)], prefix)
 }
 
 // incompleteSubagentRow is the first subagent entry without a model, in task
@@ -184,28 +228,151 @@ func (d *SetupDialog) incompleteSubagentRow(task *string) (string, int, bool) {
 // back leaves the editor or the page, and reports whether the dialog is at
 // its root and should close.
 func (d *SetupDialog) back() bool {
-	panic("unported: mj-tui/src/setup/draft.rs back")
+	if d.editor != nil {
+		d.editor = nil
+		d.form = chat.NewDialog[SetupControl]()
+		return false
+	}
+	if isSubagentCategoryPage(d.path) {
+		var pending [][]string
+		for _, path := range d.fields.paths() {
+			field, _ := d.fields.get(path)
+			if setupHasPrefix(path, d.path) && field.input.text().Value() != field.applied {
+				pending = append(pending, path)
+			}
+		}
+		var firstInvalid []string
+		for _, path := range pending {
+			if d.applyPending(path) != nil && firstInvalid == nil {
+				firstInvalid = path
+			}
+		}
+		if firstInvalid != nil {
+			d.focusPath(firstInvalid)
+			return false
+		}
+		category := d.path[1]
+		if task, index, ok := d.incompleteSubagentRow(&category); ok {
+			modelPath := []string{"subagents", task, strconv.Itoa(index), "model"}
+			d.focusPath(modelPath)
+			notice := incompleteSubagentNotice(task, index)
+			d.notice = &notice
+			return false
+		}
+	}
+	child := slices.Clone(d.path)
+	if len(d.path) == 0 {
+		return true
+	}
+	d.path = slices.Clone(d.path[:len(d.path)-1])
+	d.combo = chat.ComboBoxState[SetupControl]{}
+	d.form = chat.NewDialog[SetupControl]()
+	d.focusPath(child)
+	return false
 }
 
 // add adds an entry to the open collection, and returns the new subagent
 // row's model path to focus.
 func (d *SetupDialog) add() ([]string, bool) {
-	panic("unported: mj-tui/src/setup/draft.rs add")
+	if !d.collection() {
+		return nil, false
+	}
+	if isSubagentCategoryPage(d.path) {
+		path, err := client.EditAddEntry(&d.draft, d.path, nil)
+		if err != nil {
+			panic(fmt.Sprintf("a list accepts a new entry: %v", err))
+		}
+		path = append(path, "model")
+		d.combo = chat.ComboBoxState[SetupControl]{}
+		d.notice = nil
+		return path, true
+	}
+	if setupValueIsArray(d.current()) {
+		path, err := client.EditAddEntry(&d.draft, d.path, nil)
+		if err != nil {
+			panic(fmt.Sprintf("a list accepts a new entry: %v", err))
+		}
+		d.openPage(path)
+	} else {
+		d.editor = &Editor{
+			path:   slices.Clone(d.path),
+			input:  editorInputText(chat.NewTextInput()),
+			adding: true,
+		}
+		d.form = chat.NewDialog[SetupControl]()
+	}
+	return nil, false
 }
 
 func (d *SetupDialog) rebindFieldsAfterRemoval(parent []string, removal *client.Removal) {
-	panic("unported: mj-tui/src/setup/draft.rs rebind_fields_after_removal")
+	rebound := setupFields{}
+	for _, path := range d.fields.paths() {
+		field, _ := d.fields.get(path)
+		if slices.ContainsFunc(removal.Removed, func(removed []string) bool { return setupHasPrefix(path, removed) }) {
+			continue
+		}
+		if removal.ListIndex != nil && setupHasPrefix(path, parent) && len(path) > len(parent) {
+			if index, err := strconv.ParseUint(path[len(parent)], 10, 64); err == nil && index > uint64(*removal.ListIndex) {
+				path[len(parent)] = strconv.FormatUint(index-1, 10)
+			}
+		}
+		rebound[setupPathKey(path)] = field
+	}
+	d.fields = rebound
 }
 
 // removeSubagentEntry removes row index from the open subagent category page
 // and returns the next row's model path to focus, or false when the list is
 // now empty.
 func (d *SetupDialog) removeSubagentEntry(index int) ([]string, bool) {
-	panic("unported: mj-tui/src/setup/draft.rs remove_subagent_entry")
+	if !isSubagentCategoryPage(d.path) {
+		return nil, false
+	}
+	parent := slices.Clone(d.path)
+	entryPath := []string{parent[0], parent[1], strconv.Itoa(index)}
+	removal, err := client.RemoveEntry(&d.draft, entryPath)
+	if err != nil {
+		refusal := err.Error()
+		d.notice = &refusal
+		return nil, false
+	}
+	d.notice = removal.Notice
+	d.rebindFieldsAfterRemoval(parent, &removal)
+	d.combo = chat.ComboBoxState[SetupControl]{}
+	d.descriptors = nil
+	remaining := 0
+	if entries, ok := setupValueArray(d.current()); ok {
+		remaining = len(entries)
+	}
+	if remaining == 0 {
+		return nil, false
+	}
+	return []string{parent[0], parent[1], strconv.Itoa(min(index, remaining-1)), "model"}, true
 }
 
 func (d *SetupDialog) applyEditor() error {
-	panic("unported: mj-tui/src/setup/draft.rs apply_editor")
+	if d.editor == nil {
+		return nil
+	}
+	editor := *d.editor
+	if editor.adding {
+		name := editor.input.text().Value()
+		newPath, err := client.EditAddEntry(&d.draft, editor.path, &name)
+		if err != nil {
+			return errors.New(err.Error())
+		}
+		d.editor = nil
+		if len(editor.path) > 0 && editor.path[0] == "profiles" {
+			profileID := newPath[1]
+			if len(editor.path) > 1 {
+				profileID = editor.path[1]
+			}
+			d.invalidateReviewValidationFor(&profileID)
+		}
+		d.openPage(newPath)
+		return nil
+	}
+	return nil
 }
 
 func (d *SetupDialog) applyPending(path []string) error {
@@ -231,7 +398,43 @@ func (d *SetupDialog) applyPending(path []string) error {
 // applyValue: all scalar controls share the schema-aware write and its side
 // effects. A nil choice applies the input's text.
 func (d *SetupDialog) applyValue(path []string, input *EditorInput, choice *any) error {
-	panic("unported: mj-tui/src/setup/draft.rs apply_value")
+	if d.buildCacheFieldUserManaged(path) {
+		return errors.New("This machine's mbx installation owns its budgets. Mjolnir does not modify them.")
+	}
+	edited := editorInputText(chat.NewTextInput())
+	if input != nil {
+		edited = *input
+	}
+	old, oldOK := setupLookup(d.draft, path)
+	old = setupValueClone(old)
+	var setting client.SettingInput = client.SettingInputText{Value: edited.text().Value()}
+	if choice != nil {
+		setting = client.SettingInputChoice{Value: *choice}
+	}
+	rewritten, err := client.ApplyValue(&d.draft, path, setting)
+	if err != nil {
+		return errors.New(err.Error())
+	}
+	if rewritten != nil {
+		edited.text().SetValue(*rewritten)
+	}
+	current, currentOK := setupLookup(d.draft, path)
+	if changed := !setupValueOptionEqual(current, currentOK, old, oldOK); changed && len(path) > 0 && path[0] == "profiles" {
+		d.invalidateReviewValidationFor(setupPathSegment(path, 1))
+	}
+	if field, ok := d.fields.get(path); ok {
+		field.input = edited
+		field.applied = field.input.String()
+		source, ok := setupLookup(d.draft, path)
+		if !ok {
+			panic("applied field exists")
+		}
+		field.source = setupValueClone(source)
+		field.err = nil
+	}
+	// Kind edits may remove fields; reconcile pending buffers deliberately.
+	d.retainExistingFields()
+	return nil
 }
 
 // acceptsStagedEdits is whether edits made on the person's behalf can join
@@ -287,18 +490,165 @@ func setupPathSegment(path []string, index int) *string {
 }
 
 func (d *SetupDialog) save(capabilities *core.ProfileCapabilitiesSnapshot) DashboardAction {
-	panic("unported: mj-tui/src/setup/draft.rs save")
+	if _, resolving := d.pendingSave.(PendingSaveResolving); d.saving || resolving {
+		return DashboardActionNone{}
+	}
+	d.pendingSave = PendingSaveIdle{}
+	d.reconcileHostOwnedFields()
+	var pending [][]string
+	for _, path := range d.fields.paths() {
+		field, _ := d.fields.get(path)
+		if field.input.text().Value() != field.applied {
+			pending = append(pending, path)
+		}
+	}
+	var firstInvalid []string
+	for _, path := range pending {
+		// Target-home expansion is asynchronous, just as it is for Enter.
+		resolve, err := d.resolvePathAction(path)
+		switch {
+		case err != nil:
+			field, _ := d.fields.get(path)
+			message := err.Error()
+			field.err = &message
+			if firstInvalid == nil {
+				firstInvalid = path
+			}
+			continue
+		case resolve != nil:
+			if firstInvalid == nil {
+				field, _ := d.fields.get(path)
+				d.pendingSave = PendingSaveResolving{
+					path:  slices.Clone(path),
+					value: field.input.String(),
+					draft: setupValueClone(d.draft),
+				}
+				return resolve
+			}
+			continue
+		}
+		if d.applyPending(path) != nil && firstInvalid == nil {
+			firstInvalid = path
+		}
+	}
+	if firstInvalid != nil {
+		d.openPage(setupPageForPath(firstInvalid))
+		d.focusPath(firstInvalid)
+		return DashboardActionNone{}
+	}
+	if task, index, ok := d.incompleteSubagentRow(nil); ok {
+		category := []string{"subagents", task}
+		modelPath := []string{"subagents", task, strconv.Itoa(index), "model"}
+		if !slices.Equal(d.path, category) {
+			d.openPage(category)
+		}
+		d.focusPath(modelPath)
+		notice := incompleteSubagentNotice(task, index)
+		d.notice = &notice
+		return DashboardActionNone{}
+	}
+	config, err := client.ConfigFromDraft(d.draft)
+	var failure *string
+	if err != nil {
+		message := err.Error()
+		failure = &message
+	} else if d.reviewValidation != nil {
+		// Full validation reads profile files and needs resolved secrets.
+		// The background save owns it; this is only a sources projection.
+		if message, invalid := reviewSettingsDialogValidationError(d.reviewValidation, &config.Review); invalid {
+			failure = &message
+		}
+	}
+	if failure != nil {
+		d.notice = failure
+		return DashboardActionNone{}
+	}
+	d.saving = true
+	notice := "Saving settings…"
+	d.notice = &notice
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		panic(fmt.Sprintf("config serializes: %v", err))
+	}
+	updated := string(encoded)
+	if profileID := d.pendingLogin; profileID != nil {
+		d.pendingLogin = nil
+		return DashboardActionSaveSetupAndLogin{
+			Generation: d.generation,
+			Original:   d.original,
+			Updated:    updated,
+			ProfileID:  *profileID,
+		}
+	}
+	return DashboardActionSaveSetup{
+		Generation: d.generation,
+		Original:   d.original,
+		Updated:    updated,
+	}
 }
 
 // isDirty compares only values that can be persisted to the config file. The
 // expanded schema and all navigation/discovery fields are transient UI state
 // and must not make a freshly opened Setup dialog dirty.
 func (d *SetupDialog) isDirty() bool {
-	panic("unported: mj-tui/src/setup/draft.rs is_dirty")
+	for _, field := range d.fields {
+		if field.input.text().Value() != field.applied {
+			return true
+		}
+	}
+	if d.editor != nil && !d.editor.input.text().IsEmpty() {
+		return true
+	}
+	if _, _, incomplete := d.incompleteSubagentRow(nil); incomplete {
+		return true
+	}
+	original, originalErr := core.WithEnvironmentSourcesOnly(func() setupConfigRead {
+		var config core.Config
+		err := json.Unmarshal([]byte(d.original), &config)
+		return setupConfigRead{config: config, err: err}
+	}).unpack()
+	current, currentErr := client.ConfigFromDraft(d.draft)
+	if originalErr != nil || currentErr != nil {
+		return true
+	}
+	return !setupConfigEqual(original, current)
+}
+
+// setupConfigRead carries a decoded configuration out of a scoped read.
+type setupConfigRead struct {
+	config core.Config
+	err    error
+}
+
+func (r setupConfigRead) unpack() (core.Config, error) { return r.config, r.err }
+
+// setupConfigEqual is Config's derived PartialEq. It compares the stored
+// form, which is how both sides are written and read, so a nil and an empty
+// collection compare equal as Rust's do, and then the sets the file does not
+// store.
+func setupConfigEqual(a, b core.Config) bool {
+	left, errLeft := json.Marshal(a)
+	right, errRight := json.Marshal(b)
+	return errLeft == nil && errRight == nil && bytes.Equal(left, right) &&
+		maps.Equal(a.DefaultTargets, b.DefaultTargets) && maps.Equal(a.DisabledTargets, b.DisabledTargets)
 }
 
 func (d *SetupDialog) openReview(dashboard *DashboardState) DashboardAction {
-	panic("unported: mj-tui/src/setup/draft.rs open_review")
+	config, err := client.ConfigFromDraft(d.draft)
+	if err != nil {
+		notice := fmt.Sprintf("Fix the invalid settings draft before opening Code Review: %s", err.Error())
+		d.notice = &notice
+		d.form = chat.NewDialog[SetupControl]()
+		d.prepare()
+		return DashboardActionNone{}
+	}
+	review := newReviewSettingsDialog(&config)
+	review.updateChoices(&config, &dashboard.profileCapabilities, dashboard.usagePricedProfiles(&config))
+	d.syncReviewValidation(review)
+	d.reviewEditor = review
+	d.form = chat.NewDialog[SetupControl]()
+	d.prepare()
+	return DashboardActionNone{}
 }
 
 // syncReview writes review into the draft. The saved form leaves defaults
@@ -315,7 +665,9 @@ func (d *SetupDialog) syncReview(review *core.ReviewConfig) {
 }
 
 func (d *SetupDialog) syncReviewValidation(review *ReviewSettingsDialog) {
-	panic("unported: mj-tui/src/setup/draft.rs sync_review_validation")
+	d.syncReview(&review.review)
+	snapshot := review.validationSnapshot()
+	d.reviewValidation = &snapshot
 }
 
 func (d *SetupDialog) invalidateReviewValidationFor(profileID *string) {
@@ -343,7 +695,31 @@ func (d *SetupDialog) leaveManagedSetup() {
 }
 
 func (d *SetupDialog) createManagedProfileAndLogin(capabilities *core.ProfileCapabilitiesSnapshot) DashboardAction {
-	panic("unported: mj-tui/src/setup/draft.rs create_managed_profile_and_login")
+	if d.managedSetup == nil {
+		return DashboardActionNone{}
+	}
+	state := *d.managedSetup
+	if state < 0 || state >= len(managedSetupHarnesses) {
+		notice := "Choose an agent to set up."
+		d.notice = &notice
+		return DashboardActionNone{}
+	}
+	kind := managedSetupHarnesses[state]
+	profileID := d.availableProfileID(kind.ID())
+	home := kind.ManagedProfileHome(profileID)
+	// The kind's own defaults, so the profile holds only fields its kind
+	// reads, the same as a profile added on the Profiles page.
+	profile := client.Defaults(
+		[]string{"profiles", profileID},
+		jsonvalue.Object{{Key: "kind", Value: string(kind)}},
+	)
+	setupValueInsert(&profile, nil, "home", home)
+	setupValueInsert(&d.draft, []string{"profiles"}, profileID, profile)
+	d.managedSetup = nil
+	notice := fmt.Sprintf("Created %s. Next, Mjolnir prepares it and opens sign-in.", kind.DisplayName())
+	d.notice = &notice
+	d.pendingLogin = &profileID
+	return d.save(capabilities)
 }
 
 func (d *SetupDialog) availableProfileID(base string) string {

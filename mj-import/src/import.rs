@@ -1,9 +1,12 @@
 //! Import native harness sessions into Hel's durable archive format.
 //
 
+mod antigravity;
+mod dsh;
 mod muse;
 #[cfg(test)]
 mod native_tests;
+mod opencode;
 #[doc(hidden)]
 pub mod test_fixtures;
 

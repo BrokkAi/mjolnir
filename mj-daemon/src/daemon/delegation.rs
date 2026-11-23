@@ -142,13 +142,25 @@ impl CompletionRetry {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DelegationResult {
+    pub(crate) result: mj_core::subagent::SubagentToolResult,
+    pub(crate) persisted: bool,
+}
+
+impl From<StoredDelegationResult> for DelegationResult {
+    fn from(stored: StoredDelegationResult) -> Self {
+        Self {
+            result: stored.result,
+            persisted: true,
+        }
+    }
+}
+
 enum Completed {
-    /// The durable result, and how its first delivery attempt ended (a
+    /// The result, and how its first delivery attempt ended (a
     /// real failure carries its cause).
-    Executed(
-        StoredDelegationResult,
-        std::result::Result<Delivery, String>,
-    ),
+    Executed(DelegationResult, std::result::Result<Delivery, String>),
     Delivered,
     /// The owner closed during a deferral; the entry stays with the daemon
     /// that is exiting.
@@ -893,14 +905,14 @@ async fn settle_child(
 async fn deliver_background(
     runtime: &RuntimeState,
     parent: &str,
-    stored_result: StoredDelegationResult,
+    result: DelegationResult,
     deferral: &std::sync::atomic::AtomicBool,
 ) -> Result<Delivery> {
     let Some(admission) = admit_delivery(&runtime.session_gate, parent, deferral).await else {
         return Ok(Delivery::Stopped);
     };
     let handle = runtime.workspace_session_handle(parent).await?;
-    deliver(&handle, &admission, stored_result, async {
+    deliver(&handle, &admission, result, async {
         if let Err(error) = runtime.reconcile_parent_reports(parent).await {
             tracing::warn!(
                 parent_session_id = parent,
@@ -972,33 +984,42 @@ async fn admit_delivery(
 pub(crate) async fn deliver(
     handle: &mj_controller::session_manager::ManagedSessionHandle,
     admission: &mj_controller::recovery_gate::RecoveryAttempt,
-    stored_result: StoredDelegationResult,
+    result: DelegationResult,
     reconcile_reports: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
+    let DelegationResult { result, persisted } = result;
     let parent = handle.session_id().to_owned();
-    let request_id = stored_result.result.request_id.clone();
-    let current = mj_core::runtime::spawn_blocking({
-        let parent = parent.clone();
-        let request_id = request_id.clone();
-        move || mj_controller::database::load_delegation(&parent, &request_id)
-    })
-    .await??;
-    let Some((_, result)) = current else {
-        return Ok(());
+    let request_id = result.request_id.clone();
+    let result = if persisted {
+        let current = mj_core::runtime::spawn_blocking({
+            let parent = parent.clone();
+            let request_id = request_id.clone();
+            move || mj_controller::database::load_delegation(&parent, &request_id)
+        })
+        .await??;
+        let Some((_, stored)) = current else {
+            return Ok(());
+        };
+        stored
+            .context("delegation delivery has no durable result")?
+            .result
+    } else {
+        result
     };
-    let result = result.context("delegation delivery has no durable result")?;
     let mut lease = handle.lease_connection(admission).await?;
     let delivered = tokio::select! {
-        result = lease.connection_mut().complete_subagent_request(result.result) => result,
+        result = lease.connection_mut().complete_subagent_request(result) => result,
         () = mj_controller::recovery_gate::wait_until_cancelled(admission) => return Err(anyhow::anyhow!("delegation delivery preempted")),
     };
     lease.release();
     delivered?;
-    reconcile_reports.await;
-    mj_core::runtime::spawn_blocking(move || {
-        mj_controller::database::acknowledge_delegation(parent, request_id)
-    })
-    .await??;
+    if persisted {
+        reconcile_reports.await;
+        mj_core::runtime::spawn_blocking(move || {
+            mj_controller::database::acknowledge_delegation(parent, request_id)
+        })
+        .await??;
+    }
     Ok(())
 }
 

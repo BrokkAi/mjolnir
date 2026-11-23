@@ -463,3 +463,90 @@ fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
 fn codex_loads_a_restored_thread_marked_unused_by_the_seed() {
     recover_native_session_from(RelayOrigin::RestoredSeed, "codex", None, false);
 }
+
+#[test]
+fn rejected_seeded_config_exits_with_startup_failure_before_the_brief() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    let home = temp.path().join("harness-home");
+    std::fs::create_dir(&home).unwrap();
+    let log = temp.path().join("methods.log");
+    let script = temp.path().join("bridge.py");
+    std::fs::write(
+        &script,
+        r#"import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    with open(sys.argv[1], "a") as log:
+        log.write(method + "\n")
+    if "id" not in request:
+        continue
+    response = {"jsonrpc": "2.0", "id": request["id"]}
+    if method == "initialize":
+        response["result"] = {"protocolVersion": 1}
+    elif method == "session/new":
+        response["result"] = {"sessionId": "test", "modes": {
+            "currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}]},
+            "configOptions": [
+            {"id": "model", "name": "Model", "type": "select", "currentValue": "default",
+             "options": [{"value": "default", "name": "Default"},
+                         {"value": "selected", "name": "Selected"}]}]}
+    elif method == "session/set_config_option":
+        assert request["params"]["value"] == "selected", request
+        response["error"] = {"code": -32603, "message": "selected model refused"}
+    else:
+        response["result"] = {}
+    print(json.dumps(response), flush=True)
+"#,
+    )
+    .unwrap();
+    let config = temp.path().join("launch.json");
+    let launch = serde_json::json!({
+        "session_id": SESSION_ID, "harness": "codex",
+        "bridge_command": "python3", "bridge_args": [script, log],
+        "environment": {}, "target_environment": {"MJ_INSTANCE": "qa-seeded-config-refusal"},
+        "cwd": temp.path(), "execution_policy": "configured_approvals",
+        "harness_home": home,
+        "initial_commands": [
+            {"command_id": "seed-model", "command": RelayCommand::SetConfig {
+                key: "model".into(), value: "selected".into()
+            }},
+            {"command_id": "seed-brief", "command": RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("do the work"))]
+            }}
+        ]
+    });
+    std::fs::write(&config, serde_json::to_vec(&launch).unwrap()).unwrap();
+
+    let command = CommandSpec::new(
+        env!("CARGO_BIN_EXE_mj-worker"),
+        [
+            "worker",
+            "run",
+            "--root",
+            root.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ],
+    );
+    // The first run exits through dispatch. The second finds the persisted
+    // refusal while opening the relay and must never reach the bridge.
+    for _ in 0..2 {
+        let output = BoundedProcessExecutor::new(IO_TIMEOUT)
+            .execute(&command)
+            .unwrap();
+        assert_ne!(output.status, 0, "{output:?}");
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(mj_core::relay::WORKER_EXIT_FILE)).unwrap(),
+        )
+        .unwrap();
+        let failure = record["harness_startup_failure"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing typed startup failure: {record}"));
+        assert!(failure.contains("selected model refused"), "{failure}");
+        let methods = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(methods.matches("session/set_config_option").count(), 1);
+        assert!(!methods.contains("session/prompt"), "{methods}");
+    }
+}

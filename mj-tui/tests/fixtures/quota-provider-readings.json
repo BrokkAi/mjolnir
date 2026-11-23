@@ -75,7 +75,7 @@
     "windows": [
       {
         "label": "Week",
-        "remaining_percent": 0,
+        "remaining_percent": 18,
         "duration_seconds": 604800,
         "used": null,
         "limit": null,
@@ -84,13 +84,13 @@
       },
       {
         "label": "Week (Fable)",
-        "remaining_percent": 69,
+        "remaining_percent": 5,
         "duration_seconds": 604800,
         "model_scope": "fable",
         "used": null,
         "limit": null,
-        "resets": "12:59 Nov 19",
-        "resets_at_epoch_seconds": 1795114799
+        "resets": "07:22 Nov 19",
+        "resets_at_epoch_seconds": 1795094529
       }
     ],
     "extra": null,
@@ -114,7 +114,7 @@
       },
       {
         "label": "Week (Fable)",
-        "remaining_percent": 98,
+        "remaining_percent": 0,
         "duration_seconds": 604800,
         "model_scope": "fable",
         "used": null,

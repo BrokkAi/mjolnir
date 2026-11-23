@@ -5,11 +5,11 @@ package tui
 // cpuRollupDerivations is how many times the CPU rollups have been derived,
 // without deriving them.
 func (d *DashboardState) cpuRollupDerivations() int {
-	panic("unported: mj-tui/src/session_view.rs DashboardState::cpu_rollup_derivations")
+	return d.cpuRollupsField.derivations
 }
 
 // sessionViewDerivations is how many times the session facts and the
 // Sessions order have been derived, without deriving them.
 func (d *DashboardState) sessionViewDerivations() (int, int) {
-	panic("unported: mj-tui/src/session_view.rs DashboardState::session_view_derivations")
+	return d.sessionFactsField.derivations, d.sessionOrderField.derivations
 }

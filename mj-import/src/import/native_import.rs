@@ -1,3 +1,5 @@
+use mj_checkpoint::archive::NativeArtifactData;
+
 use super::*;
 
 pub struct NativeImportRequest<'a> {
@@ -57,14 +59,21 @@ pub fn import_native_session(
     let native_snapshot = tempfile::Builder::new()
         .prefix("native-import-")
         .tempdir_in(archive_directory)?;
-    let mut muse_capture = None;
+    let mut captured_source = None;
     for (index, artifact) in native_artifacts.iter_mut().enumerate() {
         if let Some(control) = control {
             control.check_cancelled()?;
         }
         let path = native_snapshot.path().join(index.to_string());
-        let selected_muse_stream = harness == HarnessKind::Muse
-            && matches!(&artifact.data, mj_checkpoint::archive::NativeArtifactData::File(original) if original == source_path);
+        let selected = match harness {
+            HarnessKind::Muse | HarnessKind::Dsh => {
+                matches!(&artifact.data, NativeArtifactData::File(original) if original == source_path)
+            }
+            HarnessKind::OpenCode => {
+                artifact.relative_path == Path::new(mj_checkpoint::native::opencode::DATABASE)
+            }
+            _ => false,
+        };
         {
             let mut source = CancellableRead {
                 inner: artifact.reader()?,
@@ -72,46 +81,64 @@ pub fn import_native_session(
             };
             let mut target = fs::File::create(&path)?;
             std::io::copy(&mut source, &mut target)?;
-            if selected_muse_stream {
-                target.set_modified(fs::metadata(source_path)?.modified()?)?;
-                muse_capture = Some(path.clone());
+            if selected {
+                target.set_modified(
+                    fs::metadata(native_source_file(harness, source_path))?.modified()?,
+                )?;
+                captured_source = Some(path.clone());
             }
         }
-        artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
+        artifact.data = NativeArtifactData::File(path);
     }
-    let captured_transcript = if harness == HarnessKind::Muse {
+    let captured_transcript = if matches!(
+        harness,
+        HarnessKind::Muse | HarnessKind::OpenCode | HarnessKind::Dsh
+    ) {
         if let Some(control) = control {
             control.check_cancelled()?;
         }
-        let captured_path =
-            muse_capture.context("selected Muse log is missing from the capture")?;
-        let current = super::adapter_transcript::read_muse_transcript(&captured_path, source_path)
-            .context("validate captured Muse session")?;
-        // The preview can precede confirmation by minutes. Reject changes
-        // that could invalidate its bundle, safety, or conversation.
-        ensure!(
-            current.cwd.as_os_str() == transcript.cwd.as_os_str()
-                && current
-                    .edited_paths
-                    .iter()
-                    .map(|path| path.as_os_str())
-                    .eq(transcript.edited_paths.iter().map(|path| path.as_os_str()))
-                && current.items == transcript.items
-                && current.last_activity_at_ms == transcript.last_activity_at_ms,
-            "native session changed after it was selected; select it again"
-        );
-        ensure!(
-            native_import_artifacts_match(
-                &native_artifacts,
-                &collect_import_native_artifacts(
-                    harness,
-                    harness_home,
-                    native_session_id,
-                    source_path,
-                )?
-            )?,
-            "native session changed while being imported; stop its harness and retry"
-        );
+        let captured_path = captured_source.with_context(|| {
+            format!(
+                "selected {} session is missing from the capture",
+                harness.display_name()
+            )
+        })?;
+        let current = match harness {
+            HarnessKind::Muse => {
+                super::adapter_transcript::read_muse_transcript(&captured_path, source_path)
+                    .context("validate captured Muse session")?
+            }
+            HarnessKind::OpenCode => {
+                let key = format!(
+                    "{}\u{1f}{native_session_id}",
+                    captured_path
+                        .to_str()
+                        .context("captured OpenCode database path is not UTF-8")?
+                );
+                super::adapter_transcript::read_projection(harness, Path::new(&key), &captured_path)
+                    .context("validate captured OpenCode session")?
+            }
+            HarnessKind::Dsh => {
+                super::adapter_transcript::read_projection(harness, &captured_path, &captured_path)
+                    .context("validate captured DSH session")?
+            }
+            _ => unreachable!("harness has no captured transcript validation"),
+        };
+        verify_captured_transcript(&current, transcript)?;
+        if harness == HarnessKind::Muse {
+            ensure!(
+                native_import_artifacts_match(
+                    &native_artifacts,
+                    &collect_import_native_artifacts(
+                        harness,
+                        harness_home,
+                        native_session_id,
+                        source_path,
+                    )?
+                )?,
+                "native session changed while being imported; stop its harness and retry"
+            );
+        }
         Some(current)
     } else {
         None
@@ -683,6 +710,26 @@ impl<'a> ImportProjectRemap<'a> {
         }
         Ok(())
     }
+}
+
+/// The preview can precede confirmation by minutes. Reject changes that
+/// could invalidate its bundle, safety, or conversation.
+fn verify_captured_transcript(
+    current: &ClaudeTranscript,
+    preview: &ClaudeTranscript,
+) -> Result<()> {
+    ensure!(
+        current.cwd.as_os_str() == preview.cwd.as_os_str()
+            && current
+                .edited_paths
+                .iter()
+                .map(|path| path.as_os_str())
+                .eq(preview.edited_paths.iter().map(|path| path.as_os_str()))
+            && current.items == preview.items
+            && current.last_activity_at_ms == preview.last_activity_at_ms,
+        "native session changed after it was selected; select it again"
+    );
+    Ok(())
 }
 
 /// Compare captured contents, independently of whether bodies live in memory

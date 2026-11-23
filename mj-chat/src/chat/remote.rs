@@ -854,10 +854,16 @@ async fn enqueue_chat_remote_operation(
             let results = results.clone();
             let attached = attached.clone();
             pending.spawn(async move {
-                let result = session
-                    .stop_background_task(id.clone())
-                    .await
-                    .map_err(|error| format!("{error:#}"));
+                let result = async {
+                    mj_client::daemon::connect_existing()
+                        .await?
+                        .http()
+                        .await?
+                        .stop_background_task(session.session_id(), id.clone())
+                        .await
+                }
+                .await
+                .map_err(|error| format!("{error:#}"));
                 publish_chat_remote_result(
                     &results,
                     &attached,
@@ -1754,10 +1760,14 @@ mod tests {
         // The session actor fixture and the control endpoint change independently:
         // require upload acknowledgement before the actor receives a reference.
         use mj_client::daemon::{
-            DaemonAction, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
-            RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+            ApiEndpointMetadata, DaemonAction, DaemonIdentity, DaemonMetadata, DaemonPlacement,
+            DaemonReply, PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, read_frame,
+            write_frame,
         };
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let metadata = DaemonMetadata {
             protocol_version: PROTOCOL_VERSION,
             pid: std::process::id(),
@@ -1771,79 +1781,115 @@ mod tests {
         let metadata_path = mj_client::daemon::metadata_path();
         std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
         std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        let (upload_started, started) = tokio::sync::oneshot::channel();
-        let mut upload_started = Some(upload_started);
-        let (legacy_upload_started, legacy_started) = tokio::sync::oneshot::channel();
-        let mut legacy_upload_started = Some(legacy_upload_started);
-        let (receipt_upload_started, receipt_started) = tokio::sync::oneshot::channel();
-        let mut receipt_upload_started = Some(receipt_upload_started);
-        let uploads = mj_core::runtime::spawn(async move {
-            for attempt in 0..6 {
+        mj_client::daemon::write_api_endpoint(&ApiEndpointMetadata {
+            address: http.local_addr().unwrap(),
+            token: "test-http-token".into(),
+            pid: metadata.pid,
+            instance_id: metadata.instance_id.clone(),
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+        let discovery = mj_core::runtime::spawn(async move {
+            for _ in 0..7 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut body = Vec::new();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert_eq!(request.token, metadata.token);
+                assert!(matches!(request.action, DaemonAction::Identity));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: request.request_id,
+                        result: Ok(DaemonReply::Identity(DaemonIdentity {
+                            instance_id: metadata.instance_id.clone(),
+                            build_version: metadata.build_version.clone(),
+                            placement: DaemonPlacement::Host,
+                        })),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let (upload_started, started) = tokio::sync::oneshot::channel();
+        let (legacy_upload_started, legacy_started) = tokio::sync::oneshot::channel();
+        let (receipt_upload_started, receipt_started) = tokio::sync::oneshot::channel();
+        let uploads = mj_core::runtime::spawn(async move {
+            let mut cancellation_checks = [
+                (0, upload_started),
+                (1, legacy_upload_started),
+                (4, receipt_upload_started),
+            ]
+            .into_iter()
+            .peekable();
+            for attempt in 0..7 {
+                let (stream, _) = http.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let path = line.split_whitespace().nth(1).unwrap();
+                let path = path.to_owned();
+                assert!(line.starts_with("POST "));
+                let mut length = None;
+                let mut authorized = false;
                 loop {
-                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                    assert_eq!(request.token, metadata.token);
-                    let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
-                        panic!("expected upload fragment");
-                    };
-                    body.extend_from_slice(&bytes);
-                    if sha256.is_none() {
-                        continue;
-                    }
-                    if attempt < 2 || attempt == 4 {
-                        if attempt == 0 {
-                            upload_started.take().unwrap().send(()).unwrap();
-                        } else if attempt == 1 {
-                            legacy_upload_started.take().unwrap().send(()).unwrap();
-                        } else {
-                            receipt_upload_started.take().unwrap().send(()).unwrap();
-                        }
-                        use tokio::io::AsyncReadExt as _;
-                        assert_eq!(
-                            stream.read(&mut [0u8; 1]).await.unwrap(),
-                            0,
-                            "cancel drops the upload connection"
-                        );
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
                         break;
                     }
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: PROTOCOL_VERSION,
-                            request_id: request.request_id,
-                            result: Ok(DaemonReply::BlobUploaded("fixture-blob".into())),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                    let DaemonAction::InstallAttachment {
-                        session_id,
-                        reference,
-                        blob,
-                    } = request.action
-                    else {
-                        panic!("expected attachment installation");
-                    };
-                    assert_eq!(blob, "fixture-blob");
-                    let bytes = body;
-                    mj_core::attachment::AttachmentStore::controller(&session_id)
-                        .unwrap()
-                        .install(&reference, &bytes)
-                        .unwrap();
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: PROTOCOL_VERSION,
-                            request_id: request.request_id,
-                            result: Ok(DaemonReply::AttachmentInstalled(reference)),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    break;
+                    let (name, value) = line.split_once(':').unwrap();
+                    match name.to_ascii_lowercase().as_str() {
+                        "content-length" => length = Some(value.trim().parse::<usize>().unwrap()),
+                        "authorization" => authorized = value.trim() == "Bearer test-http-token",
+                        _ => {}
+                    }
                 }
+                assert!(authorized);
+                let mut bytes = vec![0; length.unwrap()];
+                stream.read_exact(&mut bytes).await.unwrap();
+                if attempt == 6 {
+                    assert_eq!(path, "/api/v1/sessions/image-session/background-tasks/stop");
+                    let body: mj_client::http::StopBackgroundTaskRequest =
+                        serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body.background_task_id, "terminal:provider-task");
+                    stream.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    continue;
+                }
+                let session_id = path
+                    .strip_prefix("/api/v1/sessions/")
+                    .unwrap()
+                    .strip_suffix("/attachments")
+                    .unwrap();
+                if cancellation_checks
+                    .peek()
+                    .is_some_and(|(index, _)| *index == attempt)
+                {
+                    cancellation_checks.next().unwrap().1.send(()).unwrap();
+                    assert_eq!(
+                        stream.read(&mut [0u8; 1]).await.unwrap(),
+                        0,
+                        "cancel drops the upload connection"
+                    );
+                    continue;
+                }
+                let optimized = mj_client::image::optimize_image(&bytes).unwrap();
+                let reference = mj_core::attachment::AttachmentRef::new(
+                    &optimized.bytes,
+                    optimized.mime_type,
+                    optimized.width,
+                    optimized.height,
+                )
+                .unwrap();
+                mj_core::attachment::AttachmentStore::controller(session_id)
+                    .unwrap()
+                    .install(&reference, &optimized.bytes)
+                    .unwrap();
+                let body = serde_json::json!({"attachment": reference}).to_string();
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
             }
         });
         let mut fixture = mj_client::session::replacement_session_test_fixture("image-session", 19);
@@ -2140,7 +2186,20 @@ mod tests {
             matches!(remote.recv().await.unwrap(), ChatRemoteResult::Prompt { command_id, result: Ok(19), .. } if command_id == "old-receipt")
         );
         assert!(fixture.submitted.try_recv().is_err());
+        remote
+            .operations()
+            .send(ChatRemoteOperation::StopBackgroundTask {
+                id: "terminal:provider-task".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            remote.recv().await.unwrap(),
+            ChatRemoteResult::StopBackgroundTask { id, result: Ok(()) }
+                if id == "terminal:provider-task"
+        ));
         uploads.await.unwrap();
+        discovery.await.unwrap();
     }
 
     #[tokio::test]

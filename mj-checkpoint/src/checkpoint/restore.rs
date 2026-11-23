@@ -352,46 +352,63 @@ fn restore_missing_parent_relay(
 /// Collapse a legacy database/WAL family before publishing any authoritative
 /// file. A retry can then treat a present database as complete, with no receipt
 /// or partially published sidecars to reconcile.
-fn restore_missing_sqlite_families(
+fn restore_sqlite_families(
     archive: &crate::archive::VerifiedArchive,
     payload_reader: &mut crate::archive::CheckpointPayloadReader,
     spec: &CheckpointRestoreSpec,
     target_cwd: Option<&Path>,
+    missing_only: bool,
 ) -> Result<(bool, std::collections::BTreeSet<PathBuf>)> {
     let mut changed = false;
     let mut families = std::collections::BTreeSet::new();
+    let harness = archive.manifest.session.harness_kind;
     for database in &archive.manifest.payloads {
         let PayloadRole::NativeArtifact { relative_path } = &database.role else {
             continue;
         };
-        if !super::native_scan::is_sqlite_native_database(
-            archive.manifest.session.harness_kind,
-            relative_path,
-        ) {
+        if !super::native_scan::is_sqlite_native_database(harness, relative_path) {
             continue;
         }
         let sidecars = super::native_scan::sqlite_sidecars(relative_path);
-        families.insert(relative_path.clone());
-        families.extend(sidecars.iter().cloned());
-        if spec.harness_home.join(relative_path).try_exists()? {
+        let archived_sidecars =
+            archive
+                .manifest
+                .payloads
+                .iter()
+                .filter_map(|payload| match &payload.role {
+                    PayloadRole::NativeArtifact { relative_path }
+                        if sidecars.contains(relative_path) =>
+                    {
+                        Some((relative_path, payload))
+                    }
+                    _ => None,
+                });
+        let mut archived_sidecars = archived_sidecars.peekable();
+        if !missing_only && archived_sidecars.peek().is_none() {
             continue;
         }
-        for sidecar in &sidecars {
-            ensure!(
-                !spec.harness_home.join(sidecar).try_exists()?,
-                "native database is absent but its sidecar remains; retaining both for recovery"
-            );
+
+        families.insert(relative_path.clone());
+        families.extend(sidecars.iter().cloned());
+        if missing_only {
+            if spec.harness_home.join(relative_path).try_exists()? {
+                continue;
+            }
+            for sidecar in &sidecars {
+                ensure!(
+                    !spec.harness_home.join(sidecar).try_exists()?,
+                    "native database is absent but its sidecar remains; retaining both for recovery"
+                );
+            }
         }
         let scratch = tempfile::tempdir()?;
         write_private_with(scratch.path(), relative_path, database.mode, |file| {
             payload_reader.copy_payload(database, file)
         })?;
-        for sidecar in &sidecars {
-            if let Some(payload) = archive.manifest.payloads.iter().find(|payload| matches!(&payload.role, PayloadRole::NativeArtifact { relative_path } if relative_path == sidecar)) {
-                write_private_with(scratch.path(), sidecar, payload.mode, |file| {
-                    payload_reader.copy_payload(payload, file)
-                })?;
-            }
+        for (sidecar, payload) in archived_sidecars {
+            write_private_with(scratch.path(), sidecar, payload.mode, |file| {
+                payload_reader.copy_payload(payload, file)
+            })?;
         }
         // The collapsed copy stays a file; only a relocating provider needs
         // its bytes in memory to rewrite them.
@@ -400,33 +417,47 @@ fn restore_missing_sqlite_families(
             "recovered native",
             |_| Ok(()),
         )?;
-        if target_cwd.is_none()
-            || native_artifact_relocation(archive.manifest.session.harness_kind, relative_path)
-                .is_none()
-        {
-            changed |= write_missing_private_with(
-                &spec.harness_home,
-                relative_path,
-                database.mode,
-                |file| {
-                    std::io::copy(&mut File::open(snapshot.path())?, file)?;
-                    Ok(())
-                },
-            )?;
-        } else {
+        if target_cwd.is_some() && native_artifact_relocation(harness, relative_path).is_some() {
             let complete = restored_native_artifact_bytes(
-                archive.manifest.session.harness_kind,
+                harness,
+                &archive.manifest.session.native_session_id,
                 relative_path,
                 &fs::read(snapshot.path())?,
                 target_cwd,
                 &spec.harness_home,
             )?;
-            changed |= write_missing_private_file(
-                &spec.harness_home,
-                relative_path,
-                &complete,
-                database.mode,
-            )?;
+            if missing_only {
+                changed |= write_missing_private_file(
+                    &spec.harness_home,
+                    relative_path,
+                    &complete,
+                    database.mode,
+                )?;
+            } else {
+                write_private_file(&spec.harness_home, relative_path, &complete, database.mode)?;
+                changed = true;
+            }
+        } else {
+            let copy_snapshot = |file: &mut File| {
+                std::io::copy(&mut File::open(snapshot.path())?, file)?;
+                Ok(())
+            };
+            if missing_only {
+                changed |= write_missing_private_with(
+                    &spec.harness_home,
+                    relative_path,
+                    database.mode,
+                    copy_snapshot,
+                )?;
+            } else {
+                write_private_with(
+                    &spec.harness_home,
+                    relative_path,
+                    database.mode,
+                    copy_snapshot,
+                )?;
+                changed = true;
+            }
         }
     }
     Ok((changed, families))
@@ -446,35 +477,29 @@ fn restore_native_artifacts(
             &spec.workspace_root,
         )
     });
-    let (mut changed, sqlite_families) = if missing_only {
-        restore_missing_sqlite_families(archive, payload_reader, spec, target_cwd.as_deref())?
-    } else {
-        (false, std::collections::BTreeSet::new())
-    };
-    // A restored database replaces the one in the home, and SQLite would
-    // replay a write-ahead log left beside the old one over it. An archive
-    // from before OpenCode snapshots carries its own log, which the loop
-    // below writes after this.
-    for descriptor in &archive.manifest.payloads {
-        if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
-            && super::native_scan::is_sqlite_native_database(
-                archive.manifest.session.harness_kind,
-                relative_path,
-            )
-        {
-            for sidecar in super::native_scan::sqlite_sidecars(relative_path) {
-                if missing_only {
-                    ensure!(
-                        !spec.harness_home.join(&sidecar).try_exists()?
-                            || spec.harness_home.join(relative_path).try_exists()?,
-                        "native database is absent but its sidecar remains; retaining both for recovery"
-                    );
-                } else {
+    // Remove stale sidecars before replacing any database. Archived sidecars
+    // are replayed in scratch before the restored database is published.
+    if !missing_only {
+        for descriptor in &archive.manifest.payloads {
+            if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
+                && super::native_scan::is_sqlite_native_database(
+                    archive.manifest.session.harness_kind,
+                    relative_path,
+                )
+            {
+                for sidecar in super::native_scan::sqlite_sidecars(relative_path) {
                     remove_private_file(&spec.harness_home, &sidecar)?;
                 }
             }
         }
     }
+    let (mut changed, sqlite_families) = restore_sqlite_families(
+        archive,
+        payload_reader,
+        spec,
+        target_cwd.as_deref(),
+        missing_only,
+    )?;
     for descriptor in &archive.manifest.payloads {
         let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
             continue;
@@ -484,7 +509,7 @@ fn restore_native_artifacts(
         {
             continue;
         }
-        if missing_only && sqlite_families.contains(relative_path) {
+        if sqlite_families.contains(relative_path) {
             continue;
         }
         if !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT) {
@@ -493,8 +518,7 @@ fn restore_native_artifacts(
                 relative_path,
                 target_cwd.as_deref(),
             )?;
-            // Provider relocation rewrites Kimi/Grok/Muse/DSH records and agy's
-            // SQLite database. Claude and Codex transcripts only remap paths.
+            // Claude and Codex transcripts need only path remapping.
             if target_cwd.is_none()
                 || native_artifact_relocation(archive.manifest.session.harness_kind, &destination)
                     .is_none()
@@ -553,6 +577,7 @@ fn restore_native_artifacts(
         )?;
         let native_data = restored_native_artifact_bytes(
             archive.manifest.session.harness_kind,
+            &archive.manifest.session.native_session_id,
             &relative_path,
             native_data,
             target_cwd.as_deref(),
@@ -1005,6 +1030,7 @@ enum NativeRelocation {
     Muse,
     Dsh,
     Antigravity,
+    OpenCode,
     GrokSummary,
     KimiRegistry,
     KimiIndex,
@@ -1023,6 +1049,9 @@ fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<Nativ
         {
             Some(NativeRelocation::Antigravity)
         }
+        HarnessKind::OpenCode if super::native_scan::is_sqlite_native_database(harness, path) => {
+            Some(NativeRelocation::OpenCode)
+        }
         HarnessKind::Grok if is_grok_session_summary(path) => Some(NativeRelocation::GrokSummary),
         HarnessKind::Kimi if path == Path::new("workspaces.json") => {
             Some(NativeRelocation::KimiRegistry)
@@ -1037,6 +1066,7 @@ fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<Nativ
 
 pub(super) fn restored_native_artifact_bytes(
     harness: HarnessKind,
+    native_session_id: &str,
     relative_path: &Path,
     data: &[u8],
     target_cwd: Option<&Path>,
@@ -1058,6 +1088,15 @@ pub(super) fn restored_native_artifact_bytes(
                     target_cwd.display()
                 )
             });
+        }
+        Some(NativeRelocation::OpenCode) => {
+            return crate::native::opencode::relocate(data, native_session_id, target_cwd)
+                .with_context(|| {
+                    format!(
+                        "relocate OpenCode session {native_session_id} to {}",
+                        target_cwd.display()
+                    )
+                });
         }
         Some(NativeRelocation::GrokSummary) => {
             return rewrite_grok_session_summary(data, target_cwd, harness_home);
@@ -1200,7 +1239,7 @@ fn write_missing_private_file(
 
 /// Checks the destination and creates its parents, returning the path to
 /// write. Both the replacing and the missing-only writers start here.
-fn prepare_private_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
+pub(super) fn prepare_private_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
     ensure_no_symlink_ancestors(root, relative)?;

@@ -3,6 +3,11 @@
 package tui
 
 import (
+	"cmp"
+	"fmt"
+	"maps"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,7 +75,45 @@ type AttentionNavigation struct {
 // applied. Only SessionFacts calls this; everything else reads the level it
 // keeps.
 func presentationAttention(dashboard *DashboardState, sessionID string) AttentionLevel {
-	panic("unported: mj-tui/src/dashboard_sessions.rs presentation_attention")
+	served, ok := dashboard.servedAttention.Get().Get(sessionID)
+	if !ok {
+		served = core.SessionAttentionUnknown
+	}
+	// The session row, workspace badges, host notifications and notification
+	// cards all read this projection. Locally accepted dismissals take effect
+	// here before the daemon's next served-attention publication arrives.
+	if (served == core.SessionAttentionNeedsInput || served == core.SessionAttentionImportant) &&
+		dashboard.notificationDismissalPending(sessionID) {
+		return AttentionLevelIdle
+	}
+	if served == core.SessionAttentionImportant {
+		if target, ok := dashboard.notificationDismissals.Get().Get(sessionID); ok {
+			if through, ok := target.(core.NotificationDismissalReadThrough); ok {
+				if session := dashboard.state.Get().Sessions.GetShared(sessionID); session != nil &&
+					session.ViewedThroughEventOrdinal >= through.Value {
+					return AttentionLevelIdle
+				}
+			}
+		}
+	}
+	switch served {
+	case core.SessionAttentionNeedsInput:
+		return AttentionLevelWaiting
+	case core.SessionAttentionImportant:
+		return AttentionLevelImportant
+	case core.SessionAttentionUnread:
+		return AttentionLevelUnread
+	case core.SessionAttentionFailed:
+		return AttentionLevelFailed
+	case core.SessionAttentionUnreachable:
+		return AttentionLevelUnreachable
+	case core.SessionAttentionWorking:
+		return AttentionLevelWorking
+	case core.SessionAttentionIdle:
+		return AttentionLevelIdle
+	default:
+		return AttentionLevelInactive
+	}
 }
 
 // SessionsTextSearch is the daemon's answer to the Sessions filter's text:
@@ -168,7 +211,42 @@ func (d *DashboardState) sessionsRows() []SessionsRow {
 // deriveSessionsRows is the rows for sessions, in order, for sessionOrder to
 // keep. numbered says whether more than one project is listed.
 func (d *DashboardState) deriveSessionsRows(sessions []*core.SessionRecord, numbered bool) []SessionsRow {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::derive_sessions_rows")
+	// Two projects can share a short name, in which case both need their
+	// full names to stay distinguishable.
+	shortNames := map[string]map[string]struct{}{}
+	for _, session := range sessions {
+		source := d.ProjectSource(session)
+		if shortNames[source.Short] == nil {
+			shortNames[source.Short] = map[string]struct{}{}
+		}
+		shortNames[source.Short][source.Key] = struct{}{}
+	}
+	grouped := d.config.Get().Advanced.SessionOrder == core.SessionOrderProject && !d.sessionsRankedByMatch()
+	collapsed := *d.collapsedProjectKeys.Get()
+	rows := []SessionsRow{}
+	var previous *string
+	number := 0
+	for index, session := range sessions {
+		source := d.ProjectSource(session)
+		if grouped && (previous == nil || *previous != source.Key) {
+			number++
+			label := source.Short
+			if len(shortNames[source.Short]) > 1 {
+				label = source.Full
+			}
+			var shown *int
+			if numbered && number <= 9 {
+				value := number
+				shown = &value
+			}
+			rows = append(rows, SessionsRowProjectHeading{Key: source.Key, Label: label, Number: shown})
+			key := source.Key
+			previous = &key
+		}
+		_, folded := collapsed[source.Key]
+		rows = append(rows, SessionsRowSession{Index: index, Expanded: !folded})
+	}
+	return rows
 }
 
 // selectedVisibleIndex is where the selection sits among the rows on
@@ -220,7 +298,38 @@ func (d *DashboardState) orderedSessionPosition(sessionID string) (int, bool) {
 // deriveOrderedSessions is orderedSessions worked out from the inputs, and
 // how many sessions the filter holds back, for sessionOrder to keep.
 func (d *DashboardState) deriveOrderedSessions() ([]*core.SessionRecord, int) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::derive_ordered_sessions")
+	sessions := d.orderedSessionsUnfiltered()
+	selected, hasSelected := d.SelectedSessionID()
+	if hasSelected {
+		if active := d.state.Get().Sessions.GetShared(selected); active != nil &&
+			!slices.ContainsFunc(sessions, func(session *core.SessionRecord) bool { return session.ID == active.ID }) {
+			sessions = slices.Insert(sessions, 0, active)
+		}
+	}
+	filter := *d.sessionsFilter.Get()
+	if filter == nil {
+		return sessions, 0
+	}
+	listed := len(sessions)
+	kept := make([]*core.SessionRecord, 0, len(sessions))
+	for _, session := range sessions {
+		if (hasSelected && session.ID == selected) || d.sessionMatchesFilter(session, filter) {
+			kept = append(kept, session)
+		}
+	}
+	hidden := listed - len(kept)
+	query := strings.ToLower(strings.TrimSpace(filter.Query.Value()))
+	if query != "" {
+		// A stable sort keeps the list's own order inside each group.
+		ranks := make(map[*core.SessionRecord]uint8, len(kept))
+		for _, session := range kept {
+			ranks[session] = d.sessionsFilterRank(session, query)
+		}
+		slices.SortStableFunc(kept, func(a, b *core.SessionRecord) int {
+			return int(ranks[a]) - int(ranks[b])
+		})
+	}
+	return kept, hidden
 }
 
 func (d *DashboardState) sessionOutsideFilter(session *core.SessionRecord) bool {
@@ -263,13 +372,68 @@ func (d *DashboardState) sessionsOtherWorkspaceMatches() int {
 }
 
 func (d *DashboardState) deriveOtherWorkspaceMatches() int {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::derive_other_workspace_matches")
+	filter := *d.sessionsFilter.Get()
+	if filter == nil {
+		return 0
+	}
+	if *d.childWorkspace.Get() != nil ||
+		(strings.TrimSpace(filter.Query.Value()) == "" && filter.State == nil) {
+		return 0
+	}
+	query := strings.ToLower(strings.TrimSpace(filter.Query.Value()))
+	search := d.sessionsText.Get()
+	currentAnswer := strings.ToLower(search.answeredQuery) == query
+	activeWorkspaceID, hasActiveWorkspace := d.ActiveWorkspaceID()
+	selected, hasSelected := d.SelectedSessionID()
+	count := 0
+	for _, session := range d.state.Get().Sessions.All() {
+		if hasActiveWorkspace && session.WorkspaceID == activeWorkspaceID {
+			continue
+		}
+		if hasSelected && session.ID == selected {
+			continue
+		}
+		if !d.isOpenableWorkspaceSession(session) {
+			continue
+		}
+		if filter.State != nil && !filter.State.admits(d.AttentionLevel(session.ID)) {
+			continue
+		}
+		if query != "" && !d.sessionMatchesMetadata(session, query) {
+			if _, found := search.matches[session.ID]; !currentAnswer || !found {
+				continue
+			}
+		}
+		count++
+	}
+	return count
 }
 
 // sessionMatchesMetadata says whether the lower-cased query is in the
 // session's name, id, project, profile, target, or branch.
 func (d *DashboardState) sessionMatchesMetadata(session *core.SessionRecord, query string) bool {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::session_matches_metadata")
+	source := d.ProjectSource(session)
+	branch := ""
+	checkout, err := d.state.Get().Checkout(session.ID)
+	if worktree, ok := checkout.(core.CheckoutManagedWorktree); err == nil && ok && worktree.Worktree != nil {
+		branch = worktree.Worktree.Branch
+	} else if session.LaunchBranch != nil {
+		branch = *session.LaunchBranch
+	}
+	for _, field := range []string{
+		strings.ToLower(session.ListedTitle()),
+		strings.ToLower(branch),
+		strings.ToLower(session.ID),
+		strings.ToLower(source.Short),
+		strings.ToLower(source.Full),
+		strings.ToLower(session.LastProfile),
+		strings.ToLower(session.TargetTemplateID),
+	} {
+		if strings.Contains(field, query) {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionsFilterRank is where a filtered session sorts: name and branch
@@ -298,14 +462,58 @@ func (d *DashboardState) sessionsRankedByMatch() bool {
 // already asked about. The caller runs it in the background and hands the
 // answer to ApplySessionsText; the render loop never waits for it.
 func (d *DashboardState) NextSessionsTextSearch() (uint64, string, bool) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::next_sessions_text_search")
+	query := ""
+	if filter := *d.sessionsFilter.Get(); filter != nil {
+		query = strings.TrimSpace(filter.Query.Value())
+	}
+	if query == d.sessionsText.Get().asked {
+		return 0, "", false
+	}
+	search := d.sessionsText.Mut()
+	search.requestID++
+	if query == "" {
+		*search = SessionsTextSearch{requestID: search.requestID}
+		d.clampSelections()
+		return 0, "", false
+	}
+	if search.sync == nil {
+		search.sync = &SyncEpisode{ID: search.requestID}
+	}
+	// Matches for what was typed so far still hold for a longer text among
+	// the rows they name; for any other text they do not.
+	if !strings.HasPrefix(strings.ToLower(query), strings.ToLower(search.asked)) {
+		search.matches = nil
+	}
+	search.asked = query
+	pending := SessionsTextQueryTyped
+	search.pending = &pending
+	return search.requestID, query, true
 }
 
 // ApplySessionsText takes the daemon's answer to the search
 // NextSessionsTextSearch handed out. An answer to an older search is
 // dropped.
 func (d *DashboardState) ApplySessionsText(requestID uint64, matches []client.SessionTextMatch, err error) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::apply_sessions_text")
+	if requestID != d.sessionsText.Get().requestID {
+		return
+	}
+	search := d.sessionsText.Mut()
+	if err != nil && search.pending != nil && *search.pending == SessionsTextQuerySyncRefresh && search.sync != nil {
+		failed := client.DaemonErr[client.WikiSyncStatus](err.Error())
+		search.sync.Status = &failed
+	}
+	search.pending = nil
+	if err != nil {
+		search.matches = nil
+		d.SetNotice("Conversation search failed: " + err.Error())
+		return
+	}
+	search.answeredQuery = search.asked
+	search.matches = make(map[string]client.SessionTextMatchKind, len(matches))
+	for _, found := range matches {
+		search.matches[found.SessionID] = found.Kind
+	}
+	d.settleSessionsFilter()
 }
 
 // beginSessionsFilter opens the Sessions filter for typing, keeping any
@@ -377,7 +585,68 @@ func (d *DashboardState) escClearsSessionsFilter() bool {
 // input. When not editing, the state letters narrow the list and Esc drops
 // the whole filter whenever escClearsSessionsFilter holds.
 func (d *DashboardState) handleSessionsFilterKey(key tea.KeyPressMsg, plain bool) bool {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::handle_sessions_filter_key")
+	code := chat.KeyPressCode(key)
+	if filter := *d.sessionsFilter.Get(); filter != nil && filter.Editing {
+		d.setSessionActionFocus(nil)
+		slot := d.sessionsFilter.Mut()
+		filter := *slot
+		switch code {
+		case tea.KeyEnter:
+			filter.Editing = false
+			if filter.Query.IsEmpty() && filter.State == nil {
+				*slot = nil
+			}
+		case tea.KeyEscape:
+			// Esc clears the text and leaves the input. A state filter stays
+			// until Esc on the pane drops it.
+			filter.Query.Clear()
+			filter.Editing = false
+			if filter.State == nil {
+				*slot = nil
+			}
+		default:
+			// Everything else is line editing: the shared single-line editor
+			// takes the readline keys, and leaves the arrows Up and Down (and
+			// anything it does not know) to the pane.
+			if filter.Query.HandleKey(key) == chat.EditOutcomeUnhandled {
+				return false
+			}
+		}
+		d.clampSelections()
+		return true
+	}
+	if !plain {
+		return false
+	}
+	switch {
+	case code == tea.KeyEscape && d.escClearsSessionsFilter():
+		d.clearSessionsFilter()
+		return true
+	case chat.IsCharKeyCode(code):
+		state, ok := sessionStateFilterFromLetter(code)
+		if !ok {
+			return false
+		}
+		current := *d.sessionsFilter.Get()
+		switch {
+		case state == nil && current == nil:
+			return false
+		case state == nil:
+			slot := d.sessionsFilter.Mut()
+			(*slot).State = nil
+			if (*slot).Query.IsEmpty() {
+				*slot = nil
+			}
+		case current != nil:
+			(*d.sessionsFilter.Mut()).State = state
+		default:
+			*d.sessionsFilter.Mut() = &SessionsFilter{Query: chat.NewTextInput(), State: state}
+		}
+	default:
+		return false
+	}
+	d.settleSessionsFilter()
+	return true
 }
 
 // clearSessionsFilter drops the whole Sessions filter, the search text and
@@ -412,7 +681,151 @@ func (d *DashboardState) isListedTopLevelSession(session *core.SessionRecord, wo
 }
 
 func (d *DashboardState) orderedSessionsUnfiltered() []*core.SessionRecord {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::ordered_sessions_unfiltered")
+	sessions := d.state.Get().Sessions
+	if workspace := *d.childWorkspace.Get(); workspace != nil {
+		parentID := workspace.ParentID
+		children := []*core.SessionRecord{}
+		for _, id := range d.managedChildIDsOfKind(parentID, workspace.Kind) {
+			if session := sessions.GetShared(id); session != nil {
+				children = append(children, session)
+			}
+		}
+		if workspace.Kind == core.SubagentKindWorker {
+			for _, id := range slices.Sorted(maps.Keys((*d.nativeByParent.Get())[parentID])) {
+				if session := sessions.GetShared(id); session != nil {
+					children = append(children, session)
+				}
+			}
+		}
+		type childKey struct {
+			stopped bool
+			group   int
+		}
+		nativeAgents := *d.nativeAgents.Get()
+		keys := make(map[*core.SessionRecord]childKey, len(children))
+		for _, session := range children {
+			group := 2
+			if pane, ok := nativeAgents[session.ID]; ok {
+				switch {
+				case pane.Agent.State == core.NativeAgentStateRunning:
+					group = 0
+				case pane.Agent.Availability == core.NativeAgentAvailabilityAvailable:
+					group = 1
+				}
+			} else if d.sessionIsWorking(session.ID) {
+				group = 0
+			} else if session.State == core.SessionStateRunning {
+				group = 1
+			}
+			keys[session] = childKey{stopped: session.State == core.SessionStateStopped, group: group}
+		}
+		slices.SortStableFunc(children, func(a, b *core.SessionRecord) int {
+			left, right := keys[a], keys[b]
+			if left.stopped != right.stopped {
+				if left.stopped {
+					return 1
+				}
+				return -1
+			}
+			if left.group != right.group {
+				return left.group - right.group
+			}
+			return a.CompareByCreation(b)
+		})
+		return children
+	}
+	activeWorkspaceID, ok := d.ActiveWorkspaceID()
+	if !ok {
+		return []*core.SessionRecord{}
+	}
+	active := []*core.SessionRecord{}
+	for _, session := range d.listedSessionCandidates() {
+		if d.isListedTopLevelSession(session, activeWorkspaceID) {
+			active = append(active, session)
+		}
+	}
+	if d.config.Get().Advanced.SessionOrder == core.SessionOrderPriority {
+		facts := d.sessionFacts()
+		type priorityKey struct {
+			stopped  bool
+			level    AttentionLevel
+			activity uint64
+		}
+		keys := make(map[*core.SessionRecord]priorityKey, len(active))
+		for _, session := range active {
+			keys[session] = priorityKey{
+				stopped:  session.State == core.SessionStateStopped,
+				level:    facts.attentionLevel(session.ID),
+				activity: d.lastActivityMs(session.ID),
+			}
+		}
+		slices.SortStableFunc(active, func(a, b *core.SessionRecord) int {
+			left, right := keys[a], keys[b]
+			if left.stopped != right.stopped {
+				if left.stopped {
+					return 1
+				}
+				return -1
+			}
+			if left.level != right.level {
+				return int(right.level) - int(left.level)
+			}
+			if left.activity != right.activity {
+				if left.activity > right.activity {
+					return -1
+				}
+				return 1
+			}
+			return a.CompareByCreation(b)
+		})
+		return active
+	}
+	// Grouping keeps this order, so stopped sessions end each project.
+	slices.SortStableFunc(active, func(a, b *core.SessionRecord) int {
+		leftStopped, rightStopped := a.State == core.SessionStateStopped, b.State == core.SessionStateStopped
+		if leftStopped != rightStopped {
+			if leftStopped {
+				return 1
+			}
+			return -1
+		}
+		return a.CompareByCreation(b)
+	})
+	groups := map[string][]*core.SessionRecord{}
+	for _, session := range active {
+		key := d.ProjectSource(session).Key
+		groups[key] = append(groups[key], session)
+	}
+	type projectGroup struct {
+		short, full, key string
+		sessions         []*core.SessionRecord
+	}
+	ordered := make([]projectGroup, 0, len(groups))
+	for _, key := range slices.Sorted(maps.Keys(groups)) {
+		members := groups[key]
+		source := d.ProjectSource(members[0])
+		ordered = append(ordered, projectGroup{
+			short:    strings.ToLower(source.Short),
+			full:     source.Full,
+			key:      source.Key,
+			sessions: members,
+		})
+	}
+	// Display spelling must not split sessions with the same canonical key.
+	slices.SortStableFunc(ordered, func(a, b projectGroup) int {
+		if c := strings.Compare(a.short, b.short); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.full, b.full); c != 0 {
+			return c
+		}
+		return strings.Compare(a.key, b.key)
+	})
+	flat := make([]*core.SessionRecord, 0, len(active))
+	for _, group := range ordered {
+		flat = append(flat, group.sessions...)
+	}
+	return flat
 }
 
 func (d *DashboardState) ProjectSource(session *core.SessionRecord) core.ProjectSourceIdentity {
@@ -500,7 +913,33 @@ func (d *DashboardState) AttentionLevel(sessionID string) AttentionLevel {
 // its report; a child that finished its turn is taken to have handed it
 // back.
 func (d *DashboardState) subagentsNotHandedBack(parentID string) []string {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::subagents_not_handed_back")
+	ids := []string{}
+	for _, id := range d.managedActiveChildIDs(parentID) {
+		if owns, known := d.state.Get().OwnsEnvironment(id); !known || !owns {
+			ids = append(ids, id)
+		}
+	}
+	ids = append(ids, slices.Sorted(maps.Keys((*d.nativeByParent.Get())[parentID]))...)
+	children := []*core.SessionRecord{}
+	for _, id := range ids {
+		if !d.verdict(id).Unfinished {
+			continue
+		}
+		if session := d.state.Get().Sessions.GetShared(id); session != nil {
+			children = append(children, session)
+		}
+	}
+	slices.SortStableFunc(children, func(left, right *core.SessionRecord) int {
+		if c := strings.Compare(left.CreatedAt, right.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	titles := make([]string, 0, len(children))
+	for _, child := range children {
+		titles = append(titles, child.ListedTitle())
+	}
+	return titles
 }
 
 // InterruptFailure is one turn "Interrupt all" could not end: the session
@@ -511,7 +950,23 @@ type InterruptFailure struct {
 }
 
 func (d *DashboardState) InterruptAllFinished(requested int, failures []InterruptFailure) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::interrupt_all_finished")
+	if len(failures) == 0 {
+		if requested == 0 {
+			d.SetNotice("Nothing is running any more.")
+		} else {
+			d.SetNotice(fmt.Sprintf("Sent an interrupt to %s.", counted(requested, "turn", "turns")))
+		}
+		return
+	}
+	first := failures[0]
+	name := first.SessionID
+	if session := d.state.Get().Sessions.GetShared(first.SessionID); session != nil {
+		name = session.ListedTitle()
+	}
+	d.SetNotice(fmt.Sprintf(
+		"Could not interrupt %d of %s; %s: %s",
+		len(failures), counted(requested, "turn", "turns"), name, first.Error,
+	))
 }
 
 // waitingChildOf is the child whose open form makes parentID read as
@@ -572,7 +1027,54 @@ func (d *DashboardState) AttentionQueue() []AttentionEntry {
 }
 
 func (d *DashboardState) attentionQueueForWorkspace(workspaceID *string) []AttentionEntry {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::attention_queue_for_workspace")
+	type queued struct {
+		entry     AttentionEntry
+		elsewhere bool
+		activity  uint64
+	}
+	entries := []queued{}
+	for _, session := range d.state.Get().Sessions.All() {
+		if session.NotificationsIgnored {
+			continue
+		}
+		level := d.attentionNoticeLevel(session.ID)
+		if !level.NeedsPerson() {
+			continue
+		}
+		entries = append(entries, queued{
+			entry:     AttentionEntry{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Level: level},
+			elsewhere: workspaceID == nil || session.WorkspaceID != *workspaceID,
+			activity:  d.lastActivityMs(session.ID),
+		})
+	}
+	// Most urgent first, then the given workspace, then newest activity,
+	// then by id and workspace.
+	slices.SortFunc(entries, func(a, b queued) int {
+		if a.entry.Level != b.entry.Level {
+			return int(b.entry.Level) - int(a.entry.Level)
+		}
+		if a.elsewhere != b.elsewhere {
+			if a.elsewhere {
+				return 1
+			}
+			return -1
+		}
+		if a.activity != b.activity {
+			if a.activity > b.activity {
+				return -1
+			}
+			return 1
+		}
+		if c := strings.Compare(a.entry.SessionID, b.entry.SessionID); c != 0 {
+			return c
+		}
+		return strings.Compare(a.entry.WorkspaceID, b.entry.WorkspaceID)
+	})
+	queue := make([]AttentionEntry, 0, len(entries))
+	for _, entry := range entries {
+		queue = append(queue, entry.entry)
+	}
+	return queue
 }
 
 // attentionSummary is the most urgent unseen level and the number of
@@ -656,7 +1158,106 @@ func (d *DashboardState) attentionBadgeSummary() (AttentionLevel, int, bool) {
 // queue and from the top otherwise. Consecutive steps retain their starting
 // workspace preference so switching tabs cannot strand notifications.
 func (d *DashboardState) stepAttention(delta int) DashboardAction {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::step_attention")
+	selected, hasSelected := d.SelectedSessionID()
+	navigation := d.attentionNavigation
+	if navigation != nil && (!hasSelected || selected != navigation.sessionID) {
+		navigation = nil
+	}
+	activeWorkspaceID := func() *string {
+		if id, ok := d.ActiveWorkspaceID(); ok {
+			return &id
+		}
+		return nil
+	}
+	var workspaceID *string
+	if navigation != nil {
+		workspaceID = navigation.workspaceID
+	} else {
+		workspaceID = activeWorkspaceID()
+	}
+	queue := d.attentionQueueForWorkspace(workspaceID)
+	if len(queue) == 0 {
+		d.attentionNavigation = nil
+		d.SetNotice("Nothing is waiting for you.")
+		return DashboardActionNone{}
+	}
+	var from *string
+	if navigation != nil {
+		from = &navigation.queueSessionID
+	} else if hasSelected {
+		from = &selected
+	}
+	position := -1
+	if from != nil {
+		position = slices.IndexFunc(queue, func(entry AttentionEntry) bool { return entry.SessionID == *from })
+	}
+	// Resolving the selected notification ends this traversal.
+	if active := activeWorkspaceID(); position < 0 && !dashboardSessionsSameWorkspace(workspaceID, active) {
+		workspaceID = active
+		queue = d.AttentionQueue()
+	}
+	var target AttentionEntry
+	switch {
+	case position >= 0:
+		length := len(queue)
+		target = queue[((position+delta)%length+length)%length]
+	case delta < 0:
+		target = queue[len(queue)-1]
+	default:
+		target = queue[0]
+	}
+	// A parent waiting only on a child leads to the child's form, in the
+	// Sub-agents or Reviewers workspace where that child is listed.
+	var child *string
+	if target.Level == AttentionLevelWaiting {
+		if d.notificationCards != nil {
+			if card := d.notificationCards.GetShared(target.SessionID); card != nil &&
+				card.Holder != nil && *card.Holder != target.SessionID {
+				holder := *card.Holder
+				child = &holder
+			}
+		} else if holder, ok := d.waitingChildOf(target.SessionID); ok {
+			child = &holder
+		}
+	}
+	queueSessionID := target.SessionID
+	var sessionID string
+	var action DashboardAction
+	session := d.state.Get().Sessions.GetShared(target.SessionID)
+	switch {
+	case child != nil:
+		action = d.focusSessionFromCPUReport(*child)
+		sessionID = *child
+	case !d.state.Get().IsSubagentSession(target.SessionID) && session != nil && !session.State.IsActive():
+		// The row's conversation area says what to do with it; the notice
+		// names the session and what failed.
+		notice := d.NoticeNamingWorkspace(target.SessionID, fmt.Sprintf(
+			"%s stopped: %s",
+			d.sessionNoticeName(target.SessionID),
+			d.sessionFailureText(target.SessionID),
+		))
+		d.SetNotice(notice)
+		action = d.moveToSession(target.WorkspaceID, target.SessionID, false)
+		sessionID = target.SessionID
+	default:
+		action = d.focusSessionFromCPUReport(target.SessionID)
+		sessionID = target.SessionID
+	}
+	d.attentionNavigation = &AttentionNavigation{
+		sessionID:      sessionID,
+		workspaceID:    workspaceID,
+		queueSessionID: queueSessionID,
+	}
+	return action
+}
+
+// dashboardSessionsSameWorkspace compares two optional workspace ids as Rust
+// compares `Option<&str>`.
+func dashboardSessionsSameWorkspace(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // focusSessionAnywhere moves the dashboard to one session, wherever it
@@ -671,7 +1272,43 @@ func (d *DashboardState) focusSessionAnywhere(workspaceID string, sessionID stri
 }
 
 func (d *DashboardState) moveToSession(workspaceID string, sessionID string, open bool) DashboardAction {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::move_to_session")
+	if *d.childWorkspace.Get() != nil {
+		d.switchChildScope(nil)
+		d.sessionsScroll = 0
+	}
+	if active := *d.activeWorkspaceID.Get(); active == nil || *active != workspaceID {
+		if d.workspaceViews == nil {
+			d.workspaceViews = map[string]WorkspaceViewState{}
+		}
+		view, ok := d.workspaceViews[workspaceID]
+		if !ok {
+			view = WorkspaceViewState{
+				paneSizes:            core.NewPaneSizes(),
+				conversationLayout:   core.NewConversationLayout(),
+				collapsedProjectKeys: map[string]struct{}{},
+				focus:                FocusPrompt,
+			}
+		}
+		if open {
+			view.focus = FocusPrompt
+		} else {
+			view.focus = FocusSessions
+		}
+		d.workspaceViews[workspaceID] = view
+		d.pendingNavigation = &PendingNavigation{sessionID: sessionID, open: open}
+		return DashboardActionSelectWorkspace{WorkspaceID: workspaceID}
+	}
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil {
+		key := d.ProjectSource(session).Key
+		delete(*d.collapsedProjectKeys.Mut(), key)
+	}
+	d.SelectActiveSession(sessionID)
+	d.clearFilterHidingSelection()
+	if open {
+		return d.openSelectedSession()
+	}
+	d.focus = FocusSessions
+	return DashboardActionNone{}
 }
 
 // focusSessionFromCPUReport opens a session selected from the CPU report.
@@ -679,7 +1316,40 @@ func (d *DashboardState) moveToSession(workspaceID string, sessionID string, ope
 // crossing workspaces carries both the child selection and the parent view
 // to restore.
 func (d *DashboardState) focusSessionFromCPUReport(sessionID string) DashboardAction {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::focus_session_from_cpu_report")
+	session := d.state.Get().Sessions.GetShared(sessionID)
+	if session == nil {
+		return DashboardActionNone{}
+	}
+	sessionWorkspace := session.WorkspaceID
+	relation, isChild := d.state.Get().Subagents.Get(sessionID)
+	d.CancelModal()
+
+	if isChild {
+		parentID := relation.ParentSessionID
+		parent := d.state.Get().Sessions.GetShared(parentID)
+		if parent == nil {
+			return DashboardActionNone{}
+		}
+		parentWorkspace := parent.WorkspaceID
+		if active, ok := d.ActiveWorkspaceID(); ok && active == parentWorkspace {
+			if d.state.Get().Subagents.Index(sessionID).Kind == core.SubagentKindReviewer {
+				d.OpenReviewerWorkspace(parentID)
+			} else {
+				d.OpenSubagentWorkspace(parentID)
+			}
+			d.SelectActiveSession(sessionID)
+			d.clearFilterHidingSelection()
+			return d.openSelectedSession()
+		}
+
+		action := d.focusSessionAnywhere(parentWorkspace, sessionID)
+		if _, switching := action.(DashboardActionSelectWorkspace); switching {
+			d.navigationSubagentParent = &parentID
+		}
+		return action
+	}
+
+	return d.focusSessionAnywhere(sessionWorkspace, sessionID)
 }
 
 // clearFilterHidingSelection drops a Sessions filter that hides the session
@@ -722,7 +1392,56 @@ func (d *DashboardState) requestGitProbe(sessionID string) DashboardAction {
 // been read in the last minute, oldest reading first, at most limit of
 // them: the host reads every one returned, and each is recorded as read.
 func (d *DashboardState) GitProbeCandidates(now time.Time, limit int) []string {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::git_probe_candidates")
+	const refresh = 60 * time.Second
+	type probe struct {
+		probed *time.Time
+		id     string
+	}
+	due := []probe{}
+	operations := *d.sessionOperations.Get()
+	for _, session := range d.orderedSessions() {
+		if !session.State.IsActive() || session.Target == nil {
+			continue
+		}
+		if _, busy := operations[session.ID]; busy {
+			continue
+		}
+		if d.TransitionKind(session.ID) != nil {
+			continue
+		}
+		var probed *time.Time
+		if at, ok := d.gitProbeAt[session.ID]; ok {
+			probed = &at
+		}
+		if probed != nil && now.Sub(*probed) < refresh {
+			continue
+		}
+		due = append(due, probe{probed: probed, id: session.ID})
+	}
+	// Never-read sessions first, then the oldest reading, then by id.
+	slices.SortFunc(due, func(a, b probe) int {
+		switch {
+		case a.probed == nil && b.probed != nil:
+			return -1
+		case a.probed != nil && b.probed == nil:
+			return 1
+		case a.probed != nil && !a.probed.Equal(*b.probed):
+			return a.probed.Compare(*b.probed)
+		}
+		return strings.Compare(a.id, b.id)
+	})
+	// Only what the host will read this pass counts as read. The rest stay
+	// due, so the next pass reaches them.
+	due = due[:min(len(due), max(limit, 0))]
+	if d.gitProbeAt == nil {
+		d.gitProbeAt = map[string]time.Time{}
+	}
+	ids := make([]string, 0, len(due))
+	for _, entry := range due {
+		d.gitProbeAt[entry.id] = now
+		ids = append(ids, entry.id)
+	}
+	return ids
 }
 
 // gitRowText is the branch text a session row carries, when its checkout
@@ -740,11 +1459,72 @@ func (d *DashboardState) gitRowText(sessionID string) (string, bool) {
 // lists, which is exactly the set its tab badge counts. A session with no
 // row contributes to no badge, so leaving it unread hides nothing.
 func (d *DashboardState) markAllRead() DashboardAction {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::mark_all_read")
+	listed := []string{}
+	for _, session := range d.orderedSessionsUnfiltered() {
+		listed = append(listed, session.ID)
+	}
+	receipts := []client.DaemonPair[string, uint64]{}
+	for _, sessionID := range listed {
+		// Rust's Option<u64> max: any value beats None.
+		var through *uint64
+		raise := func(value uint64) {
+			if through == nil || value > *through {
+				through = &value
+			}
+		}
+		if frontier, ok := d.unreadFrontiers.Get(sessionID); ok {
+			raise(frontier)
+		}
+		if target, ok := d.notificationDismissals.Get().Get(sessionID); ok {
+			if readThrough, ok := target.(core.NotificationDismissalReadThrough); ok {
+				raise(readThrough.Value)
+			}
+		}
+		if d.notificationCards != nil {
+			if card := d.notificationCards.GetShared(sessionID); card != nil {
+				for _, entry := range card.Entries {
+					if entry.Kind == core.NotificationKindImportant {
+						raise(entry.CompletedOrdinal)
+					}
+				}
+			}
+		}
+		if through == nil {
+			continue
+		}
+		state := d.state.Mut()
+		session := state.Sessions.GetMut(sessionID)
+		if session == nil {
+			continue
+		}
+		if *through > session.ViewedThroughEventOrdinal {
+			session.ViewedThroughEventOrdinal = *through
+			if detail, ok := (*d.sessionDetails.Mut())[sessionID]; ok {
+				detail.clearUnread()
+			}
+			receipts = append(receipts, client.DaemonPair[string, uint64]{First: sessionID, Second: *through})
+		}
+	}
+	if len(receipts) == 0 {
+		d.SetNotice("No unread sessions in this workspace.")
+		return DashboardActionNone{}
+	}
+	d.SetNotice("Marked this workspace read; questions and failures stay flagged.")
+	return DashboardActionMarkAllRead{Receipts: receipts}
 }
 
 func (d *DashboardState) compatibleProfiles(sessionID string) []CompatibleProfile {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::compatible_profiles")
+	if d.SessionRecord(sessionID) == nil {
+		return []CompatibleProfile{}
+	}
+	profiles := []CompatibleProfile{}
+	config := d.config.Get()
+	for _, id := range slices.Sorted(maps.Keys(config.Profiles)) {
+		if d.profileOffered(id) {
+			profiles = append(profiles, CompatibleProfile{ID: id, Kind: config.Profiles[id].Kind})
+		}
+	}
+	return profiles
 }
 
 // profileChoice is one row of the profile picker tables: a blank indent,
@@ -780,24 +1560,153 @@ func (d *DashboardState) newWizardProfileChoice(id string) PickerChoice {
 // the same preference and remaining-headroom signals already cached on the
 // dashboard.
 func (d *DashboardState) predictedProfileForCandidates(candidates []string) (string, bool) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::predicted_profile_for_candidates")
+	var best *profilePrediction
+	for _, id := range candidates {
+		key, ok := d.profilePredictionKey(id)
+		if !ok {
+			continue
+		}
+		// min_by_key keeps the first of equal keys.
+		if best == nil || key.compare(*best) < 0 {
+			found := key
+			best = &found
+		}
+	}
+	if best == nil {
+		return "", false
+	}
+	return best.id, true
+}
+
+// compare is the lexicographic order of Rust's prediction tuple.
+func (p profilePrediction) compare(other profilePrediction) int {
+	if c := cmp.Compare(p.tier, other.tier); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(p.preferRank, other.preferRank); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(p.primary, other.primary); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(p.fiveHour, other.fiveHour); c != 0 {
+		return c
+	}
+	return strings.Compare(p.id, other.id)
 }
 
 // predictedProviderProfile is a preview of which profile in provider would
 // be used when launching with that provider row selected.
 func (d *DashboardState) predictedProviderProfile(provider core.QuotaProvider) (string, bool) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::predicted_provider_profile")
+	candidates := []string{}
+	for id, profile := range d.offeredProfiles() {
+		if profileProvider(id, &profile, &d.quotaProviders) == provider {
+			candidates = append(candidates, id)
+		}
+	}
+	return d.predictedProfileForCandidates(candidates)
 }
 
 // predictedAutoPrimaryProfile is a preview of which profile Auto (Primary)
 // would select among offered profiles whose discovered capabilities offer a
 // configured primary model.
 func (d *DashboardState) predictedAutoPrimaryProfile() (string, bool) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::predicted_auto_primary_profile")
+	config := d.config.Get()
+	choices := config.Subagents.PrimaryChoices()
+	if len(choices) == 0 {
+		return "", false
+	}
+	identities := make([]string, len(choices))
+	for index, choice := range choices {
+		identities[index] = d.profileCapabilities.ModelID(config, choice.Model)
+	}
+	candidates := []string{}
+	for id, profile := range d.offeredProfiles() {
+		entry, ok := d.profileCapabilities.Profiles[profile.CapabilitiesKey(id)]
+		if !ok || entry.Choices.Kind != core.CapabilityStateReady {
+			continue
+		}
+		models := entry.Choices.Value.Models
+		matchesPrimary := false
+		for index, choice := range choices {
+			offer, ok := core.Offer(models, identities[index], choice.Model)
+			if !ok {
+				continue
+			}
+			if choice.Effort == nil {
+				matchesPrimary = true
+				break
+			}
+			efforts, ok := entry.Efforts[offer.Value]
+			if ok && efforts.Kind == core.CapabilityStateReady && slices.ContainsFunc(efforts.Value, func(effort core.SessionConfigChoice) bool {
+				return effort.Value == *choice.Effort
+			}) {
+				matchesPrimary = true
+				break
+			}
+		}
+		if matchesPrimary {
+			candidates = append(candidates, id)
+		}
+	}
+	return d.predictedProfileForCandidates(candidates)
+}
+
+// windowRemainingPercent is quotaRemainingPercent of a window the report
+// may not have (Rust's `window().and_then(quota_remaining_percent)`).
+func windowRemainingPercent(window *client.QuotaWindow) (uint8, bool) {
+	if window == nil {
+		return 0, false
+	}
+	return quotaRemainingPercent(window)
 }
 
 func (d *DashboardState) profilePredictionKey(id string) (profilePrediction, bool) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::profile_prediction_key")
+	preferRank := slices.Index(d.config.Get().Quota.Prefer, id)
+	if preferRank < 0 {
+		preferRank = math.MaxInt
+	}
+	unknown := func(tier uint8) (profilePrediction, bool) {
+		return profilePrediction{tier: tier, preferRank: preferRank, primary: math.MaxUint8, fiveHour: math.MaxUint8, id: id}, true
+	}
+	if _, refreshing := d.quotaRefreshing[id]; refreshing {
+		return unknown(1)
+	}
+	quota, ok := d.quotas[id]
+	if !ok {
+		return unknown(1)
+	}
+	if quota.Error != nil {
+		return unknown(4)
+	}
+	if quota.IsUsagePriced() {
+		return unknown(3)
+	}
+	primary, hasPrimary := windowRemainingPercent(quota.SummaryWindow())
+	fiveHour, hasFiveHour := windowRemainingPercent(quota.FiveHourWindow())
+	if weeklyQuotaExhausted(&quota) || (hasPrimary && primary == 0) || (hasFiveHour && fiveHour == 0) {
+		return profilePrediction{}, false
+	}
+	if !hasPrimary {
+		return unknown(1)
+	}
+	fiveHourUsed := uint8(0)
+	if hasFiveHour {
+		fiveHourUsed = 100 - min(fiveHour, 100)
+	}
+	tier := uint8(0)
+	// Subscriptions at the 1% reserve floor rank behind unknown quota,
+	// matching profile_scheduler's reserve-floor tiering.
+	if primary <= 1 || (hasFiveHour && fiveHour <= 1) {
+		tier = 2
+	}
+	return profilePrediction{
+		tier:       tier,
+		preferRank: preferRank,
+		primary:    100 - min(primary, 100),
+		fiveHour:   fiveHourUsed,
+		id:         id,
+	}, true
 }
 
 // profileQuotaCells is the WEEKLY and 5H cells of a profile picker row, as
@@ -806,7 +1715,69 @@ func (d *DashboardState) profilePredictionKey(id string) (profilePrediction, boo
 // reading: a profile that is refreshing, failing, usage-priced, or out of
 // weekly quota altogether.
 func (d *DashboardState) profileQuotaCells(id string) (PickerCell, PickerCell) {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::profile_quota_cells")
+	plain := func(text string) (PickerCell, PickerCell) {
+		return pickerCellText(text), pickerCellBlank()
+	}
+	if _, refreshing := d.quotaRefreshing[id]; refreshing {
+		return plain("refreshing")
+	}
+	quota, ok := d.quotas[id]
+	if !ok {
+		return plain("refreshing")
+	}
+	if quota.Error != nil {
+		label, ok := quota.ErrorLabel()
+		if !ok {
+			label = "unavailable"
+		}
+		return plain(label)
+	}
+	if label, ok := quota.WindowlessLabel(); ok {
+		return plain(label)
+	}
+	if quota.Harness == core.HarnessKindAntigravity {
+		var pools []core.AntigravityQuotaPool
+		if profile, ok := d.config.Get().EnabledProfile(id); ok {
+			pools = profile.AntigravityPools()
+		}
+		poolCell := func(weekly bool) PickerCell {
+			parts := []string{}
+			for _, pool := range pools {
+				// A pool without this allowance has nothing to show: Argon
+				// reports no five-hour limit, and only plans that keep Argon
+				// apart report its pool at all.
+				report := quota.ForAntigravityPool(pool)
+				window := report.FiveHourWindow()
+				if weekly {
+					window = report.WeeklyWindow()
+				}
+				if window == nil {
+					continue
+				}
+				value := "?"
+				if remaining, ok := quotaRemainingPercent(window); ok {
+					value = fmt.Sprintf("%d%%", remaining)
+				}
+				parts = append(parts, fmt.Sprintf("%s %s", pool.Label(), value))
+			}
+			return pickerCellText(strings.Join(parts, " / "))
+		}
+		return poolCell(true), poolCell(false)
+	}
+	primary, ok := windowRemainingPercent(quota.SummaryWindow())
+	if !ok {
+		return plain("unavailable")
+	}
+	percent := func(value uint8) PickerCell {
+		return pickerCellStyled(fmt.Sprintf("%d%%", value), chat.Style{}.Foreground(headroomColor(value)))
+	}
+	fiveHour := pickerCellBlank()
+	if quota.WeeklyWindow() != nil && !weeklyQuotaExhausted(&quota) {
+		if remaining, ok := windowRemainingPercent(quota.FiveHourWindow()); ok {
+			fiveHour = percent(remaining)
+		}
+	}
+	return percent(primary), fiveHour
 }
 
 // selectedContainerSession is the selected session, if its target template
@@ -841,14 +1812,43 @@ func (d *DashboardState) invalidateSessionPreflight() {
 }
 
 func (d *DashboardState) ApplySuspendPreflight(preflight core.SuspendPreflight) DashboardAction {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::apply_suspend_preflight")
+	shouldQuickSuspend := false
+	if confirm, ok := d.mode.(ModeConfirm); ok {
+		if suspend, ok := confirm.confirmation.(ConfirmationSuspendSession); ok && suspend.SessionID == preflight.SessionID {
+			quick := !preflight.HasBlockers() && !preflight.HasWarnings() &&
+				!suspend.Interrupting && len(suspend.ChildrenNotHandedBack) == 0
+			received := preflight
+			suspend.Preflight = &received
+			suspend.Checking = false
+			confirm.confirmation = suspend
+			if !quick {
+				confirm.refreshForm()
+			}
+			shouldQuickSuspend = quick
+		}
+	}
+	if shouldQuickSuspend {
+		sessionID := preflight.SessionID
+		d.CancelModal()
+		return DashboardActionSuspend{SessionID: sessionID, Consent: core.SuspendConsent{}}
+	}
+	return DashboardActionNone{}
 }
 
 // DismissSuspendPreflight closes the suspend confirmation dialog if it is
 // still waiting on sessionID's preflight, leaving any unrelated modal
 // untouched.
 func (d *DashboardState) DismissSuspendPreflight(sessionID string) bool {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::dismiss_suspend_preflight")
+	matches := false
+	if confirm, ok := d.mode.(ModeConfirm); ok {
+		if suspend, ok := confirm.confirmation.(ConfirmationSuspendSession); ok {
+			matches = suspend.Checking && suspend.SessionID == sessionID
+		}
+	}
+	if matches {
+		d.CancelModal()
+	}
+	return matches
 }
 
 func (d *DashboardState) CancelModal() {
@@ -869,11 +1869,88 @@ func (d *DashboardState) quotaRows() []QuotaRow {
 }
 
 func (d *DashboardState) selectedQuotaRow() QuotaRow {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::selected_quota_row")
+	pools := d.quotaPools()
+	rows := selectableRows(pools, d.quotaExpanded)
+	// A profile's row can change type between refreshes (a status row
+	// becomes a pool or lane after its first reading, and back on a failure),
+	// so follow the profile to its row or the pool it joined before falling
+	// back to its previous pool.
+	profileRow := func(id string) QuotaRow {
+		for _, row := range rows {
+			switch row := row.(type) {
+			case QuotaRowProfile:
+				if row.ID == id {
+					return row
+				}
+			case QuotaRowLane:
+				if row.ID == id {
+					return row
+				}
+			}
+		}
+		for _, row := range rows {
+			pool, ok := row.(QuotaRowPool)
+			if !ok {
+				continue
+			}
+			for _, provider := range pools {
+				index := slices.IndexFunc(provider.Pools, func(candidate QuotaPool) bool { return candidate.Key == pool.Key })
+				if index < 0 {
+					continue
+				}
+				if slices.ContainsFunc(provider.Pools[index].Members, func(member PoolMember) bool { return member.ID == id }) {
+					return row
+				}
+				break
+			}
+		}
+		return nil
+	}
+	if selected := d.quotaSelection; selected != nil {
+		if slices.Contains(rows, selected) {
+			return selected
+		}
+		var followed QuotaRow
+		switch selected := selected.(type) {
+		case QuotaRowProfile:
+			followed = profileRow(selected.ID)
+		case QuotaRowLane:
+			followed = profileRow(selected.ID)
+		}
+		if followed != nil {
+			return followed
+		}
+		if key, ok := selected.pool(); ok && slices.Contains(rows, QuotaRow(QuotaRowPool{Key: key})) {
+			return QuotaRowPool{Key: key}
+		}
+	}
+	if len(rows) > 0 {
+		return rows[0]
+	}
+	return nil
 }
 
 func (d *DashboardState) toggleQuotaPool() {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::toggle_quota_pool")
+	row := d.selectedQuotaRow()
+	if row == nil {
+		return
+	}
+	key, ok := row.pool()
+	if !ok {
+		return
+	}
+	_, lane := row.(QuotaRowLane)
+	if index := slices.Index(d.quotaExpanded, key); lane || index >= 0 {
+		if index >= 0 {
+			d.quotaExpanded = slices.Delete(d.quotaExpanded, index, index+1)
+		}
+	} else {
+		at, _ := slices.BinarySearchFunc(d.quotaExpanded, key, PoolKey.compare)
+		d.quotaExpanded = slices.Insert(d.quotaExpanded, at, key)
+	}
+	d.quotaSelection = QuotaRowPool{Key: key}
+	quota := FocusQuota
+	d.recenterOnSelection = &quota
 }
 
 func (d *DashboardState) focusLenFor(focus Focus) int {
@@ -892,11 +1969,61 @@ func (d *DashboardState) focusLenFor(focus Focus) int {
 // setSelectionFor moves the focused list's selection to index, counted
 // among the rows currently on screen.
 func (d *DashboardState) setSelectionFor(focus Focus, index int) bool {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::set_selection_for")
+	d.recenterOnSelection = nil
+	if focus == FocusSessions {
+		d.setSessionActionFocus(nil)
+		// Choosing a row, even the current one, shows it again.
+		d.sessionsWheelScrolledFrom = nil
+	}
+	switch focus {
+	case FocusSessions:
+		sessions := d.orderedSessions()
+		visible := d.visibleSessionIndices()
+		if index < 0 || index >= len(visible) || visible[index] >= len(sessions) {
+			return false
+		}
+		next := sessions[visible[index]].ID
+		if selected, ok := d.SelectedSessionID(); ok && selected == next {
+			return false
+		}
+		d.SelectActiveSession(next)
+		return true
+	case FocusTargets:
+		if d.capacityIndex != index {
+			d.capacityIndex = index
+			return true
+		}
+		return false
+	case FocusQuota:
+		var next QuotaRow
+		if rows := d.quotaRows(); index >= 0 && index < len(rows) {
+			next = rows[index]
+		}
+		changed := d.quotaSelection != next
+		d.quotaSelection = next
+		quota := FocusQuota
+		d.recenterOnSelection = &quota
+		return changed
+	default:
+		return false
+	}
 }
 
 func (d *DashboardState) selectionFor(focus Focus) int {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::selection_for")
+	switch focus {
+	case FocusSessions:
+		index, _ := d.selectedVisibleIndex()
+		return index
+	case FocusTargets:
+		return d.capacityIndex
+	case FocusQuota:
+		selected := d.selectedQuotaRow()
+		return max(slices.IndexFunc(d.quotaRows(), func(row QuotaRow) bool {
+			return selected != nil && row == selected
+		}), 0)
+	default:
+		return 0
+	}
 }
 
 func (d *DashboardState) moveSelection(delta int) {
@@ -910,7 +2037,27 @@ func (d *DashboardState) moveSelection(delta int) {
 // wrapped note) shows its remaining lines before a single-step move leaves
 // it.
 func (d *DashboardState) scrollTallQuotaRow(delta int) bool {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::scroll_tall_quota_row")
+	viewport := d.quotaViewport
+	rendered := d.quotaRenderedSelection
+	if rendered == nil {
+		return false
+	}
+	first, last := rendered.first, rendered.last
+	offset := d.quotaScroll
+	var next int
+	switch {
+	case delta > 0 && last+1 > offset+viewport && last+1-first > viewport:
+		next = offset + 1
+	case delta < 0 && offset > first && last+1-first > viewport:
+		next = offset - 1
+	default:
+		return false
+	}
+	d.quotaScroll = next
+	if d.recenterOnSelection != nil && *d.recenterOnSelection == FocusQuota {
+		d.recenterOnSelection = nil
+	}
+	return true
 }
 
 // scrollSessionsView scrolls the Sessions list by delta rows without moving
@@ -953,5 +2100,19 @@ func (d *DashboardState) scrollSelectionFor(focus Focus, delta int) {
 // belongs to navigation and is never reassigned by row filtering or
 // refresh.
 func (d *DashboardState) clampSelections() {
-	panic("unported: mj-tui/src/dashboard_sessions.rs DashboardState::clamp_selections")
+	projectKeys := d.projectKeys()
+	// Rust's retain takes the set mutably whether or not it removes a key.
+	keys := d.collapsedProjectKeys.Mut()
+	for key := range *keys {
+		if !slices.Contains(projectKeys, key) {
+			delete(*keys, key)
+		}
+	}
+	quotaSelection := d.selectedQuotaRow()
+	if d.quotaSelection != quotaSelection && d.focus == FocusQuota {
+		quota := FocusQuota
+		d.recenterOnSelection = &quota
+	}
+	d.quotaSelection = quotaSelection
+	d.capacityIndex = min(d.capacityIndex, max(len(d.capacityDetails)-1, 0))
 }

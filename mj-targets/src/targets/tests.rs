@@ -2363,7 +2363,12 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
     )
     .unwrap();
 
-    assert!(plan.commands[1].args.windows(2).any(|args| {
+    let run = plan
+        .commands
+        .iter()
+        .find(|command| command.creates_target)
+        .unwrap();
+    assert!(run.args.windows(2).any(|args| {
         args == [
             "--mount",
             "type=bind,source=/Users/me/assets,target=/mnt/assets,readonly",

@@ -168,10 +168,8 @@ where
     let permission_elicitations = pending_elicitations.clone();
     // A bridge-local counter alone repeats after reload (and worker restart).
     // Use the same unique identity source as sessions, keeping the namespace.
-    let permission_id_prefix = format!(
-        "{TOOL_PERMISSION_ID_PREFIX}{}-",
-        mj_core::state::new_session_id()?
-    );
+    let bridge_elicitation_id = mj_core::state::new_session_id()?;
+    let permission_id_prefix = format!("{TOOL_PERMISSION_ID_PREFIX}{bridge_elicitation_id}-");
     let permission_review_ids = Arc::new(AtomicU64::new(1));
     let ext_review_ids = Arc::new(AtomicU64::new(1));
     let session_elicitations = pending_elicitations.clone();
@@ -505,48 +503,71 @@ where
                             biased;
                             () = ticket.withdrawn() => None,
                             () = cancellation.cancelled() => None,
-                            decision = guardian.review(&request, input.as_ref(), native_child) => Some(decision),
+                            decision = guardian.review(&request, input.as_ref(), native_child, &permission_id_prefix) => Some(decision),
                         };
                         let title = request.tool_call.fields.title.as_deref().map(str::trim)
                             .filter(|title| !title.is_empty()).unwrap_or("a tool call");
                         let subject = permission_title_with_command(title, input.as_ref());
-                        match decision {
+                        let settlement = match decision {
                             None => {
                                 return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                             }
-                            // Once only: an allow the harness remembers would let
-                            // later calls skip review.
-                            Some(guardian::GuardianDecision::Allow) => match guardian::allow_once_response(&request) {
-                                // Settled under the withdrawal lock: a verdict
-                                // never follows a cancel the agent was told of.
-                                Some(response) => return ticket.settle(|withdrawn| responder.respond(if withdrawn {
-                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                } else {
-                                    response
-                                })),
-                                None => guardian_preface = Some(guardian::ask_person_preface(
-                                    "the guardian allowed it, but the harness offered no way to allow it once",
-                                )),
-                            },
-                            Some(guardian::GuardianDecision::Deny { rationale }) => {
-                                let (withdrawn, answered) = ticket.settle(|withdrawn| (withdrawn, responder.respond(if withdrawn {
-                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                } else {
-                                    guardian::rejection_response(&request)
-                                })));
-                                if !withdrawn {
-                                    permission_events
-                                        .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
-                                        .await
-                                        .map_err(|_| relay_event_channel_error())?;
+                            // An allow the harness remembers would let later calls skip review.
+                            Some(guardian::GuardianDecision::Allow { review }) => {
+                                match guardian::allow_once_response(&request) {
+                                    Some(response) => Some((review, response, None)),
+                                    None => {
+                                        guardian_preface = Some(guardian::ask_person_preface(
+                                            "the guardian allowed it, but the harness offered no way to allow it once",
+                                        ));
+                                        None
+                                    }
                                 }
-                                return answered;
+                            }
+                            Some(guardian::GuardianDecision::Deny { rationale, review }) => {
+                                Some((review, guardian::rejection_response(&request), Some(rationale)))
                             }
                             // A turn withdrawn from here on still reaches the
                             // form: registering it answers `cancelled`.
                             Some(guardian::GuardianDecision::AskPerson { reason }) => {
                                 guardian_preface = Some(guardian::ask_person_preface(&reason));
+                                None
                             }
+                        };
+                        if let Some((review, response, rationale)) = settlement {
+                            // Reserve room before settling. Publication to the live context
+                            // and the journal queue share the ticket's withdrawal decision.
+                            let reserved = tokio::select! {
+                                biased;
+                                () = ticket.withdrawn() => None,
+                                () = cancellation.cancelled() => None,
+                                reserved = permission_events.reserve() => Some(reserved),
+                            };
+                            let Some(reserved) = reserved else {
+                                return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                            };
+                            let journal = reserved.map_err(|_| relay_event_channel_error())?;
+                            let (settled, tripped, answered) = ticket.settle(|withdrawn| {
+                                let withdrawn = withdrawn || cancellation.is_cancelled();
+                                let answered = responder.respond(if withdrawn {
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                } else {
+                                    response
+                                });
+                                let settled = !withdrawn && answered.is_ok();
+                                let tripped = settled && guardian.record_settled_review(review, journal);
+                                (settled, tripped, answered)
+                            });
+                            if settled && let Some(mut rationale) = rationale {
+                                if tripped {
+                                    rationale.push_str(" The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.");
+                                }
+                                permission_events
+                                    .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                            }
+                            return answered;
                         }
                     }
                     let native_child = permission_native_agents.lock().expect("native agent router poisoned")
@@ -601,16 +622,11 @@ where
                             let response = await_elicitation_response(
                                 &pending, &id, answer_rx, cancellation.cancelled(),
                             ).await;
-                            let action = response
-                                .as_ref()
-                                .map_or("cancel", PendingAnswer::action_name)
-                                .to_owned();
-                            if let Err(error) = events
-                                .send(RuntimeEvent::ElicitationResolved {
-                                    elicitation_id: id.clone(),
-                                    action,
-                                    reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
-                                })
+                            if let Err(error) = emit_elicitation_resolution(
+                                &events, &permission_parent_context, &review,
+                                response.as_ref().map_or("cancel", PendingAnswer::action_name),
+                                response.as_ref().and_then(PendingAnswer::human),
+                            )
                                 .await
                             {
                                 tracing::debug!(
@@ -726,6 +742,14 @@ where
                             pending.remove(&id);
                             None
                         };
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &permission_parent_context, &form,
+                            response.as_ref().map_or("closed", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel),
+                        ).await {
+                            tracing::debug!(%error, "harness permission result receiver closed");
+                        }
                         // ACP keeps `cancelled` for a cancelled turn. Skip is a
                         // rejection of this call alone, so it selects the
                         // request's one-time rejection. Cancel reaches here only
@@ -753,15 +777,6 @@ where
                         let result = responder.respond(answer);
                         if let Err(error) = result {
                             tracing::debug!(%error, "harness permission responder closed");
-                        }
-                        if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
-                            elicitation_id: id,
-                            action: response.as_ref().map_or("closed", PendingAnswer::action_name).into(),
-                            reply: response.as_ref().and_then(PendingAnswer::human)
-                                .filter(|response| **response != ElicitationResponse::Cancel)
-                                .map(|response| form.reply_text(response)),
-                        }).await {
-                            tracing::debug!(%error, "harness permission result receiver closed");
                         }
                     });
                     Ok(())
@@ -960,7 +975,7 @@ where
                 let method = request.method().to_owned();
                 if method == "elicitation/create" {
                     let id = format!(
-                        "elicitation-{}",
+                        "elicitation-{bridge_elicitation_id}-{}",
                         next_elicitation_id.fetch_add(1, Ordering::Relaxed)
                     );
                     let child = request.params().get("sessionId").and_then(serde_json::Value::as_str)
@@ -994,6 +1009,7 @@ where
                     let answer_rx = handler_elicitations.register(request.clone(), requesting_agent, AwayRequest::Question);
                     let pending = handler_elicitations.clone();
                     let events = elicitation_events.clone();
+                    let turn_context = ext_parent_context.clone();
                     let cancellation = responder.cancellation();
                     mj_core::runtime::spawn(async move {
                         if events
@@ -1017,16 +1033,11 @@ where
                         let response = await_elicitation_response(
                             &pending, &id, answer_rx, cancellation.cancelled(),
                         ).await;
-                        let action = response
-                            .as_ref()
-                            .map_or("cancel", PendingAnswer::action_name)
-                            .to_owned();
-                        if let Err(error) = events
-                            .send(RuntimeEvent::ElicitationResolved {
-                                elicitation_id: id.clone(),
-                                action,
-                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| request.reply_text(response)),
-                            })
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &turn_context, &request,
+                            response.as_ref().map_or("cancel", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human),
+                        )
                             .await
                         {
                             tracing::debug!(
@@ -1082,7 +1093,7 @@ where
                     return Ok(());
                 }
                 if grok::handles_exit_plan_mode(ext_harness, &method) {
-                    let id = grok::plan_review_id(ext_review_ids.fetch_add(1, Ordering::Relaxed));
+                    let id = grok::plan_review_id(&bridge_elicitation_id, ext_review_ids.fetch_add(1, Ordering::Relaxed));
                     let review = normalized_plan_review(id.clone(), request.params());
                     let requesting_agent = request.params().get("sessionId")
                         .and_then(serde_json::Value::as_str)
@@ -1091,6 +1102,7 @@ where
                     let answer_rx = handler_elicitations.register(review.clone(), requesting_agent, AwayRequest::Plan);
                     let pending = handler_elicitations.clone();
                     let events = ext_events.clone();
+                    let turn_context = ext_parent_context.clone();
                     let cancellation = responder.cancellation();
                     mj_core::runtime::spawn(async move {
                         if events
@@ -1114,16 +1126,11 @@ where
                         let response = await_elicitation_response(
                             &pending, &id, answer_rx, cancellation.cancelled(),
                         ).await;
-                        let action = response
-                            .as_ref()
-                            .map_or("cancel", PendingAnswer::action_name)
-                            .to_owned();
-                        if let Err(error) = events
-                            .send(RuntimeEvent::ElicitationResolved {
-                                elicitation_id: id.clone(),
-                                action,
-                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
-                            })
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &turn_context, &review,
+                            response.as_ref().map_or("cancel", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human),
+                        )
                             .await
                         {
                             tracing::debug!(
@@ -1482,8 +1489,6 @@ pub(super) fn turn_stall_timeout() -> Option<Duration> {
 /// when anything last arrived, and which tool calls are open.
 pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::ActivityFacts {
     mj_core::activity::ActivityFacts {
-        background_commands: spec.turn_context.counts().0,
-        queued_commands: spec.turn_context.counts().1,
         last_acp_activity_at_ms: spec.acp_activity.last_at_ms(),
         tools_in_flight: spec.tools_in_flight.snapshot(),
         ..mj_core::activity::ActivityFacts::default()
@@ -2092,6 +2097,7 @@ async fn record_refused_question(
             elicitation_id,
             action: action.into(),
             reply: None,
+            answers: None,
         })
         .await
         .map_err(|_| relay_event_channel_error())

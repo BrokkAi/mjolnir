@@ -3,7 +3,9 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"runtime"
 	"unicode/utf16"
@@ -66,4 +68,39 @@ func blobOrNull(value any) ([]byte, bool, error) {
 	default:
 		return nil, false, fmt.Errorf("Invalid column type %T", value)
 	}
+}
+
+// valuesQueryMap runs query and decodes every row with scan, collecting the
+// results: rusqlite's prepare(..).query_map(..).collect(). The rows are
+// closed before it returns, so the caller may write on the same connection.
+func valuesQueryMap[T any](conn Queryer, query string, args []any, scan func(rows *sql.Rows) (T, error)) ([]T, error) {
+	rows, err := conn.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	var collected []T
+	for rows.Next() {
+		value, err := scan(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		collected = append(collected, value)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	return collected, nil
+}
+
+// valuesOptional is rusqlite's query_row(..).optional(): false without an
+// error when the query returned no row.
+func valuesOptional(err error) (bool, error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

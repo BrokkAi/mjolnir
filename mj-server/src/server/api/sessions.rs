@@ -1,5 +1,34 @@
+use super::routes::loopback_authenticated;
 use super::*;
 use crate::server::{BackgroundTaskStopFailure, BackgroundTaskStopRequest};
+
+pub(super) async fn session_working_context(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<mj_client::http::SessionWorkingContext>, ApiFailure> {
+    super::super::validate_public_id(&session_id)?;
+    backend(&state)?
+        .session_working_context(session_id.clone())
+        .await
+        .map_err(|error| {
+            ApiFailure::unavailable(format!("working context probe failed: {error:#}"))
+        })?
+        .map(Json)
+        .ok_or_else(|| ApiFailure::not_found(format!("no session {session_id}")))
+}
+
+pub(super) async fn session_git_status(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<mj_core::local_git::SessionGitStatus>, ApiFailure> {
+    super::super::validate_public_id(&session_id)?;
+    backend(&state)?
+        .session_git_status(session_id.clone())
+        .await
+        .map_err(|error| ApiFailure::unavailable(format!("git status probe failed: {error:#}")))?
+        .map(Json)
+        .ok_or_else(|| ApiFailure::not_found(format!("no session {session_id}")))
+}
 
 /// Ask the live session actor to stop one task the current projection still
 /// shows. The snapshot check is intentionally repeated at admission time:
@@ -8,6 +37,7 @@ use crate::server::{BackgroundTaskStopFailure, BackgroundTaskStopRequest};
 pub(super) async fn stop_background_task(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<StopBackgroundTaskRequest>,
 ) -> Result<StatusCode, ApiFailure> {
     crate::server::validate_public_id(&session_id)?;
@@ -17,7 +47,9 @@ pub(super) async fn stop_background_task(
     if request.background_task_id.is_empty() || request.background_task_id.len() > 256 {
         return Err(ApiFailure::bad_request("invalid background task id"));
     }
-    {
+    // Terminal controls can also name native agents, which are absent from
+    // the viewer's task list. The actor validates those and stale task IDs.
+    if !loopback_authenticated(&state, &headers) {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         let task = session
@@ -850,44 +882,74 @@ pub(super) async fn wiki_hits(
 pub(super) async fn wiki_restore(
     State(state): State<ServerState>,
     Path(wiki_id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<WikiRestoreBody>,
-) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
+) -> Result<(StatusCode, Json<WikiRestoreResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
-    crate::server::require_named_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
-    // Also requires a launchable target.
-    let resource_allocation = new_session_allocation(&state, &request.target_id, None, None)?;
-    let session_id = backend
-        .wiki_restore(mj_client::daemon::WikiRestoreRequest {
-            wiki_id: wiki_id.clone(),
-            workspace_id: request.workspace_id.unwrap_or_default(),
-            profile_id: request.profile_id,
-            target_template_id: request.target_id,
-            project_directory: request.project_directory,
-            additional_mounts: Vec::new(),
-            resource_allocation,
-        })
-        .await
-        .map_err(|error| ApiFailure::unavailable(format!("restore failed: {error:#}")))?
-        .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
-    // Model and effort are applied the same way a new session's are, once the
-    // harness is up.
-    backend
-        .start_followup(
-            session_id.clone(),
-            StartFollowup {
-                model: request.model,
-                effort: request.effort,
-                prompt: None,
-                ..Default::default()
-            },
-        )
-        .await?;
+    let direct = loopback_authenticated(&state, &headers);
+    let include_registration = request.include_registration;
+    if !direct
+        && (include_registration
+            || !request.additional_mounts.is_empty()
+            || request.resource_allocation.is_some())
+    {
+        return Err(ApiFailure::bad_request(
+            "terminal wiki restore options require the direct daemon API",
+        ));
+    }
+    let resource_allocation = if include_registration {
+        request.resource_allocation
+    } else {
+        crate::server::require_named_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+        let default = new_session_allocation(&state, &request.target_id, None, None)?;
+        request.resource_allocation.or(default)
+    };
+    let work = state
+        .upgrade_gate
+        .enter_unless_draining("wiki restore (HTTP)")
+        .map_err(|_| ApiFailure::handoff())?;
+    // Once admitted, registration and the archived hand-off must finish
+    // together even if the HTTP client disconnects.
+    let registered = mj_core::runtime::spawn(async move {
+        let _work = work;
+        let restored = backend
+            .wiki_restore(mj_client::daemon::WikiRestoreRequest {
+                wiki_id: wiki_id.clone(),
+                workspace_id: request.workspace_id.unwrap_or_default(),
+                profile_id: request.profile_id,
+                target_template_id: request.target_id,
+                project_directory: request.project_directory,
+                additional_mounts: request.additional_mounts,
+                resource_allocation,
+            })
+            .await
+            .map_err(|error| {
+                tracing::warn!(%wiki_id, %error, "wiki restore failed");
+                ApiFailure::unavailable(format!("restore failed: {error:#}"))
+            })?
+            .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
+        // Model and effort are applied once the harness is up, as on creation.
+        backend
+            .start_followup(
+                restored.session.id.clone(),
+                StartFollowup {
+                    model: request.model,
+                    effort: request.effort,
+                    prompt: None,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok::<_, ApiFailure>(restored)
+    })
+    .await
+    .map_err(|error| ApiFailure::unavailable(format!("wiki restore task failed: {error}")))??;
+    let session_id = registered.session.id.clone();
     Ok((
         StatusCode::CREATED,
-        Json(StartSessionResponse {
+        Json(WikiRestoreResponse {
             session_id,
-            turn_id: None,
-            notice: None,
+            registered: include_registration.then_some(registered),
         }),
     ))
 }

@@ -534,7 +534,9 @@ pub fn fail_startup_group(session_id: &str, group_id: &str, error: &str) -> Resu
     let error = error.to_owned();
     submit_database_write("record startup rejection", move |connection| {
         connection.execute(
-            "UPDATE startup_steps SET phase=CASE WHEN phase='pending' THEN 'failed' ELSE 'rejecting' END,error=?3 WHERE session_id=?1 AND group_id=?2 AND phase IN ('pending','delivering','accepted')",
+            "UPDATE startup_steps SET phase='failed',error=?3
+             WHERE session_id=?1 AND group_id=?2
+               AND phase IN ('pending','delivering','accepted','rejecting')",
             params![session_id, group_id, error],
         )?;
         Ok(())
@@ -638,7 +640,8 @@ pub fn fail_unavailable_startup_groups(session_id: &str, error: &str) -> Result<
             "UPDATE startup_steps SET phase='failed',error=?2
              WHERE session_id=?1 AND group_id IS NOT NULL AND phase='pending'
                AND NOT EXISTS (SELECT 1 FROM sessions WHERE session_id=?1
-                 AND state IN ('provisioning','running','disconnected','checkpointing'))",
+                 AND state IN ('provisioning','startup-cleanup','running','disconnected',
+                               'checkpointing','closing','destroying','parked'))",
             params![session_id, error],
         )?;
         Ok(())

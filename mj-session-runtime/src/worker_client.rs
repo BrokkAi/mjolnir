@@ -39,6 +39,10 @@ const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
 /// traverse a container runtime before the relay sees `hello`. This 60-second
 /// budget applies to both initial connects and reconnect handshakes.
 const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Loaded hosts can stall observation and queue RPCs past the control deadline
+/// (#1438, #1363). Match the handshake budget while staying inside the worker's
+/// 110s and MCP's 120s sub-agent reply windows.
+const RELAY_OBSERVATION_TIMEOUT: Duration = RELAY_HANDSHAKE_TIMEOUT;
 /// An attachment can decompress a transport-sized page from cold journal
 /// segments. It remains bounded by the relay frame budget, but cold or loaded
 /// storage needs a filesystem deadline rather than an in-memory RPC deadline.
