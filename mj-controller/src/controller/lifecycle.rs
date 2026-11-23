@@ -783,6 +783,7 @@ impl Controller {
                 None,
                 LatchExclusivity::HoldThroughClose,
                 None,
+                SuspendSettlement::Suspend,
             )
             .await?
         {
@@ -800,6 +801,7 @@ impl Controller {
         manager: &SessionManagerControl,
         consent: &mj_core::suspend_consent::SuspendConsent,
         before_close: Option<BeforeClose>,
+        settlement: SuspendSettlement,
     ) -> Result<bool> {
         if consent.without_checkpoint {
             return crate::worker_lifecycle::run_admitted(admission, session_id, async {
@@ -820,10 +822,11 @@ impl Controller {
                     tracing::warn!(session_id, warning, "suspend without checkpoint warning");
                     executor.notify_notice(&warning);
                 }
-                let outcome = self.suspend_without_checkpoint(
+                let outcome = self.suspend_without_checkpoint_with(
                     session_id,
                     consent.confirm_no_checkpoint,
                     executor,
+                    |record| settlement.without_checkpoint(record),
                 )?;
                 for warning in &outcome.warnings {
                     tracing::warn!(session_id, warning, "suspend without checkpoint warning");
@@ -848,6 +851,7 @@ impl Controller {
             None,
             LatchExclusivity::HoldThroughClose,
             None,
+            settlement,
         )
         .await
     }
@@ -888,6 +892,7 @@ impl Controller {
                 LatchExclusivity::HoldThroughClose
             },
             None,
+            SuspendSettlement::TemporaryStop,
         )
         .await?;
         Ok(())
@@ -953,6 +958,7 @@ impl Controller {
                     source_relay.take(),
                     exclusivity,
                     None,
+                    SuspendSettlement::TemporaryStop,
                 )
                 .await
             },
@@ -978,6 +984,7 @@ impl Controller {
         mut held_relay: Option<super::checkpoint::ControllerRelayLease>,
         exclusivity: LatchExclusivity,
         harness_failure: Option<&mj_core::relay::WorkerHarnessStartupFailure>,
+        settlement: SuspendSettlement,
     ) -> Result<bool> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -1337,7 +1344,7 @@ impl Controller {
                 if let Some(before_close) = before_close {
                     before_close.await?;
                 }
-                return self.destroy_after_verified_checkpoint(session_id, verified, executor);
+                return self.destroy_after_verified_checkpoint(session_id, verified, executor, settlement);
             }
         }
 
@@ -1727,7 +1734,7 @@ impl Controller {
             // answer `Closed`.
             return Ok(false);
         }
-        match self.destroy_after_verified_checkpoint(session_id, &artifact.metadata, executor) {
+        match self.destroy_after_verified_checkpoint(session_id, &artifact.metadata, executor, settlement) {
             Ok(deferred) => Ok(deferred),
             Err(error) => {
                 self.record_interrupted_close(session_id, &error)?;
@@ -1935,6 +1942,7 @@ impl Controller {
         manager: &SessionManagerControl,
         consent: &mj_core::suspend_consent::SuspendConsent,
         before_close: Option<BeforeClose>,
+        settlement: SuspendSettlement,
     ) -> Result<bool> {
         if consent.without_checkpoint {
             return crate::worker_lifecycle::run_admitted(admission, session_id, async {
@@ -1955,10 +1963,11 @@ impl Controller {
                     tracing::warn!(session_id, warning, "suspend without checkpoint warning");
                     executor.notify_notice(&warning);
                 }
-                let outcome = self.suspend_without_checkpoint(
+                let outcome = self.suspend_without_checkpoint_with(
                     session_id,
                     consent.confirm_no_checkpoint,
                     executor,
+                    |record| settlement.without_checkpoint(record),
                 )?;
                 for warning in &outcome.warnings {
                     tracing::warn!(session_id, warning, "suspend without checkpoint warning");
@@ -1990,7 +1999,7 @@ impl Controller {
                 before_close.await?;
             }
             return self
-                .destroy_after_verified_checkpoint(session_id, &verified, executor)
+                .destroy_after_verified_checkpoint(session_id, &verified, executor, settlement)
                 .context(LifecycleFailureReason::Cleanup);
         }
         ensure!(
@@ -2013,7 +2022,8 @@ impl Controller {
                 admission, session_id, executor, Some(manager), None,
                 SourceTargetDisposition::Destroy, policy, consent, before_close, None,
                 LatchExclusivity::HoldThroughClose, None,
-            ).await;
+            settlement,
+).await;
         }
         let started = std::time::Instant::now();
         let mut phase = "wait for session actor";
@@ -2072,7 +2082,8 @@ impl Controller {
                     None,
                     LatchExclusivity::HoldThroughClose,
                     None,
-                )).await;
+                settlement,
+)).await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -2151,7 +2162,8 @@ impl Controller {
                             None,
                             LatchExclusivity::HoldThroughClose,
                             harness_failure.as_ref(),
-                        )
+                        settlement,
+)
                         .await;
                 }
             }
@@ -2161,7 +2173,7 @@ impl Controller {
             if let Some(before_close) = before_close {
                 before_close.await?;
             }
-            self.destroy_after_verified_checkpoint(session_id, &verified, executor)
+            self.destroy_after_verified_checkpoint(session_id, &verified, executor, settlement)
                 .context(LifecycleFailureReason::Cleanup)
         }
         .await;
@@ -2444,11 +2456,26 @@ impl Controller {
         confirm_no_checkpoint: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<SuspendWithoutCheckpointOutcome> {
+        self.stop_without_checkpoint(
+            session_id,
+            confirm_no_checkpoint,
+            executor,
+            SuspendSettlement::Suspend,
+        )
+    }
+
+    pub fn stop_without_checkpoint(
+        &mut self,
+        session_id: &str,
+        confirm_no_checkpoint: bool,
+        executor: &(impl CommandExecutor + Sync),
+        settlement: SuspendSettlement,
+    ) -> Result<SuspendWithoutCheckpointOutcome> {
         self.suspend_without_checkpoint_with(
             session_id,
             confirm_no_checkpoint,
             executor,
-            crate::database::save_lifecycle_session,
+            |record| settlement.without_checkpoint(record),
         )
     }
 
@@ -2597,13 +2624,11 @@ impl Controller {
         session_id: &str,
         verified: &CheckpointMetadata,
         executor: &(impl CommandExecutor + Sync),
+        settlement: SuspendSettlement,
     ) -> Result<bool> {
-        self.destroy_after_verified_checkpoint_with(
-            session_id,
-            verified,
-            executor,
-            crate::database::save_closed_session,
-        )
+        self.destroy_after_verified_checkpoint_with(session_id, verified, executor, |record| {
+            settlement.with_checkpoint(record)
+        })
     }
 
     pub fn destroy_after_verified_checkpoint_with(
@@ -3267,6 +3292,29 @@ impl DestroyOutcome {
     }
 }
 
+/// The durable disposition of a session stopped by the close machinery.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SuspendSettlement {
+    Suspend,
+    TemporaryStop,
+}
+
+impl SuspendSettlement {
+    fn without_checkpoint(self, record: &SessionRecord) -> Result<()> {
+        match self {
+            Self::Suspend => crate::database::save_suspended_session(record),
+            Self::TemporaryStop => crate::database::save_lifecycle_session(record),
+        }
+    }
+
+    fn with_checkpoint(self, record: &SessionRecord) -> Result<()> {
+        match self {
+            Self::Suspend => crate::database::save_closed_session(record),
+            Self::TemporaryStop => crate::database::save_temporary_close(record),
+        }
+    }
+}
+
 /// Whether an owning session has no workspace to archive. A record still
 /// `Provisioning` has never had a worker connected, so there is no relay to
 /// latch and no harness state to capture. A record mid-close or already
@@ -3297,14 +3345,14 @@ fn teardown_stopping_session(
     owns_environment: bool,
     clone_prerequisite: super::worktree::CloneRetirementPrerequisite,
 ) -> Result<bool> {
-    let Some(locator) = &session.target else {
-        return Ok(false);
-    };
     if !owns_environment {
         super::environment::stop_borrower(&session.id, config, executor)?;
         retire_worker_restart_intent(&session.id)?;
         return Ok(false);
     }
+    let Some(locator) = &session.target else {
+        return Ok(false);
+    };
     let backend = backend_locator(locator, session, config)?;
     if targets::quiesce_plan(&backend, &session.id)?.is_some() {
         super::environment::quiesce_session_environment(session, config, executor)?;

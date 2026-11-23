@@ -8742,6 +8742,7 @@ esac
                         id,
                         &RefusingExecutor("a committed destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8753,6 +8754,7 @@ esac
                         id,
                         &RefusingExecutor("a ready destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8847,7 +8849,8 @@ esac
                 mj_controller::database::settle_superseded_move_source(
                     &restored,
                     Some(&source_environment.id),
-                    &operation.operation_id
+                    &operation.operation_id,
+                    true,
                 )
                 .is_err()
             );
@@ -10295,6 +10298,22 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Missing).await;
 
+    let closed_id = "closed-borrower";
+    let workspace = &parent
+        .state
+        .session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .workspace_id;
+    let closed = runtime_test_session(closed_id, workspace, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+    let data = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(&data, closed_id, "detail", "{}")
+        .unwrap();
+
     let failure = tokio::time::timeout(
         Duration::from_secs(60),
         parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
@@ -10304,6 +10323,8 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     assert!(failure.is_err());
 
     let stored = mj_controller::database::load_state().unwrap();
+    assert!(stored.sessions.contains_key(closed_id));
+    assert!(data.join("tool-details/closed-borrower.mjtd").exists());
     let record = &stored.sessions[LATCH_RELAY_SESSION];
     assert_eq!(record.state, SessionState::Running, "{record:?}");
     assert!(
@@ -10394,6 +10415,7 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
         stored.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Stopped
     );
+    assert!(!stored.sessions.contains_key(stopped_id));
     assert!(
         !stored.sessions.contains_key(WORKING_CHILD)
             && !stored.subagents.contains_key(WORKING_CHILD),
@@ -11106,9 +11128,57 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
         )
         .unwrap()
     );
+    let closed_id = "closed-borrower";
+    let closed = runtime_test_session(closed_id, &workspace.id, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, parent_id),
+    )
+    .unwrap();
+    let item = Arc::new(mj_core::transcript::TranscriptItem {
+        stable_id: "message".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: mj_core::transcript::TranscriptBody::System {
+            text: "closed child history".into(),
+        },
+    });
+    let mut projection = mj_core::state::MaterializedSession::empty(closed_id);
+    projection.applied_event_ordinal = 1;
+    projection.applied_event_digest = format!("{:064x}", 1);
+    projection.transcript.push(item.clone());
+    mj_controller::database::save_materialized_session(&projection).unwrap();
+    let data_dir = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(
+        &data_dir,
+        closed_id,
+        &item.stable_id,
+        &serde_json::to_string(&item.body).unwrap(),
+    )
+    .unwrap();
+    let detail = data_dir
+        .join("tool-details")
+        .join(format!("{closed_id}.mjtd"));
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    let mut view = ready_startup_view();
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.window = mj_core::state::ProjectionWindow::of(&projection);
+    snapshot.materialized = projection;
+    state.owner().publish_view(closed_id.into(), view);
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    let cursor = replica.cursor.clone().unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, &cursor),
+        mj_client::runtime_feed::SessionTailReply::Tail { .. }
+    ));
+    assert!(detail.is_file());
     tokio::time::timeout(
         Duration::from_secs(60),
         state.suspend_session(parent_id.to_owned()),
@@ -11116,6 +11186,23 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     .await
     .unwrap()
     .unwrap();
+
+    replica
+        .apply(state.runtime_changes(Some(cursor), false).await.unwrap())
+        .unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, replica.cursor.as_ref().unwrap()),
+        mj_client::runtime_feed::SessionTailReply::NoTail
+    ));
+    assert!(state.session_record(closed_id).is_none());
+    assert!(!state.owner().sessions.contains_key(closed_id));
+    assert!(!state.owner().transcripts.contains_key(closed_id));
+    assert!(
+        mj_controller::database::load_materialized_session(closed_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!detail.exists());
 
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
@@ -11173,10 +11260,7 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         stored.subagents.contains_key(child_id),
         "the relation stays"
     );
-    assert!(
-        worker_root.exists(),
-        "the shared environment retains the child's private root"
-    );
+    assert!(!worker_root.exists());
     assert!(
         !root.path().join("started").exists(),
         "the parked child's worker was not started"
@@ -11440,10 +11524,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             stored.sessions[LATCH_RELAY_SESSION].state,
             SessionState::Stopped
         );
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
-        );
+        assert!(!worker_root.exists());
         let history = mj_controller::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
@@ -11512,6 +11593,19 @@ async fn exercise_child_close_with_a_nested_workspace(
         worker_root: worker_root.clone(),
     }));
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
+    let profile = mj_controller::targets::local_nested_profile_root(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&profile).unwrap();
+    let detail_data = mj_core::config::data_dir();
+    let detail_body = mj_core::transcript::TranscriptBody::System {
+        text: "spilled child detail".into(),
+    };
+    let (offset, len) = mj_controller::database::tool_details::append_tool_detail(
+        &detail_data,
+        LATCH_RELAY_SESSION,
+        "detail",
+        &serde_json::to_string(&detail_body).unwrap(),
+    )
+    .unwrap();
     let reports = repository
         .path()
         .join(".mj/agents")
@@ -11668,9 +11762,18 @@ async fn exercise_child_close_with_a_nested_workspace(
         let closed = &stored.sessions[LATCH_RELAY_SESSION];
         assert_eq!(closed.state, SessionState::Stopped);
         assert!(closed.target.is_none() && closed.checkpoint.is_none());
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
+        assert!(!worker_root.exists());
+        assert!(!profile.exists());
+        assert_eq!(
+            mj_controller::database::tool_details::read_tool_detail(
+                &detail_data,
+                LATCH_RELAY_SESSION,
+                "detail",
+                offset,
+                len,
+            )
+            .unwrap(),
+            detail_body,
         );
     }
     assert_eq!(stored.sessions[parent_id], parent);

@@ -308,21 +308,15 @@ fn borrowed_worker_cleanup_plan_scoped(
     let script = stopped
         .map(|_| ControlScript::without_control(String::new()))
         .unwrap_or_else(|| kill_worker_daemon_script(&worker_root))
-        .map_script(|mut script| {
-            script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
-            if matches!(locator, TargetLocator::LocalBare { .. }) {
-                script.push_str(&format!(
-                    "rm -rf -- {}\n",
-                    posix_quote(&local_nested_profile_root(child_session_id).to_string_lossy()),
-                ));
-            } else {
-                script.push_str(&format!(
-                    "rm -rf -- {} {}\n",
-                    posix_quote(&format!("/var/lib/hel/profiles/{child_session_id}")),
-                    posix_quote(&format!(".local/share/hel/profiles/{child_session_id}")),
-                ));
-            }
-            script
+        .map_script(|script| {
+            format!(
+                "{script}rm -rf -- {} {}\n",
+                posix_quote(&worker_root),
+                posix_quote(&super::profile_home::session_profile_root(
+                    locator,
+                    child_session_id
+                )),
+            )
         });
     let purpose = if stopped.is_some() {
         "remove a stopped borrowed-target sub-agent's private worker state"
@@ -849,4 +843,64 @@ pub fn stopped_borrowed_worker_cleanup_plan<P: StoppedWorkerProof>(
         _proof: proof,
         plan,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_borrowed_cleanup_cannot_mask_worker_root_removal_failure() {
+        struct Proof {
+            target: TargetLocator,
+            root: String,
+        }
+
+        impl StoppedWorkerProof for Proof {
+            fn session_id(&self) -> &str {
+                "child-123"
+            }
+            fn target(&self) -> &TargetLocator {
+                &self.target
+            }
+            fn root(&self) -> &str {
+                &self.root
+            }
+        }
+
+        let root = "/tmp/parent's workers/child-123";
+        let proof = Proof {
+            target: TargetLocator::LocalBare {
+                worker_root: root.into(),
+            },
+            root: root.into(),
+        };
+        let plan = stopped_borrowed_worker_cleanup_plan(proof).unwrap();
+        let script = plan.plan.commands_without_staging().unwrap()[0]
+            .args
+            .last()
+            .unwrap();
+        // Emulate rm failing for the worker operand and succeeding everywhere
+        // else, while recording every actual operand, including quoting.
+        let script = format!(
+            "rm() {{ printf '%s\\n' \"$@\"; for arg do [ \"$arg\" != {} ] || return 1; done; }}\n{script}",
+            posix_quote(root),
+        );
+        let output = ProcessExecutor
+            .execute(&CommandSpec::new("sh", ["-c", &script]))
+            .unwrap();
+        assert_ne!(output.status, 0);
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "-rf",
+                "--",
+                root,
+                local_nested_profile_root("child-123").to_str().unwrap()
+            ],
+        );
+    }
 }

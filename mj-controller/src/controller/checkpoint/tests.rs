@@ -3848,6 +3848,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await;
     channels.shutdown.shutdown().await.unwrap();
@@ -4307,6 +4308,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await;
 
@@ -4725,6 +4727,7 @@ async fn suspended_archive_serializes_compact_tool_and_terminal_bodies() {
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await;
     channels.shutdown.shutdown().await.unwrap();
