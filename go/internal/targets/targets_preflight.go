@@ -3,14 +3,18 @@
 package targets
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
@@ -148,7 +152,52 @@ const (
 // path from prompting for, or silently downloading, Apple's default kernel;
 // the manual command documented for first-time setup remains interactive.
 func EnsureAppleContainerRuntime(executor core.CommandExecutor) (AppleContainerRuntime, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs ensure_apple_container_runtime")
+	// A launch can own this gate through the unbounded ProcessExecutor used by
+	// the options API. Daemon shutdown joins the cancellable startup and image
+	// refresh callers, so they must be able to leave while waiting for it.
+	backoff := time.Millisecond
+	for {
+		if executor.CancellationRequested() {
+			return 0, errors.New("operation cancelled while waiting to check Apple container runtime")
+		}
+		if appleContainerEnsure.TryLock() {
+			break
+		}
+		time.Sleep(backoff)
+		backoff = min(backoff*2, 50*time.Millisecond)
+	}
+	defer appleContainerEnsure.Unlock()
+	if executor.CancellationRequested() {
+		return 0, errors.New("operation cancelled while checking Apple container runtime")
+	}
+
+	status, err := AppleContainerRuntimeStatus(executor)
+	if err != nil {
+		return 0, err
+	}
+	if status.Kind == AppleContainerStatusRunning {
+		return AppleContainerRuntimeRunning, nil
+	}
+
+	start := core.NewCommandSpec("container", []string{"system", "start", "--disable-kernel-install"}).
+		WithPurpose("start Apple container runtime").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning})
+	output, err := executor.Execute(&start)
+	if err != nil {
+		return 0, err
+	}
+	if output.Status != 0 {
+		return 0, fmt.Errorf("container system start failed with status %d: %s", output.Status, appleContainerOutput(&output))
+	}
+
+	status, err = AppleContainerRuntimeStatus(executor)
+	if err != nil {
+		return 0, err
+	}
+	if status.Kind == AppleContainerStatusRunning {
+		return AppleContainerRuntimeStarted, nil
+	}
+	return 0, fmt.Errorf("container system status still failed after start with status %d: %s", status.Status, status.Detail)
 }
 
 // AppleContainerStatusKind names an AppleContainerStatus variant.
@@ -246,7 +295,96 @@ type AppleContainerPreflight struct {
 // Platform support comes first: a Linux host has no `container` command and
 // no reason to be told to install one.
 func VerifySSHAppleContainer(ssh *core.SshTarget, executor core.CommandExecutor) (AppleContainerPreflight, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs verify_ssh_apple_container")
+	if err := core.ValidateSSH(ssh); err != nil {
+		return AppleContainerPreflight{}, err
+	}
+	destination := ssh.Destination
+	probe := func(args [2]string, purpose string) core.CommandSpec {
+		return core.SSHValidationCommand(ssh, []string{args[0], args[1]}, purpose).
+			WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning})
+	}
+	reported := func(command core.CommandSpec) (string, error) {
+		output, err := executor.Execute(&command)
+		if err != nil {
+			return "", fmt.Errorf("Apple container preflight on %s could not run `%s`: %w", destination, command.Purpose, err)
+		}
+		if output.Status != 0 {
+			return "", fmt.Errorf("Apple container preflight failed on %s: `%s` exited with status %d: %s",
+				destination, command.Purpose, output.Status, strings.TrimSpace(preflightLossy(output.Stderr)))
+		}
+		return strings.TrimSpace(preflightLossy(output.Stdout)), nil
+	}
+
+	uname, err := reported(probe(PreflightPlatformProbe, "detect the Apple container host platform"))
+	if err != nil {
+		return AppleContainerPreflight{}, err
+	}
+	platform, err := TargetPlatformParse(uname)
+	if err != nil {
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight failed on %s: the host reported %s: %w",
+			destination, core.RustDebugString(uname), err)
+	}
+	if platform.Os != TargetOsDarwin {
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight failed on %s: Apple container runs only on macOS, and this host reports %s.",
+			destination, core.RustDebugString(uname))
+	}
+	if platform.Architecture != "aarch64" {
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight failed on %s: Apple container requires Apple silicon, and this host reports %s.",
+			destination, core.RustDebugString(uname))
+	}
+
+	macosVersion, err := reported(probe(AppleContainerMacosProbe, "detect the remote macOS release"))
+	if err != nil {
+		return AppleContainerPreflight{}, err
+	}
+	majorText, _, _ := strings.Cut(macosVersion, ".")
+	major, ok := preflightParseU32(majorText)
+	if !ok {
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight failed on %s: `sw_vers -productVersion` printed %s",
+			destination, core.RustDebugString(macosVersion))
+	}
+	if major < AppleContainerMinimumMacos {
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight failed on %s: Apple container requires macOS %d or newer, and this host runs %s.",
+			destination, AppleContainerMinimumMacos, macosVersion)
+	}
+
+	version, err := reported(probe(AppleContainerVersionProbe, "check the remote Apple container installation"))
+	if err != nil {
+		return AppleContainerPreflight{}, err
+	}
+	// `container system status` exits nonzero while the daemon is stopped, so
+	// it is checked for its status rather than its words.
+	status := core.SSHValidationCommand(ssh, AppleContainerStatusProbe[:], "check the remote Apple container daemon").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning})
+	output, err := executor.Execute(&status)
+	if err != nil {
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight on %s could not query the daemon: %w", destination, err)
+	}
+	if output.Status != 0 {
+		var messages []string
+		for _, message := range []string{strings.TrimSpace(preflightLossy(output.Stdout)), strings.TrimSpace(preflightLossy(output.Stderr))} {
+			if message != "" {
+				messages = append(messages, message)
+			}
+		}
+		return AppleContainerPreflight{}, fmt.Errorf("Apple container preflight failed on %s: the Apple container daemon is not running (%s). Start it there with `container system start`.",
+			destination, strings.Join(messages, " "))
+	}
+	return AppleContainerPreflight{MacosVersion: macosVersion, Version: version}, nil
+}
+
+// preflightParseU32 is Rust's `str::parse::<u32>`: decimal digits with an
+// optional leading `+`.
+func preflightParseU32(text string) (uint32, bool) {
+	text = strings.TrimPrefix(text, "+")
+	if text == "" || strings.HasPrefix(text, "+") || strings.HasPrefix(text, "-") {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(text, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(value), true
 }
 
 // AppleContainerMinimumMacos is the oldest macOS release Apple's official
@@ -345,7 +483,14 @@ type DockerUnavailable struct {
 	Kind     DockerUnavailableKind
 	Status   int
 	Reported string
+	// source is the error this reason was attached to as context, the way
+	// anyhow's `.context(DockerUnavailable::NotInstalled)` keeps the failed
+	// spawn on the chain for callers that classify it. Never shown.
+	source error
 }
+
+// Unwrap is the error the reason was attached to, if any.
+func (d DockerUnavailable) Unwrap() error { return d.source }
 
 // Remedy is what to do before Docker can run sessions, for a check made
 // before anything is launched, such as the session wizard's target row. It
@@ -430,7 +575,47 @@ var DockerServerVersion = [4]string{
 }
 
 func verifyDocker(ssh *core.SshTarget, executor core.CommandExecutor) (DockerPreflight, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs verify_docker")
+	command := core.NewCommandSpec(DockerServerVersion[0], DockerServerVersion[1:]).
+		WithPurpose("check Docker daemon").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning})
+	if ssh != nil {
+		command = commandOverSSH(core.SshTrafficClassControl, command, ssh)
+	}
+	output, err := executor.Execute(&command)
+	if err != nil {
+		// Over SSH a missing program would be `ssh` itself, which the SSH
+		// checks report; only a local one means Docker is not installed.
+		// The cause stays in the chain for callers that classify it.
+		if ssh == nil && isMissingProgram(err) {
+			return DockerPreflight{}, DockerUnavailable{Kind: DockerUnavailableNotInstalled, source: err}
+		}
+		return DockerPreflight{}, fmt.Errorf("Docker preflight failed: run `docker info` as the user running Mjolnir: %w", err)
+	}
+	if output.Status != 0 {
+		reported := strings.TrimSpace(preflightLossy(output.Stderr))
+		if ssh == nil {
+			if dockerDaemonNotRunning(reported) {
+				return DockerPreflight{}, DockerUnavailable{Kind: DockerUnavailableNotRunning, Reported: reported}
+			}
+			return DockerPreflight{}, DockerUnavailable{Kind: DockerUnavailableNotAnswering, Status: output.Status, Reported: reported}
+		}
+		return DockerPreflight{}, fmt.Errorf("Docker preflight failed: `docker version` exited with status %d: %s. Run `docker info` as the user running Mjolnir. See %s.",
+			output.Status, reported, DockerDocumentationURL)
+	}
+	reported := preflightLossy(output.Stdout)
+	fields := strings.Fields(reported)
+	var version, os string
+	if len(fields) > 0 {
+		version = fields[0]
+	}
+	if len(fields) > 1 {
+		os = fields[1]
+	}
+	if version == "" || os != "linux" {
+		return DockerPreflight{}, fmt.Errorf("Docker preflight failed: expected a Linux Docker daemon, got %s. See %s.",
+			core.RustDebugString(strings.TrimSpace(reported)), DockerDocumentationURL)
+	}
+	return DockerPreflight{Version: version}, nil
 }
 
 // VerifySSHPodman verifies the same rootless Podman preconditions on an SSH
@@ -439,7 +624,54 @@ func verifyDocker(ssh *core.SshTarget, executor core.CommandExecutor) (DockerPre
 // The probes run through the noninteractive SSH options, so an unreachable
 // host fails fast instead of blocking doctor or session preflight.
 func VerifySSHPodman(ssh *core.SshTarget, executor core.CommandExecutor) (PodmanPreflight, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs verify_ssh_podman")
+	host := podmanHost{ssh: ssh}
+	if err := core.ValidateSSH(ssh); err != nil {
+		return PodmanPreflight{}, fmt.Errorf("%s: the configured SSH destination is unusable (%s). Set a valid `host` (and optional `user`) for this ssh-podman target. See %s.",
+			host.failure(), err, PodmanDocumentationURL)
+	}
+	// One SSH round trip carries every probe; a remote shell runs them in
+	// sequence and frames each result so the checks below stay unchanged.
+	probes, err := runSSHPodmanProbes(host, executor)
+	if err != nil {
+		return PodmanPreflight{}, err
+	}
+	platform, ok := probes[platformProbeKey]
+	macosHost := ok && platform.Status == 0 && string(preflightTrimASCII(platform.Stdout)) == "Darwin"
+	preflight, err := verifyPodmanProbes(host, macosHost, func(probe PodmanProbe) (core.CommandOutput, error) {
+		output, ok := probes[probe.Key()]
+		if !ok {
+			message, _ := sshTransportFailure(host, fmt.Sprintf("the preflight output ended before the %s probe", probe.Key()))
+			return core.CommandOutput{}, errors.New(message)
+		}
+		return checkPodmanProbeStatus(host, probe, output)
+	})
+	if err != nil {
+		return PodmanPreflight{}, err
+	}
+	// Lingering is systemd's: a Mac has no `loginctl`, and its engine is the
+	// Podman machine rather than a user service.
+	if !macosHost {
+		var linger *core.CommandOutput
+		if output, ok := probes[lingerProbeKey]; ok {
+			linger = &output
+		}
+		if warning := sshPodmanLingerWarning(ssh, linger); warning != nil {
+			preflight.Warnings = append(preflight.Warnings, *warning)
+		}
+	}
+	return preflight, nil
+}
+
+// preflightTrimASCII is Rust's `<[u8]>::trim_ascii`.
+func preflightTrimASCII(data []byte) []byte {
+	isSpace := func(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\f' || b == '\r' }
+	for len(data) > 0 && isSpace(data[0]) {
+		data = data[1:]
+	}
+	for len(data) > 0 && isSpace(data[len(data)-1]) {
+		data = data[:len(data)-1]
+	}
+	return data
 }
 
 // PodmanPostcondition is one rootless Podman postcondition, with the wording
@@ -605,7 +837,57 @@ func verifyPodman(host podmanHost, executor core.CommandExecutor) (PodmanPreflig
 // macosHost says the host running `podman` is a Mac, whose engine is always
 // its Podman machine.
 func verifyPodmanProbes(host podmanHost, macosHost bool, probeOutput func(PodmanProbe) (core.CommandOutput, error)) (PodmanPreflight, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs verify_podman_probes")
+	versionOutput, err := probeOutput(PodmanProbeVersion)
+	if err != nil {
+		return PodmanPreflight{}, err
+	}
+	version, err := parsePodmanVersion(host, versionOutput.Stdout)
+	if err != nil {
+		return PodmanPreflight{}, err
+	}
+
+	infoOutput, err := probeOutput(PodmanProbeInfo)
+	if err != nil {
+		return PodmanPreflight{}, err
+	}
+	info, err := parsePodmanInfo(host, infoOutput.Stdout)
+	if err != nil {
+		return PodmanPreflight{}, err
+	}
+
+	if !info.rootless {
+		return PodmanPreflight{}, probeFailure(host, PodmanPostconditionRootless, fmt.Sprintf(
+			"%s: %s was not met. `podman info` reports rootful mode.",
+			host.failure(), PodmanPostconditionRootless.statement()))
+	}
+
+	// A remote client is expected only on a Mac, whose Podman machine is
+	// that host's engine whether Mjolnir runs there or reaches it over SSH.
+	// On Linux, `serviceIsRemote` means CONTAINER_HOST or a selected
+	// connection points this target at another host's engine, whose paths and
+	// containers are not the ones Mjolnir records.
+	if info.serviceIsRemote && !macosHost {
+		return PodmanPreflight{}, probeFailure(host, PodmanPostconditionRemote, fmt.Sprintf(
+			"%s: %s was not met. `podman info` reports serviceIsRemote=true.",
+			host.failure(), PodmanPostconditionRemote.statement()))
+	}
+
+	for _, containerID := range []uint64{0, 1} {
+		if !info.coversUID(containerID) {
+			return PodmanPreflight{}, probeFailure(host, PodmanPostconditionUIDMap, fmt.Sprintf(
+				"%s: %s was not met. `podman info` reports UID map %s.",
+				host.failure(), PodmanPostconditionUIDMap.statement(), info.uidMapDescription()))
+		}
+	}
+
+	var warnings []PodmanPreflightWarning
+	if len(info.unenforceableLimits) != 0 {
+		warnings = append(warnings, PodmanPreflightWarning{
+			Detail:      UnenforceableLimitsDetail(info.unenforceableLimits),
+			Remediation: host.remediationScope() + CgroupDelegationRemediation,
+		})
+	}
+	return PodmanPreflight{Version: version, Warnings: warnings}, nil
 }
 
 // CgroupLimit is a session container limit that rootless Podman applies
@@ -751,7 +1033,82 @@ func (i *podmanInfo) uidMapDescription() string {
 // `podman info` reports the server's view, so it works for local Rootless
 // Podman, a remote Podman machine, and an SSH host alike.
 func parsePodmanInfo(host podmanHost, stdout []byte) (podmanInfo, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs parse_podman_info")
+	value, err := preflightDecodeJSON(stdout)
+	if err != nil {
+		return podmanInfo{}, probeFailure(host, PodmanPostconditionInfo, fmt.Sprintf(
+			"%s: `podman info --format json` returned unparsable output: %s.", host.failure(), err))
+	}
+	rootless, ok := preflightPointer(value, "host", "security", "rootless").(bool)
+	if !ok {
+		return podmanInfo{}, podmanInfoFailure(host, "it did not report rootless mode")
+	}
+	serviceIsRemote, _ := preflightPointer(value, "host", "serviceIsRemote").(bool)
+	entries, ok := preflightPointer(value, "host", "idMappings", "uidmap").([]any)
+	if !ok {
+		return podmanInfo{}, podmanInfoFailure(host, "it did not report a UID map")
+	}
+	uidMap := make([][3]uint64, 0, len(entries))
+	for _, entry := range entries {
+		var mapping [3]uint64
+		for i, name := range []string{"container_id", "host_id", "size"} {
+			number, ok := preflightU64(preflightPointer(entry, name))
+			if !ok {
+				return podmanInfo{}, podmanInfoFailure(host, "it reported a UID mapping without "+name)
+			}
+			mapping[i] = number
+		}
+		uidMap = append(uidMap, mapping)
+	}
+	var limits []CgroupLimit
+	if object, ok := value.(map[string]any); ok {
+		if hostValue, ok := object["host"]; ok {
+			limits = unenforceableLimits(hostValue)
+		}
+	}
+	return podmanInfo{
+		rootless:            rootless,
+		serviceIsRemote:     serviceIsRemote,
+		uidMap:              uidMap,
+		unenforceableLimits: limits,
+	}, nil
+}
+
+// preflightDecodeJSON decodes one JSON value as serde_json::Value does,
+// keeping integers exact.
+func preflightDecodeJSON(data []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("trailing characters after the JSON value")
+	}
+	return value, nil
+}
+
+// preflightPointer is serde_json's `Value::pointer` over object keys: nil
+// when any step is missing or not an object.
+func preflightPointer(value any, keys ...string) any {
+	for _, key := range keys {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		value = object[key]
+	}
+	return value
+}
+
+// preflightU64 is serde_json's `Value::as_u64`.
+func preflightU64(value any) (uint64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseUint(number.String(), 10, 64)
+	return parsed, err == nil
 }
 
 func podmanInfoFailure(host podmanHost, observation string) error {
@@ -762,7 +1119,45 @@ func podmanInfoFailure(host podmanHost, observation string) error {
 // or an unavailable durability check. Neither condition makes an otherwise
 // usable target fail. A nil output means the probe's result was missing.
 func sshPodmanLingerWarning(ssh *core.SshTarget, output *core.CommandOutput) *PodmanPreflightWarning {
-	panic("unported: mj-targets/src/targets/preflight.rs ssh_podman_linger_warning")
+	if output == nil {
+		warning := lingerUnavailableWarning(ssh, "the probe could not run: the preflight output did not include it")
+		return &warning
+	}
+	linger := preflightLossy(output.Stdout)
+	value := preflightASCIILower(strings.TrimSpace(linger))
+	switch {
+	case output.Status == 0 && value == "yes":
+		return nil
+	case output.Status == 0 && value == "no":
+		return &PodmanPreflightWarning{
+			Detail:      fmt.Sprintf("Remote user lingering is disabled on %s; SSH-Podman sessions may be terminated when the last SSH connection closes.", ssh.Destination),
+			Remediation: fmt.Sprintf("On %s, run `sudo loginctl enable-linger \"$(id -un)\"`.", ssh.Destination),
+		}
+	}
+	status := output.Status
+	stderr := strings.TrimSpace(preflightLossy(output.Stderr))
+	var reason string
+	switch {
+	case status == 127 || strings.Contains(stderr, "loginctl: not found"):
+		reason = "`loginctl` was not found; this host may not use systemd"
+	case status != 0:
+		reason = fmt.Sprintf("`loginctl` exited with status %d: %s", status, stderr)
+	default:
+		reason = fmt.Sprintf("`loginctl` returned an unrecognized Linger value %s", core.RustDebugString(linger))
+	}
+	warning := lingerUnavailableWarning(ssh, reason)
+	return &warning
+}
+
+// preflightASCIILower is Rust's `str::to_ascii_lowercase`.
+func preflightASCIILower(text string) string {
+	lowered := []byte(text)
+	for i, b := range lowered {
+		if 'A' <= b && b <= 'Z' {
+			lowered[i] = b + ('a' - 'A')
+		}
+	}
+	return string(lowered)
 }
 
 func lingerUnavailableWarning(ssh *core.SshTarget, reason string) PodmanPreflightWarning {
@@ -801,7 +1196,28 @@ func podmanProbeRunFailure(host podmanHost, probe PodmanProbe, reported string) 
 }
 
 func checkPodmanProbeStatus(host podmanHost, probe PodmanProbe, output core.CommandOutput) (core.CommandOutput, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs check_podman_probe_status")
+	// `ssh` reserves this status for its own connection failures; the Podman
+	// probes never produce it. Reporting that case separately keeps an
+	// unreachable host from being mistaken for a broken Podman installation.
+	if output.Status == core.SSHTransportExitStatus {
+		if message, ok := sshTransportFailure(host, strings.TrimSpace(preflightLossy(output.Stderr))); ok {
+			return core.CommandOutput{}, errors.New(message)
+		}
+	}
+	if output.Status != 0 {
+		stderr := strings.TrimSpace(preflightLossy(output.Stderr))
+		postcondition := probe.postcondition()
+		// Podman's message is usually a sentence without a final period.
+		// End it before the remediation starts, so the fix does not read as
+		// part of the command output.
+		reported := stderr + "."
+		if strings.HasSuffix(stderr, ".") || strings.HasSuffix(stderr, "!") || strings.HasSuffix(stderr, "?") {
+			reported = stderr
+		}
+		return core.CommandOutput{}, probeFailure(host, postcondition, fmt.Sprintf(
+			"%s: %s failed. Podman reported: %s", host.failure(), postcondition.statement(), reported))
+	}
+	return output, nil
 }
 
 const (
@@ -857,7 +1273,23 @@ exit 0
 `
 
 func runSSHPodmanProbes(host podmanHost, executor core.CommandExecutor) (map[string]core.CommandOutput, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs run_ssh_podman_probes")
+	command := host.command([]string{"sh", "-c", SSHPodmanPreflightScript}, "check remote Podman prerequisites")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return nil, podmanProbeRunFailure(host, PodmanProbeVersion, err.Error())
+	}
+	if output.Status == core.SSHTransportExitStatus {
+		if message, ok := sshTransportFailure(host, strings.TrimSpace(preflightLossy(output.Stderr))); ok {
+			return nil, errors.New(message)
+		}
+	}
+	probes := parsePodmanProbeOutput(output.Stdout)
+	if _, ok := probes[PodmanProbeVersion.Key()]; !ok {
+		return nil, podmanProbeRunFailure(host, PodmanProbeVersion, fmt.Sprintf(
+			"the preflight probes returned unparsable output (status %d): %s",
+			output.Status, strings.TrimSpace(preflightLossy(output.Stderr))))
+	}
+	return probes, nil
 }
 
 // ProbeFixture is one probe result for SSHPodmanProbeFixture (Rust passes a
@@ -901,7 +1333,70 @@ func parsePodmanProbeOutput(stdout []byte) map[string]core.CommandOutput {
 // ParseFramedProbes splits framed output into one result per probe, as
 // parsePodmanProbeOutput does for frames.
 func ParseFramedProbes(stdout []byte, frames ProbeFrames) map[string]core.CommandOutput {
-	panic("unported: mj-targets/src/targets/preflight.rs parse_framed_probes")
+	lines := preflightLines(preflightLossy(stdout))
+	blocks := map[string]string{}
+	probes := map[string]core.CommandOutput{}
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
+		if rest, ok := strings.CutPrefix(line, frames.Begin); ok {
+			if name, ok := strings.CutPrefix(rest, " "); ok && name != "" {
+				var body []string
+				closed := false
+				for index++; index < len(lines); index++ {
+					if lines[index] == frames.End {
+						closed = true
+						break
+					}
+					body = append(body, lines[index])
+				}
+				if closed {
+					blocks[name] = strings.Join(body, "\n")
+				}
+				continue
+			}
+		}
+		rest, ok := strings.CutPrefix(line, frames.Status)
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[0]
+		status, err := strconv.ParseInt(fields[1], 10, 32)
+		out, outOK := blocks[name+".stdout"]
+		if outOK {
+			delete(blocks, name+".stdout")
+		}
+		errText, errOK := blocks[name+".stderr"]
+		if errOK {
+			delete(blocks, name+".stderr")
+		}
+		if err != nil || !outOK || !errOK {
+			continue
+		}
+		probes[name] = core.CommandOutput{Status: int(status), Stdout: []byte(out), Stderr: []byte(errText)}
+	}
+	return probes
+}
+
+// preflightLines is Rust's `str::lines`: lines end at `\n` or `\r\n`, and a
+// final line ending adds no empty line.
+func preflightLines(text string) []string {
+	var lines []string
+	for text != "" {
+		line := text
+		next := ""
+		if index := strings.IndexByte(text, '\n'); index >= 0 {
+			line = text[:index]
+			next = text[index+1:]
+			line = strings.TrimSuffix(line, "\r")
+		}
+		lines = append(lines, line)
+		text = next
+	}
+	return lines
 }
 
 func sshTransportFailure(host podmanHost, reported string) (string, bool) {
@@ -914,7 +1409,40 @@ func sshTransportFailure(host podmanHost, reported string) (string, bool) {
 }
 
 func parsePodmanVersion(host podmanHost, stdout []byte) (string, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs parse_podman_version")
+	failure := host.failure()
+	version := strings.TrimSpace(preflightLossy(stdout))
+	unreadable := func() error {
+		return probeFailure(host, PodmanPostconditionVersion, fmt.Sprintf(
+			"%s: %s returned %s.", failure, PodmanPostconditionVersion.statement(), core.RustDebugString(version)))
+	}
+	candidate := ""
+	for _, part := range strings.Fields(version) {
+		if part[0] >= '0' && part[0] <= '9' {
+			candidate = part
+			break
+		}
+	}
+	if candidate == "" {
+		return "", unreadable()
+	}
+	numbers := strings.Split(candidate, ".")
+	major, ok := preflightParseU32(numbers[0])
+	if !ok {
+		return "", unreadable()
+	}
+	// A version with no minor component, such as `podman version 4`, names
+	// the earliest release of that series.
+	var minor uint32
+	if len(numbers) > 1 {
+		if parsed, ok := preflightParseU32(numbers[1]); ok {
+			minor = parsed
+		}
+	}
+	if major < podmanMinimumVersion[0] || (major == podmanMinimumVersion[0] && minor < podmanMinimumVersion[1]) {
+		return "", probeFailure(host, PodmanPostconditionVersion, fmt.Sprintf(
+			"%s: %s was not met (found %s).", failure, PodmanPostconditionVersion.statement(), candidate))
+	}
+	return candidate, nil
 }
 
 // filesystemTypesScript prints the filesystem type of each argument, one per
@@ -959,7 +1487,28 @@ done`
 // The reply is positional, so the whole batch fails unless the host answered
 // for every directory in order.
 func ProbeFilesystemTypes(ssh *core.SshTarget, paths []string, executor core.CommandExecutor) ([]string, error) {
-	panic("unported: mj-targets/src/targets/preflight.rs probe_filesystem_types")
+	if len(paths) == 0 {
+		return []string{}, nil
+	}
+	args := []string{"sh", "-c", filesystemTypesScript, "hel-filesystem"}
+	args = append(args, paths...)
+	command := podmanHost{ssh: ssh}.command(args, "probe mount source filesystem")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return nil, err
+	}
+	if output.Status != 0 {
+		return nil, fmt.Errorf("filesystem probe failed with status %d: %s", output.Status, strings.TrimSpace(preflightLossy(output.Stderr)))
+	}
+	lines := preflightLines(preflightLossy(output.Stdout))
+	types := make([]string, 0, len(lines))
+	for _, line := range lines {
+		types = append(types, strings.TrimSpace(line))
+	}
+	if len(types) != len(paths) {
+		return nil, fmt.Errorf("filesystem probe named %d filesystems for %d directories", len(types), len(paths))
+	}
+	return types, nil
 }
 
 // preflightLossy is Rust's String::from_utf8_lossy.

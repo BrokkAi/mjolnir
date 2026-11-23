@@ -111,7 +111,39 @@ func NitroInfoCommand(ssh *core.SshTarget) core.CommandSpec {
 // ParseNitroInfo parses the engine's report, and says what is wrong with a
 // host that cannot run a sandbox.
 func ParseNitroInfo(destination string, stdout []byte) (NitroPreflight, error) {
-	panic("unported: mj-targets/src/targets/nitro.rs parse_nitro_info")
+	var info NitroEngineInfo
+	if err := json.Unmarshal(stdout, &info); err != nil {
+		return NitroPreflight{}, fmt.Errorf("decode the Nitro sandbox engine report from %s: %w", destination, err)
+	}
+	if strings.TrimSpace(info.FirecrackerVersion) == "" {
+		return NitroPreflight{}, fmt.Errorf("Nitro sandbox preflight failed on %s: Firecracker is not installed. "+
+			"Create the host with `mj ec2 create --runtime nitro`.", destination)
+	}
+	if info.MemoryPoolTotalMib == 0 {
+		return NitroPreflight{}, fmt.Errorf("Nitro sandbox preflight failed on %s: no memory is reserved for sandboxes. "+
+			"Boot the host with `nitro_enclaves.mempool=95%%-1G` and restart it.", destination)
+	}
+	kernel, err := kernelRelease(info.KernelVersion)
+	if err != nil {
+		return NitroPreflight{}, fmt.Errorf("Nitro sandbox preflight failed on %s: the host reports kernel %s: %w",
+			destination, core.RustDebugString(info.KernelVersion), err)
+	}
+	if kernelOlder(kernel, kernelMinimum) {
+		return NitroPreflight{}, fmt.Errorf("Nitro sandbox preflight failed on %s: kernel %s is older than %d.%d.%d, "+
+			"the oldest with Nitro Sandbox support.",
+			destination, info.KernelVersion, kernelMinimum[0], kernelMinimum[1], kernelMinimum[2])
+	}
+	return NitroPreflight{Info: info}, nil
+}
+
+// kernelOlder compares two kernel releases as Rust compares tuples.
+func kernelOlder(release, minimum [3]uint32) bool {
+	for i := range release {
+		if release[i] != minimum[i] {
+			return release[i] < minimum[i]
+		}
+	}
+	return false
 }
 
 func kernelRelease(release string) ([3]uint32, error) {
@@ -143,7 +175,20 @@ func (e NitroEngineUnavailable) Error() string {
 // the engine first, because the engine is the worker binary and nothing here
 // can run without it.
 func VerifySSHNitro(ssh *core.SshTarget, executor core.CommandExecutor) (NitroPreflight, error) {
-	panic("unported: mj-targets/src/targets/nitro.rs verify_ssh_nitro")
+	if err := core.ValidateSSH(ssh); err != nil {
+		return NitroPreflight{}, err
+	}
+	command := NitroInfoCommand(ssh)
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return NitroPreflight{}, fmt.Errorf("Nitro sandbox preflight on %s could not run `%s`: %w", ssh.Destination, command.Purpose, err)
+	}
+	if output.Status != 0 {
+		return NitroPreflight{}, NitroEngineUnavailable(fmt.Sprintf(
+			"Nitro sandbox preflight failed on %s: `%s` exited with status %d: %s",
+			ssh.Destination, command.Purpose, output.Status, strings.TrimSpace(preflightLossy(output.Stderr))))
+	}
+	return ParseNitroInfo(ssh.Destination, output.Stdout)
 }
 
 // NitroWorkspaceVolume names the workspace volume the engine creates for a
@@ -167,14 +212,89 @@ type NitroMbxRemote struct {
 // namespaces) and with options spelled the way the engine contract lists
 // them.
 func nitroRunArgs(template *core.TargetsContainerTemplate, name string, sessionID string, additionalMounts []core.AdditionalMount, workspaceRoot string, mbxRemote *NitroMbxRemote) ([]string, error) {
-	panic("unported: mj-targets/src/targets/nitro.rs nitro_run_args")
+	if len(additionalMounts) != 0 {
+		return nil, errors.New("Nitro sandboxes cannot attach host directories")
+	}
+	args := []string{"run"}
+	args = append(args, "--pull="+dockerPullPolicy(template))
+	// The guest agent is PID 1 and reaps; stopping always kills.
+	args = append(args, "--init")
+	args = append(args, "--stop-signal", "KILL")
+	args = append(args, "--detach", "--name", name)
+	args = append(args, managedResourceIdentityArgs(managedResourceKindContainer, sessionID)...)
+	// The size, platform and environment the shared template builder wrote in
+	// Podman's `--flag=value` spelling. A VM runs only the host's
+	// architecture; the engine refuses any other platform rather than
+	// quietly running the host's variant.
+	extra := template.ExtraRunArgs
+	for i := 0; i < len(extra); i++ {
+		argument := extra[i]
+		flag, value, split := strings.Cut(argument, "=")
+		switch {
+		case split && (flag == "--platform" || flag == "--cpus" || flag == "--memory"):
+			args = append(args, flag, value)
+		case argument == "--env":
+			if i+1 >= len(extra) {
+				return nil, errors.New("--env has no value in the run arguments")
+			}
+			i++
+			args = append(args, argument, extra[i])
+		default:
+			return nil, fmt.Errorf("Nitro sandboxes do not support the run argument %s", core.RustDebugString(argument))
+		}
+	}
+	// As on Podman, the session runs as root with the image user's home.
+	args = append(args, "--user", "0:0", "--env", "HOME=/home/hel")
+	args = append(args,
+		"--volume", ContainerTemporaryVolumeName(name)+":/tmp:rw",
+		"--volume", NitroWorkspaceVolume(name)+":"+workspaceRoot+":rw",
+	)
+	if mbxRemote != nil {
+		args = append(args, "--mbx-remote", mbxRemote.URL)
+		if mbxRemote.Region != nil {
+			args = append(args, "--mbx-remote-region="+*mbxRemote.Region)
+		}
+		if mbxRemote.Budget != nil {
+			args = append(args, "--mbx-cache-budget="+*mbxRemote.Budget)
+		}
+		for _, namespace := range mbxRemote.Namespaces {
+			// Namespace segments may start with a hyphen.
+			args = append(args, "--mbx-namespace="+namespace)
+		}
+	}
+	args = append(args, template.Image)
+	args = append(args, "sh", "-c", keepaliveScript)
+	return args, nil
 }
 
 // nitroContainerRun creates the sandbox, then makes `/tmp` the world-writable
 // sticky directory the Podman launch script makes it (the fresh volume is
 // root-owned 0755).
 func nitroContainerRun(template *core.TargetsContainerTemplate, name string, sessionID string, additionalMounts []core.AdditionalMount, ssh *core.SshTarget, workspaceRoot string, mbxRemote *NitroMbxRemote) ([]core.CommandSpec, error) {
-	panic("unported: mj-targets/src/targets/nitro.rs nitro_container_run")
+	arguments, err := nitroRunArgs(template, name, sessionID, additionalMounts, workspaceRoot, mbxRemote)
+	if err != nil {
+		return nil, err
+	}
+	// A valueless `--env NAME` inherits NAME from the engine's environment,
+	// which `sudo` would otherwise reset. Preserve exactly those names; the
+	// arguments are the one list, so the two cannot disagree.
+	inherited := inheritedEnvironmentNames(arguments)
+	command := core.EngineArgvWithEnv(core.MicrovmEngine, inherited)
+	command = append(command, arguments...)
+	run := core.SSHCommandOwned(core.SshTrafficClassControl, ssh, command).
+		WithPurpose("start remote Nitro sandbox").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning}).
+		WithCreatesTarget()
+	tmp := core.SSHEngineCommand(core.SshTrafficClassControl, ssh, core.MicrovmEngine, []string{
+		"exec",
+		name,
+		"sh",
+		"-c",
+		"set -eu; chown 0:0 /tmp; chmod 1777 /tmp",
+	}).
+		WithPurpose("prepare the Nitro sandbox's /tmp").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageProvisioning})
+	return []core.CommandSpec{run, tmp}, nil
 }
 
 // inheritedEnvironmentNames is the names of the `--env NAME` arguments that

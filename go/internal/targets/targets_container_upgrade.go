@@ -11,7 +11,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
+	"os"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -369,7 +377,31 @@ func hostAndName(locator *core.TargetsTargetLocator) (core.ImageHost, string, er
 // inspect reads the named container, or nil when the engine says it does
 // not exist.
 func inspect(host *core.ImageHost, name string, executor core.CommandExecutor) (*inspection, error) {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs inspect")
+	// `container exists` is Podman-specific. Both engines use inspect's exit 1
+	// for absence; any other failure remains an error rather than a fallback.
+	command := host.Command([]string{host.Engine(), "container", "inspect", name}, "inspect retained session container")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return nil, err
+	}
+	missing := preflightASCIILower(preflightLossy(output.Stderr))
+	if output.Status != 0 &&
+		(strings.Contains(missing, "no such container") ||
+			strings.Contains(missing, "no such object") ||
+			strings.Contains(missing, "no container with name or id")) {
+		return nil, nil
+	}
+	if output.Status != 0 {
+		return nil, fmt.Errorf("inspect retained container %s: %s", name, preflightLossy(output.Stderr))
+	}
+	var records []inspection
+	if err := json.Unmarshal(output.Stdout, &records); err != nil {
+		return nil, fmt.Errorf("decode container inspection: %w", err)
+	}
+	if len(records) != 1 {
+		return nil, errors.New("container inspection did not identify exactly one container")
+	}
+	return &records[0], nil
 }
 
 func owned(record *inspection, sessionID string) error {
@@ -390,7 +422,215 @@ func storageUnavailable(message string) core.Refusal {
 // replacement could not reproduce. workspace and workerRoot are target-side
 // paths.
 func InspectRetainedContainer(locator *core.TargetsTargetLocator, sessionID string, targetImage string, operationID string, workspace string, workerRoot string, executor core.CommandExecutor) (RetainedContainer, error) {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs inspect_retained_container")
+	host, name, err := hostAndName(locator)
+	if err != nil {
+		return RetainedContainer{}, err
+	}
+	record, err := inspect(&host, name, executor)
+	if err != nil {
+		return RetainedContainer{}, err
+	}
+	if record == nil {
+		return RetainedContainer{}, errors.New("the existing container is missing; Restart and upgrade cannot reconstruct its filesystem")
+	}
+	if err := owned(record, sessionID); err != nil {
+		return RetainedContainer{}, err
+	}
+	entrypoint := record.Config.Entrypoint
+	command := record.Config.Cmd
+	if !((len(entrypoint) == 0 &&
+		(slices.Equal(command, []string{"sh", "-c", keepaliveScript}) ||
+			slices.Equal(command, []string{"sleep", "infinity"}))) ||
+		(slices.Equal(entrypoint, []string{"sh"}) && slices.Equal(command, []string{"-c", keepaliveScript}))) {
+		return RetainedContainer{}, storageUnavailable("container upgrade cannot safely restart this custom container entrypoint; retain the current environment")
+	}
+	nonempty := func(value any) bool {
+		switch value := value.(type) {
+		case nil:
+			return false
+		case []any:
+			return len(value) != 0
+		case map[string]any:
+			return len(value) != 0
+		default:
+			return true
+		}
+	}
+	hostConfig := &record.HostConfig
+	capabilitiesKept := true
+	for _, capability := range hostConfig.CapAdd {
+		if !slices.Contains(containerCapabilities(host.Engine()), strings.TrimPrefix(capability, "CAP_")) {
+			capabilitiesKept = false
+		}
+	}
+	optionsKept := true
+	for _, option := range hostConfig.SecurityOpt {
+		if !slices.Contains(containerSecurityOpts(host.Engine()), option) {
+			optionsKept = false
+		}
+	}
+	if hostConfig.Privileged ||
+		hostConfig.ReadonlyRootfs ||
+		nonempty(hostConfig.Devices) ||
+		nonempty(hostConfig.PortBindings) ||
+		hostConfig.UsernsMode != "" ||
+		!capabilitiesKept ||
+		len(hostConfig.CapDrop) != 0 ||
+		!optionsKept ||
+		strings.HasPrefix(hostConfig.NetworkMode, "container:") {
+		return RetainedContainer{}, storageUnavailable("storage-preserving upgrades do not support this container's device, privilege, port, or namespace overrides; the existing container is unchanged")
+	}
+	for _, assignment := range record.Config.Env {
+		if err := validateRetainedEnvironment(assignment); err != nil {
+			return RetainedContainer{}, err
+		}
+	}
+	if hostConfig.AutoRemove {
+		return RetainedContainer{}, storageUnavailable("cannot preserve storage of an auto-remove container")
+	}
+	if strings.TrimLeft(record.Name, "/") != name {
+		return RetainedContainer{}, errors.New("container locator must name its managed container")
+	}
+	mounts := make([]retainedMount, 0, len(record.Mounts))
+	for _, mount := range record.Mounts {
+		unsupportedOption := slices.ContainsFunc(mount.Options, func(option string) bool {
+			return option == "O" || option == "z" || option == "Z" || option == "noexec" ||
+				strings.Contains(option, "overlay") || strings.Contains(option, "idmap")
+		})
+		if !((mount.Kind == "volume" || mount.Kind == "bind") &&
+			!unsupportedOption &&
+			(mount.Propagation == "" || mount.Propagation == "private" || mount.Propagation == "rprivate")) {
+			return RetainedContainer{}, storageUnavailable(fmt.Sprintf("cannot preserve transient or unsupported mount at %s (%s)", mount.Destination, mount.Kind))
+		}
+		source := mount.Source
+		if mount.Kind == "volume" {
+			source = mount.Name
+		}
+		if source == "" || strings.ContainsAny(source, ",\n") || strings.ContainsAny(mount.Destination, ",\n") {
+			return RetainedContainer{}, fmt.Errorf("mount at %s cannot be represented safely for replacement", mount.Destination)
+		}
+		mounts = append(mounts, retainedMount{
+			Kind:        mount.Kind,
+			Source:      source,
+			Destination: mount.Destination,
+			Writable:    mount.Writable,
+		})
+	}
+	slices.SortStableFunc(mounts, func(left, right retainedMount) int {
+		return strings.Compare(left.Destination, right.Destination)
+	})
+	retainedPath := func(path string) bool {
+		return slices.ContainsFunc(mounts, func(mount retainedMount) bool {
+			return mount.Writable && upgradePathStartsWith(path, mount.Destination)
+		})
+	}
+	if !retainedPath(workspace) {
+		return RetainedContainer{}, storageUnavailable(fmt.Sprintf("cannot preserve workspace: %s lives in the container writable layer; use independent workspace storage before upgrading", workspace))
+	}
+	const controlRoot = "/var/lib/hel"
+	var control *controlState
+	if !(retainedPath(workerRoot) && retainedPath(core.Join(controlRoot, "profiles"))) {
+		if !upgradePathStartsWith(workerRoot, controlRoot) {
+			return RetainedContainer{}, errors.New("cannot transfer this worker's unsupported control-state layout")
+		}
+		base := workspace
+		if retainedPath("/tmp") {
+			base = "/tmp"
+		}
+		excludes := []string{}
+		for _, mount := range mounts {
+			relative, ok := upgradePathStripPrefix(mount.Destination, controlRoot)
+			if ok && relative != "" {
+				excludes = append(excludes, "./"+core.Text(relative))
+			}
+		}
+		control = &controlState{
+			Root:             controlRoot,
+			StagingDirectory: core.Text(core.Join(base, ".mj-container-upgrade-"+operationID)),
+			Excludes:         excludes,
+		}
+	}
+	if control != nil {
+		probe := core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"sh", "-c", "tar --help 2>&1"}).
+			WithPurpose("verify control-state transfer support")
+		output, err := executor.Execute(&probe)
+		if err != nil {
+			return RetainedContainer{}, err
+		}
+		help := preflightLossy(output.Stdout)
+		supported := output.Status == 0
+		for _, option := range []string{"--one-file-system", "--unlink-first", "--strip-components", "--no-recursion", "--occurrence"} {
+			if !strings.Contains(help, option) {
+				supported = false
+			}
+		}
+		if !supported {
+			return RetainedContainer{}, storageUnavailable("this container lacks the tar support needed to preserve worker state; the source is unchanged")
+		}
+	}
+	cachedCommand := host.Command([]string{host.Engine(), "image", "inspect", "--format", "{{.Id}}", targetImage}, "inspect selected upgrade image")
+	cached, err := executor.Execute(&cachedCommand)
+	if err != nil {
+		return RetainedContainer{}, err
+	}
+	var preparedImage *string
+	if cached.Status == 0 {
+		text, err := upgradeUTF8(cached.Stdout)
+		if err != nil {
+			return RetainedContainer{}, err
+		}
+		id := strings.TrimSpace(text)
+		preparedImage = &id
+	} else {
+		message := strings.ToLower(preflightLossy(cached.Stderr))
+		if !(strings.Contains(message, "no such image") ||
+			strings.Contains(message, "image not known") ||
+			strings.Contains(message, "image not found")) {
+			return RetainedContainer{}, fmt.Errorf("cannot inspect selected image: %s", message)
+		}
+	}
+	currentImage := record.Config.Image
+	if selected, ok := record.Config.Labels["dev.mj.container-image"]; ok {
+		currentImage = selected
+	} else if record.ImageName != "" {
+		currentImage = record.ImageName
+	}
+	var selectedImageID *string
+	if preparedImage != nil {
+		selected := *preparedImage
+		selectedImageID = &selected
+	}
+	var pidsLimit int64
+	if hostConfig.PidsLimit != nil {
+		pidsLimit = *hostConfig.PidsLimit
+	}
+	environment := record.Config.Env
+	if environment == nil {
+		environment = []string{}
+	}
+	return RetainedContainer{
+		Locator:              upgradeCloneLocator(locator),
+		SourceID:             record.ID,
+		Name:                 name,
+		BackupName:           name + "-upgrade-" + operationID,
+		currentImageID:       record.Image,
+		CurrentImage:         currentImage,
+		TargetImage:          targetImage,
+		controlState:         control,
+		ControlStateRestored: false,
+		selectedImageID:      selectedImageID,
+		PreparedImage:        preparedImage,
+		ImagePinReserved:     false,
+		OperationID:          operationID,
+		mounts:               mounts,
+		user:                 record.Config.User,
+		environment:          environment,
+		workingDirectory:     record.Config.WorkingDir,
+		memory:               hostConfig.Memory,
+		nanoCpus:             hostConfig.NanoCpus,
+		pidsLimit:            pidsLimit,
+		networkMode:          hostConfig.NetworkMode,
+	}, nil
 }
 
 func mountConflict(destination string, retained string) core.Refusal {
@@ -422,7 +662,109 @@ func (r *RetainedContainer) ImageChanged() bool {
 // applied are the attachments the running container has, change the ones
 // and the allocation the replacement gets. workspace is a target-side path.
 func (r *RetainedContainer) ApplySettings(applied []core.AdditionalMount, change *core.ContainerSettingsChange, workspace string, template *core.ContainerTemplate) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::apply_settings")
+	overlaps := func(a, b string) bool { return upgradePathStartsWith(a, b) || upgradePathStartsWith(b, a) }
+	protect := func(destination string) error {
+		for _, path := range []string{workspace, "/var/lib/hel"} {
+			if overlaps(destination, path) {
+				return mountConflict(destination, path)
+			}
+		}
+		return nil
+	}
+	containsMount := func(mounts []core.AdditionalMount, mount core.AdditionalMount) bool {
+		return slices.ContainsFunc(mounts, func(candidate core.AdditionalMount) bool {
+			return upgradeSameMount(candidate, mount)
+		})
+	}
+	for _, mount := range applied {
+		if containsMount(change.Mounts, mount) {
+			continue
+		}
+		index := slices.IndexFunc(r.mounts, func(retained retainedMount) bool {
+			return retained.Destination == core.Text(mount.Destination) &&
+				retained.Kind == "bind" &&
+				retained.Source == core.Text(mount.Source) &&
+				retained.Writable == (mount.Access == core.MountAccessRw)
+		})
+		if index < 0 {
+			return fmt.Errorf("the attached directory at %s no longer matches the running container", mount.Destination)
+		}
+		if err := protect(mount.Destination); err != nil {
+			return err
+		}
+		if r.controlState != nil && upgradePathStartsWith(r.controlState.StagingDirectory, mount.Destination) {
+			return mountConflict(mount.Destination, "the worker staging directory")
+		}
+		r.mounts = slices.Delete(r.mounts, index, index+1)
+	}
+	for _, mount := range change.Mounts {
+		if containsMount(applied, mount) {
+			continue
+		}
+		if err := protect(mount.Destination); err != nil {
+			return err
+		}
+		for _, retained := range r.mounts {
+			if overlaps(mount.Destination, retained.Destination) {
+				return mountConflict(mount.Destination, retained.Destination)
+			}
+		}
+		source := core.Text(mount.Source)
+		destination := core.Text(mount.Destination)
+		if strings.ContainsAny(source, ",\n") || strings.ContainsAny(destination, ",\n") {
+			return fmt.Errorf("mount at %s cannot be represented safely for replacement", destination)
+		}
+		r.mounts = append(r.mounts, retainedMount{
+			Kind:        "bind",
+			Source:      source,
+			Destination: destination,
+			Writable:    mount.Access == core.MountAccessRw,
+		})
+	}
+	if change.ResourceAllocation != nil {
+		memory := core.AllocationMemory(change.ResourceAllocation)
+		if memory > math.MaxInt64 {
+			return errors.New("out of range integral type conversion attempted")
+		}
+		r.memory = int64(memory)
+		cpus := core.AllocationCpus(change.ResourceAllocation)
+		if cpus > math.MaxInt64 {
+			return errors.New("out of range integral type conversion attempted")
+		}
+		if cpus > math.MaxInt64/1_000_000_000 {
+			return errors.New("container CPU limit is too large")
+		}
+		r.nanoCpus = int64(cpus) * 1_000_000_000
+	} else {
+		var memory int64
+		if template.Memory != nil {
+			limit, err := core.ContainerMemoryLimit(*template.Memory)
+			if err != nil {
+				return err
+			}
+			memory = limit
+		}
+		r.memory = memory
+		var nanoCpus int64
+		if template.CPUs != nil {
+			cpus, err := upgradeParseFloat(*template.CPUs)
+			if err != nil {
+				return err
+			}
+			nanos := cpus * 1e9
+			if !(nanos >= 0 && nanos < float64(math.MaxInt64)) {
+				return fmt.Errorf("invalid container CPU limit %s", core.RustDebugString(*template.CPUs))
+			}
+			nanoCpus = int64(math.Round(nanos))
+		}
+		r.nanoCpus = nanoCpus
+	}
+	prepared := r.currentImageID
+	r.PreparedImage = &prepared
+	selected := prepared
+	r.selectedImageID = &selected
+	r.TargetImage = r.CurrentImage
+	return nil
 }
 
 // SettingsPreview is Preview for a settings change.
@@ -460,13 +802,83 @@ func (r *RetainedContainer) Preview(sessionID string) core.ContainerUpgradePrevi
 // CaptureControlState copies only the stopped worker's private control tree.
 // Every independent mount beneath it is excluded, including build caches.
 func (r *RetainedContainer) CaptureControlState(executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::capture_control_state")
+	state := r.controlState
+	if state == nil {
+		return nil
+	}
+	id, err := core.NewCommandID("capture")
+	if err != nil {
+		return err
+	}
+	next := fmt.Sprintf("%s/state.tar.%s", state.StagingDirectory, id)
+	args := []string{
+		"sh",
+		"-c",
+		`set -eu; mkdir -p -- "$1"; chmod 700 -- "$1"; shift; exec "$@"`,
+		"mj-container-control-state",
+		state.StagingDirectory,
+		"tar",
+		"--one-file-system",
+	}
+	for _, path := range state.Excludes {
+		args = append(args, "--exclude", path)
+	}
+	args = append(args, "-C", state.Root, "-cf", next, ".")
+	capture := core.LocatorCommand(core.SshTrafficClassBulk, &r.Locator, args).
+		WithPurpose("capture stopped worker journal and harness state")
+	output, err := executor.Execute(&capture)
+	if err != nil {
+		return err
+	}
+	if output.Status != 0 {
+		return fmt.Errorf("cannot transfer worker control state; source and storage retained: %s", preflightLossy(output.Stderr))
+	}
+	seal := core.LocatorCommand(core.SshTrafficClassBulk, &r.Locator, []string{
+		"mv",
+		"--",
+		next,
+		state.StagingDirectory + "/state.tar",
+	}).WithPurpose("seal private control-state transfer")
+	output, err = executor.Execute(&seal)
+	if err != nil {
+		return err
+	}
+	if output.Status != 0 {
+		return errors.New("cannot seal worker control-state transfer; source retained")
+	}
+	return nil
 }
 
 // RestoreControlState extracts the captured control tree into the
 // replacement, once.
 func (r *RetainedContainer) RestoreControlState(executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::restore_control_state")
+	state := r.controlState
+	if state == nil {
+		return nil
+	}
+	// A disconnected engine client may leave its extractor alive. The lock
+	// and durable completion marker make every later extractor wait and then
+	// skip, even after the new worker starts accepted work. Capture prefixes
+	// every member with './'. Strip that component so --unlink-first never
+	// tries to unlink the root '.' directory, then restore just that
+	// directory's metadata without extracting files.
+	const script = `set -eu; state=$1; root=$2; exec flock -x "$state/restore.lock" sh -c 'set -eu; [ ! -f "$1/restore-complete" ] || exit 0; mkdir -p -- "$2"; tar --unlink-first --strip-components=1 -C "$2" -xf "$1/state.tar"; tar --no-recursion --occurrence=1 -C "$2" -xf "$1/state.tar" .; touch "$1/restore-complete"' mj-control-restore "$state" "$root"`
+	restore := core.LocatorCommand(core.SshTrafficClassBulk, &r.Locator, []string{
+		"sh",
+		"-c",
+		script,
+		"mj-container-control-state",
+		state.StagingDirectory,
+		state.Root,
+	}).WithPurpose("transfer preserved worker journal and harness state")
+	output, err := executor.Execute(&restore)
+	if err != nil {
+		return err
+	}
+	if output.Status != 0 {
+		return fmt.Errorf("cannot restore private worker state; source and all mounts retained: %s", preflightLossy(output.Stderr))
+	}
+	return nil
 }
 
 // SourceIsCurrent reports whether the container under this plan's name is
@@ -490,19 +902,323 @@ func (r *RetainedContainer) imagePin() string {
 // ReleaseImagePin drops the private tag that keeps the prepared image from
 // being pruned.
 func (r *RetainedContainer) ReleaseImagePin(executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::release_image_pin")
+	if !r.ImagePinReserved {
+		return nil
+	}
+	host, _, err := hostAndName(&r.Locator)
+	if err != nil {
+		return err
+	}
+	if host.Kind == core.ImageHostSshNitro {
+		return r.nitroRelease(&host, executor)
+	}
+	pin := r.imagePin()
+	inspectPin := host.Command([]string{host.Engine(), "image", "inspect", "--format", "{{.Id}}", pin}, "inspect private upgrade image pin")
+	inspected, err := executor.Execute(&inspectPin)
+	if err != nil {
+		return err
+	}
+	if inspected.Status != 0 {
+		message := preflightASCIILower(preflightLossy(inspected.Stderr))
+		if !(strings.Contains(message, "no such image") ||
+			strings.Contains(message, "image not known") ||
+			strings.Contains(message, "image not found")) {
+			return fmt.Errorf("cannot inspect private upgrade image pin: %s", message)
+		}
+		return nil
+	}
+	text, err := upgradeUTF8(inspected.Stdout)
+	if err != nil {
+		return err
+	}
+	image := strings.TrimSpace(text)
+	if r.PreparedImage != nil && trimSha256Prefixes(image) != trimSha256Prefixes(*r.PreparedImage) {
+		return errors.New("private upgrade image pin changed ownership")
+	}
+	var args []string
+	if host.Engine() == "podman" {
+		args = []string{"untag", image, pin}
+	} else {
+		args = []string{"image", "rm", "--force", "--no-prune", pin}
+	}
+	_, err = checked(&host, args, executor)
+	return err
 }
 
 // Prepare pulls and pins the target image, and checks it can receive the
 // control state, before anything is stopped.
 func (r *RetainedContainer) Prepare(executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::prepare")
+	host, _, err := hostAndName(&r.Locator)
+	if err != nil {
+		return err
+	}
+	if r.PreparedImage == nil {
+		if err := r.pullTargetImage(&host, executor); err != nil {
+			return err
+		}
+	}
+	if host.Kind == core.ImageHostSshNitro {
+		return r.nitroStage(&host, executor)
+	}
+	if _, err := checked(&host, []string{"image", "tag", *r.PreparedImage, r.imagePin()}, executor); err != nil {
+		return err
+	}
+	if r.controlState != nil {
+		user := r.user
+		if user == "" {
+			user = "0"
+		}
+		if _, err := checked(&host, []string{
+			"run",
+			"--rm",
+			"--entrypoint",
+			"sh",
+			"--user",
+			user,
+			*r.PreparedImage,
+			"-c",
+			"command -v tar >/dev/null && command -v flock >/dev/null && mkdir -p /var/lib/hel && test -w /var/lib/hel",
+		}, executor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pullTargetImage downloads the target image and records its immutable
+// identity, holding the image's pull gate for the download (Rust holds the
+// guard for the rest of the `if` block in Prepare).
+func (r *RetainedContainer) pullTargetImage(host *core.ImageHost, executor core.CommandExecutor) error {
+	lock := ImagePullMutex(host, r.TargetImage)
+	pull, err := HoldImagePull(lock, executor.CancellationRequested, func() {})
+	if err != nil {
+		return err
+	}
+	defer pull.Release()
+	if _, err := checked(host, []string{"pull", r.TargetImage}, executor); err != nil {
+		return err
+	}
+	output, err := checked(host, []string{"image", "inspect", "--format", "{{.Id}}", r.TargetImage}, executor)
+	if err != nil {
+		return err
+	}
+	text, err := upgradeUTF8(output.Stdout)
+	if err != nil {
+		return err
+	}
+	id := strings.TrimSpace(text)
+	if id == "" {
+		return errors.New("image preparation returned no immutable image identity")
+	}
+	r.PreparedImage = &id
+	return nil
 }
 
 // Replace is idempotent after the durable replacement boundary. The stopped
 // source remains a rollback resource until the new worker is ready.
 func (r *RetainedContainer) Replace(sessionID string, executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::replace")
+	host, _, err := hostAndName(&r.Locator)
+	if err != nil {
+		return err
+	}
+	if r.PreparedImage == nil {
+		return errors.New("container image has not been prepared")
+	}
+	image := *r.PreparedImage
+	if host.Kind == core.ImageHostSshNitro {
+		if err := r.nitroReplace(&host, sessionID, executor); err != nil {
+			return err
+		}
+		return InitializeContainerHome(&r.Locator, executor)
+	}
+	current, err := inspect(&host, r.Name, executor)
+	if err != nil {
+		return err
+	}
+	if current != nil {
+		if err := owned(current, sessionID); err != nil {
+			return err
+		}
+		if operation, ok := current.Config.Labels["dev.mj.container-upgrade"]; ok && operation == r.OperationID {
+			if !current.State.Running {
+				if _, err := checked(&host, []string{"start", r.Name}, executor); err != nil {
+					return err
+				}
+			}
+			return InitializeContainerHome(&r.Locator, executor)
+		}
+		if current.ID != r.SourceID {
+			return errors.New("container identity changed since upgrade confirmation; refusing replacement")
+		}
+		if current.State.Running {
+			if err := checkedContainerStateChange(&host, "kill", r.SourceID, containerStateGoalNotRunning, executor); err != nil {
+				return err
+			}
+		}
+		if _, err := checked(&host, []string{"rename", r.SourceID, r.BackupName}, executor); err != nil {
+			return err
+		}
+	}
+	if r.ControlStateRestored {
+		return errors.New("replacement container is missing after its worker state was restored; retaining the source and refusing to replay older work")
+	}
+	backup, err := inspect(&host, r.BackupName, executor)
+	if err != nil {
+		return err
+	}
+	if backup == nil {
+		return errors.New("retained source container disappeared; refusing to create another worker")
+	}
+	if err := owned(backup, sessionID); err != nil {
+		return err
+	}
+	if backup.ID != r.SourceID || backup.State.Running {
+		return errors.New("retained source identity or stopped state changed")
+	}
+	if err := core.ReachTestHook("container_upgrade_source_retained_before_replacement"); err != nil {
+		return err
+	}
+	for _, mount := range r.mounts {
+		if mount.Kind == "volume" {
+			if _, err := checked(&host, []string{"volume", "inspect", mount.Source}, executor); err != nil {
+				return err
+			}
+		}
+	}
+	args := []string{
+		"run",
+		"--detach",
+		"--name",
+		r.Name,
+		"--pull=never",
+		"--init",
+		"--stop-signal=KILL",
+	}
+	for _, capability := range containerCapabilities(host.Engine()) {
+		args = append(args, "--cap-add="+capability)
+	}
+	for _, option := range containerSecurityOpts(host.Engine()) {
+		args = append(args, "--security-opt", option)
+	}
+	args = append(args, managedResourceIdentityArgs(managedResourceKindContainer, sessionID)...)
+	args = append(args,
+		"--label", "dev.mj.container-upgrade="+r.OperationID,
+		"--label", "dev.mj.container-image="+r.TargetImage,
+	)
+	if r.user != "" {
+		args = append(args, "--user", r.user)
+	}
+	if r.workingDirectory != "" {
+		args = append(args, "--workdir", r.workingDirectory)
+	}
+	// The CLI reads environment files on its own host, without changing
+	// HOME or putting values in argv. SSH hosts read their forwarded stdin.
+	var input []byte
+	for _, assignment := range r.environment {
+		if err := validateRetainedEnvironment(assignment); err != nil {
+			return err
+		}
+		input = append(input, assignment...)
+		input = append(input, '\n')
+	}
+	var environmentFile *os.File
+	// dropEnvironment removes the private environment file, as dropping
+	// Rust's NamedTempFile does. Repeating it is safe.
+	dropEnvironment := func() {
+		if environmentFile != nil {
+			_ = environmentFile.Close()
+			_ = os.Remove(environmentFile.Name())
+		}
+	}
+	defer dropEnvironment()
+	switch host.Kind {
+	case core.ImageHostSshPodman, core.ImageHostSshDocker:
+	default:
+		file, err := os.CreateTemp("", ".tmp")
+		if err != nil {
+			return fmt.Errorf("create private container environment file: %w", err)
+		}
+		environmentFile = file
+		if _, err := file.Write(input); err != nil {
+			return fmt.Errorf("write private container environment: %w", err)
+		}
+	}
+	environmentPath := "/dev/stdin"
+	if environmentFile != nil {
+		environmentPath = environmentFile.Name()
+	}
+	args = append(args, "--env-file", environmentPath)
+	if r.networkMode != "" {
+		args = append(args, "--network", r.networkMode)
+	}
+	// The source's limits were enforceable when it was created; the host may
+	// have stopped delegating their controllers since.
+	var unenforceable []CgroupLimit
+	if (host.Kind == core.ImageHostLocalPodman || host.Kind == core.ImageHostSshPodman) && (r.memory > 0 || r.nanoCpus > 0) {
+		var ssh *core.SshTarget
+		if host.Kind == core.ImageHostSshPodman {
+			ssh = host.SSH
+		}
+		limits, err := ProbePodmanUnenforceableLimits(ssh, executor)
+		if err != nil {
+			slog.Warn("could not read Podman's cgroup controllers; keeping container limits", "error", err.Error())
+		} else {
+			unenforceable = limits
+		}
+	}
+	var dropped []CgroupLimit
+	for _, candidate := range []struct {
+		limit CgroupLimit
+		set   bool
+	}{{CgroupLimitMemory, r.memory > 0}, {CgroupLimitCPU, r.nanoCpus > 0}} {
+		if candidate.set && slices.Contains(unenforceable, candidate.limit) {
+			dropped = append(dropped, candidate.limit)
+		}
+	}
+	if len(dropped) != 0 {
+		executor.NotifyNotice(UnenforceableLimitsDetail(dropped) + " " + CgroupDelegationRemediation)
+	}
+	if r.memory > 0 && !slices.Contains(dropped, CgroupLimitMemory) {
+		args = append(args, "--memory", strconv.FormatInt(r.memory, 10))
+	}
+	if r.nanoCpus > 0 && !slices.Contains(dropped, CgroupLimitCPU) {
+		args = append(args, "--cpus", strconv.FormatFloat(float64(r.nanoCpus)/1e9, 'f', -1, 64))
+	}
+	args = append(args, "--pids-limit", strconv.FormatInt(r.pidsLimit, 10))
+	for _, mount := range r.mounts {
+		readonly := ""
+		if !mount.Writable {
+			readonly = ",readonly"
+		}
+		args = append(args, "--mount", fmt.Sprintf("type=%s,source=%s,target=%s%s", mount.Kind, mount.Source, mount.Destination, readonly))
+	}
+	args = append(args, "--entrypoint", "sh", image, "-c", keepaliveScript)
+	args = append([]string{host.Engine()}, args...)
+	command := host.Command(args, "start replacement on retained storage")
+	if environmentFile == nil {
+		command = command.WithSensitiveStdin(input)
+	}
+	result, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	dropEnvironment()
+	environmentFile = nil
+	if result.Status != 0 {
+		detail := preflightLossy(result.Stderr)
+		failure := fmt.Errorf("replacement start failed; source and all storage retained: %s", strings.TrimRightFunc(detail, unicode.IsSpace))
+		for _, mount := range r.mounts {
+			if mount.Kind == "bind" &&
+				(strings.Contains(detail, fmt.Sprintf("statfs %s: no such file or directory", mount.Source)) ||
+					strings.Contains(detail, fmt.Sprintf("bind source path does not exist: %s", mount.Source))) {
+				return core.RefusalPrecondition(fmt.Sprintf(
+					"The bind source for %s is missing. Recreate the source to retry this replacement, or remove the mount before the next container creation.",
+					mount.Destination)).Wrap(failure)
+			}
+		}
+		return failure
+	}
+	return InitializeContainerHome(&r.Locator, executor)
 }
 
 // RetireBackupForDestroy removes the stopped source a destroy no longer
@@ -532,7 +1248,61 @@ func (r *RetainedContainer) RetireBackupForDestroy(sessionID string, executor co
 // Finish retires the source and the control-state transfer once the
 // replacement's worker is ready.
 func (r *RetainedContainer) Finish(sessionID string, executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::finish")
+	host, _, err := hostAndName(&r.Locator)
+	if err != nil {
+		return err
+	}
+	replacement, err := inspect(&host, r.Name, executor)
+	if err != nil {
+		return err
+	}
+	if replacement == nil {
+		return errors.New("replacement container disappeared")
+	}
+	if err := owned(replacement, sessionID); err != nil {
+		return err
+	}
+	if operation, ok := replacement.Config.Labels["dev.mj.container-upgrade"]; !ok || operation != r.OperationID {
+		return errors.New("replacement ownership changed")
+	}
+	if host.Kind == core.ImageHostSshNitro {
+		if err := r.nitroRelease(&host, executor); err != nil {
+			return err
+		}
+	} else {
+		backup, err := inspect(&host, r.BackupName, executor)
+		if err != nil {
+			return err
+		}
+		if backup != nil {
+			if err := owned(backup, sessionID); err != nil {
+				return err
+			}
+			if backup.ID != r.SourceID || backup.State.Running {
+				return errors.New("refusing to retire a changed or running source")
+			}
+			if err := checkedContainerStateChange(&host, "rm", r.SourceID, containerStateGoalAbsent, executor); err != nil {
+				return err
+			}
+		}
+	}
+	if state := r.controlState; state != nil {
+		cleanup := core.LocatorCommand(core.SshTrafficClassControl, &r.Locator, []string{
+			"sh",
+			"-c",
+			`set -eu; [ -f "$1/restore-complete" ] || exit 0; rm -f -- "$1/state.tar" "$1"/state.tar.capture-*`,
+			"mj-control-transfer-cleanup",
+			state.StagingDirectory,
+		}).WithPurpose("retire completed private control-state transfer")
+		output, err := executor.Execute(&cleanup)
+		if err != nil {
+			return err
+		}
+		if output.Status != 0 {
+			return errors.New("cannot retire completed private control-state transfer")
+		}
+	}
+	return nil
 }
 
 // The Nitro engine replaces the root disk of the one VM in place. Two VMs
@@ -577,7 +1347,45 @@ func (r *RetainedContainer) nitroRelease(host *core.ImageHost, executor core.Com
 }
 
 func (r *RetainedContainer) nitroReplace(host *core.ImageHost, sessionID string, executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs RetainedContainer::nitro_replace")
+	current, err := inspect(host, r.Name, executor)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return errors.New("the session's sandbox is missing; refusing to create another worker over its volumes")
+	}
+	if err := owned(current, sessionID); err != nil {
+		return err
+	}
+	if operation, ok := current.Config.Labels["dev.mj.container-upgrade"]; ok && operation == r.OperationID {
+		if !current.State.Running {
+			if _, err := checked(host, []string{"start", r.Name}, executor); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if current.ID != r.SourceID {
+		return errors.New("container identity changed since upgrade confirmation; refusing replacement")
+	}
+	if r.ControlStateRestored {
+		return errors.New("replacement container is missing after its worker state was restored; retaining the source and refusing to replay older work")
+	}
+	if current.State.Running {
+		// The worker is already stopped. A stop gives the guest the chance to
+		// flush the volumes, which hold the captured control state.
+		if _, err := checked(host, []string{"stop", "--time", "0", r.Name}, executor); err != nil {
+			return err
+		}
+	}
+	if err := core.ReachTestHook("container_upgrade_source_retained_before_replacement"); err != nil {
+		return err
+	}
+	if _, err := checked(host, r.nitroVerb("apply", nil), executor); err != nil {
+		return err
+	}
+	_, err = checked(host, []string{"start", r.Name}, executor)
+	return err
 }
 
 type containerStateGoal int
@@ -588,7 +1396,33 @@ const (
 )
 
 func checkedContainerStateChange(host *core.ImageHost, verb string, containerID string, goal containerStateGoal, executor core.CommandExecutor) error {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs checked_container_state_change")
+	// Podman exits nonzero when a dead exec session's conmon never wrote its
+	// exit file, even though the container did stop; the state decides.
+	command := host.Command([]string{host.Engine(), verb, containerID}, "upgrade container while retaining storage")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	inspected, err := inspect(host, containerID, executor)
+	if err != nil {
+		return err
+	}
+	var achieved bool
+	switch goal {
+	case containerStateGoalNotRunning:
+		achieved = inspected == nil || !inspected.State.Running
+	case containerStateGoalAbsent:
+		achieved = inspected == nil
+	}
+	if achieved {
+		warning := strings.TrimSpace(preflightLossy(output.Stderr))
+		if output.Status != 0 || warning != "" {
+			slog.Warn("container state-change command succeeded by post-command state",
+				"container_id", containerID, "verb", verb, "status", output.Status, "stderr", warning)
+		}
+		return nil
+	}
+	return fmt.Errorf("container upgrade failed; storage retained: %s", preflightLossy(output.Stderr))
 }
 
 func checked(host *core.ImageHost, args []string, executor core.CommandExecutor) (core.CommandOutput, error) {
@@ -658,7 +1492,34 @@ func ContainerUpgradeTestPlan(sessionID string) RetainedContainer {
 // reattaching. Engine failure never turns surviving workspace data into a
 // checkpoint restore.
 func retainedVolumeExists(host *core.ImageHost, name string, session string, executor core.CommandExecutor) (bool, error) {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs retained_volume_exists")
+	command := host.Command([]string{host.Engine(), "volume", "inspect", name}, "inspect retained legacy volume")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return false, err
+	}
+	if output.Status != 0 {
+		message := preflightASCIILower(preflightLossy(output.Stderr))
+		if !(strings.Contains(message, "no such volume") || strings.Contains(message, "no volume with name")) {
+			return false, fmt.Errorf("cannot establish retained volume absence: %s; checkpoint and storage retained", message)
+		}
+		return false, nil
+	}
+	var records []any
+	if err := json.Unmarshal(output.Stdout, &records); err != nil {
+		return false, err
+	}
+	if len(records) == 0 {
+		return false, errors.New("volume inspection is empty")
+	}
+	record, _ := records[0].(map[string]any)
+	labels, _ := record["Labels"].(map[string]any)
+	recordName, nameOK := record["Name"].(string)
+	managed, managedOK := labels["dev.mj.managed"].(string)
+	owner, ownerOK := labels["dev.mj.session"].(string)
+	if !(nameOK && recordName == name && managedOK && managed == "true" && ownerOK && owner == session) {
+		return false, errors.New("legacy volume ownership changed; refusing checkpoint restore over retained storage")
+	}
+	return true, nil
 }
 
 func retainLegacyVolume(host *core.ImageHost, name string, session string, executor core.CommandExecutor) (bool, error) {
@@ -701,5 +1562,206 @@ func RetainedWorkspaceVolumeExists(locator *core.TargetsTargetLocator, session s
 // cleanup removes any storage. It reports whether the repositories must be
 // restored from the checkpoint.
 func RecoverRemovedContainer(locator *core.TargetsTargetLocator, template *core.TargetsContainerTemplate, sessionID string, mounts []core.AdditionalMount, workspace string, requireExistingWorkspace bool, executor core.CommandExecutor) (bool, error) {
-	panic("unported: mj-targets/src/targets/container_upgrade.rs recover_removed_container")
+	host, name, err := hostAndName(locator)
+	if err != nil {
+		return false, err
+	}
+	existing, err := inspect(&host, name, executor)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil {
+		return false, errors.New("legacy recovery target already exists")
+	}
+	var storage *core.TargetsPodmanWorkspaceLocator
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalPodman, core.TargetsTargetLocatorSshPodman:
+		storage = &locator.WorkspaceStorage
+	}
+	var restoreRepositories bool
+	switch {
+	case storage != nil && storage.EffectiveKind() == core.TargetsPodmanWorkspaceLocatorVolume:
+		if requireExistingWorkspace {
+			exists, err := retainedVolumeExists(&host, storage.Name, sessionID, executor)
+			if err != nil {
+				return false, err
+			}
+			if !exists {
+				return false, errors.New("retained workspace disappeared before replacement; no storage was created or removed; retry Resume")
+			}
+			restoreRepositories = false
+		} else {
+			existed, err := retainLegacyVolume(&host, storage.Name, sessionID, executor)
+			if err != nil {
+				return false, err
+			}
+			restoreRepositories = !existed
+		}
+	case storage != nil && storage.EffectiveKind() == core.TargetsPodmanWorkspaceLocatorHostPath:
+		command := host.Command([]string{
+			"sh",
+			"-c",
+			`test -d "$1"`,
+			"mj-retained-workspace",
+			storage.Path,
+		}, "find surviving helper workspace")
+		result, err := executor.Execute(&command)
+		if err != nil {
+			return false, err
+		}
+		if result.Status != 0 {
+			return false, errors.New("legacy helper workspace is absent or inaccessible; checkpoint retained; restore the helper resource before retrying")
+		}
+		restoreRepositories = false
+	default:
+		var chosen *core.AdditionalMount
+		chosenDepth := -1
+		for i := range mounts {
+			mount := &mounts[i]
+			if !(upgradePathStartsWith(workspace, mount.Destination) || upgradePathStartsWith(mount.Destination, workspace)) {
+				continue
+			}
+			// Rust's max_by_key keeps the last of equally deep mounts.
+			if depth := upgradePathComponentCount(mount.Destination); depth >= chosenDepth {
+				chosen, chosenDepth = mount, depth
+			}
+		}
+		if chosen == nil {
+			restoreRepositories = true
+			break
+		}
+		if chosen.Access != core.MountAccessRw {
+			return false, errors.New("legacy workspace uses an unsupported read-only or transient attachment; checkpoint retained")
+		}
+		// A surviving repository mounted inside the workspace also forbids a
+		// whole-workspace archive restore.
+		source := chosen.Source
+		if rest, ok := upgradePathStripPrefix(workspace, chosen.Destination); ok {
+			source = core.Join(chosen.Source, rest)
+		}
+		command := host.Command([]string{"test", "-d", source}, "verify surviving legacy workspace attachment")
+		result, err := executor.Execute(&command)
+		if err != nil {
+			return false, err
+		}
+		if result.Status != 0 {
+			return false, errors.New("retained legacy workspace attachment is inaccessible; refusing checkpoint restore over its storage")
+		}
+		restoreRepositories = false
+	}
+	temporary := ContainerTemporaryVolumeName(name)
+	if _, err := retainLegacyVolume(&host, temporary, sessionID, executor); err != nil {
+		return false, err
+	}
+	// Captured historical mounts are retained; provisioning's destructive
+	// error traps and repository clone plan are deliberately absent.
+	args, err := containerRunArgs(host.Engine(), template, name, sessionID, mounts, storage, workspace, false)
+	if err != nil {
+		return false, err
+	}
+	if _, err := checked(&host, args, executor); err != nil {
+		return false, err
+	}
+	return restoreRepositories, nil
+}
+
+// upgradeCloneLocator copies a locator without sharing its pointers or
+// slices.
+func upgradeCloneLocator(locator *core.TargetsTargetLocator) core.TargetsTargetLocator {
+	clone := *locator
+	clone.WorkspaceStorage.Helper = slices.Clone(locator.WorkspaceStorage.Helper)
+	if locator.BorrowedFrom != nil {
+		borrowed := *locator.BorrowedFrom
+		clone.BorrowedFrom = &borrowed
+	}
+	if locator.SSH != nil {
+		ssh := locator.SSH.Clone()
+		clone.SSH = &ssh
+	}
+	if locator.WorkerID != nil {
+		worker := *locator.WorkerID
+		clone.WorkerID = &worker
+	}
+	return clone
+}
+
+// upgradeSameMount is Rust's derived AdditionalMount equality, which compares
+// the paths by component.
+func upgradeSameMount(a, b core.AdditionalMount) bool {
+	return a.Access == b.Access &&
+		slices.Equal(upgradePathComponents(a.Source), upgradePathComponents(b.Source)) &&
+		slices.Equal(upgradePathComponents(a.Destination), upgradePathComponents(b.Destination))
+}
+
+// upgradePathComponents is Rust's `Path::components` for a target path: the
+// root, then each name, with empty and `.` components after the first
+// dropped. Target paths are POSIX; a Windows controller also splits on `\`.
+func upgradePathComponents(path string) []string {
+	separator := func(r rune) bool { return r == '/' || (runtime.GOOS == "windows" && r == '\\') }
+	var components []string
+	rest := path
+	if rest != "" && separator(rune(rest[0])) {
+		components = append(components, "/")
+		rest = rest[1:]
+	}
+	for index, part := range strings.FieldsFunc(rest, separator) {
+		if part == "." && (index != 0 || len(components) != 0 || !strings.HasPrefix(rest, ".")) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
+}
+
+// upgradePathComponentCount is `Path::components().count()`.
+func upgradePathComponentCount(path string) int {
+	return len(upgradePathComponents(path))
+}
+
+// upgradePathStartsWith is Rust's `Path::starts_with`: whether base is a
+// component prefix of path.
+func upgradePathStartsWith(path, base string) bool {
+	left, right := upgradePathComponents(path), upgradePathComponents(base)
+	return len(right) <= len(left) && slices.Equal(left[:len(right)], right)
+}
+
+// upgradePathStripPrefix is Rust's `Path::strip_prefix`: the components of
+// path after base, joined with `/`, or false when base is not a component
+// prefix of path.
+func upgradePathStripPrefix(path, base string) (string, bool) {
+	if !upgradePathStartsWith(path, base) {
+		return "", false
+	}
+	left, right := upgradePathComponents(path), upgradePathComponents(base)
+	return strings.Join(left[len(right):], "/"), true
+}
+
+// upgradeUTF8 is Rust's `String::from_utf8`.
+func upgradeUTF8(data []byte) (string, error) {
+	if !utf8.Valid(data) {
+		index := 0
+		for index < len(data) {
+			r, size := utf8.DecodeRune(data[index:])
+			if r == utf8.RuneError && size <= 1 {
+				break
+			}
+			index += size
+		}
+		return "", fmt.Errorf("invalid utf-8 sequence of 1 bytes from index %d", index)
+	}
+	return string(data), nil
+}
+
+// upgradeParseFloat is Rust's `str::parse::<f64>`, which takes decimal
+// notation, `inf`, `infinity` and `nan`, but not Go's hexadecimal floats or
+// digit separators.
+func upgradeParseFloat(text string) (float64, error) {
+	if strings.ContainsAny(text, "_xX") {
+		return 0, errors.New("invalid float literal")
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return 0, errors.New("invalid float literal")
+	}
+	return value, nil
 }
