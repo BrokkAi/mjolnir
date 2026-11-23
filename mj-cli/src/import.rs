@@ -21,7 +21,7 @@ use mj_controller::controller::Controller;
 use mj_controller::import::{
     BundleResolution, ClaudeSessionSelection, ClaudeTranscript, ImportArchiveProgress,
     ImportControl, ImportedClaudeSession, NativeImportRequest, NativeScanCache, SessionEditTargets,
-    import_native_session, import_safety_issues, locate_native_session, native_sessions_enumerable,
+    import_native_session, import_safety_issues, locate_native_session, native_source_file,
     read_native_transcript, resolve_bundle, scan_native_sessions, session_edit_targets,
 };
 use mj_tui::{ImportProfileOption, ImportSessionOption};
@@ -48,6 +48,14 @@ enum ImportCommand {
     Grok(NativeImportArgs),
     /// Import a session created by Muse Code.
     Muse(NativeImportArgs),
+    /// Import a session from Antigravity CLI.
+    #[command(visible_alias = "agy")]
+    Antigravity(NativeImportArgs),
+    /// Import a session from OpenCode.
+    #[command(name = "opencode")]
+    OpenCode(NativeImportArgs),
+    /// Import a session from dsh-acp.
+    Dsh(NativeImportArgs),
 }
 
 /// The arguments every `mj import <harness>` subcommand takes. The harness is
@@ -104,7 +112,10 @@ impl ImportArgs {
             | ImportCommand::Codex(args)
             | ImportCommand::Kimi(args)
             | ImportCommand::Grok(args)
-            | ImportCommand::Muse(args) => &args.workspace,
+            | ImportCommand::Muse(args)
+            | ImportCommand::Antigravity(args)
+            | ImportCommand::OpenCode(args)
+            | ImportCommand::Dsh(args) => &args.workspace,
         }
     }
 }
@@ -118,6 +129,9 @@ impl ImportCommand {
             ImportCommand::Kimi(args) => (HarnessKind::Kimi, args),
             ImportCommand::Grok(args) => (HarnessKind::Grok, args),
             ImportCommand::Muse(args) => (HarnessKind::Muse, args),
+            ImportCommand::Antigravity(args) => (HarnessKind::Antigravity, args),
+            ImportCommand::OpenCode(args) => (HarnessKind::OpenCode, args),
+            ImportCommand::Dsh(args) => (HarnessKind::Dsh, args),
         }
     }
 }
@@ -177,7 +191,9 @@ fn locate_client_native_session(
     for home in homes {
         match locate_native_session(harness, &home, selection) {
             Ok(located) => {
-                let modified = std::fs::metadata(&located.source_path)?.modified()?;
+                let modified =
+                    std::fs::metadata(native_source_file(harness, &located.source_path))?
+                        .modified()?;
                 candidates.push((modified, home, located));
             }
             Err(error) => errors.push(format!("{}: {error:#}", home.display())),
@@ -246,20 +262,37 @@ fn import_source(
 /// Adopt one named native session, answering with the Mjolnir session id the
 /// import produced, or `None` when the person declined the safety prompt.
 ///
-/// This is `mj import <harness> --session <id>` without the subcommand, for
-/// `mj resume --wiki` continuing a row another tool wrote. It reads the same
-/// stock harness home, so a session the harness itself no longer keeps there
-/// cannot be imported this way.
+/// Continue the row from its configured profile home when the index found it
+/// there. A remote daemon's paths are never read as client-local paths.
 pub(crate) fn import_named_native_session(
     harness: HarnessKind,
     native_session_id: String,
+    indexed_path: &std::path::Path,
     workspace_id: &str,
 ) -> Result<Option<String>> {
-    let source = ImportSource {
+    let config = daemon_config()?;
+    let mut source = ImportSource {
         profile_id: None,
         home: harness_config_home(harness)?,
     };
-    let config = daemon_config()?;
+    if daemon_shares_this_machine()? {
+        let file = native_source_file(harness, indexed_path);
+        for (id, profile) in config
+            .enabled_profiles()
+            .filter(|(_, profile)| profile.kind == harness)
+        {
+            let root = harness
+                .nested_data_dir(&profile.home)
+                .unwrap_or_else(|| profile.home.clone());
+            let contains = file.starts_with(&root)
+                || root.canonicalize().is_ok_and(|root| file.starts_with(root));
+            if contains {
+                source.profile_id = Some(id.to_owned());
+                source.home = profile.home.clone();
+                break;
+            }
+        }
+    }
     import_native(
         harness,
         NativeImportArgs {
@@ -333,7 +366,7 @@ fn import_native(
         "Selected {} session {} at {}{}",
         import_label(harness),
         located.native_session_id,
-        located.source_path.display(),
+        native_source_file(harness, &located.source_path).display(),
         match &source.profile_id {
             Some(profile_id) => format!(" (profile {profile_id})"),
             None => " (no profile runs this harness; read its default home)".to_owned(),
@@ -718,29 +751,22 @@ pub(crate) fn discover_import_profile(
         scan_progress: None,
         error: None,
     };
-    // A harness whose sessions cannot be listed yet is not an error to report.
-    if !native_sessions_enumerable(harness_kind) {
-        profile.scan_progress = Some((0, 0));
-        publish(&profile);
-        return profile;
-    }
     let mut last_publish: Option<Instant> = None;
     let mut git_availability = HashMap::new();
     let discovered = scan_native_sessions(harness_kind, &home, cache, |progress| {
         profile.scan_progress = Some((progress.scanned, progress.total));
         if let Some(session) = progress.session {
-            let reason = git_availability
-                .entry(session.cwd.clone())
-                .or_insert_with(
-                    || match mj_controller::import::git_root_for_path(&session.cwd) {
+            let cwd = session.cwd.clone();
+            let mut option = import_session_option(session);
+            if option.unavailable_reason.is_none() {
+                option.unavailable_reason = git_availability
+                    .entry(cwd.clone())
+                    .or_insert_with(|| match mj_controller::import::git_root_for_path(&cwd) {
                         Ok(Some(_)) => None,
                         Ok(None) => Some("missing Git repo".to_owned()),
                         Err(error) => Some(format!("could not inspect Git repo: {error:#}")),
-                    },
-                );
-            let mut option = import_session_option(session);
-            if option.unavailable_reason.is_none() {
-                option.unavailable_reason = reason.clone();
+                    })
+                    .clone();
             }
             push_unique_session(&mut profile.sessions, option);
         }
@@ -1235,19 +1261,10 @@ mod tests {
         let profile = scan();
         assert!(profile.error.is_none(), "{:?}", profile.error);
         // Hard-won: DSH campaign 2026-10-23: Import tab reported unsupported DSH scans as failures
-        for unsupported in [HarnessKind::Dsh, HarnessKind::OpenCode] {
-            let skipped = discover_import_profile(
-                "unsupported".into(),
-                unsupported,
-                home.clone(),
-                &cache,
-                |_| {},
-            );
-            assert!(
-                skipped.error.is_none(),
-                "{unsupported:?}: {:?}",
-                skipped.error
-            );
+        for kind in [HarnessKind::Dsh, HarnessKind::OpenCode] {
+            let skipped =
+                discover_import_profile("empty".into(), kind, home.clone(), &cache, |_| {});
+            assert!(skipped.error.is_none(), "{kind:?}: {:?}", skipped.error);
             assert!(skipped.sessions.is_empty());
         }
         assert_eq!(profile.sessions.len(), 1);

@@ -416,6 +416,7 @@ fn restore_missing_sqlite_families(
         } else {
             let complete = restored_native_artifact_bytes(
                 archive.manifest.session.harness_kind,
+                &archive.manifest.session.native_session_id,
                 relative_path,
                 &fs::read(snapshot.path())?,
                 target_cwd,
@@ -493,8 +494,7 @@ fn restore_native_artifacts(
                 relative_path,
                 target_cwd.as_deref(),
             )?;
-            // Provider relocation rewrites Kimi/Grok/Muse/DSH records and agy's
-            // SQLite database. Claude and Codex transcripts only remap paths.
+            // Claude and Codex transcripts need only path remapping.
             if target_cwd.is_none()
                 || native_artifact_relocation(archive.manifest.session.harness_kind, &destination)
                     .is_none()
@@ -553,6 +553,7 @@ fn restore_native_artifacts(
         )?;
         let native_data = restored_native_artifact_bytes(
             archive.manifest.session.harness_kind,
+            &archive.manifest.session.native_session_id,
             &relative_path,
             native_data,
             target_cwd.as_deref(),
@@ -1005,6 +1006,7 @@ enum NativeRelocation {
     Muse,
     Dsh,
     Antigravity,
+    OpenCode,
     GrokSummary,
     KimiRegistry,
     KimiIndex,
@@ -1023,6 +1025,9 @@ fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<Nativ
         {
             Some(NativeRelocation::Antigravity)
         }
+        HarnessKind::OpenCode if super::native_scan::is_sqlite_native_database(harness, path) => {
+            Some(NativeRelocation::OpenCode)
+        }
         HarnessKind::Grok if is_grok_session_summary(path) => Some(NativeRelocation::GrokSummary),
         HarnessKind::Kimi if path == Path::new("workspaces.json") => {
             Some(NativeRelocation::KimiRegistry)
@@ -1037,6 +1042,7 @@ fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<Nativ
 
 pub(super) fn restored_native_artifact_bytes(
     harness: HarnessKind,
+    native_session_id: &str,
     relative_path: &Path,
     data: &[u8],
     target_cwd: Option<&Path>,
@@ -1058,6 +1064,15 @@ pub(super) fn restored_native_artifact_bytes(
                     target_cwd.display()
                 )
             });
+        }
+        Some(NativeRelocation::OpenCode) => {
+            return crate::native::opencode::relocate(data, native_session_id, target_cwd)
+                .with_context(|| {
+                    format!(
+                        "relocate OpenCode session {native_session_id} to {}",
+                        target_cwd.display()
+                    )
+                });
         }
         Some(NativeRelocation::GrokSummary) => {
             return rewrite_grok_session_summary(data, target_cwd, harness_home);
