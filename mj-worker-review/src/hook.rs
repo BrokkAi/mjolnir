@@ -26,6 +26,7 @@ documentation_only() {
     ':(top,glob)**/CLAUDE.md' ':(top,glob)**/CLAUDE.local.md' \
     ':(top,glob)**/GEMINI.md' ':(top,glob)**/SKILL.md' \
     ':(top,glob)**/*.instructions.md' ':(top,glob)**/*.prompt.md' \
+    ':(top,glob)**/.agents/*.md' ':(top,glob)**/.agents/skills/**' \
     ':(top,glob)**/.github/**' ':(top,glob)**/.claude/**' \
     ':(top,glob)**/.codex/**' ':(top,glob)**/.gemini/**' \
     ':(top,glob)**/.cursor/**' ':(top,glob)**/.opencode/**' || return 1
@@ -276,7 +277,13 @@ mod tests {
         let root = temp.path().join("checkout");
         install_pre_push_hook(&SystemGit, &root).unwrap();
         fs::create_dir(root.join("docs")).unwrap();
-        for path in ["README.md", "docs/notes with\na newline.rst", "LICENSE"] {
+        for path in [
+            "README.md",
+            "docs/notes with\na newline.rst",
+            "LICENSE",
+            ".agents/docs/context.md",
+            ".agents/plans/feature.md",
+        ] {
             commit_file(&root, path, b"Plain documentation\n");
         }
         assert_eq!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
@@ -400,6 +407,7 @@ mod tests {
             "requirements.txt",
             "code\nwith a newline.rs",
             "AGENTS.md",
+            ".agents/PLANS.md",
             "nested/CLAUDE.md",
             "assets/skills/mj/SKILL.md",
             ".github/instructions/code.instructions.md",
