@@ -19,7 +19,8 @@ from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report,
 from .engine.grammar import MENU
 from .engine.runner import EngineRunner, SealedRunner
 from .fidelity_live import (SONNET, TERRA, adjudication_input, candidate_lines,
-                            model_usage, partition_candidates, planned_calls,
+                            model_usage, partition_candidates, partition_reconciliation_groups,
+                            planned_calls, reconciliation_groups, reconciliation_input,
                             validate_reconciliation)
 from .fidelity_symbols import capture_symbols, changed_intervals
 
@@ -759,9 +760,9 @@ class ModelIdentity(unittest.TestCase):
         # 3 is a disjoint census claim in a.rs that denotes the same relation as {0, 1, 2};
         # 4 is a disjoint invalid candidate in c.rs that reuses the same raw key "shared".
         candidates = {
-            "4": {"sites": [{"path": "c.rs", "start_line": 20, "end_line": 21}], "detail": "z" * 120},
+            "4": {"sites": [{"path": "c.rs", "start_line": 20, "end_line": 21}], "detail": "z" * 300},
             "3": {"claim": "census relation", "scope": "Covered scoped claim",
-                  "sites": [{"path": "a.rs", "start_line": 20, "end_line": 21}], "detail": "y" * 120},
+                  "sites": [{"path": "a.rs", "start_line": 20, "end_line": 21}], "detail": "y" * 450},
             "2": {"sites": [{"path": "c.rs", "start_line": 4, "end_line": 6}], "detail": "x" * 120},
             "0": {"sites": [{"path": "a.rs", "start_line": 2, "end_line": 3},
                             {"path": "b.rs", "start_line": 10, "end_line": 12}], "detail": "x" * 120},
@@ -776,18 +777,23 @@ class ModelIdentity(unittest.TestCase):
         self.assertEqual(decoded["candidates"], candidates)
         self.assertEqual(decoded["source"]["a.rs:2-3"], ["line_a_2", "line_a_3"])
 
-        # With a cap smaller than the whole bundle, transitively linked {0, 1, 2} stay atomic while {3} and {4} split.
-        batches = partition_candidates("(q)", candidates, lines, max_bytes=400)
+        # With a cap that fits the {0, 1, 2} component together, overlapping {0, 1, 2} stay atomic while {3} and {4} split.
+        comp012_bytes = len(adjudication_input("(q)", {k: candidates[k] for k in ("0", "1", "2")}, lines).encode("utf-8"))
+        batches = partition_candidates("(q)", candidates, lines, max_bytes=comp012_bytes)
         self.assertEqual([list(batch) for batch in batches], [["0", "1", "2"], ["3"], ["4"]])
-        # Empty sites or a single component cannot be split safely.
-        with_empty = {**candidates, "5": {"sites": []}}
-        self.assertEqual(partition_candidates("(q)", with_empty, candidate_lines(with_empty, blobs.get), max_bytes=10),
-                         [with_empty])
+        # An oversized connected component and an empty-site candidate still split into bounded batches.
         single_comp = {key: candidates[key] for key in ("0", "1", "2")}
-        self.assertEqual(partition_candidates("(q)", single_comp, lines, max_bytes=10), [single_comp])
+        split_comp = partition_candidates("(q)", single_comp, lines, max_bytes=400)
+        self.assertEqual([list(batch) for batch in split_comp], [["0"], ["1"], ["2"]])
+        with_empty = {**candidates, "5": {"sites": [], "detail": "w" * 450}}
+        split_empty = partition_candidates("(q)", with_empty, candidate_lines(with_empty, blobs.get),
+                                           max_bytes=comp012_bytes)
+        self.assertEqual([list(batch) for batch in split_empty], [["0", "1", "2"], ["3"], ["4", "5"]])
+        self.assertTrue(all(len(adjudication_input("(q)", b, candidate_lines(with_empty, blobs.get)).encode()) <= comp012_bytes
+                            for b in split_empty))
 
         query = Query("guarded-paths", "decisive", "fixture", "c" * 40, "(q)")
-        with TemporaryDirectory() as root, patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", 400), \
+        with TemporaryDirectory() as root, patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", comp012_bytes), \
                 patch.object(fidelity_live, "blob_reader", lambda *args: blobs.get):
             adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
             adapter.directory = Path(root)
@@ -843,12 +849,13 @@ class ModelIdentity(unittest.TestCase):
             fail_stage = None
             merged = adapter.adjudicate(query, candidates)
             self.assertEqual(seen_tasks, ["batch-000", "batch-001", "batch-001", "batch-002", "reconcile", "reconcile"])
-            # Full batch files and census metadata were staged for reconciliation.
-            self.assertEqual(sorted(k for k in reconcile_files_seen if k.startswith("batch-")),
-                             ["batch-000.json", "batch-001.json", "batch-002.json"])
+            # Reconciliation is self-contained (no batch-*.json files staged) with path-aliased lossless groups.
+            self.assertEqual(sorted(reconcile_files_seen), ["catalogue.md", "input.json", "menu.md", "rulings.md"])
             rec_payload = json.loads(reconcile_files_seen["input.json"])
+            self.assertEqual(rec_payload["files"], {"f0": "a.rs", "f1": "b.rs", "f2": "c.rs"})
             self.assertEqual(rec_payload["groups"]["b1:shared"]["census"],
                              [{"id": "3", "claim": "census relation", "scope": "Covered scoped claim"}])
+            self.assertEqual(rec_payload["groups"]["b0:shared"]["representative"]["detail"], "x" * 120)
             # Cross-batch census claim 3 merged onto 0/1/2; invalid 4 stayed distinct.
             self.assertEqual({merged[cid]["key"] for cid in ("0", "1", "2", "3")}, {"b0:shared"})
             self.assertEqual(merged["4"]["key"], "b2:shared")
@@ -876,6 +883,97 @@ class ModelIdentity(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "mixed single-session and batched"):
                 adapter.adjudicate(query, candidates)
             (adj_dir / "intent.json").unlink()
+            with patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", 10_000_000):
+                with self.assertRaisesRegex(RuntimeError, "mixed single-session and batched"):
+                    adapter.adjudicate(query, candidates)
+
+    def test_oversized_reconciliation_runs_bounded_pairs_with_transitive_closure(self):
+        blobs = {"a.rs": "".join(f"line_{i}\n" for i in range(1, 40)).encode()}
+        # Three overlapping candidates that split into 3 batches under a tight limit,
+        # whose 3 reconciliation groups exceed the limit together and must reconcile pairwise.
+        candidates = {
+            "0": {"kind": "guarded_path", "fields": {"note": "a" * 90},
+                  "sites": [{"path": "a.rs", "start_line": 1, "end_line": 10}]},
+            "1": {"kind": "guarded_path", "fields": {"note": "b" * 90},
+                  "sites": [{"path": "a.rs", "start_line": 5, "end_line": 15}]},
+            "2": {"kind": "guarded_path", "fields": {"note": "c" * 90},
+                  "sites": [{"path": "a.rs", "start_line": 10, "end_line": 20}]},
+        }
+        # Measure a cap that forces 3 single-candidate batches and 3 reconciliation chunks (pairs <= cap).
+        preliminary = {
+            cid: {"in_scope": True, "key": f"b{i}:row", "reason": "ok"}
+            for i, cid in enumerate(("0", "1", "2"))
+        }
+        file_table, groups = reconciliation_groups([{cid: candidates[cid]} for cid in ("0", "1", "2")], preliminary)
+        pair01_bytes = len(reconciliation_input("(q)", file_table,
+                                                {"b0:row": groups["b0:row"], "b1:row": groups["b1:row"]}).encode())
+        full_rec_bytes = len(reconciliation_input("(q)", file_table, groups).encode())
+        cap = pair01_bytes + 4
+        self.assertLess(cap, full_rec_bytes)
+        self.assertEqual(len(partition_reconciliation_groups("(q)", file_table, groups, max_bytes=cap)), 3)
+
+        query = Query("guarded-paths", "random", "fixture", "c" * 40, "(q)")
+        with TemporaryDirectory() as root, patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", cap), \
+                patch.object(fidelity_live, "blob_reader", lambda *args: blobs.get):
+            adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+            adapter.directory = Path(root)
+            adapter.sources = {query.commit: "fixture"}
+            adapter.catalogue = adapter.menu = adapter.rulings = ""
+
+            pair_sizes = {}
+            fail_pair = "pair-001-002"
+            ran = []
+
+            def fake_sealed_task(commit, directory, model, profile, files, prompt, check_output):
+                directory.mkdir(parents=True, exist_ok=True)
+                output_file = directory / "output.json"
+                if (directory / "completed.json").exists():
+                    return check_output(output_file.read_bytes(), blobs.get), {"reused": True}
+                ran.append(directory.name)
+                if directory.name == fail_pair:
+                    (directory / "failed.json").write_text("{}")
+                    raise RuntimeError("transient pair failure")
+                payload = json.loads(files["input.json"])
+                if directory.name.startswith("pair-"):
+                    pair_sizes[directory.name] = len(files["input.json"].encode("utf-8"))
+                    # Merge b0:row==b1:row in pair-000-001 and b1:row==b2:row in pair-001-002;
+                    # pair-000-002 emits no merge, testing Union-Find transitive closure.
+                    if directory.name == "pair-000-001":
+                        raw = {"merges": [{"keys": ["b0:row", "b1:row"], "reason": "0 equals 1"}]}
+                    elif directory.name == "pair-001-002":
+                        raw = {"merges": [{"keys": ["b1:row", "b2:row"], "reason": "1 equals 2"}]}
+                    else:
+                        raw = {"merges": []}
+                else:
+                    raw = {cid: {"in_scope": True, "key": "row", "reason": "ok"} for cid in payload["candidates"]}
+                raw_bytes = json.dumps(raw).encode()
+                checked = check_output(raw_bytes, blobs.get)
+                output_file.write_bytes(raw_bytes)
+                (directory / "completed.json").write_text("{}")
+                return checked, {"reused": False}
+
+            adapter.sealed_task = fake_sealed_task
+            with self.assertRaisesRegex(RuntimeError, "transient pair failure"):
+                adapter.adjudicate(query, candidates)
+            rec_dir = adapter.directory / query.key / "adjudicator" / "reconcile"
+            (rec_dir / "pair-001-002").rename(rec_dir / "pair-001-002-failed-deadbeef")
+            fail_pair = None
+            merged = adapter.adjudicate(query, candidates)
+            # Every pair stayed within the byte cap and pair-000-001/pair-000-002 were reused on resume.
+            self.assertEqual(ran, ["batch-000", "batch-001", "batch-002",
+                                   "pair-000-001", "pair-000-002", "pair-001-002", "pair-001-002"])
+            self.assertTrue(all(size <= cap for size in pair_sizes.values()), pair_sizes)
+            self.assertEqual({merged[cid]["key"] for cid in ("0", "1", "2")}, {"b0:row"})
+
+            # Mixed single-session and pairwise reconciliation artifacts fail visibly.
+            (rec_dir / "intent.json").write_text("{}")
+            with self.assertRaisesRegex(RuntimeError, "mixed single-session and pairwise"):
+                adapter.adjudicate(query, candidates)
+            (rec_dir / "intent.json").unlink()
+            (rec_dir / "pair-009-010").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "unexpected reconciliation pair directories"):
+                adapter.adjudicate(query, candidates)
+            (rec_dir / "pair-009-010").rmdir()
             with patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", 10_000_000):
                 with self.assertRaisesRegex(RuntimeError, "mixed single-session and batched"):
                     adapter.adjudicate(query, candidates)
