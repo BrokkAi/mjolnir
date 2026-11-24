@@ -11,6 +11,7 @@
 
 mod harness_tools;
 pub mod history;
+mod indexed_messages;
 #[cfg(test)]
 mod native_tests;
 mod provenance;
@@ -2102,14 +2103,15 @@ pub fn query_rows(
     };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
+    // Rows skipped as unclassifiable are logged by the visibility; the
+    // listing itself has no place to carry notices.
     query_rows_from(
         &connection,
         query,
         limit,
         live,
         include_tool_matches,
-        &ownership,
-        &cache,
+        &mut top_level::QueryVisibility::new(&ownership, &cache),
     )
 }
 
@@ -2137,8 +2139,7 @@ fn query_rows_from(
     limit: usize,
     live: &BTreeSet<String>,
     include_tool_matches: bool,
-    ownership: &top_level::Snapshot,
-    cache: &crate::import::NativeScanCache,
+    visibility: &mut top_level::QueryVisibility<'_>,
 ) -> Result<Vec<WikiRow>> {
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
     let query = query.trim();
@@ -2150,7 +2151,7 @@ fn query_rows_from(
             if visible.len() >= limit {
                 break;
             }
-            if top_level::is_child(&row, ownership, cache)? {
+            if visibility.is_child_lenient(&row) {
                 continue;
             }
             visible.push(wiki_row(row, None, live));
@@ -2179,7 +2180,7 @@ fn query_rows_from(
         if rows.len() >= limit {
             break;
         }
-        if top_level::is_child(&row, ownership, cache)? {
+        if visibility.is_child_lenient(&row) {
             continue;
         }
         found.insert(row.session_id.clone());
@@ -2189,7 +2190,7 @@ fn query_rows_from(
         if rows.len() >= limit {
             break;
         }
-        if found.contains(&hit.row.session_id) || top_level::is_child(&hit.row, ownership, cache)? {
+        if found.contains(&hit.row.session_id) || visibility.is_child_lenient(&hit.row) {
             continue;
         }
         found.insert(hit.row.session_id.clone());
@@ -2203,7 +2204,7 @@ fn query_rows_from(
             if rows.len() >= limit {
                 break;
             }
-            if found.contains(&row.session_id) || top_level::is_child(&row, ownership, cache)? {
+            if found.contains(&row.session_id) || visibility.is_child_lenient(&row) {
                 continue;
             }
             found.insert(row.session_id.clone());
@@ -3269,8 +3270,7 @@ mod tests {
             limit,
             &BTreeSet::new(),
             include_tool_matches,
-            ownership,
-            &crate::import::NativeScanCache::new(),
+            &mut top_level::QueryVisibility::new(ownership, &crate::import::NativeScanCache::new()),
         )
     }
 
