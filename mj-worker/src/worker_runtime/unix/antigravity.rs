@@ -1,12 +1,17 @@
 use super::*;
 use crate::acp::antigravity_tasks::{AntigravityStateFollower, read_summary_row_digest};
-use std::path::Path;
 
 pub(super) async fn handle_antigravity_stop(
     relay: &Arc<RelayCell>,
     envelope: RelayRequestEnvelope,
-    home: Option<&Path>,
+    credentials: &SharedCredentials,
 ) -> RelayResponseEnvelope {
+    let credentials = credentials.read().await;
+    let home = credentials
+        .as_ref()
+        .ok()
+        .filter(|endpoint| endpoint.harness == HarnessKind::Antigravity)
+        .map(|endpoint| endpoint.home.clone());
     let RelayRequest::AntigravityStop {
         conversation_id,
         fully_idle,
@@ -23,7 +28,6 @@ pub(super) async fn handle_antigravity_stop(
             .expect("relay state lock poisoned")
             .matches_antigravity_conversation(Some(id))
     {
-        let home = home.to_owned();
         let id = id.to_owned();
         // Antigravity waits for the hook before publishing its deferred Idle
         // transition. Read the committed row now, even if the monitor missed it.
@@ -42,10 +46,13 @@ pub(super) async fn handle_antigravity_stop(
         None
     };
 
-    relay
+    let response = relay
         .lock()
         .expect("relay state lock poisoned")
-        .handle_with_antigravity_stop_baseline(envelope, baseline)
+        .handle_with_antigravity_stop_baseline(envelope, baseline);
+    // Keep reload waiting until this hook has applied the sampled baseline.
+    drop(credentials);
+    response
 }
 
 pub(crate) const ANTIGRAVITY_TASK_POLL_INTERVAL: std::time::Duration =

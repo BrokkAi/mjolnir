@@ -841,6 +841,8 @@ pub struct CreateSessionRequest {
     pub profile_id: String,
     /// When `profile_id` is empty and `provider` is set, load-balance across
     /// enabled profiles belonging to this provider instead of `[[subagents.primary]]`.
+    /// A named profile with a provider keeps that automatic selection pinned;
+    /// creation still validates its target eligibility and accounts for its placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<mj_core::config::QuotaProvider>,
     pub bundle_id: String,

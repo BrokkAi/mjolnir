@@ -12,8 +12,9 @@ use crate::targets::{
     self, CancellableProcessExecutor, CommandExecutor, CommandSpec, ProvisionStage,
     ProvisionStageGuard,
 };
+use crate::worker_client::RelayClient;
 use mj_core::config::HarnessKind;
-use mj_core::relay::{HarnessPreparation, RelayExecutionState};
+use mj_core::relay::{HarnessPreparation, RelayExecutionState, RelayOperationalState};
 
 use mj_worker_staging::worker_binary::{WorkerProbe, probe_worker};
 
@@ -75,29 +76,38 @@ impl NativeSessionProbe for StandaloneSession {
     }
 
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
-        let snapshot = self.sync().await?;
-        let operational = snapshot.operational;
-        // A closed relay ends the wait whatever its preparation last said; a
-        // worker failure, when there is one, says more than "closed".
-        Ok(match operational.harness_preparation.clone() {
-            Some(HarnessPreparation::Failed { step, error, .. }) => {
-                NativeSessionReadiness::PreparationFailed { step, error }
-            }
-            _ if operational.execution == RelayExecutionState::Closed => {
-                NativeSessionReadiness::Closed
-            }
-            Some(HarnessPreparation::Preparing { step, since_ms }) => {
-                NativeSessionReadiness::Preparing { step, since_ms }
-            }
-            _ if operational.native_session_is_ready() => NativeSessionReadiness::Ready(
-                operational
-                    .native_session_id
-                    .clone()
-                    .expect("ready native session"),
-            ),
-            Some(HarnessPreparation::Started) => NativeSessionReadiness::Started,
-            None => NativeSessionReadiness::Waiting,
-        })
+        Ok(native_session_readiness(&self.sync().await?.operational))
+    }
+}
+
+impl NativeSessionProbe for RelayClient {
+    fn protocol_version(&self) -> u32 {
+        RelayClient::protocol_version(self)
+    }
+
+    async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
+        Ok(native_session_readiness(&self.status().await?))
+    }
+}
+
+fn native_session_readiness(operational: &RelayOperationalState) -> NativeSessionReadiness {
+    // A worker failure explains a closed relay more precisely.
+    match operational.harness_preparation.clone() {
+        Some(HarnessPreparation::Failed { step, error, .. }) => {
+            NativeSessionReadiness::PreparationFailed { step, error }
+        }
+        _ if operational.execution == RelayExecutionState::Closed => NativeSessionReadiness::Closed,
+        Some(HarnessPreparation::Preparing { step, since_ms }) => {
+            NativeSessionReadiness::Preparing { step, since_ms }
+        }
+        _ if operational.native_session_is_ready() => NativeSessionReadiness::Ready(
+            operational
+                .native_session_id
+                .clone()
+                .expect("ready native session"),
+        ),
+        Some(HarnessPreparation::Started) => NativeSessionReadiness::Started,
+        None => NativeSessionReadiness::Waiting,
     }
 }
 
@@ -380,22 +390,24 @@ trait StartingWorkerProbe {
     ) -> impl std::future::Future<Output = Result<WorkerProbe>> + Send + 'static;
 }
 
-struct StartingWorkerConnection<'a> {
+struct StartingWorkerConnection<'a, Connect> {
+    connect: Connect,
     spec: &'a CommandSpec,
     session_id: &'a str,
     locator: &'a targets::TargetLocator,
     worker_root: &'a str,
 }
 
-impl StartingWorkerProbe for StartingWorkerConnection<'_> {
-    type Relay = StandaloneSession;
+impl<Connect, Future, Relay> StartingWorkerProbe for StartingWorkerConnection<'_, Connect>
+where
+    Connect: Fn(CommandSpec, String) -> Future,
+    Future: std::future::Future<Output = Result<Relay>> + Send + 'static,
+    Relay: Send + 'static,
+{
+    type Relay = Relay;
 
-    fn connect(
-        &self,
-    ) -> impl std::future::Future<Output = Result<StandaloneSession>> + Send + 'static {
-        let spec = self.spec.clone();
-        let session_id = self.session_id.to_owned();
-        async move { StandaloneSession::connect_command(&spec, &session_id).await }
+    fn connect(&self) -> impl std::future::Future<Output = Result<Relay>> + Send + 'static {
+        (self.connect)(self.spec.clone(), self.session_id.to_owned())
     }
 
     fn inspect(
@@ -432,7 +444,29 @@ pub async fn connect_started_worker(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<StandaloneSession> {
+    connect_started_worker_with_timeout(
+        spec,
+        session_id,
+        executor,
+        locator,
+        worker_root,
+        WORKER_STARTUP_CONNECT_TIMEOUT,
+    )
+    .await
+}
+
+/// Connect for Create readiness without attaching a durable projection.
+pub async fn connect_started_worker_status(
+    spec: &CommandSpec,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Result<RelayClient> {
     let mut connection = StartingWorkerConnection {
+        connect: |spec: CommandSpec, session_id: String| async move {
+            RelayClient::connect(&spec, &session_id).await
+        },
         spec,
         session_id,
         locator,
@@ -453,6 +487,9 @@ pub async fn connect_started_worker_with_timeout(
     timeout: Duration,
 ) -> Result<StandaloneSession> {
     let mut connection = StartingWorkerConnection {
+        connect: |spec: CommandSpec, session_id: String| async move {
+            StandaloneSession::connect_command(&spec, &session_id).await
+        },
         spec,
         session_id,
         locator,

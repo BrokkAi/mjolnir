@@ -42,6 +42,15 @@ def load_points(results, filename, axis, flag):
     return eligible | {option: (*points[option][:2], False) for option in EXTRAS}
 
 
+def load_key_values(results):
+    values = {}
+    for name, filename, _ in SERIES:
+        with (results / filename).open(newline="") as source:
+            rows = csv.DictReader(source)
+            values[name] = {row["option"]: row for row in rows}
+    return values
+
+
 def name_option(option):
     return (EXTRAS.get(option, option).replace("gpt-6.2-sol/", "Sol 6.2/")
             .replace("Terra/", "Terra 6.1/").replace("Sol/", "Sol 6.1/")
@@ -102,6 +111,7 @@ def render(results, output, *, cost):
     series = [(name, color, load_points(results, filename, axis, flag))
               for name, filename, color in SERIES]
     reference = series[0][2]
+    key_values = load_key_values(results)
     order = sorted({o for _, _, points in series for o, p in points.items() if p[2]},
                    key=lambda o: (reference[o][0], o)) + list(EXTRAS)
     number = {o: i for i, o in enumerate(order, 1)}
@@ -116,8 +126,8 @@ def render(results, output, *, cost):
              "1–3 parallel reviewers · Greptile solo references only"
              " · 70 historical mjolnir diffs · blind Opus 5.5/high verification (verify9)",
              fontsize=14, color=MUTED)
-    ax = fig.add_axes([.06, .12, .48, .73], facecolor=BG)
-    key = fig.add_axes([.565, .12, .415, .73])
+    ax = fig.add_axes([.06, .12, .43, .73], facecolor=BG)
+    key = fig.add_axes([.52, .12, .46, .73])
     key.set_axis_off()
     ax.set_xscale("log")
     if cost:
@@ -169,30 +179,41 @@ def render(results, output, *, cost):
               ncols=len(handles), frameon=False, fontsize=11, columnspacing=1.2)
     place_numbers(fig, ax, marks, number)
 
-    key.text(0, 1.012, "Reviewers", fontsize=14, fontweight="bold", va="bottom")
-    columns = (.72, .81, .91, 1.0)
-    for title, x in zip(("USD/diff" if cost else "s", "All", "Med+", "High"), columns):
-        key.text(x, 1.012, title, fontsize=11, color=MUTED, ha="right", va="bottom")
+    key.text(.04, 1.012, "Reviewers", fontsize=14, fontweight="bold", va="bottom")
+    columns = {"time": .67, "cost": .78, "All": .85, "Medium or high": .93,
+               "High only": 1.0}
+    for title, x in (("Time (s)", columns["time"]), ("Cost", columns["cost"]),
+                     ("All", columns["All"]), ("Med+", columns["Medium or high"]),
+                     ("High", columns["High only"])):
+        key.text(x, 1.012, title, fontsize=10.5, color=MUTED, ha="right", va="bottom")
     step = .98 / len(order)
-    x_format, y_format = (".3f", ".2f") if cost else (".0f", ".0f")
+    finding_format = ".2f" if cost else ".0f"
     for index, option in enumerate(order):
         y = .98 - index * step
         key.text(0, y, str(number[option]), fontsize=11, fontweight="bold", va="center")
-        key.text(.044, y, name_option(option), fontsize=11, va="center")
-        key.text(columns[0], y, format(reference[option][0], x_format),
-                 fontsize=11, color=MUTED, ha="right", va="center")
-        for (_, color, points), x in zip(series, columns[1:]):
-            _, findings, flagged = points[option]
-            if flagged or option in EXTRAS:
-                key.text(x, y, format(findings, y_format), fontsize=11, color=color,
-                         ha="right", va="center")
+        key.text(.044, y, name_option(option), fontsize=9.5, va="center")
+        all_row = key_values["All confirmed"][option]
+        time_text = f"{float(all_row['median_latency_s']):.1f}"
+        raw_cost = all_row["cost_per_diff_usd"]
+        cost_text = f"{float(raw_cost):.3f}" if raw_cost else "—"
+        key.text(columns["time"], y, time_text, fontsize=9.5, color=MUTED,
+                 ha="right", va="center")
+        key.text(columns["cost"], y, cost_text, fontsize=9.5, color=MUTED,
+                 ha="right", va="center")
+        for (label, color, points), column in zip(
+                series, ("All", "Medium or high", "High only")):
+            if not points[option][2] and option not in EXTRAS:
+                continue
+            value = float(key_values[label][option]["findings"])
+            key.text(columns[column], y, format(value, finding_format), fontsize=9.5,
+                     color=color, ha="right", va="center")
 
     if cost:
-        methodology = ("Cost estimates cover reviewer turns and exclude carrier work, judging and subscriptions. "
-                       "Options with unknown prices are omitted.")
+        methodology = ("Cost is estimated USD per diff; estimates cover reviewer turns and exclude carrier work, "
+                       "judging and subscriptions. Only priced options appear on this chart.")
     else:
         methodology = ("Latency simulates simultaneous starts and uses the slowest reviewer. "
-                       "It excludes startup and contention.")
+                       "It excludes startup and contention. Cost is estimated USD per diff; — means unknown.")
     fig.text(.05, .047, methodology, fontsize=11, color=MUTED)
     fig.text(.05, .027,
              "Findings are expected totals across 70 diffs. Greptile's repository context could not be pinned to each diff's commit.",

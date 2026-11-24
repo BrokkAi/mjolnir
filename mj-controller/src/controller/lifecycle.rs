@@ -192,22 +192,6 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let children_not_handed_back: Vec<String> = self
-            .state
-            .subagents
-            .values()
-            .filter(|sub| {
-                sub.parent_session_id == session_id
-                    && self.state.owns_environment(&sub.child_session_id) == Some(false)
-            })
-            .filter(|sub| {
-                self.state
-                    .sessions
-                    .get(&sub.child_session_id)
-                    .is_some_and(|child| child.state.is_active())
-            })
-            .map(|sub| sub.child_session_id.clone())
-            .collect();
         let existing_checkpoint = session.checkpoint.as_deref().map(|checkpoint| {
             let verified = verify_installed_checkpoint_gate(session_id, checkpoint).is_ok();
             let age_seconds = chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
@@ -227,7 +211,6 @@ impl Controller {
 
         let mut preflight = mj_core::suspend_consent::SuspendPreflight {
             session_id: session_id.to_owned(),
-            children_not_handed_back,
             owning_children_to_suspend: self.state.suspendable_owned_child_ids(session_id).len(),
             existing_checkpoint,
             ..Default::default()
@@ -819,6 +802,23 @@ impl Controller {
             let result = mj_core::runtime::off_async_worker(|| {
                 targets::ensure_recovery_target_running(executor, Some(&plan))
             });
+            let result = match result {
+                Err(error)
+                    if record.state == SessionState::Closing
+                        && executor.cancellation_requested()
+                        && !executor.shutdown_interrupted() =>
+                {
+                    // The current suspend can settle cancellation once it can
+                    // read the target's records. Keep target recovery resumable.
+                    mj_core::runtime::off_async_worker(|| {
+                        targets::ensure_recovery_target_running(&ProcessExecutor, Some(&plan))
+                    })
+                    .with_context(|| {
+                        format!("recover suspend target after interrupted probe: {error:#}")
+                    })
+                }
+                result => result,
+            };
             executor.end_resumable_work("continue suspend on retained target")?;
             result.map(Some)
         };
@@ -833,6 +833,22 @@ impl Controller {
             ).into());
         }
         Ok(())
+    }
+
+    fn record_suspend_cancellation(
+        attempt: &OriginDeltaSuspend,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<String> {
+        if let Some(reason) = attempt.restart_reason(executor)? {
+            return Ok(reason);
+        }
+        let reason = if attempt.already_quiescent() {
+            "operation cancelled before parked capture"
+        } else {
+            "suspend was cancelled"
+        };
+        attempt.record_restart(&anyhow::anyhow!(reason), executor)?;
+        Ok(reason.to_owned())
     }
 
     #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
@@ -1150,26 +1166,13 @@ impl Controller {
         )?;
 
         let restart_reason = |attempt: &OriginDeltaSuspend| -> Result<Option<String>> {
-            let cancelled = user_cancelled();
-            let restart = if cancelled {
-                attempt.restart_reason(&ProcessExecutor)
-            } else {
+            if !user_cancelled() {
                 attempt.restart_reason(executor)
-            };
-            if !owning_suspend {
-                return restart;
-            }
-            let restart = restart?;
-            if !cancelled || restart.is_some() {
-                return Ok(restart);
-            }
-            let reason = if attempt.already_quiescent() {
-                "operation cancelled before parked capture"
+            } else if owning_suspend {
+                Self::record_suspend_cancellation(attempt, &ProcessExecutor).map(Some)
             } else {
-                "suspend was cancelled"
-            };
-            attempt.record_restart(&anyhow::anyhow!(reason), &ProcessExecutor)?;
-            Ok(Some(reason.to_owned()))
+                attempt.restart_reason(&ProcessExecutor)
+            }
         };
         let mut restart = None;
         if let Some(attempt) = origin_delta.as_mut() {

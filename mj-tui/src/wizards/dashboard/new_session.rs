@@ -29,6 +29,42 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
+        let provider = match wizard.step {
+            WizardStep::Profile => wizard.selected_provider(self),
+            WizardStep::Target => wizard
+                .resolved_profile
+                .as_ref()
+                .map(|(_, provider)| provider.clone()),
+            _ => None,
+        };
+        if let Some(provider) = provider {
+            if wizard.profile_selection_request.is_some() {
+                self.mode = Mode::New(wizard);
+                return DashboardAction::None;
+            }
+            self.invalidate_session_preflight();
+            let generation = self.session_preflight_generation();
+            wizard.profile_selection_request = Some(generation);
+            let checking_target = wizard.step == WizardStep::Target;
+            let request = mj_client::http::ProviderProfileSelectionRequest {
+                provider,
+                profile_id: checking_target
+                    .then(|| wizard.selected_profile_id(self))
+                    .flatten(),
+                target_template_id: checking_target
+                    .then(|| nth_key(&self.config.targets, wizard.target)),
+            };
+            self.notices.set("Selecting profile…");
+            self.mode = Mode::New(wizard);
+            return DashboardAction::SelectProviderProfile {
+                request,
+                generation,
+            };
+        }
+        self.advance_new_wizard_step(wizard)
+    }
+
+    fn advance_new_wizard_step(&mut self, mut wizard: NewWizard) -> DashboardAction {
         match wizard.step {
             WizardStep::Profile => {
                 wizard.step = WizardStep::Target;
@@ -141,6 +177,65 @@ impl DashboardState {
         }
     }
 
+    /// Only the current provider request may choose a profile or advance its page.
+    pub fn apply_provider_profile_selection(
+        &mut self,
+        generation: u64,
+        result: Result<String, String>,
+    ) -> DashboardAction {
+        if generation != self.session_preflight_generation()
+            || !matches!(&self.mode, Mode::New(wizard)
+                if matches!(wizard.step, WizardStep::Profile | WizardStep::Target)
+                    && wizard.profile_selection_request == Some(generation))
+        {
+            return DashboardAction::None;
+        }
+        let Mode::New(mut wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            unreachable!();
+        };
+        wizard.profile_selection_request = None;
+        let result = result.and_then(|id| {
+            (0..self.new_wizard_profile_count())
+                .find(|index| self.new_wizard_profile_id(*index).as_deref() == Some(&id))
+                .ok_or_else(|| {
+                    format!("Selected profile {id} is no longer available. Choose a profile again.")
+                })
+        });
+        match result {
+            Ok(index) => {
+                let provider = wizard.selected_provider(self).or_else(|| {
+                    wizard
+                        .resolved_profile
+                        .as_ref()
+                        .map(|(_, provider)| provider.clone())
+                });
+                wizard.set_profile(index);
+                wizard.resolved_profile = provider.map(|provider| {
+                    (
+                        self.new_wizard_profile_id(index).expect("selected above"),
+                        provider,
+                    )
+                });
+                let profile = wizard.selected_profile_id(self).expect("selected above");
+                let remembered = self.state.remembered_subagent_policy_for(&profile);
+                wizard.subagents.refresh_create(
+                    &profile,
+                    &self.config,
+                    remembered.as_ref(),
+                    self.state.last_oracle_choice_for(&profile),
+                );
+                self.notices.clear();
+                self.advance_new_wizard_step(wizard)
+            }
+            Err(error) => {
+                self.notices
+                    .set(format!("Could not select profile: {error}"));
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+        }
+    }
+
     fn create_session_action(&mut self, wizard: &NewWizard) -> DashboardAction {
         let action = self.create_session_action_without_closing(wizard);
         self.cancel_modal();
@@ -149,6 +244,7 @@ impl DashboardState {
 
     pub(in crate::wizards) fn invalidate_new_remote_preflight(&mut self, wizard: &mut NewWizard) {
         self.invalidate_session_preflight();
+        wizard.profile_selection_request = None;
         wizard.remote_repositories = None;
         wizard.remote_preflight_in_flight = false;
         wizard.remote_preflight_error = None;
@@ -341,7 +437,12 @@ impl DashboardState {
             // A profile that vanished after the launch was submitted is
             // refused by name by the controller.
             profile_id: wizard.selected_profile_id(self).unwrap_or_default(),
-            provider: wizard.selected_provider(self),
+            provider: wizard.selected_provider(self).or_else(|| {
+                wizard
+                    .resolved_profile
+                    .as_ref()
+                    .map(|(_, provider)| provider.clone())
+            }),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {
