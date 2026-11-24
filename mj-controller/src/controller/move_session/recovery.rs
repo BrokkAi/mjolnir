@@ -2,7 +2,7 @@
 //! legacy (pre-148) `MoveOperation` records, plus EC2 grant and SSH key
 //! reconciliation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -13,8 +13,8 @@ use mj_core::state::{
 };
 
 use super::transport::ec2_grant::{
-    AwsCliEc2Client, Ec2GrantConfig, Ec2GrantManager, Ec2GrantStore, Ec2SecurityGroupClient,
-    ReconcileReport, SqliteEc2GrantStore,
+    AwsCliEc2Client, Ec2GrantConfig, Ec2GrantManager, Ec2GrantRoute, Ec2GrantStore,
+    Ec2SecurityGroupClient, ReconcileReport, SqliteEc2GrantStore,
 };
 
 /// Durable ownership classification for an in-flight Move operation.
@@ -147,22 +147,21 @@ pub fn prune_stale_ec2_grant_users<S: Ec2GrantStore>(
     })
 }
 
-/// A security group with the region and AWS profile that own it.
-type SecurityGroupScope = (String, Option<String>, Option<String>);
-
-/// Every recorded security group with the region and AWS profile that own it.
-fn recorded_security_groups<S: Ec2GrantStore>(store: &S) -> Result<BTreeSet<SecurityGroupScope>> {
+/// Every recorded security group with the route that reaches it. A group's
+/// records share one route; where a legacy record lacks a field another
+/// record has, the field is taken from that record.
+fn recorded_security_groups<S: Ec2GrantStore>(
+    store: &S,
+) -> Result<BTreeMap<String, Ec2GrantRoute>> {
     store.with_transaction(|records| {
-        Ok(records
-            .keys()
-            .map(|k| {
-                (
-                    k.security_group_id.clone(),
-                    k.region.clone(),
-                    k.aws_profile.clone(),
-                )
-            })
-            .collect())
+        let mut groups: BTreeMap<String, Ec2GrantRoute> = BTreeMap::new();
+        for record in records.values() {
+            groups
+                .entry(record.key.security_group_id.clone())
+                .or_default()
+                .fill_from(&record.route);
+        }
+        Ok(groups)
     })
 }
 
@@ -180,8 +179,8 @@ pub fn reconcile_ec2_grants_live<S: Ec2GrantStore, C: Ec2SecurityGroupClient>(
     let manager =
         Ec2GrantManager::new(store, client, daemon_instance_id, Ec2GrantConfig::default());
     let mut total = ReconcileReport::default();
-    for (sg, region, profile) in security_groups {
-        let report = manager.reconcile_group(&sg, region.as_deref(), profile.as_deref())?;
+    for (sg, route) in security_groups {
+        let report = manager.reconcile_group(&sg, &route)?;
         total.revoked_rules += report.revoked_rules;
         total.dropped_records += report.dropped_records;
         total.resolved_installed += report.resolved_installed;
@@ -202,13 +201,9 @@ pub fn reconcile_ec2_grants_startup<S: Ec2GrantStore, C: Ec2SecurityGroupClient>
     let manager =
         Ec2GrantManager::new(store, client, daemon_instance_id, Ec2GrantConfig::default());
     let mut total = ReconcileReport::default();
-    for (sg, region, profile) in security_groups {
-        let report = manager.reconcile_group_startup(
-            &sg,
-            region.as_deref(),
-            profile.as_deref(),
-            |op_id| active_operation_ids.contains(op_id),
-        )?;
+    for (sg, route) in security_groups {
+        let report = manager
+            .reconcile_group_startup(&sg, &route, |op_id| active_operation_ids.contains(op_id))?;
         total.revoked_rules += report.revoked_rules;
         total.dropped_records += report.dropped_records;
         total.resolved_installed += report.resolved_installed;
@@ -531,8 +526,9 @@ mod tests {
     #[test]
     fn startup_prune_and_live_reconcile_preserve_concurrent_new_moves() {
         use super::super::transport::ec2_grant::{
-            Ec2ApiError, Ec2GrantKey, Ec2GrantRecord, Ec2GrantState, Ec2IngressRule,
-            Ec2InstanceNetwork, Ec2SecurityGroupClient, InMemoryGrantStore,
+            Ec2ApiError, Ec2GrantCoordination, Ec2GrantKey, Ec2GrantRecord, Ec2GrantRoute,
+            Ec2GrantState, Ec2IngressRule, Ec2InstanceNetwork, Ec2SecurityGroupClient,
+            InMemoryGrantStore,
         };
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
@@ -540,6 +536,10 @@ mod tests {
         #[derive(Clone)]
         struct SharedStore(Arc<InMemoryGrantStore>);
         impl Ec2GrantStore for SharedStore {
+            fn coordination(&self) -> Arc<Ec2GrantCoordination> {
+                self.0.coordination()
+            }
+
             fn with_transaction<R, F>(&self, f: F) -> Result<R>
             where
                 F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
@@ -579,6 +579,7 @@ mod tests {
             fn authorize_ingress(
                 &self,
                 key: &Ec2GrantKey,
+                _route: &Ec2GrantRoute,
                 description: &str,
             ) -> std::result::Result<(), Ec2ApiError> {
                 self.rules.lock().unwrap().push((
@@ -591,7 +592,11 @@ mod tests {
                 ));
                 Ok(())
             }
-            fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
+            fn revoke_ingress(
+                &self,
+                key: &Ec2GrantKey,
+                _route: &Ec2GrantRoute,
+            ) -> std::result::Result<(), Ec2ApiError> {
                 self.rules.lock().unwrap().retain(|(sg, r)| {
                     !(sg == &key.security_group_id
                         && r.cidr_ip == key.cidr_ip
@@ -617,13 +622,18 @@ mod tests {
                         users: BTreeSet::from(["op-dead".to_owned()]),
                         absent_checks: 0,
                         attempt_id: 1,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
             })
             .unwrap();
         client
-            .authorize_ingress(&dead_key, "mj-move-grant:daemon-1")
+            .authorize_ingress(
+                &dead_key,
+                &Ec2GrantRoute::default(),
+                "mj-move-grant:daemon-1",
+            )
             .unwrap();
 
         // 1. Startup prunes dead pre-crash users synchronously (before live admission).
@@ -641,13 +651,18 @@ mod tests {
                         users: BTreeSet::from(["op-new-concurrent".to_owned()]),
                         absent_checks: 0,
                         attempt_id: 2,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
             })
             .unwrap();
         client
-            .authorize_ingress(&live_key, "mj-move-grant:daemon-1")
+            .authorize_ingress(
+                &live_key,
+                &Ec2GrantRoute::default(),
+                "mj-move-grant:daemon-1",
+            )
             .unwrap();
 
         // 3. Background live reconciliation revokes the dead pre-crash rule

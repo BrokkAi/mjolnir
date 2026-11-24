@@ -6,10 +6,11 @@
 //! committed state transitions (`Installing` -> `Installed` -> `Removing`), and
 //! pre-existing non-Mjolnir rules are recorded as `External` and never revoked.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -25,18 +26,14 @@ pub fn grant_description(daemon_instance_id: &str) -> String {
     format!("{EC2_GRANT_DESCRIPTION_PREFIX}{daemon_instance_id}")
 }
 
-/// Unique key for a shared TCP ingress rule on an EC2 security group.
+/// Unique key for a shared TCP ingress rule on an EC2 security group. It is
+/// exactly the durable primary key `(security_group_id, cidr_ip, port)`, so one
+/// rule has one record and one set of users however it was reached.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Ec2GrantKey {
     pub security_group_id: String,
     pub cidr_ip: String,
     pub port: u16,
-    /// AWS region of the security group; `None` uses the client's default.
-    #[serde(default)]
-    pub region: Option<String>,
-    /// AWS CLI profile owning the security group; `None` uses the client's default.
-    #[serde(default)]
-    pub aws_profile: Option<String>,
 }
 
 impl Ec2GrantKey {
@@ -45,19 +42,63 @@ impl Ec2GrantKey {
             security_group_id: security_group_id.into(),
             cidr_ip: cidr_ip.into(),
             port: 22,
-            region: None,
-            aws_profile: None,
+        }
+    }
+}
+
+/// Where to reach the AWS API for a security group: routing metadata that
+/// belongs to the record, never to its identity. `None` uses the client's
+/// default region or profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ec2GrantRoute {
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub aws_profile: Option<String>,
+}
+
+impl Ec2GrantRoute {
+    pub fn new(region: Option<String>, aws_profile: Option<String>) -> Self {
+        Self {
+            region,
+            aws_profile,
         }
     }
 
-    pub fn with_region(mut self, region: Option<String>) -> Self {
-        self.region = region;
-        self
+    pub fn region(&self) -> Option<&str> {
+        self.region.as_deref()
     }
 
-    pub fn with_aws_profile(mut self, aws_profile: Option<String>) -> Self {
-        self.aws_profile = aws_profile;
-        self
+    pub fn aws_profile(&self) -> Option<&str> {
+        self.aws_profile.as_deref()
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.region.is_none() && self.aws_profile.is_none()
+    }
+
+    /// Fill the fields this route lacks from `other`. A field that is already
+    /// set keeps its value, so a later caller cannot reroute the first owner.
+    pub fn fill_from(&mut self, other: &Self) {
+        if self.region.is_none() {
+            self.region.clone_from(&other.region);
+        }
+        if self.aws_profile.is_none() {
+            self.aws_profile.clone_from(&other.aws_profile);
+        }
+    }
+}
+
+/// A rule to open and the AWS region and profile that own its security group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ec2GrantTarget {
+    pub key: Ec2GrantKey,
+    pub route: Ec2GrantRoute,
+}
+
+impl Ec2GrantTarget {
+    pub fn new(key: Ec2GrantKey, route: Ec2GrantRoute) -> Self {
+        Self { key, route }
     }
 }
 
@@ -87,6 +128,9 @@ pub struct Ec2GrantRecord {
     /// pre-acquire AWS `describe` snapshot.
     #[serde(default)]
     pub attempt_id: u64,
+    /// Where AWS calls for this rule go. Shared by every user of the record.
+    #[serde(default)]
+    pub route: Ec2GrantRoute,
 }
 
 /// One TCP ingress rule returned by AWS `describe-security-groups`.
@@ -146,15 +190,44 @@ pub struct ReconcileReport {
 /// Slice 5D plugs SQLite persistence into this trait; tests use
 /// [`InMemoryGrantStore`].
 pub trait Ec2GrantStore: Send + Sync {
+    /// The one owner of in-flight work for this store. Every manager over the
+    /// same durable records must share it, or a reconciler built beside a live
+    /// Move cannot see that Move's pending AWS call.
+    fn coordination(&self) -> Arc<Ec2GrantCoordination>;
+
     fn with_transaction<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>;
+}
+
+/// In-flight AWS work and attempt numbering shared by every
+/// [`Ec2GrantManager`] over one store.
+#[derive(Debug, Default)]
+pub struct Ec2GrantCoordination {
+    last_attempt_id: AtomicU64,
+    in_flight_installs: Mutex<BTreeSet<(Ec2GrantKey, u64)>>,
+    in_flight_revokes: Mutex<BTreeSet<Ec2GrantKey>>,
+}
+
+impl Ec2GrantCoordination {
+    /// The next attempt number: above every number this process handed out and
+    /// above `persisted_max`, so a restart never reuses a stored generation.
+    fn next_attempt_id(&self, persisted_max: u64) -> u64 {
+        let previous = self
+            .last_attempt_id
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
+                Some(last.max(persisted_max) + 1)
+            })
+            .expect("the update always succeeds");
+        previous.max(persisted_max) + 1
+    }
 }
 
 /// In-memory mutex-backed [`Ec2GrantStore`] for tests and standalone use.
 #[derive(Debug, Default)]
 pub struct InMemoryGrantStore {
     records: Mutex<BTreeMap<Ec2GrantKey, Ec2GrantRecord>>,
+    coordination: Arc<Ec2GrantCoordination>,
 }
 
 impl InMemoryGrantStore {
@@ -168,6 +241,10 @@ impl InMemoryGrantStore {
 }
 
 impl Ec2GrantStore for InMemoryGrantStore {
+    fn coordination(&self) -> Arc<Ec2GrantCoordination> {
+        self.coordination.clone()
+    }
+
     fn with_transaction<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
@@ -175,6 +252,20 @@ impl Ec2GrantStore for InMemoryGrantStore {
         let mut guard = self.records.lock().expect("grant store lock");
         f(&mut guard)
     }
+}
+
+/// One coordination per daemon database: every Move and reconciler in this
+/// process that reads the same `ec2_move_grants` table shares it.
+fn sqlite_coordination() -> Arc<Ec2GrantCoordination> {
+    static BY_DATA_DIR: OnceLock<Mutex<HashMap<PathBuf, Arc<Ec2GrantCoordination>>>> =
+        OnceLock::new();
+    BY_DATA_DIR
+        .get_or_init(Default::default)
+        .lock()
+        .expect("coordination registry lock")
+        .entry(mj_core::config::data_dir())
+        .or_default()
+        .clone()
 }
 
 /// SQLite-backed [`Ec2GrantStore`] persisted in the daemon's `ec2_move_grants` table.
@@ -203,6 +294,10 @@ impl SqliteEc2GrantStore {
 }
 
 impl Ec2GrantStore for SqliteEc2GrantStore {
+    fn coordination(&self) -> Arc<Ec2GrantCoordination> {
+        sqlite_coordination()
+    }
+
     fn with_transaction<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
@@ -221,8 +316,6 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                             security_group_id: k.security_group_id.clone(),
                             cidr_ip: k.cidr_ip.clone(),
                             port: k.port,
-                            region: v.region.clone(),
-                            aws_profile: v.aws_profile.clone(),
                         };
                         map.insert(
                             key.clone(),
@@ -232,6 +325,7 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                                 users: v.users.clone(),
                                 absent_checks: v.absent_checks,
                                 attempt_id: v.attempt_id,
+                                route: Ec2GrantRoute::new(v.region.clone(), v.aws_profile.clone()),
                             },
                         );
                     }
@@ -244,8 +338,8 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                     rows.clear();
                     for (k, v) in updated {
                         let key_row = crate::database::Ec2MoveGrantKeyRow {
-                            security_group_id: k.security_group_id.clone(),
-                            cidr_ip: k.cidr_ip.clone(),
+                            security_group_id: k.security_group_id,
+                            cidr_ip: k.cidr_ip,
                             port: k.port,
                         };
                         rows.insert(
@@ -256,8 +350,8 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                                 users: v.users,
                                 absent_checks: v.absent_checks,
                                 attempt_id: v.attempt_id,
-                                region: k.region,
-                                aws_profile: k.aws_profile,
+                                region: v.route.region,
+                                aws_profile: v.route.aws_profile,
                             },
                         );
                     }
@@ -312,10 +406,15 @@ pub trait Ec2SecurityGroupClient: Send + Sync {
     fn authorize_ingress(
         &self,
         key: &Ec2GrantKey,
+        route: &Ec2GrantRoute,
         description: &str,
     ) -> std::result::Result<(), Ec2ApiError>;
 
-    fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError>;
+    fn revoke_ingress(
+        &self,
+        key: &Ec2GrantKey,
+        route: &Ec2GrantRoute,
+    ) -> std::result::Result<(), Ec2ApiError>;
 
     fn describe_ingress_rules(
         &self,
@@ -411,12 +510,13 @@ impl Ec2SecurityGroupClient for AwsCliEc2Client {
     fn authorize_ingress(
         &self,
         key: &Ec2GrantKey,
+        route: &Ec2GrantRoute,
         description: &str,
     ) -> std::result::Result<(), Ec2ApiError> {
         self.ec2(
             "authorize-security-group-ingress",
-            key.region.as_deref(),
-            key.aws_profile.as_deref(),
+            route.region(),
+            route.aws_profile(),
             json!({
                 "GroupId": key.security_group_id,
                 "IpPermissions": [{
@@ -433,11 +533,15 @@ impl Ec2SecurityGroupClient for AwsCliEc2Client {
         Ok(())
     }
 
-    fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
+    fn revoke_ingress(
+        &self,
+        key: &Ec2GrantKey,
+        route: &Ec2GrantRoute,
+    ) -> std::result::Result<(), Ec2ApiError> {
         self.ec2(
             "revoke-security-group-ingress",
-            key.region.as_deref(),
-            key.aws_profile.as_deref(),
+            route.region(),
+            route.aws_profile(),
             json!({
                 "GroupId": key.security_group_id,
                 "IpPermissions": [{
@@ -562,9 +666,8 @@ pub struct Ec2GrantManager<S, C> {
     client: C,
     daemon_instance_id: String,
     config: Ec2GrantConfig,
-    next_attempt_id: AtomicU64,
-    in_flight_installs: Mutex<BTreeSet<(Ec2GrantKey, u64)>>,
-    in_flight_revokes: Mutex<BTreeSet<Ec2GrantKey>>,
+    /// Owned by the store, not the manager; see [`Ec2GrantStore::coordination`].
+    coordination: Arc<Ec2GrantCoordination>,
 }
 
 struct InFlightTokenGuard<'a> {
@@ -606,14 +709,13 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         daemon_instance_id: impl Into<String>,
         config: Ec2GrantConfig,
     ) -> Self {
+        let coordination = store.coordination();
         Self {
             store,
             client,
             daemon_instance_id: daemon_instance_id.into(),
             config,
-            next_attempt_id: AtomicU64::new(1),
-            in_flight_installs: Mutex::new(BTreeSet::new()),
-            in_flight_revokes: Mutex::new(BTreeSet::new()),
+            coordination,
         }
     }
 
@@ -630,7 +732,12 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
     }
 
     /// Acquire a shared EC2 security-group ingress grant for `operation_id`.
-    pub fn acquire(&self, key: &Ec2GrantKey, operation_id: &str) -> Result<AcquireOutcome> {
+    ///
+    /// The grant's identity is `target.key` alone. If a record for it already
+    /// exists, this operation joins its users and the record keeps its route;
+    /// the caller's route only fills a field the record lacks.
+    pub fn acquire(&self, target: &Ec2GrantTarget, operation_id: &str) -> Result<AcquireOutcome> {
+        let key = &target.key;
         let mut attempts = 0usize;
         loop {
             // Hold `in_flight_installs` across the store transaction (consistent
@@ -639,6 +746,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
             // also seeing it in `in_flight_installs`.
             let step = {
                 let mut in_flight = self
+                    .coordination
                     .in_flight_installs
                     .lock()
                     .expect("in_flight_installs lock");
@@ -647,10 +755,12 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                         match record.state {
                             Ec2GrantState::Installed | Ec2GrantState::External => {
                                 record.users.insert(operation_id.to_owned());
+                                record.route.fill_from(&target.route);
                                 Ok(AcquireStep::Granted)
                             }
                             Ec2GrantState::Installing => {
                                 record.users.insert(operation_id.to_owned());
+                                record.route.fill_from(&target.route);
                                 Ok(AcquireStep::WaitForInstaller)
                             }
                             Ec2GrantState::Removing => {
@@ -661,7 +771,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                     } else {
                         let mut users = BTreeSet::new();
                         users.insert(operation_id.to_owned());
-                        let attempt_id = self.next_attempt_id.fetch_add(1, Ordering::Relaxed);
+                        let attempt_id = self.next_attempt_id(records);
                         records.insert(
                             key.clone(),
                             Ec2GrantRecord {
@@ -670,6 +780,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                                 users,
                                 absent_checks: 0,
                                 attempt_id,
+                                route: target.route.clone(),
                             },
                         );
                         Ok(AcquireStep::BecomeInstaller(attempt_id))
@@ -685,10 +796,10 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                 AcquireStep::Granted => return Ok(AcquireOutcome::Granted),
                 AcquireStep::BecomeInstaller(attempt_id) => {
                     let _guard = InFlightTokenGuard {
-                        set: &self.in_flight_installs,
+                        set: &self.coordination.in_flight_installs,
                         token: (key.clone(), attempt_id),
                     };
-                    return self.run_installer(key, attempt_id, operation_id);
+                    return self.run_installer(target, attempt_id, operation_id);
                 }
                 AcquireStep::WaitForInstaller => {
                     attempts += 1;
@@ -712,22 +823,30 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         }
     }
 
+    /// A fresh attempt number above every stored and every handed-out one.
+    fn next_attempt_id(&self, records: &BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> u64 {
+        let persisted = records.values().map(|r| r.attempt_id).max().unwrap_or(0);
+        self.coordination.next_attempt_id(persisted)
+    }
+
     fn run_installer(
         &self,
-        key: &Ec2GrantKey,
+        target: &Ec2GrantTarget,
         attempt_id: u64,
         operation_id: &str,
     ) -> Result<AcquireOutcome> {
+        let key = &target.key;
+        let route = &target.route;
         let our_desc = self.description();
-        match self.client.authorize_ingress(key, &our_desc) {
+        match self.client.authorize_ingress(key, route, &our_desc) {
             Ok(()) => self.finish_installed_or_revoke(key, attempt_id, Ec2GrantState::Installed),
             Err(Ec2ApiError::Duplicate) => {
                 // Rule already existed; inspect description to distinguish
                 // Mjolnir's rule from an external user-managed rule.
                 let rules = match self.client.describe_ingress_rules(
                     &key.security_group_id,
-                    key.region.as_deref(),
-                    key.aws_profile.as_deref(),
+                    route.region(),
+                    route.aws_profile(),
                 ) {
                     Ok(rules) => rules,
                     Err(_) => {
@@ -758,8 +877,8 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                 // Ambiguous failure: query AWS before changing state.
                 let rules = match self.client.describe_ingress_rules(
                     &key.security_group_id,
-                    key.region.as_deref(),
-                    key.aws_profile.as_deref(),
+                    route.region(),
+                    route.aws_profile(),
                 ) {
                     Ok(rules) => rules,
                     Err(_) => {
@@ -911,6 +1030,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
     ) -> Result<bool> {
         {
             let mut revokes = self
+                .coordination
                 .in_flight_revokes
                 .lock()
                 .expect("in-flight revoke lock");
@@ -919,30 +1039,29 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
             }
         }
         let _guard = InFlightRevokeGuard {
-            set: &self.in_flight_revokes,
+            set: &self.coordination.in_flight_revokes,
             key: key.clone(),
         };
 
         // Re-verify under the store transaction BEFORE any AWS call that this
         // key is still in `Removing` for `expected_attempt_id`. Because `acquire`
         // waits while `Removing`, no newer generation can start until we finish.
-        let still_removing = self.store.with_transaction(|records| {
-            Ok(records.get(key).is_some_and(|r| {
-                r.state == Ec2GrantState::Removing && r.attempt_id == expected_attempt_id
-            }))
+        let route = self.store.with_transaction(|records| {
+            Ok(records
+                .get(key)
+                .filter(|r| {
+                    r.state == Ec2GrantState::Removing && r.attempt_id == expected_attempt_id
+                })
+                .map(|r| r.route.clone()))
         })?;
-        if !still_removing {
+        let Some(route) = route else {
             return Ok(false);
-        }
+        };
 
         let our_desc = self.description();
         let rules = self
             .client
-            .describe_ingress_rules(
-                &key.security_group_id,
-                key.region.as_deref(),
-                key.aws_profile.as_deref(),
-            )
+            .describe_ingress_rules(&key.security_group_id, route.region(), route.aws_profile())
             .map_err(|err| {
                 anyhow::anyhow!(
                     "describe EC2 security group {} before revoke: {err}",
@@ -968,7 +1087,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
             return Ok(false);
         }
 
-        match self.client.revoke_ingress(key) {
+        match self.client.revoke_ingress(key, &route) {
             Ok(()) => {
                 self.store.with_transaction(|records| {
                     if records
@@ -1014,10 +1133,9 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
     pub fn reconcile_group(
         &self,
         group_id: &str,
-        region: Option<&str>,
-        aws_profile: Option<&str>,
+        route: &Ec2GrantRoute,
     ) -> Result<ReconcileReport> {
-        self.reconcile_group_inner(group_id, region, aws_profile, None)
+        self.reconcile_group_inner(group_id, route, None)
     }
 
     /// Startup reconciliation for `group_id`.
@@ -1029,18 +1147,16 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
     pub fn reconcile_group_startup(
         &self,
         group_id: &str,
-        region: Option<&str>,
-        aws_profile: Option<&str>,
+        route: &Ec2GrantRoute,
         is_active: impl Fn(&str) -> bool,
     ) -> Result<ReconcileReport> {
-        self.reconcile_group_inner(group_id, region, aws_profile, Some(&is_active))
+        self.reconcile_group_inner(group_id, route, Some(&is_active))
     }
 
     fn reconcile_group_inner(
         &self,
         group_id: &str,
-        region: Option<&str>,
-        aws_profile: Option<&str>,
+        route: &Ec2GrantRoute,
         startup_is_active: Option<&dyn Fn(&str) -> bool>,
     ) -> Result<ReconcileReport> {
         let mut report = ReconcileReport::default();
@@ -1059,6 +1175,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                 .collect();
             for key in group_keys {
                 let remove_record = if let Some(record) = records.get_mut(&key) {
+                    record.route.fill_from(route);
                     if let Some(is_active) = startup_is_active {
                         record.users.retain(|op| is_active(op));
                     }
@@ -1093,7 +1210,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         // 2. Query AWS for current rules in `group_id`.
         let aws_rules = self
             .client
-            .describe_ingress_rules(group_id, region, aws_profile)
+            .describe_ingress_rules(group_id, route.region(), route.aws_profile())
             .map_err(|err| anyhow::anyhow!("describe EC2 security group {group_id}: {err}"))?;
 
         let our_aws_keys: BTreeSet<Ec2GrantKey> = aws_rules
@@ -1103,8 +1220,6 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                 security_group_id: group_id.to_owned(),
                 cidr_ip: rule.cidr_ip.clone(),
                 port: rule.port,
-                region: region.map(ToOwned::to_owned),
-                aws_profile: aws_profile.map(ToOwned::to_owned),
             })
             .collect();
 
@@ -1115,6 +1230,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
             keys_to_revoke.into_iter().collect();
         {
             let in_flight = self
+                .coordination
                 .in_flight_installs
                 .lock()
                 .expect("in_flight_installs lock");
@@ -1123,7 +1239,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                 for key in &our_aws_keys {
                     match records.get_mut(key) {
                         None => {
-                            let attempt_id = self.next_attempt_id.fetch_add(1, Ordering::Relaxed);
+                            let attempt_id = self.next_attempt_id(records);
                             records.insert(
                                 key.clone(),
                                 Ec2GrantRecord {
@@ -1132,6 +1248,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                                     users: BTreeSet::new(),
                                     absent_checks: 0,
                                     attempt_id,
+                                    route: route.clone(),
                                 },
                             );
                             revoke_candidates.insert((key.clone(), attempt_id));
@@ -1184,6 +1301,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                             }
                             Ec2GrantState::Removing => {
                                 let revoke_in_flight = self
+                                    .coordination
                                     .in_flight_revokes
                                     .lock()
                                     .expect("in-flight revoke lock")
@@ -1251,6 +1369,9 @@ mod tests {
         fail_next_authorize_without_creating: bool,
         force_next_authorize_duplicate: bool,
         on_describe: Option<Box<dyn Fn() + Send>>,
+        /// Runs once at the start of the next `authorize_ingress`, with the
+        /// fake's lock released, before the rule exists.
+        on_authorize: Option<Box<dyn Fn() + Send>>,
         /// `(operation, group, region, aws_profile)` for every scoped call.
         scopes: Vec<(&'static str, String, Option<String>, Option<String>)>,
         instances: BTreeMap<String, Ec2InstanceNetwork>,
@@ -1290,15 +1411,20 @@ mod tests {
         fn authorize_ingress(
             &self,
             key: &Ec2GrantKey,
+            route: &Ec2GrantRoute,
             description: &str,
         ) -> std::result::Result<(), Ec2ApiError> {
             let (group_id, port, cidr_ip) = (&key.security_group_id, key.port, &key.cidr_ip);
+            let hook = self.state.lock().expect("fake lock").on_authorize.take();
+            if let Some(hook) = hook {
+                hook();
+            }
             let mut st = self.state.lock().expect("fake lock");
             st.scopes.push((
                 "authorize",
                 group_id.clone(),
-                key.region.clone(),
-                key.aws_profile.clone(),
+                route.region.clone(),
+                route.aws_profile.clone(),
             ));
             st.authorize_calls += 1;
             if st.force_next_authorize_duplicate {
@@ -1325,14 +1451,18 @@ mod tests {
             Ok(())
         }
 
-        fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
+        fn revoke_ingress(
+            &self,
+            key: &Ec2GrantKey,
+            route: &Ec2GrantRoute,
+        ) -> std::result::Result<(), Ec2ApiError> {
             let (group_id, port, cidr_ip) = (&key.security_group_id, key.port, &key.cidr_ip);
             let mut st = self.state.lock().expect("fake lock");
             st.scopes.push((
                 "revoke",
                 group_id.clone(),
-                key.region.clone(),
-                key.aws_profile.clone(),
+                route.region.clone(),
+                route.aws_profile.clone(),
             ));
             st.revoke_calls += 1;
             let list = st.rules.entry(group_id.clone()).or_default();
@@ -1382,6 +1512,10 @@ mod tests {
         }
     }
 
+    fn target(key: &Ec2GrantKey) -> Ec2GrantTarget {
+        Ec2GrantTarget::new(key.clone(), Ec2GrantRoute::default())
+    }
+
     fn fast_config() -> Ec2GrantConfig {
         Ec2GrantConfig {
             backoff: Duration::from_millis(1),
@@ -1397,11 +1531,11 @@ mod tests {
         let key = Ec2GrantKey::ssh("sg-1", "10.0.0.5/32");
 
         assert_eq!(
-            mgr.acquire(&key, "op-1").expect("acquire 1"),
+            mgr.acquire(&target(&key), "op-1").expect("acquire 1"),
             AcquireOutcome::Granted
         );
         assert_eq!(
-            mgr.acquire(&key, "op-2").expect("acquire 2"),
+            mgr.acquire(&target(&key), "op-2").expect("acquire 2"),
             AcquireOutcome::Granted
         );
         assert_eq!(client.rules_for("sg-1").len(), 1);
@@ -1440,7 +1574,7 @@ mod tests {
         let key = Ec2GrantKey::ssh("sg-ext", "10.0.0.9/32");
 
         assert_eq!(
-            mgr.acquire(&key, "op-1").expect("acquire"),
+            mgr.acquire(&target(&key), "op-1").expect("acquire"),
             AcquireOutcome::Granted
         );
         assert_eq!(
@@ -1483,6 +1617,7 @@ mod tests {
                         users: BTreeSet::new(),
                         absent_checks: 0,
                         attempt_id: 1,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
@@ -1491,7 +1626,7 @@ mod tests {
 
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         let report = mgr
-            .reconcile_group("sg-ambig", None, None)
+            .reconcile_group("sg-ambig", &Ec2GrantRoute::default())
             .expect("reconcile");
         assert_eq!(report.revoked_rules, 1);
         assert!(client.rules_for("sg-ambig").is_empty());
@@ -1521,7 +1656,7 @@ mod tests {
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
 
         let report = mgr
-            .reconcile_group("sg-shared", None, None)
+            .reconcile_group("sg-shared", &Ec2GrantRoute::default())
             .expect("reconcile");
         assert_eq!(report.revoked_rules, 1);
 
@@ -1546,7 +1681,7 @@ mod tests {
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         let key = Ec2GrantKey::ssh("sg-abs", "10.0.0.30/32");
 
-        let outcome = mgr.acquire(&key, "op-1").expect("acquire");
+        let outcome = mgr.acquire(&target(&key), "op-1").expect("acquire");
         assert_eq!(outcome, AcquireOutcome::FallbackToDaemonStream);
         // After 1st absent check, record must still be in `Removing` (not dropped).
         let snap = mgr.store().snapshot();
@@ -1558,7 +1693,7 @@ mod tests {
 
         // Second separated reconcile check confirms absence and drops the record.
         let report = mgr
-            .reconcile_group("sg-abs", None, None)
+            .reconcile_group("sg-abs", &Ec2GrantRoute::default())
             .expect("reconcile 2");
         assert_eq!(report.dropped_records, 1);
         assert!(mgr.store().snapshot().is_empty());
@@ -1572,7 +1707,7 @@ mod tests {
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         let key = Ec2GrantKey::ssh("sg-dup", "10.0.0.40/32");
 
-        let outcome = mgr.acquire(&key, "op-1").expect("acquire");
+        let outcome = mgr.acquire(&target(&key), "op-1").expect("acquire");
         assert_eq!(outcome, AcquireOutcome::FallbackToDaemonStream);
         assert_eq!(
             client.revoke_calls(),
@@ -1608,6 +1743,7 @@ mod tests {
                             users,
                             absent_checks: 0,
                             attempt_id: 99,
+                            route: Default::default(),
                         },
                     );
                     Ok(())
@@ -1618,6 +1754,10 @@ mod tests {
         // Wrap Arc<InMemoryGrantStore> via a thin forwarding adapter.
         struct SharedStore(Arc<InMemoryGrantStore>);
         impl Ec2GrantStore for SharedStore {
+            fn coordination(&self) -> Arc<Ec2GrantCoordination> {
+                self.0.coordination()
+            }
+
             fn with_transaction<R, F>(&self, f: F) -> Result<R>
             where
                 F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
@@ -1632,7 +1772,7 @@ mod tests {
             "daemon-a",
             fast_config(),
         );
-        mgr.reconcile_group("sg-race", None, None)
+        mgr.reconcile_group("sg-race", &Ec2GrantRoute::default())
             .expect("reconcile");
 
         assert_eq!(
@@ -1666,6 +1806,7 @@ mod tests {
                         users: BTreeSet::new(),
                         absent_checks: 0,
                         attempt_id: 7,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
@@ -1674,10 +1815,14 @@ mod tests {
 
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         // Simulate another task currently revoking `key`.
-        mgr.in_flight_revokes.lock().unwrap().insert(key.clone());
+        mgr.coordination
+            .in_flight_revokes
+            .lock()
+            .unwrap()
+            .insert(key.clone());
 
         let report = mgr
-            .reconcile_group("sg-rev", None, None)
+            .reconcile_group("sg-rev", &Ec2GrantRoute::default())
             .expect("concurrent reconcile");
         assert_eq!(
             report.revoked_rules, 0,
@@ -1691,7 +1836,7 @@ mod tests {
         let saved_rules = std::mem::take(&mut client.state.lock().unwrap().rules);
         for _ in 0..3 {
             let absent_report = mgr
-                .reconcile_group("sg-rev", None, None)
+                .reconcile_group("sg-rev", &Ec2GrantRoute::default())
                 .expect("reconcile while absent and revoking");
             assert_eq!(absent_report.dropped_records, 0);
             assert_eq!(absent_report.remaining_pending, 1);
@@ -1713,7 +1858,7 @@ mod tests {
         // Now finish the first revoke, re-acquire a fresh grant (generation 42 != 7),
         // and verify a stale revoke for generation 7 makes ZERO AWS revoke calls
         // and leaves the new `Installed` grant intact.
-        mgr.in_flight_revokes.lock().unwrap().clear();
+        mgr.coordination.in_flight_revokes.lock().unwrap().clear();
         mgr.store()
             .with_transaction(|records| {
                 let mut users = BTreeSet::new();
@@ -1726,6 +1871,7 @@ mod tests {
                         users,
                         absent_checks: 0,
                         attempt_id: 42,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
@@ -1776,6 +1922,7 @@ mod tests {
                         users,
                         absent_checks: 0,
                         attempt_id: 1,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
@@ -1790,6 +1937,10 @@ mod tests {
             key: Ec2GrantKey,
         }
         impl Ec2GrantStore for RaceStore {
+            fn coordination(&self) -> Arc<Ec2GrantCoordination> {
+                self.inner.coordination()
+            }
+
             fn with_transaction<R, F>(&self, f: F) -> Result<R>
             where
                 F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
@@ -1821,7 +1972,9 @@ mod tests {
             },
         );
 
-        let outcome = mgr.acquire(&key, "op-waiter").expect("waiter acquire");
+        let outcome = mgr
+            .acquire(&target(&key), "op-waiter")
+            .expect("waiter acquire");
         assert_eq!(outcome, AcquireOutcome::FallbackToDaemonStream);
         assert!(
             client.rules_for("sg-wait").is_empty(),
@@ -1839,13 +1992,13 @@ mod tests {
         let key = Ec2GrantKey::ssh("sg-live", "10.0.0.80/32");
 
         assert_eq!(
-            mgr.acquire(&key, "op-live").expect("acquire"),
+            mgr.acquire(&target(&key), "op-live").expect("acquire"),
             AcquireOutcome::Granted
         );
 
         // Live reconciliation must never prune `op-live` or revoke its rule.
         let live_report = mgr
-            .reconcile_group("sg-live", None, None)
+            .reconcile_group("sg-live", &Ec2GrantRoute::default())
             .expect("live reconcile");
         assert_eq!(live_report.revoked_rules, 0);
         assert_eq!(client.rules_for("sg-live").len(), 1);
@@ -1858,7 +2011,7 @@ mod tests {
 
         // Startup reconciliation with `is_active = false` prunes the dead op and revokes.
         let startup_report = mgr
-            .reconcile_group_startup("sg-live", None, None, |_| false)
+            .reconcile_group_startup("sg-live", &Ec2GrantRoute::default(), |_| false)
             .expect("startup reconcile");
         assert_eq!(startup_report.revoked_rules, 1);
         assert!(client.rules_for("sg-live").is_empty());
@@ -1892,6 +2045,7 @@ mod tests {
                         users: BTreeSet::from(["op-commit".to_owned()]),
                         absent_checks: 0,
                         attempt_id: 1,
+                        route: Default::default(),
                     },
                 );
                 Ok(())
@@ -1916,10 +2070,9 @@ mod tests {
             .expect("read grant");
         assert_eq!(users, Some(BTreeSet::from(["op-commit".to_owned()])));
 
-        // The grant's region and AWS profile survive the SQLite round trip.
-        let regional = Ec2GrantKey::ssh("sg-regional", "10.0.2.5/32")
-            .with_region(Some("eu-west-1".into()))
-            .with_aws_profile(Some("team".into()));
+        // The route is part of the record, so it survives the SQLite round trip.
+        let regional = Ec2GrantKey::ssh("sg-regional", "10.0.2.5/32");
+        let route = Ec2GrantRoute::new(Some("eu-west-1".into()), Some("team".into()));
         store
             .with_transaction(|map| {
                 map.insert(
@@ -1930,20 +2083,170 @@ mod tests {
                         users: BTreeSet::from(["op-regional".to_owned()]),
                         absent_checks: 0,
                         attempt_id: 2,
+                        route: route.clone(),
                     },
                 );
                 Ok(())
             })
             .expect("commit regional grant");
         let reloaded = store
-            .with_transaction(|map| Ok(map.keys().cloned().collect::<Vec<_>>()))
+            .with_transaction(|map| Ok(map.get(&regional).map(|r| r.route.clone())))
             .expect("reload grants");
-        assert!(reloaded.contains(&regional));
-        assert!(reloaded.contains(&key));
+        assert_eq!(reloaded, Some(route));
+        assert!(Arc::ptr_eq(
+            &SqliteEc2GrantStore.coordination(),
+            &SqliteEc2GrantStore.coordination()
+        ));
+    }
+
+    /// One rule reached with different routes is one record with one set of
+    /// users: the first non-empty route is kept and the rule is revoked only
+    /// when its last user leaves.
+    fn shared_rule_scenario(store: impl Ec2GrantStore) {
+        let client = FakeEc2Client::default();
+        let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
+        let key = Ec2GrantKey::ssh("sg-shared-route", "10.0.0.5/32");
+        let east = Ec2GrantRoute::new(Some("us-east-1".into()), Some("team".into()));
+        let west = Ec2GrantRoute::new(Some("eu-west-1".into()), Some("other".into()));
+        let acquire = |route: &Ec2GrantRoute, op: &str| {
+            mgr.acquire(&Ec2GrantTarget::new(key.clone(), route.clone()), op)
+                .unwrap()
+        };
+        // A legacy record without a route, then an explicit route, then another.
+        assert_eq!(
+            acquire(&Ec2GrantRoute::default(), "op-legacy"),
+            AcquireOutcome::Granted
+        );
+        assert_eq!(acquire(&east, "op-east"), AcquireOutcome::Granted);
+        assert_eq!(acquire(&west, "op-west"), AcquireOutcome::Granted);
+
+        let records = mgr.store().with_transaction(|map| Ok(map.clone())).unwrap();
+        assert_eq!(records.len(), 1, "one rule is one record: {records:?}");
+        let record = &records[&key];
+        assert_eq!(
+            record.users,
+            BTreeSet::from(["op-legacy".into(), "op-east".into(), "op-west".into()])
+        );
+        assert_eq!(
+            record.route, east,
+            "a later caller cannot reroute the record"
+        );
+        assert_eq!(client.rules_for("sg-shared-route").len(), 1);
+
+        mgr.release(&key, "op-legacy").unwrap();
+        mgr.release(&key, "op-east").unwrap();
+        assert_eq!(client.revoke_calls(), 0, "a user is still active");
+        assert_eq!(client.rules_for("sg-shared-route").len(), 1);
+        mgr.release(&key, "op-west").unwrap();
+        assert_eq!(client.revoke_calls(), 1);
+        assert!(client.rules_for("sg-shared-route").is_empty());
+        let revoked = client
+            .scopes()
+            .into_iter()
+            .find(|(operation, ..)| *operation == "revoke")
+            .unwrap();
+        assert_eq!(
+            (revoked.2.as_deref(), revoked.3.as_deref()),
+            (Some("us-east-1"), Some("team")),
+            "AWS calls follow the record's route"
+        );
     }
 
     #[test]
-    fn grant_calls_carry_the_keys_region_and_profile_through_acquire_release_and_reconcile() {
+    fn in_memory_rule_reached_with_different_routes_shares_one_record_and_user_set() {
+        shared_rule_scenario(InMemoryGrantStore::new());
+    }
+
+    #[test]
+    fn sqlite_rule_reached_with_different_routes_shares_one_record_and_user_set() {
+        let name = crate::controller::test_support::test_name(
+            module_path!(),
+            "sqlite_rule_reached_with_different_routes_shares_one_record_and_user_set",
+        );
+        if !crate::controller::move_session::test_fixtures::isolated_test_child(
+            &name,
+            "MJ_SQLITE_EC2_SHARED_ROUTE_CHILD",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        shared_rule_scenario(SqliteEc2GrantStore);
+    }
+
+    /// A reconciler beside a live Move (two managers, one store) must see the
+    /// Move's pending `authorize-security-group-ingress` and leave its
+    /// `Installing` record alone, even though AWS does not show the rule yet.
+    #[test]
+    fn reconciler_built_beside_a_live_install_does_not_remove_its_installing_record() {
+        struct SharedStore(Arc<InMemoryGrantStore>);
+        impl Ec2GrantStore for SharedStore {
+            fn coordination(&self) -> Arc<Ec2GrantCoordination> {
+                self.0.coordination()
+            }
+            fn with_transaction<R, F>(&self, f: F) -> Result<R>
+            where
+                F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
+            {
+                self.0.with_transaction(f)
+            }
+        }
+        let store = Arc::new(InMemoryGrantStore::new());
+        let client = FakeEc2Client::default();
+        let (in_authorize_tx, in_authorize) = std::sync::mpsc::channel::<()>();
+        let (proceed_tx, proceed) = std::sync::mpsc::channel::<()>();
+        client.state.lock().unwrap().on_authorize = Some(Box::new({
+            let in_authorize_tx = Mutex::new(in_authorize_tx);
+            let proceed = Mutex::new(proceed);
+            move || {
+                in_authorize_tx.lock().unwrap().send(()).unwrap();
+                proceed.lock().unwrap().recv().unwrap();
+            }
+        }));
+        let key = Ec2GrantKey::ssh("sg-live-install", "10.0.0.70/32");
+        let installer = Ec2GrantManager::new(
+            SharedStore(store.clone()),
+            client.clone(),
+            "daemon-a",
+            fast_config(),
+        );
+        let reconciler = Ec2GrantManager::new(
+            SharedStore(store.clone()),
+            client.clone(),
+            "daemon-a",
+            fast_config(),
+        );
+        std::thread::scope(|scope| {
+            let acquired = scope.spawn(|| installer.acquire(&target(&key), "op-live").unwrap());
+            in_authorize.recv().unwrap();
+            let before = store.snapshot()[&key].clone();
+            assert_eq!(before.state, Ec2GrantState::Installing);
+
+            let report = reconciler
+                .reconcile_group("sg-live-install", &Ec2GrantRoute::default())
+                .unwrap();
+            let after = store.snapshot()[&key].clone();
+            assert_eq!(after.state, Ec2GrantState::Installing, "{report:?}");
+            assert_eq!(after.attempt_id, before.attempt_id);
+            assert_eq!(after.users, before.users);
+            assert_eq!(client.revoke_calls(), 0);
+
+            proceed_tx.send(()).unwrap();
+            assert_eq!(acquired.join().unwrap(), AcquireOutcome::Granted);
+        });
+        assert_eq!(store.snapshot()[&key].state, Ec2GrantState::Installed);
+    }
+
+    #[test]
+    fn attempt_ids_never_reuse_a_stored_or_handed_out_generation() {
+        let coordination = Ec2GrantCoordination::default();
+        assert_eq!(coordination.next_attempt_id(0), 1);
+        assert_eq!(coordination.next_attempt_id(0), 2);
+        assert_eq!(coordination.next_attempt_id(40), 41, "above a persisted id");
+        assert_eq!(coordination.next_attempt_id(3), 42);
+    }
+
+    #[test]
+    fn grant_calls_carry_the_records_region_and_profile_through_acquire_release_and_reconcile() {
         let client = FakeEc2Client::default();
         let mgr = Ec2GrantManager::new(
             InMemoryGrantStore::new(),
@@ -1951,13 +2254,15 @@ mod tests {
             "daemon-a",
             fast_config(),
         );
-        let key = Ec2GrantKey::ssh("sg-east", "10.0.0.5/32")
-            .with_region(Some("us-east-2".into()))
-            .with_aws_profile(Some("team".into()));
-        assert_eq!(mgr.acquire(&key, "op-1").unwrap(), AcquireOutcome::Granted);
+        let key = Ec2GrantKey::ssh("sg-east", "10.0.0.5/32");
+        let route = Ec2GrantRoute::new(Some("us-east-2".into()), Some("team".into()));
+        assert_eq!(
+            mgr.acquire(&Ec2GrantTarget::new(key.clone(), route.clone()), "op-1")
+                .unwrap(),
+            AcquireOutcome::Granted
+        );
         mgr.release(&key, "op-1").unwrap();
-        mgr.reconcile_group("sg-east", Some("us-east-2"), Some("team"))
-            .unwrap();
+        mgr.reconcile_group("sg-east", &route).unwrap();
         let scope = |operation: &'static str| {
             (
                 operation,

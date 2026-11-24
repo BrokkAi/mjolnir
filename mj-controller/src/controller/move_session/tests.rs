@@ -1692,7 +1692,8 @@ mod direct_peer_route {
 
     use super::super::transport::DirectPeerConfig;
     use super::super::transport::ec2_grant::{
-        Ec2ApiError, Ec2GrantKey, Ec2IngressRule, Ec2InstanceNetwork, Ec2SecurityGroupClient,
+        Ec2ApiError, Ec2GrantKey, Ec2GrantRoute, Ec2GrantTarget, Ec2IngressRule,
+        Ec2InstanceNetwork, Ec2SecurityGroupClient,
     };
     use super::super::{drop_credentials_removed_by_transfer, try_build_direct_peer_config};
     use super::KeepTransferOptions;
@@ -1776,10 +1777,15 @@ mod direct_peer_route {
     }
 
     impl Ec2SecurityGroupClient for FakeEc2 {
-        fn authorize_ingress(&self, _: &Ec2GrantKey, _: &str) -> Result<(), Ec2ApiError> {
+        fn authorize_ingress(
+            &self,
+            _: &Ec2GrantKey,
+            _: &Ec2GrantRoute,
+            _: &str,
+        ) -> Result<(), Ec2ApiError> {
             unreachable!("building a peer config never changes security groups")
         }
-        fn revoke_ingress(&self, _: &Ec2GrantKey) -> Result<(), Ec2ApiError> {
+        fn revoke_ingress(&self, _: &Ec2GrantKey, _: &Ec2GrantRoute) -> Result<(), Ec2ApiError> {
             unreachable!("building a peer config never changes security groups")
         }
         fn describe_ingress_rules(
@@ -1877,6 +1883,13 @@ mod direct_peer_route {
         )
     }
 
+    fn grant(sg: &str, cidr: &str, region: Option<&str>, profile: Option<&str>) -> Ec2GrantTarget {
+        Ec2GrantTarget::new(
+            Ec2GrantKey::ssh(sg, cidr),
+            Ec2GrantRoute::new(region.map(Into::into), profile.map(Into::into)),
+        )
+    }
+
     const SRC_BIN: &str = "/home/ubuntu/.local/share/hel/workers/worker-binaries/abc/hel";
     const DST_BIN: &str = "/home/ubuntu/.local/share/hel/microvm/hel";
 
@@ -1917,11 +1930,7 @@ mod direct_peer_route {
         assert_eq!(peer.destination_address, "10.0.0.6");
         assert_eq!(peer.destination_ssh_destination, "ubuntu@10.0.0.6");
         assert_eq!(peer.source_ssh_destination, "ubuntu@10.0.0.5");
-        let scoped = |sg: &str, cidr: &str| {
-            Ec2GrantKey::ssh(sg, cidr)
-                .with_region(Some("us-east-2".into()))
-                .with_aws_profile(Some("team".into()))
-        };
+        let scoped = |sg: &str, cidr: &str| grant(sg, cidr, Some("us-east-2"), Some("team"));
         assert_eq!(
             peer.destination_ec2_grant,
             Some(scoped("sg-dst", "10.0.0.5/32"))
@@ -1966,15 +1975,11 @@ mod direct_peer_route {
         assert_eq!(peer.destination_ssh_destination, "ubuntu@54.0.0.2");
         assert_eq!(
             peer.destination_ec2_grant,
-            Some(Ec2GrantKey::ssh("sg-dst", "54.0.0.1/32").with_region(Some("eu-west-1".into())))
+            Some(grant("sg-dst", "54.0.0.1/32", Some("eu-west-1"), None))
         );
         assert_eq!(
             peer.source_ec2_grant,
-            Some(
-                Ec2GrantKey::ssh("sg-src", "54.0.0.2/32")
-                    .with_region(Some("us-east-2".into()))
-                    .with_aws_profile(Some("a".into()))
-            )
+            Some(grant("sg-src", "54.0.0.2/32", Some("us-east-2"), Some("a")))
         );
     }
 
@@ -1997,9 +2002,7 @@ mod direct_peer_route {
         .unwrap();
         assert_eq!(
             with_ip.destination_ec2_grant,
-            Some(
-                Ec2GrantKey::ssh("sg-dst", "203.0.113.7/32").with_region(Some("us-east-2".into()))
-            )
+            Some(grant("sg-dst", "203.0.113.7/32", Some("us-east-2"), None))
         );
         assert_eq!(with_ip.source_ec2_grant, None);
 

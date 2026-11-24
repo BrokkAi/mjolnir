@@ -4909,12 +4909,14 @@ impl Ec2Endpoint {
         self.network.security_group_ids.first().map(String::as_str)
     }
 
-    fn grant(&self, peer_ip: &str) -> Option<transport::ec2_grant::Ec2GrantKey> {
-        Some(
-            transport::ec2_grant::Ec2GrantKey::ssh(self.security_group()?, format!("{peer_ip}/32"))
-                .with_region(Some(self.instance.region.clone()))
-                .with_aws_profile(self.instance.aws_profile.clone()),
-        )
+    fn grant(&self, peer_ip: &str) -> Option<transport::ec2_grant::Ec2GrantTarget> {
+        Some(transport::ec2_grant::Ec2GrantTarget::new(
+            transport::ec2_grant::Ec2GrantKey::ssh(self.security_group()?, format!("{peer_ip}/32")),
+            transport::ec2_grant::Ec2GrantRoute::new(
+                Some(self.instance.region.clone()),
+                self.instance.aws_profile.clone(),
+            ),
+        ))
     }
 }
 
@@ -4954,8 +4956,8 @@ struct DirectEc2Route {
     /// Host the other side's SSH connects to when it replaces the configured one.
     source_ssh_address: Option<String>,
     destination_ssh_address: Option<String>,
-    destination_grant: Option<transport::ec2_grant::Ec2GrantKey>,
-    source_grant: Option<transport::ec2_grant::Ec2GrantKey>,
+    destination_grant: Option<transport::ec2_grant::Ec2GrantTarget>,
+    source_grant: Option<transport::ec2_grant::Ec2GrantTarget>,
 }
 
 fn plan_direct_ec2_route(

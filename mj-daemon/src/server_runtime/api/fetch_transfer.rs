@@ -159,7 +159,7 @@ pub(super) async fn try_transfer_same_ssh_host(
         )
         .purpose("session same-host file fetch");
         let output = executor.execute(&command)?;
-        Ok(worker_output(output, "session same-host file fetch").map(Some))
+        Ok(same_host_outcome(output))
     })
     .await?
 }
@@ -226,10 +226,29 @@ exec { $command[0] } @command or die "exec $command[0]: $!
 ";
 "#;
 
+/// Exit status the script reports, with [`NO_PERL_SENTINEL`] on stderr, when
+/// the host cannot run [`SPOOL_TO_STORE`].
+const NO_PERL_EXIT: i32 = 71;
+const NO_PERL_SENTINEL: &str = "__mj_fetch_no_perl__";
+
+/// The result of the same-host script. A host without perl and `JSON::PP`
+/// cannot do the fetch there, which is not a failure: `None` sends the caller
+/// down the daemon-routed path, which needs neither.
+fn same_host_outcome(output: CommandOutput) -> Result<Option<Vec<u8>>, ExportError> {
+    if output.status == NO_PERL_EXIT
+        && String::from_utf8_lossy(&output.stderr).contains(NO_PERL_SENTINEL)
+    {
+        tracing::debug!("same-host fetch needs perl with JSON::PP; fetching through the daemon");
+        return Ok(None);
+    }
+    worker_output(output, "session same-host file fetch").map(Some)
+}
+
 /// The script that runs `source` and `destination` back to back on one host:
 /// the source's output lands in a private temporary file, then feeds the
 /// destination. Both are argv vectors for that host. The payload never leaves
-/// the machine. A refusal (`EXPORT_REFUSED_EXIT_CODE`) is passed through with
+/// the machine. A host without perl and `JSON::PP` is refused up front, before
+/// anything is spooled. A refusal (`EXPORT_REFUSED_EXIT_CODE`) is passed through with
 /// its output; any other source failure exits with the source's status.
 fn same_host_fetch_script(source: &[String], destination: &[String]) -> String {
     let quote = |argv: &[String]| {
@@ -240,7 +259,8 @@ fn same_host_fetch_script(source: &[String], destination: &[String]) -> String {
     };
     let refused = mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE;
     format!(
-        r#"umask 077
+        r#"perl -MJSON::PP -e 1 >/dev/null 2>&1 || {{ printf '{no_perl}\n' >&2; exit {no_perl_exit}; }}
+umask 077
 tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/mj-fetch-XXXXXX") || exit 70
 trap 'rm -rf -- "$tmp"' EXIT
 trap 'exit 129' HUP
@@ -258,6 +278,8 @@ perl -e {program} "$tmp/spool" -- {destination}
         source = quote(source),
         destination = quote(destination),
         program = posix_quote(SPOOL_TO_STORE),
+        no_perl = NO_PERL_SENTINEL,
+        no_perl_exit = NO_PERL_EXIT,
     )
 }
 
@@ -314,13 +336,27 @@ mod tests {
     /// `scratch` so the test can see what the script leaves behind.
     #[cfg(unix)]
     fn run_script(source: &str, destination: &str, scratch: &Path) -> std::process::Output {
+        run_script_with_path(source, destination, scratch, None)
+    }
+
+    /// [`run_script`] with `PATH` replaced, to model a host without perl.
+    #[cfg(unix)]
+    fn run_script_with_path(
+        source: &str,
+        destination: &str,
+        scratch: &Path,
+        path: Option<&Path>,
+    ) -> std::process::Output {
         let shell = |body: &str| vec!["sh".to_owned(), "-c".into(), body.to_owned(), "w".into()];
         let script = same_host_fetch_script(&shell(source), &shell(destination));
-        let mut command = std::process::Command::new("sh");
+        let mut command = std::process::Command::new("/bin/sh");
         command
             .args(["-c", &script])
             .env("TMPDIR", scratch)
             .env("MJ_TEST_SCRATCH", scratch);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
         mj_core::subprocess::run_with_input(&mut command, &[]).unwrap()
     }
 
@@ -451,5 +487,45 @@ mod tests {
             assert!(!scratch.path().join("stored").exists(), "{message}");
             assert_eq!(leftover(scratch.path()), Vec::<String>::new(), "{message}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_without_perl_is_refused_before_anything_is_spooled_and_falls_back() {
+        let scratch = tempfile::tempdir().unwrap();
+        let no_tools = tempfile::tempdir().unwrap();
+        let output = run_script_with_path(
+            r#"touch "$MJ_TEST_SCRATCH/source-ran""#,
+            STORE,
+            scratch.path(),
+            Some(no_tools.path()),
+        );
+        assert_eq!(output.status.code(), Some(NO_PERL_EXIT));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(NO_PERL_SENTINEL));
+        assert!(
+            !scratch.path().join("source-ran").exists(),
+            "the source never ran"
+        );
+        assert!(!scratch.path().join("stored").exists());
+        assert_eq!(
+            leftover(scratch.path()),
+            Vec::<String>::new(),
+            "no temp dir"
+        );
+
+        let outcome = |status: i32, stderr: &str| {
+            same_host_outcome(CommandOutput {
+                status,
+                stdout: b"payload".to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        };
+        assert!(matches!(outcome(NO_PERL_EXIT, NO_PERL_SENTINEL), Ok(None)));
+        // A source or store that happens to exit 71 is a real failure.
+        assert!(matches!(
+            outcome(NO_PERL_EXIT, "worker exploded"),
+            Err(ExportError::Failed(_))
+        ));
+        assert!(matches!(outcome(0, ""), Ok(Some(body)) if body == b"payload"));
     }
 }

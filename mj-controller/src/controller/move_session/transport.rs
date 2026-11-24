@@ -28,7 +28,8 @@ use mj_core::targets::{
 use sha2::{Digest, Sha256};
 
 use self::ec2_grant::{
-    AcquireOutcome, Ec2GrantKey, Ec2GrantManager, Ec2GrantStore, Ec2SecurityGroupClient,
+    AcquireOutcome, Ec2GrantKey, Ec2GrantManager, Ec2GrantStore, Ec2GrantTarget,
+    Ec2SecurityGroupClient,
 };
 
 pub use mj_core::state::{RoutePreview, TransferRoute};
@@ -151,9 +152,9 @@ pub struct DirectPeerConfig {
     /// containers.
     pub destination_host_worker_bin: String,
     /// Optional EC2 SG grant key to open on destination for DirectPush.
-    pub destination_ec2_grant: Option<Ec2GrantKey>,
+    pub destination_ec2_grant: Option<Ec2GrantTarget>,
     /// Optional EC2 SG grant key to open on source for DirectPull.
-    pub source_ec2_grant: Option<Ec2GrantKey>,
+    pub source_ec2_grant: Option<Ec2GrantTarget>,
     /// Optional `.mj/keep/` source, destination, and `--skip` exclusions.
     pub keep: KeepTransferOptions,
     /// Reports whether every credential this transfer created was removed.
@@ -1084,10 +1085,10 @@ where
     );
 
     // 3. Acquire optional EC2 SG ingress grant on destination.
-    if let (Some(mgr), Some(key)) = (ec2_grants, peer.destination_ec2_grant.as_ref()) {
-        match mgr.acquire(key, &peer.operation_id)? {
+    if let (Some(mgr), Some(target)) = (ec2_grants, peer.destination_ec2_grant.as_ref()) {
+        match mgr.acquire(target, &peer.operation_id)? {
             AcquireOutcome::Granted => {
-                cleanup.ec2_key = Some(key.clone());
+                cleanup.ec2_key = Some(target.key.clone());
             }
             AcquireOutcome::FallbackToDaemonStream => {
                 return Ok(None);
@@ -1209,10 +1210,10 @@ where
         String::from_utf8_lossy(&install_out.stderr).trim()
     );
 
-    if let (Some(mgr), Some(key)) = (ec2_grants, peer.source_ec2_grant.as_ref()) {
-        match mgr.acquire(key, &peer.operation_id)? {
+    if let (Some(mgr), Some(target)) = (ec2_grants, peer.source_ec2_grant.as_ref()) {
+        match mgr.acquire(target, &peer.operation_id)? {
             AcquireOutcome::Granted => {
-                cleanup.ec2_key = Some(key.clone());
+                cleanup.ec2_key = Some(target.key.clone());
             }
             AcquireOutcome::FallbackToDaemonStream => {
                 return Ok(None);
@@ -2334,6 +2335,7 @@ fi
         fn authorize_ingress(
             &self,
             key: &Ec2GrantKey,
+            _route: &ec2_grant::Ec2GrantRoute,
             description: &str,
         ) -> std::result::Result<(), Ec2ApiError> {
             self.rules
@@ -2349,7 +2351,11 @@ fi
             Ok(())
         }
 
-        fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
+        fn revoke_ingress(
+            &self,
+            key: &Ec2GrantKey,
+            _route: &ec2_grant::Ec2GrantRoute,
+        ) -> std::result::Result<(), Ec2ApiError> {
             let mut map = self.rules.lock().unwrap();
             let list = map.entry(key.security_group_id.clone()).or_default();
             let before = list.len();
@@ -2492,7 +2498,10 @@ fi
             destination_worker_bin: "mj-worker".into(),
             source_host_worker_bin: "/host/src-hel".into(),
             destination_host_worker_bin: "/host/dst-hel".into(),
-            destination_ec2_grant: Some(Ec2GrantKey::ssh("sg-dst", "10.0.0.1/32")),
+            destination_ec2_grant: Some(Ec2GrantTarget::new(
+                Ec2GrantKey::ssh("sg-dst", "10.0.0.1/32"),
+                Default::default(),
+            )),
             source_ec2_grant: None,
             keep: KeepTransferOptions::default(),
             cleanup: DirectCleanupTracker::default(),
