@@ -40,9 +40,13 @@
 package workerlaunch
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -62,14 +66,101 @@ type LinkedProfileHome struct {
 // home. Returns what was linked, in session id order; a session that already
 // has a staged home, or has no installed worker, is left alone.
 func LinkProfileHomesOfEarlierSessions(state *core.StateState) []LinkedProfileHome {
-	panic("unported: mj-worker-launch/src/local_profile_homes.rs link_profile_homes_of_earlier_sessions")
+	var linked []LinkedProfileHome
+	for session := range state.Sessions.Values() {
+		locator, ok := session.Target.(core.TargetLocatorLocalBare)
+		if !ok {
+			continue
+		}
+		// A harness with a nested home always ran from a per-session root
+		// under the data directory.
+		if session.HarnessKind.NestedHome() {
+			continue
+		}
+		profileHome, ok, err := linkProfileHome(locator.WorkerRoot)
+		switch {
+		case err != nil:
+			slog.Warn(
+				fmt.Sprintf("could not link the staged home of a session an earlier release started: %v", err),
+				"session_id", session.ID,
+			)
+		case ok:
+			slog.Info(
+				"this session's worker was started by an earlier release from the profile "+
+					"home; its staged home now links there until the session is next staged",
+				"session_id", session.ID,
+				"profile_home", profileHome,
+			)
+			linked = append(linked, LinkedProfileHome{
+				SessionID:   session.ID,
+				StagedHome:  filepath.Join(locator.WorkerRoot, "profile"),
+				ProfileHome: profileHome,
+			})
+		}
+	}
+	return linked
 }
 
 // linkProfileHome links `<workerRoot>/profile` to the home the installed
 // worker was started with, when that home is not inside the worker root.
 // Returns the linked profile home; ok is false when nothing was linked.
 func linkProfileHome(workerRoot string) (profileHome string, ok bool, err error) {
-	panic("unported: mj-worker-launch/src/local_profile_homes.rs link_profile_home")
+	stagedHome := filepath.Join(workerRoot, "profile")
+	if _, err := os.Lstat(stagedHome); err == nil {
+		return "", false, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", false, err
+	}
+	installedHome, ok, err := core.InstalledHarnessHome(filepath.Join(workerRoot, "launch.json"))
+	if err != nil || !ok {
+		return "", false, err
+	}
+	if info, err := os.Stat(installedHome); pathStartsWith(installedHome, workerRoot) || err != nil || !info.IsDir() {
+		return "", false, nil
+	}
+	if err := linkDirectory(installedHome, stagedHome); err != nil {
+		return "", false, err
+	}
+	return installedHome, true, nil
+}
+
+// pathStartsWith is Rust's `Path::starts_with`: whether base's components
+// are a prefix of path's. Repeated separators and inner `.` components do
+// not count; `..` is compared as written.
+func pathStartsWith(path, base string) bool {
+	left, right := pathComponents(path), pathComponents(base)
+	if len(right) > len(left) {
+		return false
+	}
+	for index := range right {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// pathComponents is Rust's `Path::components` as text: the volume and the
+// root first when there are any, then each name. A leading `.` of a
+// relative path is kept; later `.` and empty names are dropped.
+func pathComponents(path string) []string {
+	var components []string
+	volume := filepath.VolumeName(path)
+	if volume != "" {
+		components = append(components, volume)
+	}
+	rest := path[len(volume):]
+	if rest != "" && os.IsPathSeparator(rest[0]) {
+		components = append(components, string(filepath.Separator))
+	}
+	names := strings.FieldsFunc(rest, func(r rune) bool { return r < 0x80 && os.IsPathSeparator(uint8(r)) })
+	for index, name := range names {
+		if name == "." && (index > 0 || len(components) > 0 || !strings.HasPrefix(rest, ".")) {
+			continue
+		}
+		components = append(components, name)
+	}
+	return components
 }
 
 // SessionHasAStagedHomeOfItsOwn is whether a session's staged home is a
@@ -116,5 +207,12 @@ func SessionSharesProfileLogin(session *core.SessionRecord, harness core.Harness
 // failed (ok false, after a warning "could not list running processes: no
 // command line was readable").
 func runningProcessArgumentsWithoutPs() (arguments []string, ok bool) {
-	panic("unported: mj-worker-launch/src/local_profile_homes.rs running_process_arguments_without_ps")
+	arguments = processCommandLines()
+	for _, argument := range arguments {
+		if argument != "" {
+			return arguments, true
+		}
+	}
+	slog.Warn("could not list running processes: no command line was readable")
+	return nil, false
 }

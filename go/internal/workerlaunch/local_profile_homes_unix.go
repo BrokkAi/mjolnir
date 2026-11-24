@@ -5,7 +5,9 @@
 package workerlaunch
 
 import (
+	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -24,5 +26,26 @@ func linkDirectory(target string, link string) error {
 // fails stays a failed listing: the sweep must not remove files it cannot
 // prove are idle.
 func RunningProcessArguments(executor core.CommandExecutor) (arguments []string, ok bool) {
-	panic("unported: mj-worker-launch/src/local_profile_homes.rs running_process_arguments")
+	command := core.NewCommandSpec("ps", []string{"-A", "-ww", "-o", "args="}).
+		WithPurpose("list running processes before removing files they may be using")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		if arguments, ok := runningProcessArgumentsWithoutPs(); ok {
+			return arguments, true
+		}
+		slog.Warn("could not list running processes: " + err.Error())
+		return nil, false
+	}
+	if output.Status != 0 {
+		slog.Warn(
+			"could not list running processes: "+strings.TrimSpace(lossyText(output.Stderr)),
+			"status", output.Status,
+		)
+		return nil, false
+	}
+	arguments = rustLines(lossyText(output.Stdout))
+	if arguments == nil {
+		arguments = []string{}
+	}
+	return arguments, true
 }
