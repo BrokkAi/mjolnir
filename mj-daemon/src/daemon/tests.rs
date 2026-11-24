@@ -10732,7 +10732,8 @@ async fn accepted_suspend_failure_is_published_without_an_observer() {
             WORKING_CHILD.into(),
             LifecycleKind::StopSubagent,
             super::lifecycle::LifecycleStart::request(
-                serde_json::to_string(&(LifecycleKind::StopSubagent.label(), false)).unwrap(),
+                serde_json::to_string(&(LifecycleKind::StopSubagent.label(), false, false))
+                    .unwrap(),
                 None,
                 None,
             ),

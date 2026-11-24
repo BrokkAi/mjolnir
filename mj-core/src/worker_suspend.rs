@@ -12,6 +12,14 @@ pub const RECEIPT: &str = "suspend-receipt.json";
 pub const PROGRESS: &str = "suspend-progress.json";
 pub const RESTART: &str = "suspend-restart.json";
 
+/// The checkout and process scope of an accepted checkpoint-only suspend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspendCapture {
+    pub operation: String,
+    pub checkout: PathBuf,
+    pub child_sessions: Vec<String>,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerIdentity {
     pub pid: u32,

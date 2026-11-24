@@ -185,6 +185,9 @@ pub struct WorkerLaunchConfig {
     pub goal_resume_request: Option<String>,
     #[serde(default)]
     pub run_mode: WorkerRunMode,
+    /// Writer proof for the accepted suspend, performed before checkpoint recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_capture: Option<crate::worker_suspend::SuspendCapture>,
     pub session_id: String,
     /// Resolved delegation policy; independently controls MCP exposure and native suppression.
     #[serde(
@@ -809,6 +812,7 @@ mod tests {
 
         let mut launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
         let baseline = serde_json::to_value(&launch).unwrap();
+        assert!(baseline.get("suspend_capture").is_none());
         for (orchestrator, enabled) in [(true, false), (false, true)] {
             launch.orchestrator = orchestrator;
             launch.orchestrators_enabled = enabled;

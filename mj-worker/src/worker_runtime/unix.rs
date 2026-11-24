@@ -1584,6 +1584,32 @@ pub async fn run_daemon_owned(
             .into());
         }
     }
+    if checkpoint_only && let Some(capture) = config.suspend_capture.take() {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            super::record_startup_step(&root, "checkout-quiescence");
+            let root = root.clone();
+            let session_id = config.session_id.clone();
+            mj_core::runtime::spawn_blocking(move || {
+                crate::worker_stop::suspension::terminate_session_processes(
+                    &root,
+                    &session_id,
+                    &capture,
+                    false,
+                )
+            })
+            .await
+            .context("join checkpoint checkout quiescence")??;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            drop(capture);
+            return Err(mj_core::refusal::Refusal::precondition(
+                "Managed checkout quiescence requires Linux or macOS",
+            )
+            .into());
+        }
+    }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
     let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
     // Validate and recover durable state before publishing a socket. A

@@ -4598,6 +4598,12 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
         attach_local_managed_clone(session, clone, origin);
     }
     persist_controller_fixture(&mut controller);
+    let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+    controller
+        .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+        .unwrap()
+        .write(&worker_root.join("launch.json"))
+        .unwrap();
 
     struct SkipHarnessPrepExecutor;
     impl CommandExecutor for SkipHarnessPrepExecutor {
@@ -4625,6 +4631,14 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
                 command.purpose, "export target checkpoint",
                 "older worker suspend must not fall back to version-2 export"
             );
+            if command.purpose == "probe Mjolnir worker daemon liveness" {
+                // The stand-in relay represents an older worker that is still live.
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"alive\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
             if command.purpose.contains("harness")
                 || command.purpose.contains("prepare")
                 || command.purpose.contains("runtime")
@@ -4676,107 +4690,6 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
         !worker_root.join(mj_core::worker_suspend::ACCEPTED).exists(),
         "failed upgrade must clear suspend-operation.json"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn older_worker_swap_failure_attempts_one_in_place_recovery_before_recording_error() {
-    const NAME: &str =
-        "older_worker_swap_failure_attempts_one_in_place_recovery_before_recording_error";
-    const CHILD: &str = "MJ_TEST_OLDER_WORKER_SWAP_FAILURE";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(crate::controller::test_support::test_name(
-            module_path!(),
-            NAME,
-        ))
-        .env(CHILD, "1")
-        .env("MJ_INSTANCE", "older-worker-swap-failure")
-        .isolated_store(directory.path())
-        .run();
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let temp = tempfile::tempdir().unwrap();
-    let session_id = "older-worker-swap-failure";
-    let (origin, clone) = init_managed_clone_with_origin(temp.path(), session_id);
-    let worker_root = temp.path().join("workers").join(session_id);
-    std::fs::create_dir_all(&worker_root).unwrap();
-    let target = mj_core::state::TargetLocator::LocalBare {
-        worker_root: worker_root.clone(),
-    };
-    let mut session = checkpoint_test_session(session_id);
-    session.state = SessionState::Running;
-    session.target_template_id = "local-bare".into();
-    session.target = Some(Box::new(target.clone()));
-    attach_local_managed_clone(&mut session, clone.clone(), origin);
-    let mut config = Config::default();
-    config
-        .targets
-        .insert("local-bare".into(), TargetTemplate::LocalBare);
-    let mut controller = Controller {
-        config,
-        state: State {
-            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
-            ..State::default()
-        },
-    };
-    persist_controller_fixture(&mut controller);
-    let previous = session;
-
-    // Verify no leftover worker_restart intent remains after retiring on successful in-place recovery.
-    let admission = crate::controller::test_support::session_admission(session_id);
-    crate::worker_lifecycle::run_admitted(&admission, session_id, async {
-        crate::database::begin_worker_restart(
-            session_id,
-            &crate::database::WorkerRestartIntent {
-                operation_id: "swap-recovery-op".into(),
-                target: target.clone(),
-                desired_build: "test-build".into(),
-            },
-        )
-        .unwrap();
-        assert!(
-            crate::database::load_worker_restart(session_id)
-                .unwrap()
-                .is_some()
-        );
-        retire_worker_restart_intent(session_id).unwrap();
-        assert!(
-            crate::database::load_worker_restart(session_id)
-                .unwrap()
-                .is_none(),
-            "worker_restart intent must be cleared after successful in-place recovery"
-        );
-        anyhow::Ok(())
-    })
-    .await
-    .unwrap();
-
-    // Case A: recovery succeeded -> marker stripped -> session stays Running, checkout intact.
-    let swap_error = anyhow::anyhow!("start replacement worker failed")
-        .context(crate::controller::worker_restart::WorkerRestartLeftNoWorker);
-    let recovered_error = anyhow::anyhow!("{swap_error:#}");
-    let mut record_a = previous.clone();
-    apply_close_checkpoint_failure(&mut record_a, &previous, &recovered_error, now(), None);
-    assert_eq!(record_a.state, SessionState::Running);
-    assert!(clone.exists());
-
-    // Case B: recovery also failed -> WorkerRestartLeftNoWorker preserved -> Error with --without-checkpoint, checkout intact.
-    let unrecovered_error = swap_error
-        .context("in-place worker recovery also failed; retry suspend or use --without-checkpoint: spawn failed")
-        .context(crate::controller::worker_restart::WorkerRestartLeftNoWorker);
-    let mut record_b = previous.clone();
-    apply_close_checkpoint_failure(&mut record_b, &previous, &unrecovered_error, now(), None);
-    assert_eq!(record_b.state, SessionState::Error);
-    assert!(
-        record_b.last_error.as_deref().is_some_and(
-            |msg| msg.contains("--without-checkpoint") && msg.contains("without a live worker")
-        ),
-        "expected no-worker error mentioning --without-checkpoint, got: {:?}",
-        record_b.last_error
-    );
-    assert!(clone.exists());
 }
 
 #[cfg(unix)]
@@ -5496,7 +5409,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     attempt.request_stop(&fake).unwrap();
     assert!(attempt.request_recorded());
 
-    let receipt = attempt.wait_for_stop(&fake).await.unwrap();
+    let receipt = attempt.wait_for_stop(&fake).await.unwrap().unwrap();
     assert!(receipt.error.is_none());
 
     attempt
@@ -5732,16 +5645,9 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     assert!(attempt.worker_capable(&fake).unwrap());
     attempt.accept(&fake, false).unwrap();
     attempt.request_stop(&fake).unwrap();
-    // Worker exited without writing a receipt: wait_for_stop must report an error
-    // rather than silently succeeding over potentially live writers.
-    let receipt = attempt.wait_for_stop(&fake).await.unwrap();
-    assert!(
-        receipt
-            .error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("exited without confirming checkout quiescence")),
-        "expected missing-receipt error, got: {receipt:?}"
-    );
+    // The worker exited without proving quiescence. The capture worker,
+    // which holds the root lock, owns that proof.
+    assert!(attempt.wait_for_stop(&fake).await.unwrap().is_none());
 
     let commands = fake.commands.lock().unwrap();
     assert!(!commands.is_empty());
@@ -6097,6 +6003,7 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
     let receipt = attempt
         .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
         .await
+        .unwrap()
         .unwrap();
     assert!(receipt.error.is_none());
     assert_eq!(target_fake.alive_polls.load(Ordering::SeqCst), 2);

@@ -17,9 +17,13 @@ Fresh managed Suspend, a user's retry, and startup recovery will enter one captu
 - [x] (2026-11-24 01:37Z) Received MJ Advisor review: routing consolidation approved in principle; new target command rejected as unnecessary. Accepted the capture-worker design and the listed deletions and behavioral limits.
 - [x] (2026-11-24 01:41Z) Verified sealed relay behavior, refusal-state mapping, and early stopped-target recovery ordering in current code.
 - [x] (2026-11-24 01:43Z) MJ Advisor approved implementation with six final corrections recorded below; no further plan review is needed.
-- [ ] Add additive capture launch context and shared writer draining in the checkpoint-only worker.
-- [ ] Consolidate managed controller routing and remove the specified special cases.
-- [ ] Extend the existing isolated fixture with same-daemon worker death, daemon crash, retry-from-Error, and sealed-capture restart variants.
+- [x] (2026-11-24 01:45Z) Added omitted-when-None capture launch context, shared writer draining and typed holder refusal before checkpoint journal open; reviewed worker diff. Integration validation remains.
+- [x] (2026-11-24 01:50Z) Consolidated managed controller routing and deleted the specified dead-worker recovery branches; retained only live pending-intent reattachment, with no Harness startup from that branch.
+- [x] (2026-11-24 01:50Z) Extended the existing isolated fixture with dead-worker-live, dead-worker-startup, dead-worker-error, and verified-before-destroy variants. Runtime validation is starting under one build owner.
+- [x] (2026-11-24 01:56Z) Dev CLI/worker builds, launch compatibility (1), checkpoint-only worker tests (3), worker control golden (1), and sealed-capture restart E2E passed.
+- [x] (2026-11-24 02:00Z) Additional targeted tests passed: older live worker (1), legacy Closing (4), SSH scope routing (1), Podman scope routing (1), uncancelled wait (1), daemon clone recovery (2). These remain valid across the private exporter correction.
+- [x] (2026-11-24 02:10Z) Corrected exporter scope validation and completed 17 focused Rust tests plus 9 E2Es; all pass. No isolated test process remains.
+- [ ] Complete affected-crate Clippy on the merged tree and before-push review.
 - [ ] Run targeted regression/controls and affected-crate Clippy under one build owner.
 - [ ] Review integrated simplicity and behavior, commit on the current branch, obtain before-push review, push origin/master, and dispatch platform CI.
 
@@ -29,6 +33,12 @@ Fresh managed Suspend, a user's retry, and startup recovery will enter one captu
 The incident had durable Closing, no checkpoint frontier, no stop REQUEST or RECEIPT, and no worker. Recovery still required a relay lease from that worker. After failure became Error, retry treated the missing worker as an old live worker needing an upgrade and failed its initial lease. The actual worker/daemon death mechanism is unproven; the previous daemon stopped uncleanly. Another same-day session reached the same dead end after a clean handoff.
 
 Successful Suspend already stops the original worker and starts a distinct checkpoint-only worker. `OriginDeltaSuspend::start_worker` installs the current build and launch config before starting that worker, and can reattach an alive/starting checkpoint-only worker after another daemon restart. That worker acquires worker.lock before reading or writing runtime state. A separate target-side quiescence command would duplicate ownership already available there.
+
+The first integrated run found another reader of the original-worker proof in mj-checkpoint/src/checkpoint/capture.rs: verify_origin_delta_quiescence required REQUEST, RECEIPT and original PID death inside the export subprocess. All three dead-worker variants reached that check and failed, while the sealed variant passed because it correctly reused its archive. Replace duplicate proof with scope validation against the scoped capture launch and the existing accepted operation. An older unscoped capture can still be reattached before sealing, so preserve its successful request/receipt as the legacy scope source without forcing a new worker or repeating PID proof.
+
+The existing origin_delta_suspend.py fixture still called removed framed daemon actions. Updated only its isolated record/create/wait calls to existing authenticated HTTP terminal routes before runtime assertions; no production compatibility path was added.
+
+The daemon acceptance-publication test initially timed out waiting for its held child stop. Both baseline HEAD references prove fixture drift: it registered the key (label,delete) while production joins (label,delete,recovery). Correct only that fixture key by adding false for recovery; preserve its failure-publication expectation. This requires no new lifecycle helper or production behavior.
 
 The live worker publishes its stop receipt before releasing its root lock. Existing live waiting must continue to verify exit; the capture worker's later acquisition proves root release. A stopped container makes launch/acceptance/Git reads fail before the current late target-recovery call. Reuse target_recovery_plan and ensure_recovery_target_running inside admitted accepted Suspend before those reads; do not add side effects to dry-run or preflight. Closed relay latch requires its exact barrier/cursor, so a sealed capture must use the existing verified artifact and cleanup path rather than latch again.
 
@@ -55,10 +65,22 @@ Decision: incorporate the advisor's final approval corrections without another r
 Rationale: strict older launch readers reject even a null unknown field; the extra operation guards would add unreachable branches; the existing preflight hook is too early to exercise the race; typed refusal and bounded resumable work preserve current user behavior and handoff ownership.
 Date/Author: 2026-11-24, parent agent accepting MJ Advisor final approval.
 
+Decision: retain the live-only pending Harness restart-intent reattachment, with an explicit reattach-only start option, and keep the historical verified-without-ACCEPTED relay route.
+Rationale: a retained live replacement still owns its boot intent and must release it before another compatibility swap. If it dies, the existing one-time liveness recheck enters capture without reviving Harness. Historical verified archives without an origin acceptance marker may already have sealed legacy relays; every current ACCEPTED operation uses the common path, including when an older archive exists. These preserve shipped ownership and formats rather than add a second dead-worker pipeline.
+Date/Author: 2026-11-24, parent agent after integrated controller review.
+
+Decision: consolidate exporter validation around capture scope: scoped current launch plus matching ACCEPTED operation, or the existing successful request/receipt scope for an unscoped pre-upgrade launch, followed by common session/mode and canonical checkout containment checks. The held capture-worker barrier and root-lock tenure provide process proof; the exporter must not recheck original worker liveness.
+Rationale: a live worker REQUEST is optional after a crash, but historical unsealed captures without the launch field remain valid under unchanged same-mode reattachment. This is persisted-format compatibility in one scope resolver, not a parallel dead-worker capture path. Add a focused integration test through the existing export fixture for both scope formats and rejected mismatches.
+Date/Author: 2026-11-24, parent agent after failing E2E evidence.
+
+Decision: keep the exporter's unscoped-launch compatibility arm for the demonstrated generic checkpoint restart path, and comment its removal condition beside the code.
+Rationale: ordinary reattachment keeps the old hel and invokes its old exporter, but restart_worker_for_checkpoint can install the current hel with launch:None/prepared:false while retaining the old launch.json. The new exporter can therefore see a genuine legacy unscoped launch and successful request/receipt. This is reachable persisted compatibility, not a hypothetical fallback. References: mj-session-runtime/src/checkpoint_transfer.rs export binary, mj-controller/src/controller/checkpoint/relay.rs restart arguments, and worker_restart.rs install ordering.
+Date/Author: 2026-11-24, parent agent after bounded exporter reachability trace requested by MJ Advisor.
+
 ## Outcomes & Retrospective
 
 
-Manual recovery is complete. The original command-based plan was rejected and replaced before production edits. Implementation and validation remain. Non-origin-delta checkouts retain their historical relay-first recovery path and its missing-worker limitation; this fix is scoped to managed origin-delta Suspend. The final outcome must identify deleted branches and shared ownership rather than treating raw line count as sufficient proof of simplicity. Record production diff size, test counts, review result, and pushed commit at completion.
+Manual recovery and implementation are complete; 17 focused Rust tests and 9 E2Es pass. Affected-crate Clippy, final review, and delivery remain. The initial command-based plan was rejected before production edits. The implementation deletes the parked and failed-lease recovery reroutes, dead pending-worker startup, swap-failure Harness revival, synthetic missing receipt, dead-request early return, and exporter PID proof. One existing root-lock owner proves writers stopped and captures journal state, using a shared drain. The narrowly live reattach-only pending-intent branch remains for its shipped startup ownership contract. Production Rust diff before upstream merge is +373/-353 lines; ownership and removed special cases, rather than raw size alone, are the simplicity criterion. Non-origin-delta checkouts retain their relay-first missing-worker limitation. Dead-worker process visibility, crash continuation, and refusal Harness restart remain the documented limits.
 
 ## Context and Orientation
 
@@ -118,10 +140,10 @@ Run from the repository root through the existing mbx dev profile, without chang
     mbx test -p brokk-mj-daemon suspend_recovery_preserves_a_clones_
     mbx test -p brokk-mj-daemon accepted_suspend_failure_is_published_without_an_observer
     mbx test -p brokk-mj-controller legacy_closing_with_
-    python3 tests/e2e/origin_delta_suspend.py --mj target/debug/mj --worker target/debug/mj-worker --instance suspend-restart-before-request --case restart-before-request
+    python3 tests/e2e/origin_delta_suspend.py --mj target/debug/mj --worker target/debug/mj-worker --instance suspend-restart-dead-worker-startup --case dead-worker-startup
     python3 tests/e2e/origin_delta_suspend.py --mj target/debug/mj --worker target/debug/mj-worker --instance suspend-restart-round-trip --case round-trip
 
-Add the proposed regression selector before invoking it. Existing control selectors are detached, late-file, untracked, git-error, and raw; use distinct suspend-restart-<case> names. Run worker control/drain and affected launch/journal compatibility tests. If cancellation implementation changes, run the existing cancel_turn_bypasses_a_pending_checkpoint_without_steering_the_queue filter in brokk-mj-worker-runtime. Require a nonzero matched count per Rust filter. For behavior changes run affected-crate Clippy:
+Implemented regression selectors are dead-worker-live, dead-worker-startup, dead-worker-error, and verified-before-destroy. Existing control selectors are detached, late-file, untracked, git-error, and raw; use distinct suspend-restart-<case> names. Run worker control/drain and affected launch/journal compatibility tests. If cancellation implementation changes, run the existing cancel_turn_bypasses_a_pending_checkpoint_without_steering_the_queue filter in brokk-mj-worker-runtime. Require a nonzero matched count per Rust filter. For behavior changes run affected-crate Clippy:
 
     mbx clippy -p brokk-mj-controller -p brokk-mj-worker-runtime -p brokk-mj-worker -p brokk-mj-core --all-targets -- -D warnings
 
@@ -154,3 +176,5 @@ Use optional WorkerLaunchConfig::suspend_capture with serde(default, skip_serial
 Revision note (2026-11-24 01:41Z): Replaced the unapproved target command design with the smaller capture-worker design; specified deletions, shared root tenure, sealed restart coverage, strict launch-reader compatibility, existing refusal-state mapping, early owned-container restart, and explicit process/turn/refusal/non-origin limits. These details were checked against the baseline before implementation.
 
 Revision note (2026-11-24 01:43Z): Final advisor approval incorporated: omit None launch field, unchanged capture reattachment, monotonic sealed cleanup, bounded resumable target start, typed holder refusal, and explicit post-gate hook. Implementation is authorized and no further plan review is pending.
+
+Revision note (2026-11-24 02:10Z): Completed implementation and behavior checks, documented stale fixture repairs and reachable legacy exporter scope, and recorded exact test totals. Clippy/review/delivery remain.

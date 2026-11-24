@@ -458,6 +458,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         reviewer_launch: None,
         goal_resume_request: None,
         run_mode: Default::default(),
+        suspend_capture: None,
         session_id: session.id.clone(),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,

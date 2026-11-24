@@ -857,7 +857,13 @@ pub fn export_checkpoint_with_native_state(
         .iter()
         .any(|repository| repository.capture == CheckpointRepositoryCapture::OriginDelta)
     {
-        verify_origin_delta_quiescence(&relay_root, &workspace_root, &spec.repositories, git)?;
+        verify_origin_delta_capture_scope(
+            &relay_root,
+            &workspace_root,
+            &spec.session.id,
+            &spec.repositories,
+            git,
+        )?;
     }
     let repositories = collect_checkpoint_repositories_with_policy(
         &workspace_root,
@@ -916,37 +922,50 @@ pub(super) fn collect_checkpoint_repositories(
     )
 }
 
-fn verify_origin_delta_quiescence(
+fn verify_origin_delta_capture_scope(
     relay_root: &Path,
     workspace_root: &Path,
+    session_id: &str,
     repositories: &[CheckpointRepositorySpec],
     git: &dyn GitCommandRunner,
 ) -> Result<()> {
     use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
     use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
 
-    let origin_delta_repos: Vec<_> = repositories
+    let launch = WorkerLaunchConfig::read(&relay_root.join("launch.json"))?;
+    ensure!(
+        launch.session_id == session_id && launch.run_mode == WorkerRunMode::CheckpointOnly,
+        "managed clone capture requires a checkpoint-only worker for this session"
+    );
+    let checkout = if let Some(capture) = launch.suspend_capture {
+        // The caller holds the relay barrier. This worker serves that barrier
+        // only after draining writers under its root lock.
+        let operation: String = wire::read(relay_root, wire::ACCEPTED)?
+            .context("managed clone capture has no accepted suspend operation")?;
+        ensure!(
+            capture.operation == operation,
+            "capture worker belongs to a different suspend operation"
+        );
+        capture.checkout
+    } else {
+        // restart_worker_for_checkpoint can replace hel while retaining a
+        // legacy capture launch. Keep its receipt until those launches can
+        // no longer reach the current exporter through that restart.
+        let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
+            .context("managed clone capture has no quiescence request")?;
+        let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
+            .context("managed clone capture has no quiescence receipt")?;
+        ensure!(
+            receipt.operation == request.operation && receipt.error.is_none(),
+            "managed clone capture requires a successful quiescence receipt"
+        );
+        request.checkout
+    };
+    let quiesced_checkout = checkout.canonicalize()?;
+    for repository in repositories
         .iter()
         .filter(|repository| repository.capture == CheckpointRepositoryCapture::OriginDelta)
-        .collect();
-    ensure!(
-        !origin_delta_repos.is_empty(),
-        "managed clone suspend requires at least one origin-delta repository"
-    );
-    let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
-        .context("managed clone capture has no quiescence request")?;
-    let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
-        .context("managed clone capture has no quiescence receipt")?;
-    ensure!(
-        receipt.operation == request.operation
-            && receipt.error.is_none()
-            && !request.worker.is_alive()?
-            && WorkerLaunchConfig::read(&relay_root.join("launch.json"))?.run_mode
-                == WorkerRunMode::CheckpointOnly,
-        "managed clone capture requires a quiesced worker"
-    );
-    let quiesced_checkout = request.checkout.canonicalize()?;
-    for repository in origin_delta_repos {
+    {
         let location = crate::archive::git::locate_checkout(
             git,
             &workspace_root.join(&repository.relative_destination),
@@ -956,7 +975,7 @@ fn verify_origin_delta_quiescence(
                 .top_level
                 .canonicalize()?
                 .starts_with(&quiesced_checkout),
-            "quiescence receipt belongs to a different checkout"
+            "suspend capture scope belongs to a different checkout"
         );
     }
     Ok(())

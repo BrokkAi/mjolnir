@@ -393,6 +393,7 @@ pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
+        suspend_capture: None,
         session_id: SESSION_ID.into(),
         harness: HarnessKind::Codex,
         harness_home: profile_home.into(),
