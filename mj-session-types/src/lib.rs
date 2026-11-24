@@ -127,6 +127,7 @@ impl std::error::Error for HarnessPreparationFailure {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleFailureReason {
     WorkerContact,
+    SuspendPending,
     Checkpoint,
     Cleanup,
     RetainedMoveSource,
@@ -138,6 +139,7 @@ impl std::fmt::Display for LifecycleFailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::WorkerContact => "Suspension could not contact the worker. Resume the session to repair its runtime, then retry suspension.",
+            Self::SuspendPending => "Suspension could not finish observing the accepted work. Retry Suspend to continue.",
             Self::Checkpoint => "Suspension could not save its recovery checkpoint. Retry suspension; the existing environment was kept.",
             Self::Cleanup => "Suspension could not finish removing its target. Retry suspension to finish cleanup; retained environments and recovery data were kept.",
             Self::RetainedMoveSource => "Suspension interrupted Move before the destination was ready; the source workspace was kept. Resume the session to repair its runtime, then retry suspension.",

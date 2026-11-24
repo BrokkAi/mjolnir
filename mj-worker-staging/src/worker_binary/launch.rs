@@ -511,6 +511,7 @@ pub fn worker_launch_config_with_checkout(
             target_environment,
             seed_image_environment: worker_runs_in_image(backend),
             run_mode: Default::default(),
+            suspend_capture: None,
             session_id: session_id.to_string(),
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
