@@ -92,7 +92,10 @@ type clapArg struct {
 	// fromDefault is set when values holds the default rather than a value
 	// the command line gave.
 	fromDefault bool
-	owner       *clapCommand
+	// givenAt is the command level whose own parse took each value: a
+	// global argument is parsed by every level into that level's matcher.
+	givenAt []*cobra.Command
+	owner   *clapCommand
 	// matchedAt orders the arguments the command line gave as clap's
 	// matcher does, by where each first appeared: twice the number of
 	// positional arguments before it (positional i takes 2i+1), then the
@@ -306,9 +309,13 @@ func (c *clapCommand) declare(arg *clapArg, options []argOption) *clapArg {
 	return arg
 }
 
-// clapValue is the pflag value of an option: it keeps the raw text so the
-// checks clap makes run once cobra has parsed.
-type clapValue struct{ arg *clapArg }
+// clapValue is the pflag value of an option at one command level: it keeps
+// the raw text so the checks clap makes run once cobra has parsed. A global
+// argument has one at each level, as clap gives each level its own matcher.
+type clapValue struct {
+	arg   *clapArg
+	level *cobra.Command
+}
 
 func (v clapValue) String() string {
 	if len(v.arg.values) == 0 {
@@ -319,26 +326,37 @@ func (v clapValue) String() string {
 
 func (v clapValue) Set(raw string) error {
 	arg := v.arg
-	if !arg.present() {
+	givenHere := slices.Contains(arg.givenAt, v.level)
+	if !givenHere {
 		// The positional arguments pflag has collected so far place this
-		// option among them, as clap's matcher orders what it was given.
-		arg.matchedAt = [2]int64{2 * int64(len(arg.owner.cmd.Flags().Args())), clapSequence.Add(1)}
+		// option among them, as this level's clap matcher orders what it
+		// was given.
+		arg.matchedAt = [2]int64{2 * int64(len(v.level.Flags().Args())), clapSequence.Add(1)}
 	}
+	if !arg.takesValue() && raw != "true" {
+		return &UsageError{Message: fmt.Sprintf("unexpected value '%s' for '%s' found; no more were expected", raw, arg.display(true)), Command: v.level, noUsage: true}
+	}
+	// clap refuses an argument given twice to one command, flags included;
+	// a global one given once to each of two levels is two arguments.
+	if !arg.multiple && givenHere {
+		return &UsageError{Message: repeatedArgument(arg), Command: v.level}
+	}
+	arg.givenAt = append(arg.givenAt, v.level)
 	if !arg.takesValue() {
-		if raw != "true" {
-			return &UsageError{Message: fmt.Sprintf("unexpected value '%s' for '%s' found; no more were expected", raw, arg.display(true)), Command: arg.owner.cmd, noUsage: true}
-		}
 		arg.values = append(arg.values, raw)
 		return nil
-	}
-	if !arg.multiple && arg.present() {
-		return &UsageError{Message: fmt.Sprintf("the argument '%s' cannot be used multiple times", arg.display(true)), Command: arg.owner.cmd}
 	}
 	if arg.fromDefault {
 		arg.values, arg.fromDefault = nil, false
 	}
 	arg.values = append(arg.values, raw)
 	return nil
+}
+
+// repeatedArgument is clap's error for an argument given twice to one
+// command.
+func repeatedArgument(arg *clapArg) string {
+	return fmt.Sprintf("the argument '%s' cannot be used multiple times", arg.display(true))
 }
 
 func (v clapValue) Type() string {
@@ -363,15 +381,32 @@ func (c *clapCommand) flag(target *bool, id, help string, options ...argOption) 
 	return arg
 }
 
-func (c *clapCommand) register(arg *clapArg) {
-	flags := c.cmd.Flags()
-	if arg.global {
-		flags = c.cmd.PersistentFlags()
-	}
-	flag := flags.VarPF(clapValue{arg}, arg.long, arg.short, arg.help)
+func (c *clapCommand) register(arg *clapArg) { registerFlag(c.cmd, arg) }
+
+// registerFlag gives level a pflag flag for arg. A global argument gets one
+// at every level (propagateGlobalArgs).
+func registerFlag(level *cobra.Command, arg *clapArg) {
+	flag := level.Flags().VarPF(clapValue{arg, level}, arg.long, arg.short, arg.help)
 	flag.Hidden = arg.hidden
 	if !arg.takesValue() {
 		flag.NoOptDefVal = "true"
+	}
+}
+
+// propagateGlobalArgs gives every command below command its own flag for
+// each global argument declared above it, as clap propagates global
+// arguments: each level parses them into its own matcher.
+func propagateGlobalArgs(command *cobra.Command, globals []*clapArg) {
+	for _, arg := range clapOf(command).args {
+		if arg.global {
+			globals = append(slices.Clone(globals), arg)
+		}
+	}
+	for _, child := range command.Commands() {
+		for _, arg := range globals {
+			registerFlag(child, arg)
+		}
+		propagateGlobalArgs(child, globals)
 	}
 }
 
@@ -511,13 +546,9 @@ func (c *clapCommand) finish(args []string) error {
 // with its own matcher and copies globals down only after parsing, so
 // `mj --instance x usage` names no `--instance` in its usage.
 func (c *clapCommand) matched(all []*clapArg, parsingDone bool) []*clapArg {
-	// The flags this command's own parse set: pflag records them per flag
-	// set, while the global's value is shared with the ancestor's.
-	here := map[string]bool{}
-	c.cmd.Flags().Visit(func(flag *pflag.Flag) { here[flag.Name] = true })
 	var matched []*clapArg
 	for _, arg := range all {
-		if arg.present() && (arg.owner == c || here[arg.long]) {
+		if arg.present() && (arg.positional() || slices.Contains(arg.givenAt, c.cmd)) {
 			matched = append(matched, arg)
 		}
 	}

@@ -623,6 +623,7 @@ func newCommandTree(onParsed func(cli) error) *cobra.Command {
 	cancelArguments.bind(cancelCmd, func() error { return done(commandCancelTurn{cancelArguments})() })
 
 	addHelpSubcommandsBelow(root)
+	propagateGlobalArgs(root, nil)
 	return root
 }
 
