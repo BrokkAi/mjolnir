@@ -722,7 +722,7 @@ GIT_FLAGS = set("""
     --no-patch --oneline --no-decorate --decorate --no-color --color --no-ext-diff
     --no-textconv --binary --cached --staged --no-renames --find-renames --find-copies
     --ignore-space-at-eol --ignore-space-change --ignore-all-space --ignore-submodules --submodule
-    --full-index --reverse --word-diff --exit-code --minimal --patience --histogram
+    --full-index --reverse --word-diff --exit-code --check --minimal --patience --histogram
     --first-parent --no-merges --merges --parents --quiet --verify --short --show-toplevel
     --show-prefix --show-object-format --is-inside-work-tree --path-format --absolute-git-dir
     --git-common-dir --git-dir --literal-pathspecs --relative --no-relative --porcelain
