@@ -1,0 +1,14 @@
+Respond to a structured input request
+
+Usage: mj respond [OPTIONS] --session <SESSION> --elicitation <ELICITATION> [RESPONSE]
+
+Arguments:
+  [RESPONSE]  JSON response, or - for stdin
+
+Options:
+  -i, --instance <NAME>                Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>              Session id, as `mj sessions` lists it
+      --elicitation <ELICITATION>      Id of the input request to answer, as `mj elicitations` lists it
+      --no-splash                      Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --response-file <RESPONSE_FILE>  Read the JSON response from this file instead
+  -h, --help                           Print help

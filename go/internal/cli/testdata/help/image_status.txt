@@ -1,0 +1,11 @@
+Compare published project images with the repository's current recipe
+
+Usage: mj image status [OPTIONS]
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --path <PATH>      Directory inside the repository; defaults to the current directory
+      --bundle <BUNDLE>  Bundle to inspect; defaults to the session's bundle or this local repository
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --target <TARGET>  Target whose base image determines the expected recipe hash
+  -h, --help             Print help

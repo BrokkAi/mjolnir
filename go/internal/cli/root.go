@@ -37,18 +37,16 @@ type cli struct {
 type command interface{ isCommand() }
 
 // commandImage is `mj image`: build and inspect project session images
-// from mise recipes. Its arguments (image_commands::ImageArgs) arrive with
-// image_commands.rs, which is not ported yet.
-type commandImage struct{}
+// from mise recipes.
+type commandImage struct{ args imageArgs }
 
 // commandGo is `mj go`: work in a folder using remembered account and
-// target settings. Its arguments (go::GoArgs) arrive with go.rs.
-type commandGo struct{}
+// target settings.
+type commandGo struct{ args goArgs }
 
 // commandSimple is `mj simple`: a minimal local session with direct
-// Ctrl-key commands. Its arguments (simple::SimpleArgs) arrive with
-// simple.rs.
-type commandSimple struct{}
+// Ctrl-key commands.
+type commandSimple struct{ args simpleArgs }
 
 // commandWorkspaces is `mj workspaces`.
 type commandWorkspaces struct{ args workspacesArgs }
@@ -64,22 +62,21 @@ type commandDaemonRun struct{}
 type commandDaemonWaitExit struct{ args daemonWaitExitArgs }
 
 // commandAcp is `mj acp`: serve the Agent Client Protocol on standard input
-// and output. Its arguments (acp::AcpArgs) arrive with acp.rs.
-type commandAcp struct{}
+// and output.
+type commandAcp struct{ args acpArgs }
 
 // commandDoctor is `mj doctor`.
 type commandDoctor struct{ args doctorArgs }
 
-// commandEc2 is `mj ec2`. Its arguments (ec2::Ec2Args) arrive with ec2.rs.
-type commandEc2 struct{}
+// commandEc2 is `mj ec2`.
+type commandEc2 struct{ args ec2Args }
 
 // commandSetup is the hidden `mj setup`, the former spelling of
 // `mj doctor instructions`.
 type commandSetup struct{ args setupArgs }
 
-// commandImport is `mj import`. Its arguments (import::ImportArgs) arrive
-// with import.rs.
-type commandImport struct{}
+// commandImport is `mj import`.
+type commandImport struct{ args importArgs }
 
 // commandRecover is `mj recover`.
 type commandRecover struct{ args recoverArgs }
@@ -316,16 +313,6 @@ func subcommand(name, about string) *cobra.Command {
 	return &cobra.Command{Use: name, Short: about}
 }
 
-// notPortedCommand is a command whose arguments arrive with its own file:
-// until then it accepts any arguments, and running it says it is not
-// ported.
-func notPortedCommand(name, about string, run func() error) *cobra.Command {
-	cmd := subcommand(name, about)
-	cmd.DisableFlagParsing = true
-	cmd.RunE = func(*cobra.Command, []string) error { return run() }
-	return cmd
-}
-
 // newCommandTree builds the mj command tree. onParsed receives what the
 // command line asked for once clap's checks have passed.
 func newCommandTree(onParsed func(cli) error) *cobra.Command {
@@ -350,7 +337,7 @@ func newCommandTree(onParsed func(cli) error) *cobra.Command {
 		if err != nil || target == nil {
 			target = root
 		}
-		writeHelp(cmd.OutOrStdout(), target)
+		writeHelp(cmd.OutOrStdout(), target, true)
 	}})
 	group(root, false, func() error { return onParsed(parsed) })
 	if value, ok := os.LookupEnv("MJ_NO_SPLASH"); ok && value != "" && value != "false" && value != "0" {
@@ -365,9 +352,20 @@ func newCommandTree(onParsed func(cli) error) *cobra.Command {
 	}
 	add := func(cmd *cobra.Command) { rootClap.subcommand(cmd) }
 
-	add(notPortedCommand("image", "Build and inspect project session images from mise recipes", done(commandImage{})))
-	add(notPortedCommand("go", "Work in a folder using remembered account and target settings", done(commandGo{})))
-	add(notPortedCommand("simple", "Open a minimal local session with direct Ctrl-key commands", done(commandSimple{})))
+	var image imageArgs
+	imageCmd := subcommand("image", "Build and inspect project session images from mise recipes")
+	add(imageCmd)
+	image.bind(imageCmd, func() error { return done(commandImage{image})() })
+
+	var goArguments goArgs
+	goCmd := subcommand("go", "Work in a folder using remembered account and target settings")
+	add(goCmd)
+	goArguments.bind(goCmd, func() error { return done(commandGo{goArguments})() })
+
+	var simple simpleArgs
+	simpleCmd := subcommand("simple", "Open a minimal local session with direct Ctrl-key commands")
+	add(simpleCmd)
+	simple.bind(simpleCmd, func() error { return done(commandSimple{simple})() })
 
 	var workspaces workspacesArgs
 	workspacesCmd := subcommand("workspaces", "Open the workspace selector even when Mjolnir could auto-attach, or list and create workspaces without a terminal")
@@ -390,14 +388,20 @@ func newCommandTree(onParsed func(cli) error) *cobra.Command {
 	add(waitExitCmd)
 	bindDaemonWaitExit(&waitExit, waitExitCmd, func() error { return done(commandDaemonWaitExit{waitExit})() })
 
-	add(notPortedCommand("acp", "Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon", done(commandAcp{})))
+	var acp acpArgs
+	acpCmd := subcommand("acp", "Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon")
+	add(acpCmd)
+	acp.bind(acpCmd, func() error { return done(commandAcp{acp})() })
 
 	var doctor doctorArgs
 	doctorCmd := subcommand("doctor", "Diagnose platform and configuration prerequisites")
 	add(doctorCmd)
 	doctor.bind(doctorCmd, func() error { return done(commandDoctor{doctor})() })
 
-	add(notPortedCommand("ec2", "Create, list, or destroy persistent EC2 hosts with rootless Podman", done(commandEc2{})))
+	var ec2 ec2Args
+	ec2Cmd := subcommand("ec2", "Create, list, or destroy persistent EC2 hosts with rootless Podman")
+	add(ec2Cmd)
+	ec2.bind(ec2Cmd, func() error { return done(commandEc2{ec2})() })
 
 	var setup setupArgs
 	setupCmd := subcommand("setup", "Former spelling of `mj doctor instructions`")
@@ -405,7 +409,10 @@ func newCommandTree(onParsed func(cli) error) *cobra.Command {
 	add(setupCmd)
 	setup.bind(setupCmd, func() error { return done(commandSetup{setup})() })
 
-	add(notPortedCommand("import", "Adopt a native coding-agent session as a stopped Mjolnir session", done(commandImport{})))
+	var importArguments importArgs
+	importCmd := subcommand("import", "Adopt a native coding-agent session as a stopped Mjolnir session")
+	add(importCmd)
+	importArguments.bind(importCmd, func() error { return done(commandImport{importArguments})() })
 
 	var recover recoverArgs
 	recoverCmd := subcommand("recover", "Find, adopt, or explicitly destroy managed workers missing from state")

@@ -1,0 +1,15 @@
+Atomically upload a file to an idle session workspace
+
+Usage: mj put-file [OPTIONS] --session <SESSION> --path <PATH> <SOURCE>
+
+Arguments:
+  <SOURCE>  Source file, or - for stdin
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --path <PATH>        Destination relative to the session workspace
+      --overwrite          Replace the file if it already exists
+      --json               Print the response as JSON instead of text
+  -h, --help               Print help

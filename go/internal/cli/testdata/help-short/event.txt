@@ -1,0 +1,14 @@
+Queue an external event in a session's durable mailbox
+
+Usage: mj event [OPTIONS] --session <SESSION> <TEXT>
+
+Arguments:
+  <TEXT>  Event text shown to the session as untrusted external content
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --key <KEY>          Producer idempotency key. Omit it to generate a unique key
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --wake               Start a turn if the session is idle when the worker receives the event
+  -h, --help               Print help
