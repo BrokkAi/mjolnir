@@ -2775,6 +2775,11 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (kind === 'background') {
     return `${details.label || 'Background'}${backgroundStarted == null ? '' : ` ${formatClock(now - backgroundStarted)}`}`;
   }
+  const workingSubagents = session.verdict?.working_descendants ?? 0;
+  if (workingSubagents > 0 && (kind === 'idle' || (!kind && session.attention === 'working'
+      && turnStarted == null && stepStarted == null && backgroundStarted == null))) {
+    return `${workingSubagents} subagent${workingSubagents === 1 ? '' : 's'} working`;
+  }
   if (kind === 'idle') return idleStarted == null ? 'Idle' : idleSinceLabel(idleStarted, now);
   if (kind === 'lifecycle') return details.label || sessionLifecycleLabel(session);
   if (kind) return details.label || kind;

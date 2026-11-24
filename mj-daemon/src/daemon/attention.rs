@@ -70,6 +70,17 @@ pub(super) fn update(
                     .changes(&next.moves)
                     .map(|(id, _)| id.clone()),
             )
+            .chain(
+                previous
+                    .verdicts
+                    .changes(&next.verdicts)
+                    .filter_map(|(id, next)| {
+                        let busy = |v: &mj_client::runtime_feed::SessionVerdict| {
+                            (v.working, v.working_descendants, v.review_working)
+                        };
+                        (previous.verdicts.get(id).map(busy) != next.map(busy)).then(|| id.clone())
+                    }),
+            )
             .collect()
     };
     if ids.is_empty() {
@@ -388,7 +399,17 @@ fn project_ids(
     runtime: &RuntimeProjection,
     ids: BTreeSet<String>,
 ) -> BTreeMap<String, SessionAttention> {
-    project_states(runtime, ids, None).states
+    project_states(&with_test_verdicts(runtime), ids, None).states
+}
+
+#[cfg(test)]
+fn with_test_verdicts(runtime: &RuntimeProjection) -> std::borrow::Cow<'_, RuntimeProjection> {
+    if !runtime.verdicts.is_empty() {
+        return std::borrow::Cow::Borrowed(runtime);
+    }
+    let mut runtime = runtime.clone();
+    super::verdicts::project_activity(&mut runtime, &Default::default(), None, None);
+    std::borrow::Cow::Owned(runtime)
 }
 
 struct AttentionProjection {
@@ -557,6 +578,7 @@ fn project_states(
             let view = runtime.sessions.get(id);
             let live = view.and_then(|view| view.operational.as_deref());
             let review = reviews.get(id.as_str()).copied();
+            let verdict_working = runtime.verdicts.get(id).is_some_and(|v| v.working);
             let transitioning = super::verdicts::transition_kind(
                 record,
                 lifecycles.get(id.as_str()).copied(),
@@ -582,7 +604,11 @@ fn project_states(
             } else if transitioning || record.state == mj_core::state::SessionState::Checkpointing {
                 Working
             } else if !record.state.is_active() {
-                Inactive
+                if runtime.verdicts.get(id).is_some_and(|v| v.review_working) {
+                    Working
+                } else {
+                    Inactive
+                }
             } else if record.state == mj_core::state::SessionState::Parked {
                 if questions.contains(id) {
                     NeedsInput
@@ -646,6 +672,11 @@ fn project_states(
                 }
             } else {
                 Unknown
+            };
+            let state = if state == Idle && verdict_working {
+                Working
+            } else {
+                state
             };
             let holder = holders.get(id).filter(|_| state == NeedsInput);
             let mut card = if matches!(state, NeedsInput | Important | Idle | Working)
@@ -969,7 +1000,7 @@ mod tests {
     use mj_core::state::{MaterializedSession, ProjectionWindow, SessionState};
 
     fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> AttentionProjection {
-        super::project_states(runtime, ids, None)
+        super::project_states(&with_test_verdicts(runtime), ids, None)
     }
 
     fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection) {

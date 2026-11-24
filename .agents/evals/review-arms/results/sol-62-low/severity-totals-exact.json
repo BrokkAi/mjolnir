@@ -1,0 +1,51 @@
+{
+  "6.1 Sol medium": {
+    "low": "3/2",
+    "medium": "34",
+    "high": "29/2",
+    "high_medium": "97/2",
+    "all": "50"
+  },
+  "6.2 Sol medium": {
+    "low": "55",
+    "medium": "164",
+    "high": "37",
+    "high_medium": "201",
+    "all": "256"
+  },
+  "6.2 Sol low": {
+    "low": "30",
+    "medium": "101",
+    "high": "24",
+    "high_medium": "125",
+    "all": "155"
+  },
+  "6.1 Sol medium + 2 Terra high": {
+    "low": "44/3",
+    "medium": "191/2",
+    "high": "77/3",
+    "high_medium": "727/6",
+    "all": "815/6"
+  },
+  "6.2 Sol medium + 2 Terra high": {
+    "low": "119/2",
+    "medium": "542/3",
+    "high": "77/2",
+    "high_medium": "1315/6",
+    "all": "836/3"
+  },
+  "6.2 Sol low + 2 Terra high": {
+    "low": "69/2",
+    "medium": "269/2",
+    "high": "86/3",
+    "high_medium": "979/6",
+    "all": "593/3"
+  },
+  "2 Terra high": {
+    "low": "27/2",
+    "medium": "272/3",
+    "high": "45/2",
+    "high_medium": "679/6",
+    "all": "380/3"
+  }
+}

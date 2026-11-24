@@ -17,9 +17,10 @@ The medium comparison is complete and published. The user then requested the sam
 - [x] (2026-11-24) Independently reconstructed the raw pool, groups, all four comparisons, paired bootstrap intervals, and model attribution. Published the complete readout and supporting data in the worktree.
 - [x] (2026-11-24) Final result commit `07825127b` passed review and was pushed to origin/master in upstream merge `c6585cfed`.
 - [x] (2026-11-24) Added independently calculated low/medium/high impact counts to the medium readout and pushed documentation commit `510d4f6e2`.
-- [ ] Register and audit one Sol 6.2 low review per original diff as new arm P; run at concurrency 16.
-- [ ] Jointly verify A/B/E/O/P in new round verify8 with the unchanged Neon/medium method and 16 concurrent judges; preserve all prior rounds.
-- [ ] Independently check low-versus-medium comparisons, publish the severity/price/latency readout, commit, obtain required review, and push.
+- [x] (2026-11-24 01:32Z) Registered and audited exactly 70 Sol 6.2 low reviews as arm P, one per original diff, at executor concurrency 16. No failed jobs or retries; 70 live runtime/prompt clocks and matching completed turns, three explicit no-findings handbacks, peak 12 overlapping reviewer turns.
+- [x] (2026-11-24) Completed all 34 verify8 judges at concurrency 16 without failures or retries. Audited all 501 sessions, 881 raw findings, and 70 diffs; old rounds' checksum manifests remain intact. Scoring produced 333 groups, including 305 confirmed.
+- [x] (2026-11-24) Independently checked exact source/group mappings, all 35 severity totals, all 20 paired bootstrap comparisons, model attribution, timing/price, and published exports. The severity/price/latency readout is complete in the worktree.
+- [x] (2026-11-24) Committed the low-effort results in `424f9dde5`, added historical judge disclosure in `3e6b38ad3`, passed review, and pushed both to origin/master.
 
 ## Surprises & Discoveries
 
@@ -36,6 +37,8 @@ Review of the cleanup checkpoint found that ordinary judge/task sessions create 
 One carrier failed before any prompt or review acceptance during a daemon restart. The interrupted Create retired a worker environment and reprovisioned the same session against a retained relay projection, producing an event-3 digest mismatch and a correctly refused rewind to genesis. Independent trace/source inspection confirmed the pre-review failure. Filed live daemon bug #1675. The original driver finished with 69 accepted samples; after it exited, the failed attempt was archived and only that job was retried on a new carrier. The retry passed the same audit and supplies the seventieth sample. No accepted review was repeated.
 
 The initial judge driver found a stale cached workspace ID: all 34 new-session commands were explicitly refused as unknown workspace before session creation or prompting. The old named workspace was absent from the live list. Under the existing workspace-setup lock the owner archived the stale pointer, recreated the same named workspace over the unchanged verifier checkout, and retried the 34 refused units with the identical blinded inputs. The first 16 replacement session receipts are persisted. This is setup recovery, not repeated judging.
+
+Publication review requested an explicit comparison to the original Opus/high frontier, beyond the already documented current-round Neon blinding. Both 6.2 readouts now state the judge change and the measured historical shift: 88.5% verdict agreement on 1,928 shared findings, 212 promotions to confirmed versus 10 demotions, and upward severity changes. The new 6.2 outputs have only Neon judgments; current same-round contrasts remain distinct from original Opus absolute totals.
 
 ## Decision Log
 
@@ -72,7 +75,13 @@ The quality improvement has higher recorded resource use: estimated median paral
 
 The result and reproduction commands are in `.agents/evals/review-arms/results/sol-62-medium/README.md` and `reproduction.md`, with scored CSVs, paired comparisons, Pareto CSVs, usage, coverage, judge attribution/audit, and prior-round consistency data. The main study README links the addition. Real carrier/judge cleanup succeeded after the current-CLI fixes; the two existing recovery tests and applicable script syntax checks passed. No Rust build or installation was needed. Final result commit `07825127b` passed review and reached origin/master in merge `c6585cfed`.
 
-The follow-up low-effort campaign is now assigned to the same execution owner. Its results are pending; no claims about low-effort quality, latency, or price have been made.
+The follow-up low-effort campaign completed all 70 reviews without failures or retries. It used the same image digest, Codex 0.170.0, and ACP 1.15.1 as arm O, and the canary audit matched the captured prompt after normalizing the carrier checkout path. The executor width was 16 with no extra creation gate; 12 recorded reviewer turns overlapped at peak. Three handbacks explicitly contained no findings. All 70 have matching live runtime and positive prompt-to-completion clocks.
+
+Verify8 completed all 34 judges at concurrency 16 with the same Neon/medium spec and profiles, split 17/17, and no failures or retries. Its audited pool contains exactly 501 sessions and 881 raw findings across 68 nonempty diffs; the two empty diffs remain covered. Scoring produced 333 groups, including 305 confirmed. Verify6/7 checksums remain intact. The 717 common raw findings have 97.9% verdict agreement and 90.0% retained severity agreement with verify7.
+
+Final independently reconstructed verify8 totals are 50.00 for Sol 6.1 medium, 256.00 for Sol 6.2 medium, and 155.00 for Sol 6.2 low. With two Terra/high reviewers, the respective totals are 135.83, 278.67, and 197.67. Low has 125 high/medium findings solo and 163.17 with Terra; its high-only counts are 24.00 and 28.67. Recorded solo timing/cost is 46.0 seconds/$0.120 for low versus 106.3 seconds/$0.252 for medium. With Terra, low is 52.1 seconds/$0.207 versus medium 109.5 seconds/$0.339. These are fresh same-round comparisons; the earlier verify7 medium total of 259 must not be mixed into verify8 contrasts.
+
+The independent audit exactly reproduced all 35 severity totals and all 20 paired comparison outputs from raw inputs, including the 70 P durable low-effort selections and 34 Neon judge selections. It found no integrity defect. All 501 session clocks and usage rows match, ten exports are byte-identical, and 382 prior-round checksums pass. Low versus 6.1 medium gains 105 confirmed solo and 61.83 with Terra, while trailing 6.2 medium by 101 solo and 81 with Terra. For high-impact findings alone with Terra, the gain over 6.1 medium is only 3.00, with a 95% interval of −1.00 to +7.83. The readout and supporting data are in `.agents/evals/review-arms/results/sol-62-low/`. Result commit `424f9dde5` and disclosure commit `3e6b38ad3` passed review and reached origin/master. All requested medium and low comparisons are complete.
 
 ## Context and Orientation
 
@@ -174,6 +183,8 @@ First-run evidence: `$REVIEW_ARMS_DIR/runs/diff-05bc8c1e68/O/`; driver PID 15356
 Full campaign log and process receipt: `$REVIEW_ARMS_DIR/arm-O-driver.log` and `$REVIEW_ARMS_DIR/arm-O-driver.pid`. First-run audit: `$REVIEW_ARMS_DIR/arm-O-canary-audit.json`. The changed scripts passed Python syntax parsing, and the repaired cleanup completed against the real installed CLI.
 
 Final reviewer audit: `$REVIEW_ARMS_DIR/arm-O-audit.json`. Failed pre-review attempt: `$REVIEW_ARMS_DIR/runs/diff-660c78e96c/O-failed-bootstrap-dddc797142ac/`; retry log: `$REVIEW_ARMS_DIR/arm-O-retry-bootstrap.log`. Bug report: `https://github.com/BrokkAi/mjolnir/issues/1675`. Verify7 build/pool/driver receipts: `$REVIEW_ARMS_DIR/verify7/build.log`, `pool-audit.json`, `driver.log`, and `driver.pid`. The first judge driver PID 1627672 exited after explicit workspace refusals. Replacement driver PID 1642525 uses `$REVIEW_ARMS_DIR/verify7/retry-workspace.log`; stale pointer and live refusal evidence are `workspace-stale.json` and `workspaces-at-refusal.json`.
+
+Low-effort reviewer receipts: `$REVIEW_ARMS_DIR/arm-P-canary.log`, `arm-P-driver.log`, and `arm-P-audit.json`; full driver PID 2403011 at launch. Verify8 receipts: `$REVIEW_ARMS_DIR/verify8/{build.log,pool-audit.json,driver.log,driver.pid}`; judge driver PID 3506812 at launch. Independent preflight: `.mj/agents/777987907c1b745b746e446b07cb0bd7/verify8-preflight.md`.
 
 ## Interfaces and Dependencies
 

@@ -163,21 +163,22 @@ impl SessionActivity {
         current_turn_started_at: Option<u64>,
         waiting_for_input: bool,
     ) -> bool {
-        match self.kind(current_turn_started_at) {
-            SessionActivityKind::Idle
-            | SessionActivityKind::Goal
-            | SessionActivityKind::Expecting
-            | SessionActivityKind::CheckingQuota => false,
-            SessionActivityKind::Lifecycle => {
-                self.execution == Some(mj_core::relay::RelayExecutionState::Closing)
-            }
-            SessionActivityKind::Background => true,
-            SessionActivityKind::Turn | SessionActivityKind::Step => {
-                !waiting_for_input
-                    || !self.background_commands.is_empty()
-                    || !self.active_user_shells.is_empty()
-            }
+        use mj_core::activity::ActivityState;
+        let mut state = self.state();
+        if current_turn_started_at.is_some()
+            && !matches!(
+                state.last_known(),
+                ActivityState::Closing | ActivityState::Closed
+            )
+        {
+            state = ActivityState::Turn {
+                started_at_ms: None,
+                last_activity_at_ms: None,
+            };
         }
+        let has_background =
+            !self.background_commands.is_empty() || !self.active_user_shells.is_empty();
+        state.is_computing(waiting_for_input, has_background)
     }
 
     /// Compact and detailed clocks use the same evidence as activity indicators.

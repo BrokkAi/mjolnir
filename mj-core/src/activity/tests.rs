@@ -408,6 +408,9 @@ fn an_unrecognized_published_state_is_cautious_rather_than_fatal() {
         serde_json::from_value(from_the_future).expect("an unknown state must still deserialize");
     assert_eq!(state, ActivityState::Unrecognized);
     assert!(!state.is_idle());
+    assert!(state.is_working());
+    assert!(state.is_computing(false, false));
+    assert!(!state.is_computing(true, false));
     assert!(state.has_work_in_flight());
     assert_eq!(state.chat_phase(), RelayExecutionState::Running);
 

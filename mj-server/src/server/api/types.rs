@@ -150,7 +150,12 @@ pub struct ApiSession {
     pub state: String,
     pub lifecycle: ViewerLifecycleCategory,
     pub chat_phase: crate::server::ViewerChatPhase,
+    /// Whether this session’s own worker is idle.
     pub is_idle: bool,
+    #[serde(default)]
+    pub subtree_idle: bool,
+    #[serde(default)]
+    pub working_subagents: usize,
     /// What this session is doing, in more detail than `chat_phase`'s four
     /// values allow: in particular it can say that the daemon cannot see the
     /// worker and report what it last knew, rather than claiming idleness it
@@ -220,6 +225,8 @@ impl From<&ViewerSession> for ApiSession {
             lifecycle: session.lifecycle,
             chat_phase: session.chat_phase,
             is_idle: session.is_idle,
+            subtree_idle: session.is_idle && !session.verdict.working,
+            working_subagents: session.verdict.working_descendants,
             activity_state: session.activity_state.clone(),
             operation: None,
             relay: None,

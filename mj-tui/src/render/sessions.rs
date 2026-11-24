@@ -245,11 +245,8 @@ fn drawn_session_rows_in_range(
                     now_epoch_seconds,
                     attention,
                 };
-                let primary_busy = dashboard.session_is_working(&session.id);
-                // Review work is independent of the session's primary
-                // lifecycle. A review can keep animating while the session
-                // is stopped or unreachable, so do not gate it on either.
-                let busy = primary_busy || mj_client::review::any_working(reviews);
+                let busy = dashboard.session_is_working(&session.id);
+                let working_descendants = dashboard.verdict(&session.id).working_descendants;
                 let spinner = busy.then(|| {
                     mj_chat::spinner::compact_frame(dashboard.config.spinner, animation_ms)
                 });
@@ -357,6 +354,7 @@ fn drawn_session_rows_in_range(
                             disk_full,
                             attention,
                             dashboard.waiting_child_kind(&session.id),
+                            working_descendants,
                             operation,
                             now_epoch_seconds,
                             target,
@@ -382,6 +380,7 @@ fn drawn_session_rows_in_range(
                             disk_full,
                             attention,
                             dashboard.waiting_child_kind(&session.id),
+                            working_descendants,
                             operation,
                             now_epoch_seconds,
                             target,
@@ -555,6 +554,7 @@ pub(crate) fn expanded_session_lines(
     disk_full: bool,
     attention: AttentionLevel,
     waiting_child: Option<mj_core::subagent::SubagentKind>,
+    working_descendants: usize,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -591,6 +591,7 @@ pub(crate) fn expanded_session_lines(
         disk_full,
         attention,
         waiting_child,
+        working_descendants,
         operation,
         now_epoch_seconds,
         target,
@@ -700,6 +701,7 @@ pub(crate) fn session_activity_line(
     disk_full: bool,
     attention: AttentionLevel,
     waiting_child: Option<mj_core::subagent::SubagentKind>,
+    working_descendants: usize,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -765,7 +767,13 @@ pub(crate) fn session_activity_line(
     }) {
         "expecting the agent to continue".to_owned()
     } else if facts.state.is_active() {
-        facts.clock(detailed_activity_clocks)
+        if working_descendants > 0
+            && detail.is_none_or(|detail| detail.activity.is_idle(detail.current_turn_started_at))
+        {
+            crate::widgets::counted(working_descendants, "subagent", "subagents")
+        } else {
+            facts.clock(detailed_activity_clocks)
+        }
     } else {
         format!("{:?}", facts.state)
     };
@@ -881,6 +889,7 @@ pub(crate) fn compact_session_lines(
     disk_full: bool,
     attention: AttentionLevel,
     waiting_child: Option<mj_core::subagent::SubagentKind>,
+    working_descendants: usize,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -918,6 +927,7 @@ pub(crate) fn compact_session_lines(
         disk_full,
         attention,
         waiting_child,
+        working_descendants,
         operation,
         now_epoch_seconds,
         target,

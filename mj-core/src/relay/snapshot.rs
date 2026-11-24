@@ -1143,6 +1143,30 @@ impl RelayOperationalState {
             .unwrap_or_else(|| crate::activity::classify(&self.facts()))
     }
 
+    #[must_use]
+    pub fn is_computing(&self, waiting_for_input: bool) -> bool {
+        self.activity_state().is_computing(
+            waiting_for_input,
+            !self.background_commands.is_empty() || !self.active_user_shells.is_empty(),
+        )
+    }
+
+    #[must_use]
+    pub fn has_running_turn_or_retry(&self) -> bool {
+        self.active_prompt.is_some()
+            || self.harness_turn.is_some()
+            || self.goal.running()
+            || self
+                .capacity_retry
+                .as_ref()
+                .is_some_and(|retry| !retry.submitted)
+            || self
+                .continuation
+                .quota_recovery
+                .as_ref()
+                .is_some_and(|retry| !retry.submitted)
+    }
+
     /// Whether nothing the worker owns would be destroyed by killing it now.
     ///
     /// Stopping a worker tears down the ACP bridge with it, so any operation

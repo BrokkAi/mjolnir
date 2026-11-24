@@ -405,6 +405,15 @@ cost per diff of $0.252 versus $0.100. Round `verify7` judged the old and new
 findings jointly across 431 selected sessions. The report covers uncertainty,
 historical timing limits, and reproducibility. [Full results](results/sol-62-medium/README.md)
 
+### Stage 4 follow-up: Sol 6.2 low (arm P, verified by Neon/medium)
+
+On the same 70 diffs, Sol 6.2 low produced 155.00 Neon-confirmed findings
+solo and 197.67 with two Terra 6.1 high reviewers. Fresh joint judging put
+Sol 6.1 medium at 50.00 and 135.83, and Sol 6.2 medium at 256.00 and 278.67.
+Low effort took a median 46.0 s solo and cost an estimated $0.120 per diff,
+compared with 106.3 s and $0.252 for 6.2 medium.
+[Impact counts, uncertainty, and runtime details](results/sol-62-low/README.md)
+
 ## Missing-fact labels (for a static-analysis hypothesis)
 
 Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed

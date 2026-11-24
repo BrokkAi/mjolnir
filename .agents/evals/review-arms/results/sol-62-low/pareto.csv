@@ -1,0 +1,24 @@
+option,reviewers,findings,findings_per_diff,median_latency_s,tokens_per_diff,cost_per_diff_usd,frontier,cost_frontier,bootstrap_frontier_share
+Terra/high,1,100.5,1.436,43.1,244964,0.044,True,True,0.871
+gpt-6.2-sol/low,1,155.0,2.214,46.0,290193,0.12,True,True,1.0
+Sol/medium,1,50.0,0.714,46.3,235047,0.1,False,False,0.06
+2× Terra/high,2,126.67,1.81,47.3,489928,0.087,False,True,0.165
+Terra/high + gpt-6.2-sol/low,2,186.08,2.658,48.6,535157,0.163,True,True,1.0
+3× Terra/high,3,141.0,2.014,51.7,734891,0.131,False,False,0.014
+2× Terra/high + gpt-6.2-sol/low,3,197.67,2.824,52.1,780121,0.207,True,True,1.0
+Sol/medium + Terra/high,2,113.46,1.621,52.2,480011,0.143,False,False,0.002
+2× Sol/medium,2,66.0,0.943,53.0,470095,0.2,False,False,0.007
+Sol/medium + gpt-6.2-sol/low,2,167.5,2.393,53.0,525241,0.219,False,False,0.002
+Sol/medium + 2× Terra/high,3,135.83,1.94,54.3,724975,0.187,False,False,0.0
+Sol/medium + Terra/high + gpt-6.2-sol/low,3,191.92,2.742,55.4,770205,0.263,False,False,0.01
+2× Sol/medium + Terra/high,3,121.08,1.73,55.6,715059,0.243,False,False,0.0
+2× Sol/medium + gpt-6.2-sol/low,3,173.0,2.471,58.0,760288,0.319,False,False,0.0
+gpt-6.2-sol/medium,1,256.0,3.657,106.3,755063,0.252,False,True,0.0
+Sol/medium + gpt-6.2-sol/medium,2,258.5,3.693,106.3,990111,0.352,False,False,0.0
+gpt-6.2-sol/low + gpt-6.2-sol/medium,2,284.0,4.057,106.3,1045257,0.371,False,True,0.042
+2× Sol/medium + gpt-6.2-sol/medium,3,261.0,3.729,106.3,1225158,0.451,False,False,0.0
+Sol/medium + gpt-6.2-sol/low + gpt-6.2-sol/medium,3,285.5,4.079,106.3,1280304,0.471,True,False,0.69
+Terra/high + gpt-6.2-sol/medium,2,272.0,3.886,108.0,1000027,0.295,False,True,0.002
+Sol/medium + Terra/high + gpt-6.2-sol/medium,3,273.33,3.905,108.0,1235075,0.395,False,False,0.001
+Terra/high + gpt-6.2-sol/low + gpt-6.2-sol/medium,3,295.33,4.219,108.0,1290220,0.415,True,True,1.0
+2× Terra/high + gpt-6.2-sol/medium,3,278.67,3.981,109.5,1244991,0.339,False,True,0.0
