@@ -62,19 +62,13 @@ pub(super) fn apply_environment(
     );
     let shims = data.join("shims");
     let old = environment.get("PATH").cloned().unwrap_or_default();
-    // Cache launchers must wrap tools provided by mise. Cargo's mbx launcher
-    // lives alongside the session's GitHub CLI even without a host tool mount.
-    let wrappers: Vec<_> = [
-        environment.get("MJ_BUILD_TOOL_BIN"),
-        environment
-            .get(super::GITHUB_CLI_BIN_ENV)
-            .filter(|_| environment.contains_key("MBX_SHIMS_DIR")),
-    ]
-    .into_iter()
-    .flatten()
-    .map(PathBuf::from)
-    .filter(|bin| std::env::split_paths(&old).any(|entry| &entry == bin))
-    .collect();
+    // Launcher wrappers must precede mise's toolchain shims.
+    let wrappers: Vec<_> = super::LAUNCHER_BIN_ENVS
+        .iter()
+        .filter_map(|name| environment.get(*name))
+        .filter(|bin| !bin.is_empty())
+        .map(PathBuf::from)
+        .collect();
     let mise_dir = mise.and_then(Path::parent);
     let path = std::env::join_paths(
         wrappers
@@ -595,5 +589,84 @@ mod tests {
             environment["PATH"],
             "/wrap:/worker/bin:/data/shims:/managed-node/bin:/usr/bin"
         );
+    }
+    // Hard-won: #1589: isolated Git setup hid the stable cargo and mbx launchers.
+    #[test]
+    fn mbx_launchers_survive_shell_reset_and_git_reload() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for tool in ["cargo", "mbx"] {
+            let path = bin.join(tool);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mise_shims = root.join("mise/shims");
+        std::fs::create_dir_all(&mise_shims).unwrap();
+        std::fs::write(mise_shims.join("cargo"), "#!/bin/sh\nexit 99\n").unwrap();
+        std::fs::set_permissions(
+            mise_shims.join("cargo"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), "/opt/mise/shims:/usr/bin:/bin".into()),
+            (
+                "MBX_SHIMS_DIR".into(),
+                root.join("mbx-shims").display().to_string(),
+            ),
+            (
+                "MISE_DATA_DIR".into(),
+                root.join("mise").display().to_string(),
+            ),
+        ]);
+        let mut bare = BTreeMap::new();
+        super::super::restore_mbx_launcher(root, &mut bare).unwrap();
+        assert!(!bare.contains_key("MJ_MBX_BIN"));
+        for generation in ["harness-git-first", "harness-git-reload"] {
+            environment.insert(
+                "MJ_GITHUB_CLI_BIN".into(),
+                root.join(generation).join("bin").display().to_string(),
+            );
+            super::super::restore_mbx_launcher(root, &mut environment).unwrap();
+            let check = |env: &BTreeMap<String, String>, reset: bool| {
+                let script = "command -v cargo; command -v mbx";
+                let mut command = std::process::Command::new("/bin/bash");
+                command.env_clear().envs(env).args(["-c", script]);
+                if reset {
+                    command.env("PATH", "/opt/mise/shims:/usr/bin:/bin");
+                }
+                let output = command.output().unwrap();
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    format!("{}/cargo\n{}/mbx\n", bin.display(), bin.display())
+                );
+            };
+            check(&environment, false);
+            apply_environment(&mut environment, &[root.to_owned()], None).unwrap();
+            check(&environment, false);
+            super::super::shell_environment::configure(&root.join("bash-env"), &mut environment)
+                .unwrap();
+            check(&environment, true);
+            let mut command = std::process::Command::new("/bin/bash");
+            let output = command.env_clear().envs(&environment)
+                .env("PATH", format!("/opt/mise/shims:{}:/usr/bin:/bin:{}", bin.display(), bin.display()))
+                .args(["-c", ". \"$MJ_SESSION_BASH_ENV\"; . \"$MJ_SESSION_BASH_ENV\"; command -v cargo; printf '%s' \"$PATH\""])
+                .output().unwrap();
+            assert!(output.status.success());
+            let output = String::from_utf8(output.stdout).unwrap();
+            let (cargo, path) = output.split_once('\n').unwrap();
+            assert_eq!(cargo, bin.join("cargo").to_str().unwrap());
+            assert_eq!(
+                std::env::split_paths(path)
+                    .filter(|entry| entry == &bin)
+                    .count(),
+                1
+            );
+            assert_eq!(std::env::split_paths(path).next().unwrap(), bin);
+        }
     }
 }
