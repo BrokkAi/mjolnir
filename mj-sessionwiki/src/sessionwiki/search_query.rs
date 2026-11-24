@@ -237,8 +237,12 @@ mod tests {
 #[cfg(test)]
 mod migration_tests {
     use super::super::*;
-    #[test]
-    fn migration_preserves_rows_and_readers_wait_without_a_transaction() {
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the test owns SESSIONWIKI_DATA for its whole duration"
+    )]
+    async fn migration_preserves_rows_and_readers_wait_without_a_transaction() {
         let _held = tags::testing::lock();
         let (_dir, connection) = tags::testing::isolated_index();
         tags::testing::index_row(&connection, "migration", TOOL);
@@ -254,9 +258,9 @@ mod migration_tests {
             )
             .unwrap();
         sessionwiki::index::set_tokenizer_spec(&connection, "trigram").unwrap();
-        let cancel = std::sync::atomic::AtomicBool::new(false);
         assert!(
-            wait_for_tokenizer(&connection, std::time::Instant::now(), &cancel)
+            history::wait_for_tokenizer_migration(std::time::Duration::ZERO)
+                .await
                 .unwrap_err()
                 .to_string()
                 .contains("retry shortly")
@@ -266,12 +270,9 @@ mod migration_tests {
             let db = rusqlite::Connection::open(path).unwrap();
             migrate_tokenizer(&db).unwrap();
         });
-        wait_for_tokenizer(
-            &connection,
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-            &cancel,
-        )
-        .unwrap();
+        history::wait_for_tokenizer_migration(std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
         writer.join().unwrap();
         migrate_tokenizer(&connection).unwrap();
         assert_eq!(

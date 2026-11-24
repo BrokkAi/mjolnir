@@ -188,7 +188,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         "Full-text search of earlier coding sessions, across all of them or within chosen ones. \
 Matching is SQLite FTS5 with the `porter unicode61` tokenizer, case-insensitive, never regular expressions. \
 Supported: Porter word stemming (`inventory` finds `inventories`, `retry` finds `retries`); whitespace-separated terms, all of which must match (AND); \
-\"quoted phrases\" matched exactly; `OR` or `|` between alternatives, which bind tighter than AND (`1591 OR 1589 mbx` means `(1591 OR 1589) AND mbx`); \
+\"quoted phrases\" matching adjacent tokens in order (still Porter-stemmed, not literal byte-exact: \"retry inventory\" can match \"retries inventories\"); `OR` or `|` between alternatives, which bind tighter than AND (`1591 OR 1589 mbx` means `(1591 OR 1589) AND mbx`); \
 and an explicit trailing `*` for prefixes (`a25b06ab*`, `5992*`, `diff-scop*`), which is how to find a short SHA, a session ID prefix, or a partial word. \
 Not supported: regular expressions, and leading or mid-word wildcards (`*foo`, `foo*bar`). \
 Scope: omit session_ids to search all indexed top-level sessions newest first, excluding the calling session (reported as self_hits_omitted). \

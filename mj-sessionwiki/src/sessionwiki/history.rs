@@ -20,12 +20,30 @@ const TIMED_OUT: &str = "history query timed out; retry or narrow the query";
 /// owns the worker asking; the controller supplies it, never the request.
 pub async fn execute(request: HistoryRequest, caller_session_id: Option<String>) -> HistoryResult {
     static PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    let id = request.request_id.clone();
     let permits = PERMITS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
         .clone();
-    let outcome = run_bounded(&permits, mj_core::history::QUERY_TIMEOUT, move |budget| {
-        query(&request, &budget, caller_session_id.as_deref())
+    execute_with(&permits, request, caller_session_id, query).await
+}
+
+type Work = fn(&HistoryRequest, &QueryBudget, Option<&str>) -> Result<Value>;
+
+async fn execute_with(
+    permits: &Arc<tokio::sync::Semaphore>,
+    request: HistoryRequest,
+    caller_session_id: Option<String>,
+    work: Work,
+) -> HistoryResult {
+    let id = request.request_id.clone();
+    // A full-text query waits for a tokenizer migration before it takes one of
+    // the shared permits, so waiting searches never starve the other tools.
+    if reads_full_text(&request)
+        && let Err(error) = wait_for_tokenizer_migration(mj_core::history::QUERY_TIMEOUT).await
+    {
+        return HistoryResult::failed(id, format!("{error:#}"));
+    }
+    let outcome = run_bounded(permits, mj_core::history::QUERY_TIMEOUT, move |budget| {
+        work(&request, &budget, caller_session_id.as_deref())
     })
     .await;
     match outcome {
@@ -340,7 +358,6 @@ fn query(
     request.query.validate()?;
     let mut connection = super::readable_index()?.with_context(super::unreadable_reason)?;
     connection.busy_timeout(Duration::from_secs(2))?;
-    wait_for_tokenizer_if_searching(&connection, request, budget)?;
     budget.install(&mut connection)?;
     let ownership = super::top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
@@ -360,18 +377,30 @@ fn query(
 
 /// Only the full-text tools read the FTS table, so only they wait for a
 /// tokenizer migration. The rest work on a trigram index at once.
-fn wait_for_tokenizer_if_searching(
-    connection: &rusqlite::Connection,
-    request: &HistoryRequest,
-    budget: &QueryBudget,
-) -> Result<()> {
-    if matches!(
+fn reads_full_text(request: &HistoryRequest) -> bool {
+    matches!(
         request.query,
         HistoryQuery::SearchHistory { .. } | HistoryQuery::SearchSessions { .. }
-    ) {
-        super::wait_for_tokenizer(connection, budget.deadline, &budget.cancel)?;
+    )
+}
+
+/// Wait until the index leaves the trigram tokenizer, polling with a short
+/// blocking probe so no thread or transaction is held across the sleep.
+pub(super) async fn wait_for_tokenizer_migration(timeout: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let migrating = mj_core::runtime::spawn_blocking(super::tokenizer_is_migrating)
+            .await
+            .context("tokenizer probe task failed")??;
+        if !migrating {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            bail!("session history index is migrating to porter unicode61; retry shortly");
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(250))).await;
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1075,8 +1104,27 @@ mod tests {
         drop(all);
     }
 
-    #[test]
-    fn only_full_text_queries_wait_for_the_tokenizer_migration() {
+    fn test_work(
+        request: &HistoryRequest,
+        _budget: &QueryBudget,
+        caller_session_id: Option<&str>,
+    ) -> Result<Value> {
+        let connection = super::super::readable_index()?.context("index is unreadable")?;
+        query_in_for(
+            &connection,
+            request,
+            &super::super::top_level::Snapshot::default(),
+            &crate::import::NativeScanCache::new(),
+            caller_session_id,
+        )
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the test owns SESSIONWIKI_DATA for its whole duration"
+    )]
+    async fn full_text_searches_wait_for_the_migration_without_holding_history_permits() {
         let _held = super::super::tags::testing::lock();
         let (_directory, connection) = super::super::tags::testing::isolated_index();
         super::super::tags::testing::index_row(&connection, "aaaa0001", super::super::TOOL);
@@ -1086,30 +1134,56 @@ mod tests {
                 [],
             )
             .unwrap();
+        connection
+            .execute("INSERT INTO msgs(msgs) VALUES ('rebuild')", [])
+            .unwrap();
         sessionwiki::index::set_tokenizer_spec(&connection, "trigram").unwrap();
-        let budget = QueryBudget {
-            cancel: Arc::new(AtomicBool::new(false)),
-            deadline: Instant::now(),
+        let permits = Arc::new(tokio::sync::Semaphore::new(4));
+        let search = |id: &str| HistoryRequest {
+            request_id: id.into(),
+            blame: None,
+            query: HistoryQuery::SearchHistory {
+                query: "hello".into(),
+                session_ids: None,
+                session_id: None,
+                role: None,
+                order: None,
+                limit: 20,
+                context_messages: 0,
+                max_chars: 16_000,
+                cursor: None,
+            },
         };
-        wait_for_tokenizer_if_searching(&connection, &read_request("aaaa0001"), &budget).unwrap();
-        let page = query_in(&connection, &read_request("aaaa0001")).unwrap();
-        assert_eq!(page["messages"][0]["text"], "hello");
-        let search = request(HistoryQuery::SearchHistory {
-            query: "hello".into(),
-            session_ids: None,
-            session_id: None,
-            role: None,
-            order: None,
-            limit: 20,
-            context_messages: 0,
-            max_chars: 16_000,
-            cursor: None,
-        });
-        assert!(
-            wait_for_tokenizer_if_searching(&connection, &search, &budget)
-                .unwrap_err()
-                .to_string()
-                .contains("retry shortly")
-        );
+        // More waiting searches than permits.
+        let waiting: Vec<_> = (0..5)
+            .map(|n| {
+                let permits = permits.clone();
+                let request = search(&format!("search-{n}"));
+                mj_core::runtime::spawn(async move {
+                    execute_with(&permits, request, None, test_work).await
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(waiting.iter().all(|task| !task.is_finished()));
+        assert_eq!(permits.available_permits(), 4);
+        // A tool that does not read the FTS table runs at once on the same index.
+        let read = tokio::time::timeout(
+            Duration::from_secs(3),
+            execute_with(&permits, read_request("aaaa0001"), None, test_work),
+        )
+        .await
+        .expect("a read_session call must not wait for the migration");
+        assert!(!read.is_error, "{:?}", read.value);
+        assert_eq!(read.value["messages"][0]["text"], "hello");
+        super::super::migrate_tokenizer(&connection).unwrap();
+        for task in waiting {
+            let result = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("a waiting search finishes after the migration")
+                .unwrap();
+            assert!(!result.is_error, "{:?}", result.value);
+        }
+        assert_eq!(permits.available_permits(), 4);
     }
 }

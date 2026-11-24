@@ -2096,22 +2096,16 @@ fn ensure_search_tokenizer(connection: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn wait_for_tokenizer(
-    connection: &rusqlite::Connection,
-    deadline: std::time::Instant,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<()> {
-    while is_trigram_tokenizer(&sessionwiki::index::tokenizer_spec(connection)?) {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            anyhow::bail!("session history query cancelled");
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            anyhow::bail!("session history index is migrating to porter unicode61; retry shortly");
-        }
-        std::thread::sleep(remaining.min(std::time::Duration::from_millis(250)));
-    }
-    Ok(())
+/// Whether the index is still on the trigram tokenizer, so full-text queries
+/// must wait. It opens and closes its own connection, holding no transaction.
+/// An unreadable index answers `false`: the query that follows says why.
+pub(super) fn tokenizer_is_migrating() -> Result<bool> {
+    let Some(connection) = readable_index()? else {
+        return Ok(false);
+    };
+    Ok(is_trigram_tokenizer(&sessionwiki::index::tokenizer_spec(
+        &connection,
+    )?))
 }
 
 fn migrate_tokenizer(connection: &rusqlite::Connection) -> Result<()> {
@@ -2225,10 +2219,14 @@ fn query_rows_from(
     // session grouping. Native-child filtering still happens here, so
     // over-fetch to keep children ranked first from shortening a page.
     let search_limit = MAX_WIKI_LIMIT;
-    let mut hits = Vec::new();
+    // One representative message per session, best rank first. The snippet is
+    // built later, only for the sessions that make the page, because building
+    // it for every duplicate message in the ranked scan is the expensive part.
+    let mut hits: Vec<(i64, sessionwiki::index::SessionRow)> = Vec::new();
+    let mut match_expression = None;
     if let Some(fts) = search_query::compile_fts_match(&search_query::parse_query(query).groups) {
         let mut statement = connection.prepare(
-            "SELECT f.session_id, f.tool, f.path, f.project, f.title, f.started, f.msg_count, f.kind, f.archived_at IS NOT NULL, snippet(msgs, 0, char(2), char(3), char(8230), 18)
+            "SELECT m.id, f.session_id, f.tool, f.path, f.project, f.title, f.started, f.msg_count, f.kind, f.archived_at IS NOT NULL
              FROM msgs CROSS JOIN messages m ON m.id = msgs.rowid
              JOIN files f ON f.session_id = m.session_id
              WHERE msgs MATCH ?1 AND (?2 OR m.role IN ('user', 'assistant')) ORDER BY rank",
@@ -2236,47 +2234,37 @@ fn query_rows_from(
         let candidates =
             statement.query_map(rusqlite::params![fts, include_tool_matches], |r| {
                 Ok((
+                    r.get::<_, i64>(0)?,
                     sessionwiki::index::SessionRow {
-                        session_id: r.get(0)?,
-                        tool: r.get(1)?,
-                        path: r.get(2)?,
-                        project: r.get(3)?,
-                        title: r.get(4)?,
-                        started: r.get(5)?,
-                        msg_count: r.get(6)?,
-                        kind: r.get(7)?,
-                        archived: r.get(8)?,
+                        session_id: r.get(1)?,
+                        tool: r.get(2)?,
+                        path: r.get(3)?,
+                        project: r.get(4)?,
+                        title: r.get(5)?,
+                        started: r.get(6)?,
+                        msg_count: r.get(7)?,
+                        kind: r.get(8)?,
+                        archived: r.get(9)?,
                         last_active: None,
                         preview: None,
                         summary: None,
                         tags: None,
                         account: None,
                     },
-                    r.get::<_, String>(9)?,
                 ))
             })?;
         let mut seen = BTreeSet::new();
         for candidate in candidates {
-            let (row, snippet) = candidate?;
+            let (message_id, row) = candidate?;
             if !seen.insert(row.session_id.clone()) {
                 continue;
             }
-            let plain = snippet.replace(['\u{2}', '\u{3}'], "");
-            let redacted = sessionwiki::redact::redact(&plain);
-            let snippet = if redacted != plain {
-                redacted.into_owned()
-            } else {
-                snippet
-            };
-            hits.push(sessionwiki::index::Hit {
-                row,
-                snippet,
-                role: String::new(),
-            });
+            hits.push((message_id, row));
             if hits.len() >= search_limit {
                 break;
             }
         }
+        match_expression = Some(fts);
     }
     let mut rows = Vec::with_capacity(hits.len().min(limit));
     let mut found = BTreeSet::new();
@@ -2292,15 +2280,29 @@ fn query_rows_from(
         found.insert(row.session_id.clone());
         rows.push(wiki_row(row, None, live));
     }
-    for hit in hits {
-        if rows.len() >= limit {
-            break;
+    if let Some(fts) = &match_expression {
+        let mut snippet_of = connection.prepare(
+            "SELECT snippet(msgs, 0, char(2), char(3), char(8230), 18) FROM msgs WHERE msgs.rowid = ?1 AND msgs MATCH ?2",
+        )?;
+        for (message_id, row) in hits {
+            if rows.len() >= limit {
+                break;
+            }
+            if found.contains(&row.session_id) || visibility.is_child_lenient(&row) {
+                continue;
+            }
+            let snippet: String =
+                snippet_of.query_row(rusqlite::params![message_id, fts], |r| r.get(0))?;
+            let plain = snippet.replace(['\u{2}', '\u{3}'], "");
+            let redacted = sessionwiki::redact::redact(&plain);
+            let snippet = if redacted != plain {
+                redacted.into_owned()
+            } else {
+                snippet
+            };
+            found.insert(row.session_id.clone());
+            rows.push(wiki_row(row, Some(snippet), live));
         }
-        if found.contains(&hit.row.session_id) || visibility.is_child_lenient(&hit.row) {
-            continue;
-        }
-        found.insert(hit.row.session_id.clone());
-        rows.push(wiki_row(hit.row, Some(hit.snippet), live));
     }
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
