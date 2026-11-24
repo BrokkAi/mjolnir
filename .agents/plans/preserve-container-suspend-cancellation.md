@@ -1,137 +1,113 @@
-# Preserve cancellation during reachable-container Suspend recovery
+# Finish reachable-container recovery before handling Suspend cancellation
 
-This ExecPlan follows `.agents/PLANS.md`. Keep Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective current. The user approved the reachable-target scope for #1677 and requires a simpler implementation. The earlier checked-in plan `.agents/plans/recover-suspend-without-original-worker.md` describes the shared Suspend machinery; the facts needed here are repeated below.
+This ExecPlan follows `.agents/PLANS.md`. Keep Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective current. The user approved the reachable-target scope for #1677 and requires simpler code. The checked-in `.agents/plans/recover-suspend-without-original-worker.md` describes the established Suspend machinery; the facts needed here are repeated below.
 
 ## Purpose / Big Picture
 
 
-When a user cancels Suspend during the early retained-container check, the next daemon must honor that cancellation if the target remains reachable. The daemon is the controller process; a worker owns the agent and its durable journal. Today that early check can fail before the controller writes the worker's existing durable rollback instruction. The accepted Suspend stays Closing, and another daemon can finish it against the user's cancellation.
+When a user cancels Suspend during an early retained-container check, make the reachable target available for the existing cancellation path to roll back in the same operation. The daemon is the controller process; a worker owns the agent and its durable journal. The early check currently returns on cancellation before the normal controller path can record rollback. A replacement daemon can then complete the original Suspend contrary to that cancellation.
 
-Reuse the existing RESTART instruction and ordinary rollback. Keep accepted Close authoritative: an already sealed journal only finishes verified teardown. Do not add a database migration, protocol, lifecycle state, general retry mechanism, or guarantee for an unreachable target or a handoff gate that has already closed. A handoff gate prevents new controller work while the daemon is being replaced.
+The fix is one extra attempt through the existing target-recovery function after a failed user-cancelled probe. Once it succeeds, return to the existing caller. That caller already owns cancellation, writes the existing RESTART instruction, and settles rollback under the current lifecycle owner. No early record interpretation, separate settlement path, service, executor mode, schema, protocol, lifecycle state or retry loop is needed.
 
 ## Progress
 
 
-- [x] (2026-11-24 13:11Z) Confirmed #1677 is unassigned, claimed it, and added agent-in-progress. The user approved the small reachable-target fix.
-- [x] (2026-11-24 13:13Z) Fast-forwarded the current master branch to origin/master at 9941e402c before edits. Assigned disjoint controller implementation and test/validation owners. No build is running.
-- [x] (2026-11-24 13:14Z) Approved a lifecycle.rs-only recovery boundary and confirmed daemon restoration does not erase RESTART or continue a restored Running/Parked Suspend. No daemon change is needed for the approved scope.
-- [x] (2026-11-24 13:17Z) Production is frozen in lifecycle.rs only; one shared helper replaces the duplicated cancellation write. The isolated container regression covers accepted and absent operations, shutdown-only interruption, existing restart reason, and retained-checkout rollback after reload.
-- [x] (2026-11-24 13:21Z) All three exact controller filters passed one test each. Strict controller all-targets Clippy, targeted rustfmt and diff checks passed. The fixture's first run needed its fake-command directory created; only that failing test was rerun. No compiler/test remains active.
-- [x] (2026-11-24 13:22Z) Committed 215114758 and requested review. Partial reviewers independently identified that ProcessExecutor must not make cleanup immune to daemon handoff.
-- [x] (2026-11-24 13:28Z) Added the operation-scoped gate-linked cancellation executor and deterministic stalls during both the replacement probe and marker write. The updated exact regression passed one test; strict controller all-targets Clippy, formatting and diff checks passed. All three final review findings describe the same now-corrected handoff issue.
-- [x] (2026-11-24 13:32Z) Second review identified cancelled settlement after the cleanup watcher ends. Chose the smaller correction: return SuspendPending once RESTART is durable, then settle with an existing fresh recovery owner. Removed the success return and final drain check. The fixture now observes the full cancelled entry and requires RESTART write to be its last transport operation.
-- [x] (2026-11-24 13:33Z) The final return-Pending regression passed one test in 0.75 seconds; strict controller all-targets Clippy passed in 8.28 seconds. Both Rust files pass rustfmt and the diff check. No build/test remains active.
-- [ ] Review integrated diff, commit on current branch, request review, and push to origin/master. Close #1677, remove active-work label, and dispatch platform CI if warranted by the final change.
+- [x] (2026-11-24 13:11Z) Claimed #1677, added agent-in-progress, and confirmed the user-approved reachable-target scope.
+- [x] (2026-11-24 13:13Z) Fast-forwarded current master to 9941e402c and assigned disjoint production and test/validation ownership.
+- [x] (2026-11-24 13:21Z) Initial three exact controller filters and strict all-targets Clippy passed; committed 215114758 for review.
+- [x] (2026-11-24 13:33Z) Explored handoff-aware per-call cleanup and return-Pending boundaries in 8c109c42c/ccdebf7fb. Regression/lint passed, but reviews exposed competing settlement ownership.
+- [x] (2026-11-24 13:40Z) Accepted MJ Advisor's smaller structural cut, superseding the per-call watcher, early record write, return-Pending and proposed daemon replay designs before daemon edits began. Production owner acknowledged the revision.
+- [x] (2026-11-24 13:41Z) Tracked the pipeline-wide shutdown-only executor limitation separately in #1678. No implementation of that follow-up is part of this task.
+- [x] (2026-11-24 13:45Z) Reduced lifecycle.rs change and same-call rollback fixture are complete. All three exact filters passed one each; strict controller all-targets Clippy and both Rust formatting/diff checks passed. No build/test remains active.
+- [ ] Commit, request review, merge unrelated upstream if necessary, push to origin/master, close #1677, and record platform CI/delivery.
 
 ## Surprises & Discoveries
 
 
-The early target recovery runs before loading the accepted operation and before the cancellation-aware worker stop path. `ensure_suspend_target_running` returns SuspendPending on observation failure, which retains Closing but does not itself write RESTART. Writing that instruction requires both a reachable container and an actual accepted operation ID. Loading an absent operation can synthesize a new ID, so cancellation cleanup must not invent acceptance for legacy or raw checkouts.
+The early target check was the one step that did not accommodate user cancellation. The pipeline after it already reads the actual accepted operation, preserves a matching restart reason, writes RESTART, and restores the session. Performing those decisions inside target recovery created a second settlement discipline. Returning Pending after the marker left an already-Closing session without an owner in the running daemon. Extending a local watcher also missed later cancelled-path I/O.
 
-The first regression run failed because the isolated fake Podman bin directory did not exist when its dispatcher was installed. Creating that fixture directory fixed the setup; the production change was unchanged. The focused retry passed one test, and the other two selected controls passed one each.
+MJ Advisor checked the current code and identified the smaller cut: only finish the target check, then let the existing caller settle cancellation. Its ordinary cancelled paths already use ProcessExecutor at multiple sites, including worker rollback. That pipeline-wide shutdown limitation needs one consistent executor-owned solution, tracked in #1678, rather than a partial guarantee at this helper.
 
-Review found that ignoring the original user-cancel flag with ProcessExecutor also ignores handoff interruption. Existing CancellableProcessExecutor accepts an independent CancellationToken, and the upgrade gate publishes drain before waiting for admission. An operation-scoped AbortOnDropHandle watcher can join those existing mechanisms. The daemon's user-cancel and shutdown causes are mutually exclusive, so polling shutdown_interrupted after user cancellation cannot supply the needed shutdown signal.
+Upstream `mj-daemon/src/daemon/close.rs::suspend_admitted` restores a fresh prior Running/Parked state on some errors, while startup/retry already Closing stays Closing. This makes a return-Pending shortcut insufficient. The final design completes existing settlement in the same call instead; no daemon change is needed.
 
-Upstream since the original diagnosis changed `run_accepted_suspension` in `mj-daemon/src/daemon/close.rs` to restore the pre-acceptance state on some errors with unchanged target/checkpoint. Bounded investigation confirmed this does not erase RESTART. Startup/retry already Closing retains Closing, while a fresh operation restored to Running/Parked does not automatically continue Suspend. Continue ordinary cancellation settlement after writing the marker; no daemon change is needed for this scope.
+The initial regression needed its fake Podman bin directory created before installing the dispatcher. A later test-only tokio::spawn was replaced with the repository runtime helper after Clippy. These fixture fixes did not require production behavior changes.
 
 ## Decision Log
 
 
-Decision: fix reachable-target cancellation using existing target-side RESTART and rollback, without daemon-owned cancellation storage.
-Rationale: this is the small scope the user approved. Guaranteeing cancellation through unreachable storage or a closed handoff gate would require a broader durable-intent design and is outside #1677.
-Date/Author: 2026-11-24, parent agent and user.
+Decision: after a failed early recovery plus user cancellation in Closing, make one attempt through the same target ownership/state checks with ProcessExecutor, call end_resumable_work once, and return the resulting recovery outcome to the existing caller.
+Rationale: cancellation means rollback, which requires a reachable target. The caller already owns recording and settling cancellation. Keeping one decision owner deletes the early ACCEPTED/REQUEST/RESTART handling, per-call watcher, and second settlement discipline.
+Date/Author: 2026-11-24 13:40Z, parent agent accepting MJ Advisor's ruling.
 
-Decision: cancellation arbitration belongs at the early recovery boundary, shared by its callers; reuse the existing idempotent cancellation write rather than add per-probe exceptions.
-Rationale: container existence/state/start checks and admission reacquisition can fail at the same boundary. One owner should decide whether the operation is user-cancelled or interrupted only by daemon shutdown before propagating its error.
+Decision: preserve initial successful-probe behavior and shutdown-only failure behavior. Do not invent acceptance or write any rollback record inside target recovery.
+Rationale: the common path already interprets checkout policy, operation identity and cancellation. A successful first probe needs no new handling; raw/legacy records must retain their existing policy decisions.
 Date/Author: 2026-11-24, parent agent.
 
-Decision: preserve the initial cancellable target-recovery result and allow one cleanup attempt only for user cancellation during Closing. Run that attempt through the same ownership-checked recovery plan inside the existing released handoff scope, and call end_resumable_work exactly once. The initial ProcessExecutor choice is superseded by the gate-linked executor decision below.
-Rationale: a cancelled container command may leave an otherwise reachable retained target. Reusing its normal state/ownership checks avoids blind mutation replay and provides the existing storage needed for RESTART. Shutdown-only does not take this path. No loop or background retry owner is introduced.
-Date/Author: 2026-11-24 13:14Z, parent agent accepting the implementation owner's bounded design.
-
-Decision: only after successful re-admission and a Running target may cancellation cleanup load an actual accepted attempt and share the existing idempotent restart write. A failed initial probe with no ACCEPTED retains its original error. The initial choice to continue ordinary settlement after a marker is superseded by the return-Pending decision below.
-Rationale: this prevents cleanup from manufacturing acceptance for raw/legacy Closing records and allows immediate rollback when the normal path is available. If admission has already closed, retain the existing error rather than claiming durable cancellation.
-Date/Author: 2026-11-24 13:14Z, parent agent.
-
-Decision: bind a fresh cancellation executor to the upgrade gate's drain notification for the new recovery attempt and its accepted-operation wire I/O. Ignore the original user-cancel flag, but any handoff/explicit Stop drain cancels this optional cleanup. Own and abort the watcher within the operation; keep historical common-path callers unchanged.
-Rationale: recovery runs outside handoff admission and must stop on drain; admitted marker I/O must not hold the gate while an uncancellable transport stalls. Reuse the existing token/executor and gate notification rather than add a trait, service, timeout or lifecycle state. A drain that later lapses still cancels this attempt; recovery can retry from existing durable intent. Other process exit paths that only cancel a daemon token are outside this controller-only scope.
-Date/Author: 2026-11-24 13:25Z, parent agent accepting the bounded handoff correction.
-
-Decision: once RESTART is durable or an existing matching reason is preserved, return its reason through the existing SuspendPending classification. Leave subsequent rollback/seal settlement to a fresh recovery executor rather than continue through the cancelled caller after the scoped watcher is dropped.
-Rationale: returning at the durable boundary removes the remaining uninterruptible cancelled-settlement reads without extending a watcher throughout the Suspend pipeline. Existing daemon restoration handles fresh prior Running/Parked states, and interrupted Closing records remain recoverable; the next recovery consumes the same restart intent. No background service or new result/state is needed.
-Date/Author: 2026-11-24 13:32Z, parent agent after the second review.
+Decision: keep the broader cancellation-versus-handoff executor problem in #1678 rather than extend this fix across all cancellation paths.
+Rationale: plain ProcessExecutor in cancelled rollback is pipeline-wide and predates this change. Per-call token/watchers repeatedly moved the boundary without giving a complete guarantee. The user prioritized simpler code and approved a reachable-target fix. This plan makes no new shutdown-only guarantee for the surrounding existing pipeline.
+Date/Author: 2026-11-24 13:41Z, parent agent after design review.
 
 ## Outcomes & Retrospective
 
 
-Implementation and local validation are complete. One controller file now handles cancelled early recovery and shares the existing cancellation writer with ordinary Suspend. The isolated regression proves a matching durable RESTART and rollback to Parked on reload, retaining target and checkout contents. It covers absent acceptance, shutdown-only interruption and a distinct pre-existing restart reason. It also proves handoff interrupts stalled target recovery and stalled marker I/O, leaving the matching ACCEPTED recoverable. The cancelled entry now ends immediately after durable restart intent; its transport log proves no settlement I/O follows that write. All three exact controller tests pass; the affected regression and strict controller Clippy passed again after both handoff corrections. Review and delivery remain. Unreachable/missing/foreign targets and unavailable handoff admission retain their visible failure and data; this plan makes no stronger cancellation durability claim for them. No schema, protocol, daemon, Go, dependency or worker changes were needed.
+The reduced implementation and local validation are complete. The actual managed recovery entry now rolls back cancellation to Parked in the same call, retaining its target and checkout contents and clearing the accepted/restart markers. A separate accepted operation preserves a preexisting rollback reason. Direct helper tests prove no early record writing, normal successful-probe behavior, and retained failure on shutdown-only or unreachable recovery. Three exact filters and strict controller Clippy pass. The discarded watcher and deferred-settlement mechanisms are removed from the final diff; production remains lifecycle.rs only. Review and delivery remain. Unreachable, missing or foreign targets retain a visible failure and their data. Simultaneous cancellation/handoff retains the surrounding pipeline's existing limitation, explicitly tracked in #1678.
 
 ## Context and Orientation
 
 
-`mj-controller/src/controller/lifecycle.rs` contains `ensure_suspend_target_running` and its two admitted callers, `suspend_session_managed_controlled` and `recover_interrupted_close_managed`. Session admission serializes lifecycle changes. Target recovery releases the daemon handoff hold with `begin_resumable_work` and reacquires it through `end_resumable_work`; the session's worker permit still protects placement. Container recovery must remain outside that handoff hold.
+`mj-controller/src/controller/lifecycle.rs::ensure_suspend_target_running` is called by `suspend_session_managed_controlled` and `recover_interrupted_close_managed` before policy and worker-record reads. Session admission serializes lifecycle ownership. The helper verifies the worker permit and placement, releases the daemon handoff hold with begin_resumable_work, runs target recovery, and reacquires the hold with end_resumable_work. Keep exactly that ownership and one reacquisition.
 
-`mj-targets/src/targets/recovery.rs::ensure_recovery_target_running` checks container existence and ownership, starts only an eligible stopped owned target, and verifies it is running. `mj-daemon/src/daemon/support.rs` implements cancellation and handoff admission for the executor, which runs target commands. A user-cancel flag differs from shutdown interruption; accepted user cancellation must not be replaced by shutdown-only behavior.
+`mj-targets/src/targets/recovery.rs::ensure_recovery_target_running` checks existence, ownership and running state of an owned container. It starts only an eligible stopped target. On user cancellation, the first command executor can stop the check before the retained target is accessible. ProcessExecutor ignores that already-fired user flag so the same normal recovery checks can finish once; do not hand-roll container commands or replay an arbitrary mutation.
 
-`mj-controller/src/controller/lifecycle/origin_delta.rs::OriginDeltaSuspend` loads ACCEPTED, REQUEST and RESTART from the worker root. ACCEPTED identifies the operation, REQUEST identifies its accepted worker stop, and RESTART requests rollback. An existing matching RESTART is idempotent. The common Suspend path already records cancellation with an independent `ProcessExecutor`, waits for the exact original worker when REQUEST exists, and resolves sealed versus unsealed relay state. Reuse those decisions.
+After the helper, `recover_interrupted_close_managed` observes user cancellation and the common Suspend path's restart_reason closure uses `record_suspend_cancellation`. `OriginDeltaSuspend` in `mj-controller/src/controller/lifecycle/origin_delta.rs` supplies the actual ACCEPTED operation ID, REQUEST for an accepted original-worker stop, and RESTART for rollback. Existing rollback preserves an already sealed Close and waits for accepted worker stopping where required. Keep these interpretations in their existing owners.
 
-The controller's existing tests in `mj-controller/src/controller/lifecycle/tests.rs` have isolated durable stores, target command fakes and persisted cancellation fixtures. Extend the owned-container boundary there instead of creating a test framework. Relevant controls are `interrupted_suspend_honors_dead_workers_refusal_receipt`, `interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel`, and `podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_through_container_exec`.
+Tests belong in `mj-controller/src/controller/lifecycle/tests.rs`. The isolated container fixture uses a Podman command stand-in and real persisted records, so it can deterministically cancel the existence probe without live-container operations. Production ownership is lifecycle.rs only; the test owner edits this existing test file. The parent owns this plan, integration, commit and review.
 
 ## Plan of Work
 
 
-Implement the agreed shape in lifecycle.rs. Retain the initial cancellable recovery result. On failed recovery plus user cancellation in Closing, run the same normal ownership-checked recovery plan once inside the existing released handoff scope; invoke end_resumable_work exactly once and keep both results until arbitration. Lazily create a CancellableProcessExecutor with an independent token and an operation-scoped AbortOnDropHandle watcher on the upgrade gate's drain notification. An already draining gate cancels that token immediately. Use this same executor for cleanup recovery and the subsequent accepted-operation wire reads/write. After successful re-admission and a Running target, load only an actual accepted operation, preserve its matching restart reason, and persist RESTART with the shared existing cancellation helper. Return that reason as SuspendPending immediately after the durable marker boundary; do not enter settlement through the cancelled caller. A fresh recovery executor consumes RESTART using the existing rollback/seal decisions. If there was no acceptance after a failed initial probe, preserve that original failure instead of allowing cancellation cleanup to create an operation. Preserve errors and Closing until settlement; do not strip SuspendPending as a shortcut. Unreachable targets and closed gates retain their error rather than a successful durability claim. The scoped watcher is aborted on all exits; historical common-path callers retain their previous executor.
+Reduce target recovery to retaining its first result, making one normal recovery pass with ProcessExecutor only if that result failed due to a current user cancellation in Closing, reacquiring admission once, and returning the result. Preserve useful error diagnostics on failure. Delete the local cancellation executor, token/watch task, observed-running/record-cancellation arbitration, early OriginDeltaSuspend load and restart write, and Pending return. Keep the shared ordinary cancellation-record helper if it still improves the existing closure; avoid an unused executor parameter.
 
-The production owner edits controller production files only. The test/validation owner edits the existing test file and owns every build after production is frozen. In parallel, extend an existing persisted cancellation fixture to cancel during owned-container existence/inspect before REQUEST, then replay with a fresh executor. Check the matching restart operation, retained checkout and rollback result. Cover shutdown-only interruption without RESTART, and user cancellation versus drain where the existing fixture can represent it. Preserve existing refusal and sealed-close controls. The parent maintains this plan and commits the integrated result.
+Adapt the existing regression to show that direct reachable target recovery completes despite the user flag, without writing records there. Then invoke the full recovery entry with cancellation at the early existence probe and prove that it rolls back to Parked in that same call, retains checkout/target data, and clears acceptance/restart markers. Keep a distinctive pre-existing restart reason and shutdown-only/unreachable controls as relevant. Do not use a manually scheduled second replay as the main proof. Remove the discarded per-call watcher stall cases. Initial successful probe plus late cancellation must keep historical behavior.
 
 ## Concrete Steps
 
 
-Work from `/home/jonathan/Projects/mjolnir/.mj/clones/5e24f24efdf9c69e0cf514ba11b4716b` on the current master branch. Do not create branches, rebase, or install a binary. Use mbx's dev profile and existing build storage. Run tests elevated outside the restricted sandbox because socket tests need it; keep isolated fixture configuration and data directories. No live default-instance invocation is allowed.
+Work in `/home/jonathan/Projects/mjolnir/.mj/clones/5e24f24efdf9c69e0cf514ba11b4716b` on the current master branch. Do not create a branch, rebase, install a binary, or touch the live default instance. Use mbx dev profile and existing build storage. Run Rust tests elevated outside the restricted sandbox. Keep fixture-owned isolated configuration and store directories.
 
-After production and fixtures are frozen, the sole validation owner runs the final selected controller test filters through:
+The sole validator runs the final affected filters with full names and --exact:
 
-    mbx test -p brokk-mj-controller --lib <affected-filter>
+    mbx test -p brokk-mj-controller --lib controller::lifecycle::tests::cancelled_container_suspend_probe_records_rollback_for_recovery -- --exact
+    mbx test -p brokk-mj-controller --lib controller::lifecycle::tests::interrupted_suspend_honors_dead_workers_refusal_receipt -- --exact
+    mbx test -p brokk-mj-controller --lib controller::lifecycle::tests::interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel -- --exact
     mbx clippy -p brokk-mj-controller --all-targets -- -D warnings
 
-The selected filters are cancelled_container_suspend_probe_records_rollback_for_recovery, interrupted_suspend_honors_dead_workers_refusal_receipt, and interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel, with one test expected from each. Run only these relevant controls, and rerun failures alone after fixes. Do not build CLI/worker binaries or run a broad E2E suite unless a concrete unresolved boundary requires it. If an agreed necessary production change touches another crate, add only that crate's affected validation.
-
-Validation completed with the full controller::lifecycle::tests:: prefix and -- --exact on each selected name; each reported 1 passed, 0 failed. Strict Clippy finished the dev profile in 36.07 seconds with no diagnostics. Standalone rustfmt checked both edited Rust files. No new binary or live instance was used.
-
-The parent reviews the diff, commits the changed files with `Fixes #1677`, calls request_review, resolves findings with scope judgment, and pushes HEAD to origin/master. Fetch and merge upstream if it moved; no rebase. Record delivery and any platform CI run here.
+Expect one matched test per filter. Retain unaffected passing controls during later rounds, and rerun failures only. No broad suite, CLI/worker build or E2E campaign is planned. Format the two changed Rust files and run git diff --check. The parent commits only changed files, requests review, and pushes HEAD to origin/master after review disposition. Fetch and merge upstream if moved; never rebase.
 
 ## Validation and Acceptance
 
 
-A deterministic regression must fail without the production change: cancel during early owned-container observation with an accepted origin-delta operation and reachable target, replace the cancelled executor/controller, and show that recovery honors the matching RESTART and retains the checkout rather than completing Suspend. The shutdown-only control must not create RESTART. Cancellation must preserve an existing matching restart reason and must not synthesize ACCEPTED for a legacy path. Existing sealed-close behavior remains authoritative.
+Cancellation during an early owned-container probe with a reachable retained target must complete normal cancellation rollback in the current invocation. Assert the durable Parked outcome and retained checkout contents, not merely a restart marker followed by manual recovery. Shutdown-only still returns the existing failure classification; unreachable/missing targets do not claim success. The helper itself must neither synthesize ACCEPTED nor leave a marker for a separate settlement owner. Existing operation identity, refusal reasons and sealed Close authority remain in the common path.
 
-Acceptance requires the focused tests and strict affected-crate Clippy to pass, a clean reviewed committed diff, and a successful push. No new durable record, protocol, lifecycle state, speculative timeout or retry loop is permitted. The final response must state the reachable-target limit.
+Acceptance requires the focused tests and strict controller Clippy to pass, reviewed committed code, and successful push. The final response must state the reachable-target scope and #1678 limitation. No new durable state, protocol, lifecycle state, service, executor mode, timeout or retry loop is allowed.
 
 ## Idempotence and Recovery
 
 
-Use the existing operation ID and restart instruction so repeated cancellation/recovery does not create a new operation. Keep archive verification and process teardown order unchanged. If target recovery or the marker write fails, report the failure and retain data; do not claim a cancellation guarantee that was not persisted. Keep test logs in the validation owner's report directory and clean up any isolated processes before finishing.
+Use the existing target recovery function's ownership and state checks for the extra attempt. The common path reuses its operation ID and idempotent restart handling. Keep archive verification and process teardown order unchanged. A failed target check remains an error with data retained. Clean up isolated test processes; logs belong in the validator's report directory.
 
 ## Artifacts and Notes
 
 
-Issue: https://github.com/BrokkAi/mjolnir/issues/1677. Starting revision: 9941e402c. Implementation owner: 5eade66472957cbdf498fc9dac1adfa9. Test and sole validation owner: cdaf8f7b9d8c67970c0fd3917e3bb15e. They share the checkout and have disjoint file ownership; neither may build before the parent releases validation.
+Issue: https://github.com/BrokkAi/mjolnir/issues/1677. Broader follow-up: https://github.com/BrokkAi/mjolnir/issues/1678. Starting revision: 9941e402c. Implementation owner: 5eade66472957cbdf498fc9dac1adfa9. Test and sole validation owner: cdaf8f7b9d8c67970c0fd3917e3bb15e. Reports are under the corresponding .mj/agents directories; the decisive outcomes must also be recorded here before delivery.
 
-Evidence is under .mj/agents/cdaf8f7b9d8c67970c0fd3917e3bb15e: new-regression-retry.log, interrupted_suspend_honors_dead_workers_refusal_receipt.log, interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel.log, and controller-clippy.log. The first fixture-setup failure is new-regression.log. These are temporary report files; the decisive outcomes are embedded above.
-
-The handoff correction's exact regression passed in 0.82 seconds (handoff-regression.log), including stalled recovery and RESTART transport. Strict Clippy passed in 8.21 seconds (handoff-clippy-retry.log). Its first run flagged test-only tokio::spawn, replaced mechanically by mj_core::runtime::spawn; only the failed lint was rerun. No active compiler or test remains.
-
-The final durable-boundary regression passed one test in 0.75 seconds (pending-boundary-regression.log), including the full cancelled recovery entry and its last-command assertion. Strict controller Clippy passed in 8.28 seconds (pending-boundary-clippy.log). The prior two controls remain valid; no broader rerun or binary build was needed.
+Final evidence under the validator's report directory is same-call-cancelled_container_suspend_probe_records_rollback_for_recovery.log (1 passed, 1.14 seconds), same-call-interrupted_suspend_honors_dead_workers_refusal_receipt.log (1 passed, 0.45 seconds), and same-call-interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel.log (1 passed, 0.38 seconds). same-call-controller-clippy.log records strict all-targets success in the dev profile (8.40 seconds). No binaries, daemon/E2E instances or live operations were used.
 
 ## Interfaces and Dependencies
 
 
-Keep the existing `CommandExecutor`, `CancellableProcessExecutor`, `ProcessExecutor`, `OriginDeltaSuspend`, `LifecycleFailureReason::SuspendPending`, ACCEPTED/REQUEST/RESTART formats, and session admission/worker permit. The new cleanup executor uses the existing CancellationToken and AbortOnDropHandle; no trait or dependency change is needed. Extract the existing cancellation write to one local helper accepting its executor; do not introduce an alternate interpretation of operation identity or cancellation.
+Keep the existing CommandExecutor/ProcessExecutor, target recovery function, OriginDeltaSuspend, SuspendPending failure classification, session admission/worker permit, and ACCEPTED/REQUEST/RESTART formats. No core trait, dependency, daemon, worker or origin-delta reader change is needed. The sole additional behavior is finishing the existing early target recovery step before the established cancellation path runs.
 
-Revision note (2026-11-24 13:13Z): Initial plan records the user-approved reachable-target scope and the current upstream integration check before implementation.
+Revision note (2026-11-24 13:41Z): Rewrote the plan around MJ Advisor's smaller same-owner cut. This supersedes the initial early record writer, local handoff watcher, deferred Pending settlement and proposed daemon replay. All are removed from the final implementation rather than retained as parallel paths. The surrounding pipeline's shutdown-only executor work is separately tracked in #1678.
 
-Revision note (2026-11-24 13:21Z): Implemented the shared reachable-target cancellation boundary and idempotent restart helper, documented upstream daemon compatibility, and recorded the three passing controller tests and strict lint. The single fixture setup failure was repaired without changing production behavior; review and push remain.
-
-Revision note (2026-11-24 13:28Z): Replaced ProcessExecutor only in the new cancellation cleanup with an independent, gate-linked cancellation executor. A scoped watcher makes both resumable recovery and admitted record I/O interruptible on handoff/explicit Stop. The existing regression now stalls each transport boundary deterministically and passes, as does strict controller lint. This resolves all three overlapping review findings without a new service, trait, state or timeout.
-
-Revision note (2026-11-24 13:33Z): End cancellation cleanup immediately after RESTART is durable, returning existing SuspendPending for fresh recovery to settle. This removes the watcher's lifetime gap and the redundant final check/success return. The full cancelled-entry regression, both handoff stalls and fresh parked rollback pass; strict controller lint and formatting pass.
+Revision note (2026-11-24 13:45Z): The reduced design passes the full same-call cancellation regression, two affected controls, strict controller Clippy and formatting. Recorded exact nonzero counts and the unchanged broader handoff limitation; review and delivery remain.

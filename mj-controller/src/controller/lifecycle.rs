@@ -815,75 +815,28 @@ impl Controller {
             };
             let owner = crate::worker_lifecycle::WorkerPermit::acquire(session_id, admission)?;
             owner.verify_cached_target(&self.state)?;
-            let user_cancelled = || {
-                record.state == SessionState::Closing
-                    && executor.cancellation_requested()
-                    && !executor.shutdown_interrupted()
-            };
             executor.begin_resumable_work()?;
             let result = mj_core::runtime::off_async_worker(|| {
                 targets::ensure_recovery_target_running(executor, Some(&plan))
             });
-            // User cancellation has already stopped the original executor.
-            // Keep handoff cancellation through recovery and the marker write.
-            let cancellation_cleanup = || {
-                let gate = crate::upgrade::gate();
-                let cancelled = tokio_util::sync::CancellationToken::new();
-                if gate.is_draining() {
-                    cancelled.cancel();
+            let result = match result {
+                Err(error)
+                    if record.state == SessionState::Closing
+                        && executor.cancellation_requested()
+                        && !executor.shutdown_interrupted() =>
+                {
+                    // The current suspend can settle cancellation once it can
+                    // read the target's records. Keep target recovery resumable.
+                    mj_core::runtime::off_async_worker(|| {
+                        targets::ensure_recovery_target_running(&ProcessExecutor, Some(&plan))
+                    })
+                    .with_context(|| {
+                        format!("recover suspend target after interrupted probe: {error:#}")
+                    })
                 }
-                let watch = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn({
-                    let cancelled = cancelled.clone();
-                    async move {
-                        gate.wait_until_draining().await;
-                        cancelled.cancel();
-                    }
-                }));
-                let executor = targets::CancellableProcessExecutor::new(Default::default())
-                    .with_cancellation(cancelled);
-                (executor, watch)
+                result => result,
             };
-            let mut cleanup = None;
-            // Cancellation can interrupt the probe or start before the
-            // accepted operation is reachable. Confirm ownership and state
-            // again before touching its records.
-            let recovered_after_cancel = if result.is_err() && user_cancelled() {
-                let (executor, _) = cleanup.get_or_insert_with(cancellation_cleanup);
-                match mj_core::runtime::off_async_worker(|| {
-                    targets::ensure_recovery_target_running(executor, Some(&plan))
-                }) {
-                    Ok(outcome) => Some(outcome),
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id,
-                            error = %format_args!("{error:#}"),
-                            "could not recover suspend target after cancellation"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let readmission = executor.end_resumable_work("continue suspend on retained target");
-            let observed = result.as_ref().ok().copied().or(recovered_after_cancel);
-            let record_cancellation = matches!(
-                observed,
-                Some(
-                    targets::TargetRecoveryOutcome::AlreadyRunning
-                        | targets::TargetRecoveryOutcome::Started
-                )
-            ) && user_cancelled();
-            readmission?;
-            if record_cancellation {
-                let (executor, _) = cleanup.get_or_insert_with(cancellation_cleanup);
-                let attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
-                if attempt.accepted() {
-                    let reason = Self::record_suspend_cancellation(&attempt, executor)?;
-                    // A fresh recovery owner will settle the durable restart.
-                    return Err(anyhow::Error::msg(reason));
-                }
-            }
+            executor.end_resumable_work("continue suspend on retained target")?;
             result.map(Some)
         };
         let recovered = if record.state == SessionState::Closing {

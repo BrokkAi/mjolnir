@@ -4418,7 +4418,7 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
     use mj_core::worker_suspend::{self as wire, SuspendReceipt};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -4437,25 +4437,18 @@ async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
             r#"set -eu
 root=$MJ_CANCELLED_CONTAINER_SUSPEND_FIXTURE
 cd "$root"
-stall_at() {
-    if [ -f stall ] && [ "$(cat stall)" = "$1" ]; then
-        touch stalled
-        # Bound the failing case if the executor ignores handoff.
-        sleep 15
-        touch finished_stall
-    fi
-}
 case "$1 $2" in
-    "container exists") stall_at probe ;;
+    "container exists")
+        if [ -f unreachable ]; then
+            echo "container storage unreachable" >&2
+            exit 125
+        fi
+        ;;
     "container inspect") cat inspect.json ;;
     "exec -i")
         shift 3
-        printf '%s\n' "$*" >> exec.log
         case "$1 $2" in
             "sh -c")
-                case "$3" in
-                    *suspend-restart.json*"cat >"*) stall_at restart ;;
-                esac
                 script=$(printf '%s' "$3" | sed 's|/var/lib/hel/workers/|workers/|g')
                 exec sh -c "$script"
                 ;;
@@ -4486,15 +4479,24 @@ esac
         return;
     };
 
+    #[derive(PartialEq, Eq)]
+    enum ProbeCancellation {
+        AtExistence,
+        AtReadmission,
+        Shutdown,
+    }
+
     struct InterruptedProbe {
         interrupted: AtomicBool,
-        shutdown: bool,
+        cancellation: ProbeCancellation,
         admission_released: AtomicBool,
     }
 
     impl CommandExecutor for InterruptedProbe {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            if command.purpose == "check for Mjolnir session container" {
+            if command.purpose == "check for Mjolnir session container"
+                && self.cancellation != ProbeCancellation::AtReadmission
+            {
                 assert!(self.admission_released.load(Ordering::SeqCst));
                 assert!(!self.interrupted.swap(true, Ordering::SeqCst));
                 anyhow::bail!("container existence check interrupted");
@@ -4525,7 +4527,7 @@ esac
         }
 
         fn shutdown_interrupted(&self) -> bool {
-            self.shutdown && self.cancellation_requested()
+            self.cancellation == ProbeCancellation::Shutdown && self.cancellation_requested()
         }
 
         fn begin_resumable_work(&self) -> Result<()> {
@@ -4535,6 +4537,9 @@ esac
 
         fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
             assert!(self.admission_released.swap(false, Ordering::SeqCst));
+            if self.cancellation == ProbeCancellation::AtReadmission {
+                assert!(!self.interrupted.swap(true, Ordering::SeqCst));
+            }
             Ok(())
         }
 
@@ -4573,12 +4578,13 @@ esac
     let worker_root = root.join("workers").join(SESSION_ID);
     std::fs::create_dir_all(&worker_root).unwrap();
     let admission = crate::controller::test_support::session_admission(SESSION_ID);
-    let interrupt_probe = |controller: &Controller, shutdown| {
-        let probe = InterruptedProbe {
-            interrupted: AtomicBool::new(false),
-            shutdown,
-            admission_released: AtomicBool::new(false),
-        };
+    let probe = |cancellation| InterruptedProbe {
+        interrupted: AtomicBool::new(false),
+        cancellation,
+        admission_released: AtomicBool::new(false),
+    };
+    let interrupt_probe = |controller: &Controller, cancellation| {
+        let probe = probe(cancellation);
         let outcome = controller.ensure_suspend_target_running(&admission, SESSION_ID, &probe);
         assert!(probe.cancellation_requested(), "{outcome:?}");
         assert!(!probe.admission_released.load(Ordering::SeqCst));
@@ -4586,146 +4592,83 @@ esac
         outcome
     };
 
-    // A cancelled probe without an accepted operation cannot queue a rollback.
-    let error = interrupt_probe(&controller, false).unwrap_err();
-    assert!(format!("{error:#}").contains("container existence check interrupted"));
-    assert!(!worker_root.join(wire::ACCEPTED).exists());
-    assert!(!worker_root.join(wire::RESTART).exists());
-
     let mut attempt = OriginDeltaSuspend::load(&controller, SESSION_ID, &ProcessExecutor).unwrap();
     attempt.accept(&ProcessExecutor, true).unwrap();
     let accepted: String = wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap();
-    let error = interrupt_probe(&controller, true).unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<LifecycleFailureReason>(),
-        Some(&LifecycleFailureReason::SuspendPending)
-    );
-    assert!(!worker_root.join(wire::RESTART).exists());
-
-    // The operation already yielded control admission for the retry. Even
-    // after readmission succeeds, handoff can interrupt the marker I/O.
-    for phase in ["probe", "restart"] {
-        std::fs::write(root.join("stall"), phase).unwrap();
-        let stalled = root.join("stalled");
-        let drain = mj_core::runtime::spawn({
-            let stalled = stalled.clone();
-            async move {
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while !stalled.is_file() {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .expect("container command reached the stall");
-                crate::upgrade::gate().begin_draining();
-            }
-        });
-        let outcome = interrupt_probe(&controller, false);
-        drain.await.unwrap();
-        let error = outcome.unwrap_err();
+    interrupt_probe(&controller, ProbeCancellation::AtExistence).unwrap();
+    interrupt_probe(&controller, ProbeCancellation::AtReadmission).unwrap();
+    let shutdown = interrupt_probe(&controller, ProbeCancellation::Shutdown).unwrap_err();
+    let unreachable = root.join("unreachable");
+    std::fs::write(&unreachable, "").unwrap();
+    let failed_retry = interrupt_probe(&controller, ProbeCancellation::AtExistence).unwrap_err();
+    std::fs::remove_file(unreachable).unwrap();
+    assert!(format!("{shutdown:#}").contains("container existence check interrupted"));
+    assert!(format!("{failed_retry:#}").contains("container storage unreachable"));
+    for error in [shutdown, failed_retry] {
         assert_eq!(
             error.downcast_ref::<LifecycleFailureReason>(),
             Some(&LifecycleFailureReason::SuspendPending),
-            "{phase}: {error:#}"
+            "{error:#}"
         );
-        assert!(!root.join("finished_stall").exists(), "{phase}");
-        assert!(!worker_root.join(wire::RESTART).exists(), "{phase}");
-        assert_eq!(
-            wire::read::<String>(&worker_root, wire::ACCEPTED).unwrap(),
-            Some(accepted.clone())
-        );
-        std::fs::remove_file(stalled).unwrap();
-        std::fs::remove_file(root.join("stall")).unwrap();
-        crate::upgrade::gate().expire_drain_for_test();
     }
+    assert!(!worker_root.join(wire::RESTART).exists());
+    assert_eq!(
+        wire::read::<String>(&worker_root, wire::ACCEPTED).unwrap(),
+        Some(accepted)
+    );
 
     let manager = crate::session_manager::spawn_session_manager().unwrap();
-    let probe = InterruptedProbe {
-        interrupted: AtomicBool::new(false),
-        shutdown: false,
-        admission_released: AtomicBool::new(false),
-    };
-    let exec_log = root.join("exec.log");
-    std::fs::write(&exec_log, "").unwrap();
-    let error = controller
-        .recover_interrupted_close_managed(
-            &admission,
-            SESSION_ID,
-            &probe,
-            &manager.control,
-            &consent,
-            Some(Box::pin(async {
-                panic!("cancelled suspend entered teardown")
-            })),
-            SuspendSettlement::Suspend,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<LifecycleFailureReason>(),
-        Some(&LifecycleFailureReason::SuspendPending),
-        "{error:#}"
-    );
-    assert!(probe.cancellation_requested());
-    assert!(!probe.admission_released.load(Ordering::SeqCst));
-    assert!(!worker_root.join(wire::REQUEST).exists());
-    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
-    assert_eq!(restart.operation, accepted);
-    let reason = restart.error.as_deref().unwrap();
-    assert!(reason.contains("cancelled") && format!("{error:#}").contains(reason));
-    let commands = std::fs::read_to_string(&exec_log).unwrap();
-    let last_command = commands.lines().last().unwrap();
-    assert!(
-        last_command.contains(wire::RESTART) && last_command.contains("cat >"),
-        "container I/O must end with the RESTART write: {commands}"
-    );
-    let prior_reason = "cancelled by the first suspend operation";
-    wire::write(
-        &worker_root,
-        wire::RESTART,
-        &SuspendReceipt {
-            operation: accepted,
-            error: Some(prior_reason.into()),
-        },
-    )
-    .unwrap();
-    let error = interrupt_probe(&controller, false).unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<LifecycleFailureReason>(),
-        Some(&LifecycleFailureReason::SuspendPending)
-    );
-    assert!(format!("{error:#}").contains(prior_reason));
-
-    // Replay the accepted operation from durable state after replacing the
-    // cancelled executor. A parked checkout should roll back without capture.
-    controller.state = crate::database::load_state().unwrap();
-    let error = controller
-        .recover_interrupted_close_managed(
-            &admission,
-            SESSION_ID,
-            &ProcessExecutor,
-            &manager.control,
-            &consent,
-            Some(Box::pin(async {
-                panic!("cancelled suspend entered teardown")
-            })),
-            SuspendSettlement::Suspend,
-        )
-        .await
-        .unwrap_err();
+    // Rollback belongs to the same managed recovery call that saw the
+    // interrupted probe. It also honors a reason already in durable storage.
+    for prior_reason in [None, Some("cancelled by the first suspend operation")] {
+        if let Some(reason) = prior_reason {
+            let session = controller.state.sessions.get_mut(SESSION_ID).unwrap();
+            session.state = SessionState::Closing;
+            crate::database::save_suspension_intent(session, None, Some(&consent)).unwrap();
+            attempt.accept(&ProcessExecutor, true).unwrap();
+            wire::write(
+                &worker_root,
+                wire::RESTART,
+                &SuspendReceipt {
+                    operation: wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap(),
+                    error: Some(reason.into()),
+                },
+            )
+            .unwrap();
+        }
+        let probe = probe(ProbeCancellation::AtExistence);
+        let error = controller
+            .recover_interrupted_close_managed(
+                &admission,
+                SESSION_ID,
+                &probe,
+                &manager.control,
+                &consent,
+                Some(Box::pin(async {
+                    panic!("cancelled suspend entered teardown")
+                })),
+                SuspendSettlement::Suspend,
+            )
+            .await
+            .unwrap_err();
+        assert!(probe.cancellation_requested());
+        assert!(!probe.admission_released.load(Ordering::SeqCst));
+        let expected = prior_reason.unwrap_or("operation cancelled before parked capture");
+        assert!(format!("{error:#}").contains(expected));
+        let record = crate::database::read_durable_session_record(SESSION_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, SessionState::Parked, "{error:#}");
+        assert_eq!(record.target, target);
+        for marker in [wire::ACCEPTED, wire::REQUEST, wire::RESTART] {
+            assert!(!worker_root.join(marker).exists(), "{marker}");
+        }
+    }
     manager.shutdown.shutdown().await.unwrap();
-    assert!(format!("{error:#}").contains(prior_reason));
-    let record = crate::database::read_durable_session_record(SESSION_ID)
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.state, SessionState::Parked, "{error:#}");
-    assert_eq!(record.target, target);
     assert_eq!(
         std::fs::read_to_string(checkout.join("retained")).unwrap(),
         "uncheckpointed changes\n"
     );
-    assert!(!worker_root.join(wire::ACCEPTED).exists());
-    assert!(!worker_root.join(wire::RESTART).exists());
 }
 
 #[cfg(unix)]
