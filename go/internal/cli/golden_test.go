@@ -71,8 +71,8 @@ func TestGoldenHelpOfEveryPortedCommandMatchesTheRustBuild(t *testing.T) {
 }
 
 // The files in testdata/usage-errors were captured from the Rust mj at the
-// pinned commit (`mj --instance go-e2e usage`, `mj usage --instance go-e2e
-// --json`, and `MJ_INSTANCE=go-e2e mj usage`).
+// pinned commit with the same command lines (and MJ_INSTANCE=go-e2e for
+// global-from-environment). The command lines are parsed, never run.
 //
 // Hard-won: 9fca71682: a global option given before the command, or none from the environment, changed the usage line
 func TestGoldenUsageErrorsNameTheGlobalsInTheCommandsOwnMatcher(t *testing.T) {
@@ -85,17 +85,44 @@ func TestGoldenUsageErrorsNameTheGlobalsInTheCommandsOwnMatcher(t *testing.T) {
 		{"global-from-environment", "go-e2e", []string{"usage"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			unsetHelpEnvironment(t)
-			if test.environment != "" {
-				t.Setenv("MJ_INSTANCE", test.environment)
-			}
-			var stdout, stderr bytes.Buffer
-			if code := Main(test.args, &stdout, &stderr); code != 2 {
-				t.Fatalf("exit %d: %s", code, stderr.String())
-			}
-			assertGolden(t, filepath.Join("usage-errors", test.name+".txt"), stderr.String())
+			assertParseErrorGolden(t, test.name, test.environment, test.args)
 		})
 	}
+}
+
+// Hard-won: 9b162d865: a repeated flag was accepted, and a global given once before and once after a command was refused
+func TestGoldenRepeatedArgumentsAreRefusedPerCommandLevel(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{"repeated-flag", []string{"--instance", "go-port-golden", "sessions", "--json", "--json"}},
+		{"global-repeated-at-one-level", []string{"--instance", "go-port-golden", "usage", "--no-splash", "--no-splash"}},
+		{"global-at-two-levels", []string{"--instance", "go-port-golden", "usage", "--instance", "go-port-golden"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertParseErrorGolden(t, test.name, "", test.args)
+		})
+	}
+}
+
+// assertParseErrorGolden parses args, which must fail, and compares what mj
+// prints for the failure with testdata/usage-errors/<name>.txt.
+func assertParseErrorGolden(t *testing.T, name, instance string, args []string) {
+	t.Helper()
+	unsetHelpEnvironment(t)
+	if instance != "" {
+		t.Setenv("MJ_INSTANCE", instance)
+	}
+	_, err := parseCommandLine(args)
+	if err == nil {
+		t.Fatalf("%q parsed", args)
+	}
+	var stderr bytes.Buffer
+	if code := reportError(&stderr, err); code != 2 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	assertGolden(t, filepath.Join("usage-errors", name+".txt"), stderr.String())
 }
 
 func assertGolden(t *testing.T, name, actual string) {
