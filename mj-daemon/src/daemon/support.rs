@@ -140,6 +140,16 @@ impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.staged_stream(command, |command| {
+            self.inner.execute_to_file(command, output)
+        })
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.inner.pause_deadline()
     }

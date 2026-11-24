@@ -24,6 +24,227 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecuto
 
 use super::*;
 
+const CLAUDE_PRIOR_TRANSCRIPT: &str = r#"{"type":"user","message":{"content":"work"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-a"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-a"}]}}
+{"type":"system","subtype":"compact_boundary","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"content":"native prior state"}}
+"#;
+
+fn claude_prior_snapshot() -> Arc<CanonicalSessionSnapshot> {
+    use mj_checkpoint::archive::{
+        CanonicalExecutionState, CanonicalSessionState, CanonicalTranscriptBody,
+        CanonicalTranscriptItem,
+    };
+    use serde_json::json;
+
+    let transcript = [
+        CanonicalTranscriptBody::User {
+            content: vec![json!({"type":"text","text":"work"})],
+        },
+        CanonicalTranscriptBody::Tool {
+            call: json!({"toolCallId":"tool-a","title":"Run","kind":"execute","status":"completed"}),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: None,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, body)| CanonicalTranscriptItem {
+        stable_id: format!("entry-{index}"),
+        position: index as u64 + 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_767_225_000_000,
+        last_changed_at_ms: 1_767_225_000_000,
+        body,
+    })
+    .collect();
+    Arc::new(CanonicalSessionSnapshot {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        native_use_evidence: None,
+        event_frontier: 10,
+        event_frontier_digest: "a".repeat(64),
+        session: CanonicalSessionState {
+            execution: CanonicalExecutionState::Idle,
+            last_activity_at_ms: None,
+            session_title: None,
+            configuration: Default::default(),
+        },
+        transcript,
+        queued_prompts: Vec::new(),
+        mailbox: None,
+    })
+}
+
+#[tokio::test]
+async fn claude_prior_reads_local_bare_profile_home() {
+    let worker_root = tempfile::tempdir().unwrap();
+    let project = worker_root.path().join("profile/projects/-work");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("native-1.jsonl"), CLAUDE_PRIOR_TRANSCRIPT).unwrap();
+    let target = targets::TargetLocator::LocalBare {
+        worker_root: worker_root.path().to_str().unwrap().to_owned(),
+    };
+
+    let prior = native_prior_from_target_while_cancellable(
+        "session-1",
+        &target,
+        HarnessKind::Claude,
+        Some("native-1"),
+        &claude_prior_snapshot(),
+        &ProcessExecutor,
+    )
+    .await
+    .unwrap()
+    .expect("local transcript should align with the canonical prefix");
+    assert_eq!(prior.summary, "native prior state");
+    assert_eq!(prior.through_position, 1);
+}
+
+#[tokio::test]
+async fn claude_prior_streams_remote_output_and_distinguishes_failure_from_cancellation() {
+    const CHILD: &str = "MJ_CLAUDE_PRIOR_REMOTE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            "claude_prior_streams_remote_output_and_distinguishes_failure_from_cancellation",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReadOutcome {
+        Transcript,
+        Missing,
+        FailedStatus,
+        TransportError,
+        Cancelled,
+    }
+
+    struct RemoteTranscript {
+        outcome: ReadOutcome,
+        started: std::cell::Cell<bool>,
+    }
+
+    impl CommandExecutor for RemoteTranscript {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            panic!("native transcript output must be streamed to the spool");
+        }
+
+        fn execute_to_file(
+            &self,
+            command: &CommandSpec,
+            mut output: &std::fs::File,
+        ) -> Result<CommandOutput> {
+            use std::io::Write as _;
+
+            assert!(!self.started.replace(true));
+            assert_eq!(command.program, "ssh");
+            assert_eq!(
+                command.ssh_session.as_ref().unwrap().class,
+                SshTrafficClass::Bulk
+            );
+            let remote = command.args.last().unwrap();
+            assert!(remote.contains(".local/share/hel/profiles/session-1"));
+            assert!(remote.contains("native-1"));
+            let (status, stderr) = match self.outcome {
+                ReadOutcome::Transcript => {
+                    output.write_all(CLAUDE_PRIOR_TRANSCRIPT.as_bytes())?;
+                    (0, Vec::new())
+                }
+                ReadOutcome::Missing => (0, Vec::new()),
+                ReadOutcome::FailedStatus => {
+                    // A failed command can leave a partial or even parseable spool.
+                    output.write_all(CLAUDE_PRIOR_TRANSCRIPT.as_bytes())?;
+                    (1, b"read failed".to_vec())
+                }
+                ReadOutcome::TransportError => bail!("connection refused"),
+                ReadOutcome::Cancelled => bail!("transfer interrupted"),
+            };
+            Ok(CommandOutput {
+                status,
+                stdout: Vec::new(),
+                stderr,
+            })
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.started.get() && matches!(self.outcome, ReadOutcome::Cancelled)
+        }
+    }
+
+    let target = targets::TargetLocator::SshBare {
+        ssh: targets::SshTarget {
+            destination: "user@example.invalid".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: ".local/share/hel/workspaces/session-1".into(),
+        worker_id: None,
+    };
+    let canonical = claude_prior_snapshot();
+    for outcome in [
+        ReadOutcome::Transcript,
+        ReadOutcome::Missing,
+        ReadOutcome::FailedStatus,
+        ReadOutcome::TransportError,
+        ReadOutcome::Cancelled,
+    ] {
+        let executor = RemoteTranscript {
+            outcome,
+            started: std::cell::Cell::new(false),
+        };
+        let result = native_prior_from_target_while_cancellable(
+            "session-1",
+            &target,
+            HarnessKind::Claude,
+            Some("native-1"),
+            &canonical,
+            &executor,
+        )
+        .await;
+        assert!(executor.started.get());
+        match outcome {
+            ReadOutcome::Transcript => {
+                let prior = result.unwrap().expect("streamed transcript should align");
+                assert_eq!(prior.summary, "native prior state");
+                assert_eq!(prior.through_position, 1);
+            }
+            ReadOutcome::Cancelled => {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("operation cancelled while reading native compaction"));
+            }
+            _ => assert!(result.unwrap().is_none()),
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(
     windows,

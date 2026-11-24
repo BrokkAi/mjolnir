@@ -17457,6 +17457,134 @@ async fn terminal_suspend_preflight_runs_during_drain_without_admission() {
     server.await.unwrap().unwrap();
 }
 
+// Hard-won: #1679: an idle child made its parent's suspend ask for confirmation.
+#[tokio::test]
+async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children() {
+    const CHILD: &str = "MJ_TEST_SUSPEND_PREFLIGHT_WORK";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "suspend_preflight_routes_warn_only_about_unfinished_borrowed_children",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let parent = "preflight-parent";
+    let clean_parent = "preflight-clean";
+    let active_child = "preflight-working";
+    let idle_child_with_descendant = "preflight-branch";
+    let active_descendant = "preflight-grandchild";
+    for id in [parent, clean_parent] {
+        mj_controller::database::save_session(&runtime_test_session(
+            id,
+            "default",
+            SessionState::Running,
+        ))
+        .unwrap();
+    }
+    for (id, child_parent, status, owns_environment) in [
+        (
+            "preflight-parked",
+            clean_parent,
+            SessionState::Parked,
+            false,
+        ),
+        ("preflight-idle", clean_parent, SessionState::Running, false),
+        (active_child, parent, SessionState::Running, false),
+        (
+            idle_child_with_descendant,
+            parent,
+            SessionState::Running,
+            false,
+        ),
+        (
+            active_descendant,
+            idle_child_with_descendant,
+            SessionState::Running,
+            false,
+        ),
+        ("preflight-owned", parent, SessionState::Provisioning, true),
+    ] {
+        let mut relation = runtime_test_subagent(id, child_parent);
+        relation.orchestrator = id == idle_child_with_descendant;
+        mj_controller::database::register_subagent_with_startup(
+            &runtime_test_session(id, "default", status),
+            &relation,
+            Vec::new(),
+            None,
+            None,
+            owns_environment,
+        )
+        .unwrap();
+    }
+
+    let state = test_runtime_state_loading_the_store();
+    for (id, working) in [
+        (parent, true),
+        (clean_parent, false),
+        (active_child, true),
+        (idle_child_with_descendant, false),
+        (active_descendant, true),
+        ("preflight-idle", false),
+        ("preflight-owned", true),
+    ] {
+        let mut view = ready_startup_view();
+        if working {
+            view.snapshot.as_mut().unwrap().operational.harness_turn =
+                Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        }
+        state.owner().publish_view(id.into(), view);
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (terminal, shutdown, server) = start_test_dashboard_http_api_on(state, listener).await;
+    let public =
+        mj_client::http::HttpDaemonClient::new(format!("http://{address}"), "public-test-token")
+            .unwrap();
+    let clean = terminal
+        .suspend_preflight(
+            clean_parent.into(),
+            SuspendPreflightRequest {
+                dry_run: false,
+                without_checkpoint: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!clean.has_blockers());
+    assert!(!clean.has_warnings(), "{clean:?}");
+    let from_terminal = terminal
+        .suspend_preflight(
+            parent.into(),
+            SuspendPreflightRequest {
+                dry_run: false,
+                without_checkpoint: false,
+            },
+        )
+        .await
+        .unwrap();
+    let from_public: mj_core::suspend_consent::SuspendPreflight = public
+        .get_json(&format!("/api/v1/sessions/{parent}/suspend-preflight"))
+        .await
+        .unwrap();
+    assert_eq!(from_terminal, from_public);
+    assert_eq!(
+        from_terminal.children_not_handed_back,
+        [idle_child_with_descendant, active_child]
+    );
+    assert!(from_terminal.interrupting);
+    assert_eq!(from_terminal.owning_children_to_suspend, 1);
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn parent_suspend_records_only_children_it_stops_and_resume_keeps_failed_children_eligible() {

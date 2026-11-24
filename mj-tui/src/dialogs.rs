@@ -357,12 +357,10 @@ pub(crate) enum Confirmation {
     },
     SuspendSession {
         session_id: String,
-        /// Listed titles of the sub-agents still at their task, which the
-        /// suspend stops.
-        children_not_handed_back: Vec<String>,
-        interrupting: bool,
+        request_id: u64,
+        /// Listed titles (or IDs) for the unfinished children in the preflight.
+        child_warning_titles: Vec<String>,
         preflight: Option<mj_core::suspend_consent::SuspendPreflight>,
-        checking: bool,
         viewing_all_untracked: bool,
     },
     /// Stop or restart asked for while the agent is mid-turn. An idle session
@@ -1852,17 +1850,13 @@ impl DashboardState {
             (
                 Confirmation::SuspendSession {
                     session_id,
-                    preflight,
-                    checking: false,
+                    preflight: Some(preflight),
                     ..
                 },
                 1,
-            ) if !preflight.as_ref().is_some_and(|p| p.has_blockers()) => {
+            ) if !preflight.has_blockers() => {
                 self.cancel_modal();
-                let consent = preflight
-                    .as_ref()
-                    .map(|p| p.shown_consent())
-                    .unwrap_or_default();
+                let consent = preflight.shown_consent();
                 DashboardAction::Suspend {
                     session_id,
                     consent,

@@ -364,7 +364,40 @@ async fn run_first_run_setup(
 /// HTTP request's cancellation across the whole discovery pass.
 struct PrerequisiteExecutor<'a>(&'a CancellableProcessExecutor);
 
+impl PrerequisiteExecutor<'_> {
+    fn with_probe_timeout(
+        &self,
+        command: &CommandSpec,
+        run: impl FnOnce(&CancellableProcessExecutor) -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        let timeout = mj_setup::doctor::PROBE_TIMEOUT;
+        let executor = self.0.clone().with_deadline(timeout);
+        run(&executor).map_err(|error| {
+            if executor.is_cancelled() && !executor.is_cancelled_without_deadline() {
+                CommandTimedOut {
+                    program: command.program.clone(),
+                    purpose: command.purpose.clone(),
+                    timeout,
+                }
+                .into()
+            } else {
+                error
+            }
+        })
+    }
+}
+
 impl CommandExecutor for PrerequisiteExecutor<'_> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.with_probe_timeout(command, |executor| {
+            executor.execute_to_file(command, output)
+        })
+    }
+
     fn pause_deadline(&self) -> DeadlinePause {
         DeadlinePause::none()
     }
@@ -386,20 +419,7 @@ impl CommandExecutor for PrerequisiteExecutor<'_> {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let timeout = mj_setup::doctor::PROBE_TIMEOUT;
-        let executor = self.0.clone().with_deadline(timeout);
-        executor.execute(command).map_err(|error| {
-            if executor.is_cancelled() && !executor.is_cancelled_without_deadline() {
-                CommandTimedOut {
-                    program: command.program.clone(),
-                    purpose: command.purpose.clone(),
-                    timeout,
-                }
-                .into()
-            } else {
-                error
-            }
-        })
+        self.with_probe_timeout(command, |executor| executor.execute(command))
     }
 
     fn cancellation_requested(&self) -> bool {

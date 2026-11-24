@@ -2012,6 +2012,14 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.inner.execute_to_file(&self.staged(command), output)
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.inner.pause_deadline()
     }

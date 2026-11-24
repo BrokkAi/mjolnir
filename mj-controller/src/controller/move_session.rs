@@ -3463,6 +3463,20 @@ impl Controller {
                             let canonical = mj_transcript::projection::canonical_session_from_materialized_owned(
                                 materialized,
                             )?;
+                            let canonical = std::sync::Arc::new(canonical);
+                            let native_prior = if !had_prior_expected_store_id {
+                                super::resume::native_prior_from_target_while_cancellable(
+                                    &id,
+                                    &source_backend,
+                                    source_harness_kind,
+                                    previous_session.native_session_id.as_deref(),
+                                    &canonical,
+                                    executor,
+                                )
+                                .await?
+                            } else {
+                                None
+                            };
                             let context_bytes =
                                 crate::handoff::profile_handoff_bytes(Some(&dest_profile));
                             Some(
@@ -3470,7 +3484,7 @@ impl Controller {
                                     &id,
                                     &self.config,
                                     &canonical,
-                                    None,
+                                    native_prior.as_ref(),
                                     context_bytes,
                                     executor,
                                     tokio_util::sync::CancellationToken::new(),

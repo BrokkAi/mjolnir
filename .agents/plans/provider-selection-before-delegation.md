@@ -1,0 +1,79 @@
+# Resolve provider groups before the delegation review
+
+This living plan follows `.agents/PLANS.md`.
+
+## Purpose / Big Picture
+
+Choosing a provider group in New session must resolve to a named profile when leaving the first wizard page. Subsequent pages then restore that profile's saved delegation mode and Orchestrators checkbox, and creation uses that same named profile.
+
+## Progress
+
+- [x] (2026-11-24 14:03Z) Trace the defect: provider selection returns an empty profile ID until creation, so the dialog reads the legacy preference while creation saves under the real profile.
+- [x] Add a daemon-owned provider selection request using the existing scheduler.
+- [x] Run that request asynchronously at the first page and apply only its current reply.
+- [x] Exercise saved policies, cancellation, failures, and stale replies; run focused tests and Clippy.
+- [x] Commit, review, merge upstream, and push to origin/master (3d89d82a4).
+
+## Surprises & Discoveries
+
+The daemon and TUI already transport the remembered delegation policies correctly for named profiles. The provider-group path deliberately postpones naming the profile until Create. A separate Oracle-map omission is recorded in #1680; its patch is saved in /tmp/mj-1680-oracle-preferences.patch and excluded from this fix (#1681).
+
+## Decision Log
+
+- Decision: Resolve provider groups through the daemon's existing quota scheduler when Next leaves the profile page; keep named-profile and Auto (Primary) launches otherwise unchanged.
+  Rationale: The daemon owns selection. The TUI's prediction is explicitly best effort and must not become a second selector. Once chosen, pin its name and retain its provider scope for target validation and quota placement at Create. Do not retain a quota reservation while a person browses later pages; the selection request releases its temporary reservation when it returns.
+  Date/Author: 2026-11-24 14:03Z, Codex.
+- Decision: Reuse the existing session preflight generation for asynchronous reply identity and keep a pending request identity on the new-session draft.
+  Rationale: Cancel, selection changes, and a newer request must prevent old replies from advancing a different wizard. Keep navigation and cancellation responsive.
+  Date/Author: 2026-11-24 14:03Z, Codex.
+
+## Outcomes & Retrospective
+
+Provider-group launches now resolve to a concrete profile after the first page and restore its saved mode and Orchestrators choice. The profile ID remains stable across list refreshes. Before leaving the target page, the daemon retains a compatible profile or selects another compatible member of the same provider and restores its preferences. Create validates the final pinned profile and accounts for its quota placement.
+
+Validation passed: three profile-transition tests, three delegation tests including the Create golden, the HTTP-client contract test, the provider-scheduler test, and the isolated daemon test covering target approval constraints and a compatible mixed-provider alternative. Formatting, diff checks, and Clippy passed. Three implementation/review rounds were followed by a clean zero-diff review of upstream merges; code was pushed to origin/master as 3d89d82a4.
+
+Remaining configuration-edit edge cases are tracked in #1683: picker highlighting after profile insertion, an in-flight target check during a target/policy reload, and provider membership changing between pages. These were explicitly declined in the final implementation review. Final Create admission still checks the actual named profile, target policy, provider membership, and current quota. The separate Oracle-map issue #1680 remains outside this change. No live installation was performed.
+
+## Context and Orientation
+
+`mj-tui/src/wizards/dashboard/new_session.rs` advances the Create wizard. `NewWizard::selected_profile_id` in `mj-tui/src/wizards.rs` currently returns an empty string for a provider group. `SubagentDraft::refresh_create` loads policies from `State::remembered_subagent_policy_for`. `mj-server/src/server/api/subagents.rs::resolve_provider_session_selection` already implements quota-aware selection and returns a temporary reservation. `mj-daemon/src/daemon/dashboard_api.rs` implements the dashboard HTTP backend. The CLI runs background requests and returns their completions through `DashboardIoUpdate` in `mj-cli/src/dashboard/io.rs`.
+
+## Plan of Work
+
+Add a terminal dashboard HTTP operation accepting a provider and returning its selected profile ID. Its daemon backend calls the existing provider resolver against current configuration and releases the temporary reservation on return. At the first wizard's Next, emit a background action and record its request generation. Disable duplicate Next while allowing cancel and profile changes. On a matching reply, select the returned named profile, restore delegation settings for it, and advance normally; report a failed selection while leaving the first page available to retry. Queue any follow-up UI action through the CLI's existing action queue. Keep the chosen profile by ID through configuration refreshes. Before leaving the target page, ask the daemon whether that profile can satisfy its approval policy. Preserve a compatible profile; otherwise choose a compatible profile from the same provider and restore that profile's delegation preferences before moving on to project/review. Creation retains the final named profile and provider scope.
+
+## Milestones
+
+First implement the HTTP request and adapter without changing session persistence. Next wire the first-page transition and verify that both saved mode and Orchestrators come from the resolved profile. Finally add ordering regressions and complete checks, review, and publication.
+
+## Concrete Steps
+
+Run all commands from the repository root. Use `mbx test -p brokk-mj-tui new_session_profile_step --lib` for the profile transition tests and focused HTTP or daemon tests for the new operation. Use `mbx clippy -p brokk-mj-tui -p brokk-mj-client -p brokk-mj-server -p brokk-mj-daemon -p brokk-mjolnir --all-targets -- -D warnings` and `cargo fmt --all -- --check`. Every test command runs outside the sandbox. No test may start the default daemon; use isolated instance fixtures if a daemon is needed.
+
+## Validation and Acceptance
+
+A provider-group Next waits asynchronously for a concrete profile. Returning a profile whose saved policy is Mjolnir with Orchestrators enabled displays and submits both choices. A saved None mode stays None. Creation carries that concrete profile and its provider scope; admission validates and reserves that exact profile against the final target and current quota without selecting another profile. A late completion after cancel, selecting another row, or opening a new wizard has no effect. Failure leaves the first page usable. Existing profile navigation and golden output must continue to pass except where the intended concrete-profile behavior changes.
+
+## Idempotence and Recovery
+
+Selection creates no session and retains no reservation. Retry is safe. Closing the wizard invalidates pending completions. Existing noninteractive provider creation stays supported. Only task files are staged; the unrelated Oracle patch stays outside the checkout.
+
+## Artifacts and Notes
+
+Issue: https://github.com/BrokkAi/mjolnir/issues/1681. Validation receipts will be added after the tests run.
+
+## Interfaces and Dependencies
+
+Extend `DashboardBackend` and `HttpDaemonClient` with `select_provider_profile(request: ProviderProfileSelectionRequest) -> Result<String>` using `/api/v1/profiles/select`. The request carries the provider and optional concrete profile and target names. A first-page request has neither; the target-page request has both. Add a `SelectProviderProfile` dashboard action carrying provider and generation, and a matching I/O completion. Add `NewWizard::profile_selection_request: Option<u64>` and `resolved_profile: Option<(String, QuotaProvider)>`; the string is the launch identity and the numeric profile index is only picker presentation. Apply completion through a public dashboard method returning the next `DashboardAction`.
+
+Initial plan written after the user clarified provider-group selection as the trigger.
+
+2026-11-24 14:09Z: Updated progress after the first-page transition, cancellation/retry tests, and client contract passed.
+
+Review identified two consequences of treating an automatically resolved profile as an ordinary explicit pin: guardian eligibility could be bypassed on the final target, and placement accounting was skipped. Retain the provider origin with the concrete profile, and run the existing provider admission against a configuration narrowed to that profile. This reuses the existing policy filter and quota reservation owner, commits the reservation after registration, and cannot silently select a different profile. Browsing holds no reservation; Create rechecks current quota and reports a refusal if the pinned profile is no longer eligible.
+2026-11-24 14:13Z: Revised the Create boundary after the first review; targeted validation passed (three profile tests and the isolated approval-policy test); Clippy passed again.
+
+2026-11-24 14:22Z: Updated the final design after review: target compatibility is resolved before review, IDs survive profile-list changes, and Back invalidates pending target checks.
+
+2026-11-24 14:27Z: Recorded successful publication and the bounded config-reload follow-up after final review.

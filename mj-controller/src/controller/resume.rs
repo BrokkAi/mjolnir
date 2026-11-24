@@ -1,6 +1,7 @@
 //! Resuming a stopped session onto a profile and target.
 
 use mj_core::targets::SshTrafficClass;
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use rayon::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint_transfer::restore_command;
+use crate::handoff::NativePriorSource;
 use crate::session_manager::new_command_id;
 use mj_checkpoint::archive::{
     CanonicalQueuedCommandKind, CanonicalSessionSnapshot, CheckpointRepositoryBundle, SystemGit,
@@ -2395,8 +2397,20 @@ impl Controller {
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
         let utility_config = (!native_continuity).then(|| self.config.clone());
-        let native_prior = if utility_config.is_some() && direct_move_source.is_none() {
-            native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+        let native_prior = if utility_config.is_some() {
+            if let Some((source_backend, _, _)) = &direct_move_source {
+                native_prior_from_target_while_cancellable(
+                    session_id,
+                    source_backend,
+                    archive_manifest.session.harness_kind,
+                    Some(archive_manifest.session.native_session_id.as_str()),
+                    &verified_archive.canonical_session,
+                    executor,
+                )
+                .await?
+            } else {
+                native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+            }
         } else {
             None
         };
@@ -3489,6 +3503,17 @@ struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute_to_file(command, output)
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.inner.pause_deadline()
     }
@@ -3703,11 +3728,122 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
     })
 }
 
-/// Cooperatively stop native parsing on cancellation and join its blocking
-/// task before releasing the source archive and lifecycle ownership.
 async fn native_prior_while_cancellable(
     session_id: &str,
     archive: &VerifiedResumeArchive,
+    executor: &impl CommandExecutor,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    native_prior_source_while_cancellable(
+        session_id,
+        NativePriorSource::Archive {
+            archive_path: archive.archive_path.clone(),
+            manifest: archive.manifest.clone(),
+        },
+        &archive.canonical_session,
+        executor,
+    )
+    .await
+}
+
+pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
+    session_id: &str,
+    source_backend: &targets::TargetLocator,
+    source_harness_kind: HarnessKind,
+    native_session_id: Option<&str>,
+    snapshot: &Arc<CanonicalSessionSnapshot>,
+    executor: &impl CommandExecutor,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    if source_harness_kind != HarnessKind::Claude {
+        return Ok(None);
+    }
+    let Some(id) = native_session_id.filter(|id| {
+        !id.is_empty()
+            && !id.contains('/')
+            && !id.contains('\\')
+            && !id.contains("..")
+            && !id.chars().any(char::is_control)
+    }) else {
+        return Ok(None);
+    };
+    let harness_home =
+        targets::target_profile_home_for_kind(source_backend, session_id, source_harness_kind);
+    if matches!(source_backend, targets::TargetLocator::LocalBare { .. }) {
+        return native_prior_source_while_cancellable(
+            session_id,
+            NativePriorSource::ClaudeHome {
+                harness_home: PathBuf::from(harness_home),
+                native_session_id: id.to_owned(),
+            },
+            snapshot,
+            executor,
+        )
+        .await;
+    }
+
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while reading native compaction"
+    );
+    let mut spool = mj_checkpoint::archive::create_fetch_spool()?;
+    let command = targets::locator_command(
+        SshTrafficClass::Bulk,
+        source_backend,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            r#"if [ -d "$1/projects" ] && [ ! -L "$1/projects" ]; then for d in "$1"/projects/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ "${d##*/}" != subagents ] && f="$d/$2.jsonl" && [ -f "$f" ] && [ ! -L "$f" ] && exec cat -- "$f"; done; fi; exit 0"#.into(),
+            "mj-read-claude-transcript".into(),
+            harness_home,
+            id.to_owned(),
+        ],
+    )
+    .purpose("read source Claude transcript for compaction");
+    let output = match executor.execute_to_file(&command, &spool) {
+        Ok(output) => output,
+        Err(error) if executor.cancellation_requested() => {
+            return Err(error.context("operation cancelled while reading native compaction"));
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not read source Claude transcript; using canonical history"
+            );
+            return Ok(None);
+        }
+    };
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while reading native compaction"
+    );
+    if output.status != 0 {
+        tracing::warn!(
+            session_id,
+            status = output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "could not read source Claude transcript; using canonical history"
+        );
+        return Ok(None);
+    }
+    spool.rewind()?;
+    if spool.metadata()?.len() == 0 {
+        return Ok(None);
+    }
+    native_prior_source_while_cancellable(
+        session_id,
+        NativePriorSource::ClaudeFile { file: spool },
+        snapshot,
+        executor,
+    )
+    .await
+}
+
+/// Cooperatively stop native parsing on cancellation and join its blocking
+/// task before releasing the source and lifecycle ownership.
+async fn native_prior_source_while_cancellable(
+    session_id: &str,
+    source: NativePriorSource,
+    snapshot: &Arc<CanonicalSessionSnapshot>,
     executor: &impl CommandExecutor,
 ) -> Result<Option<crate::compaction::PriorCompaction>> {
     ensure!(
@@ -3716,13 +3852,7 @@ async fn native_prior_while_cancellable(
     );
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let operation = crate::handoff::native_prior_from_archive(
-        session_id,
-        &archive.archive_path,
-        &archive.manifest,
-        &archive.canonical_session,
-        cancel.clone(),
-    );
+    let operation = crate::handoff::native_prior(session_id, source, snapshot, cancel.clone());
     tokio::pin!(operation);
     loop {
         tokio::select! {
