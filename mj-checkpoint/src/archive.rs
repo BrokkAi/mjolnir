@@ -3032,8 +3032,8 @@ pub use git::{
     migrate_review_ref, numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref,
     read_head_reflog, read_review_point, record_overridden_tree, record_review_point,
     record_reviewed_tree, remote_workspace_base, restore_git_snapshot, session_diff,
-    session_diff_details, session_diff_patch, session_start_scope, tree_without_paths,
-    validate_symlink_target,
+    session_diff_details, session_diff_patch, session_diff_patch_bytes, session_start_scope,
+    tree_without_paths, validate_symlink_target,
 };
 pub(crate) use git::{
     LegacyRestoreOptions, ensure_no_symlink_ancestors, restore_git_snapshot_for_session,

@@ -962,14 +962,14 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             json,
         } => {
             if patch {
-                let patch = mj_checkpoint::archive::session_diff_patch(
+                let patch = mj_checkpoint::archive::session_diff_patch_bytes(
                     &mj_checkpoint::archive::SystemGit,
                     &repository,
                     base.as_deref(),
                     branch.as_deref(),
                 )
                 .map_err(export_error)?;
-                return write_stdout(patch.as_bytes());
+                return write_stdout(&patch);
             }
             let result = mj_checkpoint::archive::session_diff_details(
                 &mj_checkpoint::archive::SystemGit,

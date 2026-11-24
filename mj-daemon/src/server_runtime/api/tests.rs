@@ -1592,6 +1592,54 @@ async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
     );
 }
 
+/// A stopped session whose cleanup is deferred keeps its locator. Its work is
+/// in the checkpoint, so a patch export reads that instead of addressing a
+/// target that no longer runs it, and a stopped session with nothing saved is
+/// told so rather than told to export a bundle.
+#[tokio::test]
+async fn a_stopped_sessions_patch_export_reads_its_checkpoint_even_with_a_locator() {
+    struct StoppedWithLocator(SessionRecord);
+    impl ExportRuntime for StoppedWithLocator {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.0.id).then(|| self.0.clone())
+        }
+        fn checkpoint_now(
+            &self,
+            _session_id: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            Box::pin(async { bail!("an export of a stopped session takes no checkpoint") })
+        }
+    }
+
+    let mut record = mj_controller::controller::test_support::checkpoint_test_session("stopped-1");
+    record.state = SessionState::Stopped;
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/nonexistent/worker-root".into(),
+    }));
+    let (submitted_tx, _submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "stopped-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: None,
+        })),
+        running_states(),
+        Arc::new(StoppedWithLocator(record)),
+    );
+    match backend.export_patch("stopped-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("no checkpoint"), "{reason}");
+            assert!(!reason.contains("bundle"), "{reason}");
+        }
+        other => panic!("expected a refusal naming the missing checkpoint, got {other:?}"),
+    }
+    match backend.export_patch("unknown".into()).await {
+        Err(ExportError::Refused(reason)) => assert!(reason.contains("unknown session")),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
 /// A relative export path resolves against the directory the agent runs in,
 /// not the workspace root above it. For a bare project session those differ by
 /// one level, which is why a file the agent had just written was refused as

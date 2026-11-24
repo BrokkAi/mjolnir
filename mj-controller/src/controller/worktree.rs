@@ -2681,9 +2681,6 @@ pub(super) fn restore_managed_clone_origin_delta(
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
 ) -> Result<ManagedCloneRestoreOutcome> {
-    use mj_checkpoint::archive::CheckpointPayloadReader;
-    use mj_checkpoint::snapshot::WorkspaceSnapshot;
-
     ensure!(
         worktree.kind == ManagedCheckoutKind::Clone,
         "origin delta resume requires an independent managed clone"
@@ -2691,12 +2688,6 @@ pub(super) fn restore_managed_clone_origin_delta(
     let [repository] = manifest.repositories.as_slice() else {
         bail!("origin delta resume requires exactly one repository");
     };
-    let metadata = repository
-        .metadata
-        .origin_delta
-        .as_deref()
-        .context("origin delta metadata is missing")?
-        .clone();
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
         && executor
             .execute(&managed_git_command(
@@ -2717,29 +2708,14 @@ pub(super) fn restore_managed_clone_origin_delta(
     }
     match &worktree.target {
         ManagedWorktreeTarget::Local => {
-            let pack = repository
-                .origin_delta_pack_path
-                .as_ref()
-                .map(|path| -> Result<_> {
-                    let descriptor = manifest
-                        .payloads
-                        .iter()
-                        .find(|payload| &payload.path == path)
-                        .context("origin delta pack descriptor is missing")?;
-                    let mut pack = tempfile::NamedTempFile::new()?;
-                    CheckpointPayloadReader::open(archive)?
-                        .copy_payload(descriptor, pack.as_file_mut())?;
-                    Ok(pack)
-                })
-                .transpose()?;
-            let snapshot = WorkspaceSnapshot {
-                metadata,
-                pack: pack.as_ref().map(|pack| pack.path().to_owned()),
-            };
+            let spooled = mj_checkpoint::checkpoint::spool_origin_delta_snapshot(
+                archive, manifest, repository,
+            )?
+            .context("origin delta metadata is missing")?;
             let notices = create_managed_clone_with_snapshot(
                 executor,
                 worktree,
-                CloneSeedMode::LocalSnapshot(&snapshot),
+                CloneSeedMode::LocalSnapshot(spooled.snapshot()),
             )?;
             Ok(ManagedCloneRestoreOutcome::RestoredLocally(notices))
         }
@@ -2748,6 +2724,11 @@ pub(super) fn restore_managed_clone_origin_delta(
             // invokes `mj-worker worker restore-checkpoint` with
             // `restore_repositories = true` so the snapshot is unpacked and
             // applied directly on the SSH host.
+            let metadata = repository
+                .metadata
+                .origin_delta
+                .as_deref()
+                .context("origin delta metadata is missing")?;
             create_managed_clone_with_snapshot(
                 executor,
                 worktree,

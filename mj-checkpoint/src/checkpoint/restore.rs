@@ -632,41 +632,14 @@ pub(super) fn restore_repositories_from_archive(
         // A plain project folder is the user's own directory on a bare local
         // target. Its files were never captured, so a restore must never
         // check out, rewrite or remove anything in it.
-        if let Some(delta) = repository.metadata.origin_delta.as_deref() {
+        if repository.metadata.origin_delta.is_some() {
             if !restore_contents {
                 continue;
             }
             let id = &repository.metadata.id;
-            let pack_file = repository
-                .origin_delta_pack_path
-                .as_ref()
-                .map(|path| -> Result<_> {
-                    let descriptor = archive
-                        .manifest
-                        .payloads
-                        .iter()
-                        .find(|payload| {
-                            &payload.path == path
-                                && payload.role
-                                    == (PayloadRole::GitOriginDeltaPack {
-                                        repository_id: id.clone(),
-                                    })
-                        })
-                        .context("origin delta pack descriptor is missing")?;
-                    let mut temp = tempfile::NamedTempFile::new()
-                        .context("create temporary origin delta pack file")?;
-                    crate::archive::CheckpointPayloadReader::open(archive_path)?
-                        .copy_payload(descriptor, temp.as_file_mut())
-                        .context("stream origin delta pack payload")?;
-                    std::io::Write::flush(temp.as_file_mut())
-                        .context("flush temporary origin delta pack file")?;
-                    Ok(temp)
-                })
-                .transpose()?;
-            let snapshot = crate::snapshot::WorkspaceSnapshot {
-                metadata: delta.clone(),
-                pack: pack_file.as_ref().map(|file| file.path().to_path_buf()),
-            };
+            let spooled = spool_origin_delta_snapshot(archive_path, &archive.manifest, repository)?
+                .context("origin delta metadata is missing")?;
+            let snapshot = spooled.snapshot();
             let path = if repository.metadata.id == archive.manifest.bundle.primary_repository
                 && let Some(primary) = primary_repository_root
             {
@@ -685,14 +658,16 @@ pub(super) fn restore_repositories_from_archive(
                 )
                 .with_context(|| format!("restore repository {id:?}"))?
             };
-            let notices = crate::snapshot::restore_workspace_snapshot(git, &snapshot, &path)
+            let notices = crate::snapshot::restore_workspace_snapshot(git, snapshot, &path)
                 .with_context(|| format!("restore repository {id:?}"))?;
             for notice in &notices {
                 tracing::info!(repository_id = %id, "{notice}");
             }
             all_notices.extend(notices);
-            crate::snapshot::repair_workspace_snapshot(git, &snapshot, &path)
+            crate::snapshot::repair_workspace_snapshot(git, snapshot, &path)
                 .with_context(|| format!("repair repository {id:?}"))?;
+            restore_managed_base(git, &path, &repository.metadata)
+                .with_context(|| format!("restore the launch base of repository {id:?}"))?;
             continue;
         }
         if repository.metadata.plain_directory {
@@ -728,6 +703,106 @@ pub(super) fn restore_repositories_from_archive(
         all_notices.extend(notices);
     }
     Ok(all_notices)
+}
+
+/// An origin-delta snapshot whose pack is spooled to a temporary file. The
+/// file goes away with this value, so keep it until the snapshot is applied.
+pub struct SpooledWorkspaceSnapshot {
+    snapshot: crate::snapshot::WorkspaceSnapshot,
+    _pack: Option<tempfile::NamedTempFile>,
+}
+
+impl SpooledWorkspaceSnapshot {
+    pub fn snapshot(&self) -> &crate::snapshot::WorkspaceSnapshot {
+        &self.snapshot
+    }
+}
+
+/// Spool one repository's origin-delta pack out of the archive and pair it
+/// with the snapshot metadata. `None` when the repository is not an origin
+/// delta. Resume and export both restore through this one spooling path.
+pub fn spool_origin_delta_snapshot(
+    archive_path: &Path,
+    manifest: &crate::archive::ArchiveManifest,
+    repository: &crate::archive::RepositoryManifest,
+) -> Result<Option<SpooledWorkspaceSnapshot>> {
+    let Some(delta) = repository.metadata.origin_delta.as_deref() else {
+        return Ok(None);
+    };
+    let id = &repository.metadata.id;
+    let pack = repository
+        .origin_delta_pack_path
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let descriptor = manifest
+                .payloads
+                .iter()
+                .find(|payload| {
+                    &payload.path == path
+                        && payload.role
+                            == (PayloadRole::GitOriginDeltaPack {
+                                repository_id: id.clone(),
+                            })
+                })
+                .context("origin delta pack descriptor is missing")?;
+            let mut temp = tempfile::NamedTempFile::new()
+                .context("create temporary origin delta pack file")?;
+            crate::archive::CheckpointPayloadReader::open(archive_path)?
+                .copy_payload(descriptor, temp.as_file_mut())
+                .context("stream origin delta pack payload")?;
+            std::io::Write::flush(temp.as_file_mut())
+                .context("flush temporary origin delta pack file")?;
+            Ok(temp)
+        })
+        .transpose()?;
+    Ok(Some(SpooledWorkspaceSnapshot {
+        snapshot: crate::snapshot::WorkspaceSnapshot {
+            metadata: delta.clone(),
+            pack: pack.as_ref().map(|file| file.path().to_path_buf()),
+        },
+        _pack: pack,
+    }))
+}
+
+/// Put the archived launch base back on a managed network workspace.
+///
+/// Provisioning marks the fresh clone with its own `HEAD` as the base. The
+/// archived base is the one the session started from, so it replaces that when
+/// the restored repository has the commit. An archive that recorded none (it
+/// predates this, or the checkout was not a managed workspace) and a checkout
+/// without the managed marker keep what they have.
+fn restore_managed_base(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    metadata: &crate::archive::RepositoryMetadata,
+) -> Result<()> {
+    if metadata.base_commit.is_empty()
+        || crate::archive::remote_workspace_base(git, repository)?.is_none()
+    {
+        return Ok(());
+    }
+    if !crate::archive::managed_base_is_available(git, repository, &metadata.base_commit)? {
+        tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
+            "archived launch base is absent from the restored repository; keeping the provisioned base");
+        return Ok(());
+    }
+    mj_core::remote_git::finalize_managed_checkout(&metadata.base_commit, true, |arguments| {
+        let output = git.run(
+            repository,
+            &crate::archive::GitCommand {
+                arguments: arguments.iter().map(std::ffi::OsString::from).collect(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+        )?;
+        ensure!(
+            output.status == 0,
+            "restore the launch base: git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
+    })
 }
 
 /// The top level of the checkout a repository's session directory belongs to.

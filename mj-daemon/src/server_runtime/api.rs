@@ -23,9 +23,9 @@ use mj_core::subagent::{ReportState, bounded_report};
 use mj_controller::quota::ProfileQuota;
 
 use crate::server::api::{
-    ApiFailure, BundleExport, ExportError, PurgeUntrackedFailure, PurgeUntrackedRequest,
-    PurgeUntrackedResponse, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
-    TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
+    ApiFailure, BundleExport, ExportError, ExportPatch, PurgeUntrackedFailure,
+    PurgeUntrackedRequest, PurgeUntrackedResponse, PushedBranch, StartFollowup, StartStatus,
+    SubagentBackend, TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
 };
 use crate::server::{
     ActionOutcome, BackgroundTaskStopFailure, BundleFailure, CreateBundleResponse,
@@ -3275,7 +3275,7 @@ impl ApiBackend {
         match record.target {
             Some(_) => Ok(()),
             None => Err(ExportError::Refused(format!(
-                "session {session_id} has no live target; export its checkpoint bundle instead"
+                "session {session_id} has no live target; resume it first"
             ))),
         }
     }
@@ -4368,6 +4368,42 @@ fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, Expor
         &layout.workspace_root,
         &primary_repository(layout)?.relative_destination,
     ))
+}
+
+/// The arguments of `worker diff` for a live session: the repository it works
+/// in and the base to compare against.
+fn session_diff_arguments(
+    layout: &SessionExportLayout,
+    options: crate::server::api::DiffOptions,
+) -> Result<Vec<String>, ExportError> {
+    let repository = agent_working_directory(layout)?;
+    let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
+    if let Some(base) = options.base {
+        arguments.push(format!("--base={base}"));
+    } else if let Some(worktree) = &layout.managed_worktree {
+        match &worktree.base_commit {
+            Some(base) => {
+                arguments.push("--base".to_owned());
+                arguments.push(base.clone());
+            }
+            // Sessions created before the base was recorded still name
+            // their branch, whose reflog says where it started.
+            None => {
+                arguments.push("--branch".to_owned());
+                arguments.push(worktree.branch.clone());
+            }
+        }
+    }
+    if options.json {
+        arguments.push("--json".to_owned());
+    }
+    arguments.extend(
+        options
+            .paths
+            .into_iter()
+            .map(|path| format!("--path={path}")),
+    );
+    Ok(arguments)
 }
 
 fn primary_repository(
@@ -5972,40 +6008,65 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let repository = agent_working_directory(&layout)?;
-            let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
-            if let Some(base) = options.base {
-                arguments.push(format!("--base={base}"));
-            } else if let Some(worktree) = &layout.managed_worktree {
-                match &worktree.base_commit {
-                    Some(base) => {
-                        arguments.push("--base".to_owned());
-                        arguments.push(base.clone());
-                    }
-                    // Sessions created before the base was recorded still name
-                    // their branch, whose reflog says where it started.
-                    None => {
-                        arguments.push("--branch".to_owned());
-                        arguments.push(worktree.branch.clone());
-                    }
-                }
-            }
-            if options.json {
-                arguments.push("--json".to_owned());
-            }
-            arguments.extend(
-                options
-                    .paths
-                    .into_iter()
-                    .map(|path| format!("--path={path}")),
-            );
-            if options.full_patch {
-                arguments.push("--patch".to_owned());
-            }
+            let arguments = session_diff_arguments(&layout, options)?;
             let stdout = worker_command(layout, session_id, arguments, "session diff").await?;
             String::from_utf8(stdout).map_err(|error| {
                 ExportError::Failed(anyhow!("the session diff was not UTF-8: {error}"))
             })
+        })
+    }
+
+    fn export_patch(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, std::result::Result<ExportPatch, ExportError>> {
+        Box::pin(async move {
+            let record = self
+                .exports
+                .session_record(&session_id)
+                .ok_or_else(|| ExportError::Refused(format!("unknown session {session_id}")))?;
+            if !mj_controller::controller::export_reads_checkpoint(&record) {
+                let layout = export_layout(session_id.clone()).await?;
+                let mut arguments =
+                    session_diff_arguments(&layout, crate::server::api::DiffOptions::default())?;
+                arguments.push("--patch".to_owned());
+                let bytes = worker_command(layout, session_id, arguments, "session diff").await?;
+                return Ok(ExportPatch {
+                    bytes,
+                    notice: None,
+                });
+            }
+            // A stopped session's work is rebuilt from its checkpoint in a
+            // scratch checkout, which can take minutes for a large repository.
+            // It is blocking work that owns nothing the daemon must wait for
+            // at handoff, so it holds no admission; dropping this future (the
+            // client left, or the server is stopping) cancels its Git
+            // processes.
+            let token = tokio_util::sync::CancellationToken::new();
+            let _cancel = token.clone().drop_guard();
+            let patch = mj_core::runtime::spawn_blocking(move || {
+                let executor =
+                    CancellableProcessExecutor::new(Default::default()).with_cancellation(token);
+                mj_controller::controller::checkpoint_patch(&record, &executor)
+            })
+            .await
+            .map_err(|error| {
+                ExportError::Failed(anyhow!(
+                    "the checkpoint patch export task panicked: {error}"
+                ))
+            })?;
+            match patch {
+                Ok(patch) => Ok(ExportPatch {
+                    bytes: patch.bytes,
+                    notice: patch.notice,
+                }),
+                Err(mj_controller::controller::CheckpointExportError::Refused(reason)) => {
+                    Err(ExportError::Refused(reason))
+                }
+                Err(mj_controller::controller::CheckpointExportError::Failed(error)) => {
+                    Err(ExportError::Failed(error))
+                }
+            }
         })
     }
 

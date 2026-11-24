@@ -2280,6 +2280,12 @@ mod tests {
         ) -> BoxFuture<'_, Result<PushedBranch, ExportError>> {
             Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
         }
+        fn export_patch(
+            &self,
+            _session_id: String,
+        ) -> BoxFuture<'_, Result<ExportPatch, ExportError>> {
+            Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
+        }
         fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
             Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
         }

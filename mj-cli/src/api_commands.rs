@@ -2174,12 +2174,23 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
                 Ok(())
             }
         },
-        ExportResult::Bytes(bytes) => {
+        ExportResult::Bytes { bytes, notice } => {
             let format = match args.kind {
                 ExportKindArg::Bundle => "bundle",
                 _ => "patch",
             };
-            write_bytes(&bytes, args.out.as_deref(), args.json, format)
+            // Standard output may be piped into `git apply`, so the notice
+            // goes to standard error.
+            if let Some(notice) = &notice {
+                eprintln!("note: {}", sanitize_terminal_text(notice));
+            }
+            write_bytes(
+                &bytes,
+                args.out.as_deref(),
+                args.json,
+                format,
+                notice.as_deref(),
+            )
         }
     }
 }
@@ -3264,8 +3275,16 @@ fn write_bytes(
     out: Option<&std::path::Path>,
     json: bool,
     format: &str,
+    notice: Option<&str>,
 ) -> Result<()> {
-    write_bytes_to(&mut std::io::stdout().lock(), bytes, out, json, format)
+    write_bytes_to(
+        &mut std::io::stdout().lock(),
+        bytes,
+        out,
+        json,
+        format,
+        notice,
+    )
 }
 
 fn write_bytes_to(
@@ -3274,16 +3293,20 @@ fn write_bytes_to(
     out: Option<&std::path::Path>,
     json: bool,
     format: &str,
+    notice: Option<&str>,
 ) -> Result<()> {
     match out {
         Some(path) => {
             std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
             if json {
-                let report = serde_json::json!({
+                let mut report = serde_json::json!({
                     "path": path,
                     "bytes": bytes.len(),
                     "format": format,
                 });
+                if let Some(notice) = notice {
+                    report["notice"] = notice.into();
+                }
                 writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)
                     .context("report the export")
             } else {
@@ -4272,15 +4295,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("work.patch");
         let mut printed = Vec::new();
-        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch").unwrap();
+        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch", None).unwrap();
         let report: serde_json::Value = serde_json::from_slice(&printed).unwrap();
         assert_eq!(report["bytes"], 4);
         assert_eq!(report["format"], "patch");
         assert_eq!(report["path"], path.to_str().unwrap());
+        assert!(report.get("notice").is_none());
         assert_eq!(std::fs::read(&path).unwrap(), b"diff");
 
         let mut printed = Vec::new();
-        write_bytes_to(&mut printed, b"diff", Some(&path), false, "patch").unwrap();
+        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch", Some("n")).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&printed).unwrap();
+        assert_eq!(report["notice"], "n");
+
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", Some(&path), false, "patch", None).unwrap();
         assert!(
             String::from_utf8(printed)
                 .unwrap()
@@ -4288,7 +4317,7 @@ mod tests {
         );
 
         let mut printed = Vec::new();
-        write_bytes_to(&mut printed, b"diff", None, true, "patch").unwrap();
+        write_bytes_to(&mut printed, b"diff", None, true, "patch", Some("n")).unwrap();
         assert_eq!(printed, b"diff");
     }
 

@@ -480,16 +480,40 @@ pub(super) async fn export(
     let backend = backend(&state)?.clone();
     match request.kind {
         ExportKind::Patch => {
-            let diff = backend
-                .diff(
-                    session_id,
-                    DiffOptions {
-                        full_patch: true,
-                        ..DiffOptions::default()
-                    },
-                )
-                .await?;
-            Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
+            // A patch is a repeatable read, and a stopped session's can take
+            // minutes to rebuild. Dropping the future stops its Git work, so a
+            // shutdown or handoff is not held up behind it; the client retries.
+            let patch = tokio::select! {
+                result = backend.export_patch(session_id) => result?,
+                // Like a fetch, tell the client it may reconnect and repeat the
+                // read even when this is a manual restart.
+                () = state.shutdown.cancelled() => return Err(ApiFailure::unavailable(
+                    "the daemon stopped during the patch export; reconnect and retry",
+                ).with_code(Some(DAEMON_HANDOFF_CODE))),
+            };
+            // Git writes the patch bytes as they are in the files, so no
+            // charset is claimed for them.
+            let mut response = ([(CONTENT_TYPE, "text/x-diff")], patch.bytes).into_response();
+            if let Some(notice) = patch.notice {
+                // A header value is one line of visible ASCII; a notice that
+                // carries anything else would be rejected or could split it.
+                let line: String = notice
+                    .chars()
+                    .map(|character| {
+                        if character.is_ascii_graphic() || character == ' ' {
+                            character
+                        } else {
+                            '?'
+                        }
+                    })
+                    .collect();
+                response.headers_mut().insert(
+                    axum::http::HeaderName::from_static(EXPORT_NOTICE_HEADER),
+                    axum::http::HeaderValue::from_str(&line)
+                        .map_err(|error| ApiFailure::from(anyhow::Error::from(error)))?,
+                );
+            }
+            Ok(response)
         }
         ExportKind::Branch => {
             let branch = request

@@ -736,6 +736,10 @@ pub trait SubagentBackend: Send + Sync {
         branch: String,
     ) -> BoxFuture<'_, Result<PushedBranch, ExportError>>;
 
+    /// The session's whole tracked work as a patch, from its target while it
+    /// has one and from its checkpoint after it stopped.
+    fn export_patch(&self, session_id: String) -> BoxFuture<'_, Result<ExportPatch, ExportError>>;
+
     /// A git bundle of the session's committed work.
     fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>>;
 

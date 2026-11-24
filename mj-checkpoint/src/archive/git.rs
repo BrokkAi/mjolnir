@@ -3670,17 +3670,13 @@ pub fn session_diff_patch(
     Ok(session_diff_with_mode(runner, repository, base, branch, None)?.diff)
 }
 
-fn session_diff_with_mode(
+/// Locate the checkout and resolve the commit a session diff compares against.
+fn resolve_session_diff_base(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
-    // None selects the whole-checkout patch used by export.
-    paths: Option<&[String]>,
-) -> Result<SessionDiff, SessionExportError> {
-    if paths.unwrap_or_default().iter().any(|path| path.is_empty()) {
-        return Err(SessionExportError::refused("diff paths must not be empty"));
-    }
+) -> Result<(PathBuf, String), SessionExportError> {
     let checkout = locate_checkout(runner, repository)?;
     let repository = &checkout.top_level;
     let base = match base.map(str::trim) {
@@ -3714,6 +3710,34 @@ fn session_diff_with_mode(
         )));
     }
     let base = trim_output(&resolved.stdout, "resolve the session diff base")?;
+    Ok((checkout.top_level, base))
+}
+
+/// Export the whole-checkout patch as the exact bytes Git wrote. File content
+/// is not required to be UTF-8, so this must not go through a `String`.
+pub fn session_diff_patch_bytes(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> Result<Vec<u8>, SessionExportError> {
+    let (repository, base) = resolve_session_diff_base(runner, repository, base, branch)?;
+    Ok(session_patch_bytes(runner, &repository, &base, None)?)
+}
+
+fn session_diff_with_mode(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+    // None selects the whole-checkout patch used by export.
+    paths: Option<&[String]>,
+) -> Result<SessionDiff, SessionExportError> {
+    if paths.unwrap_or_default().iter().any(|path| path.is_empty()) {
+        return Err(SessionExportError::refused("diff paths must not be empty"));
+    }
+    let (repository, base) = resolve_session_diff_base(runner, repository, base, branch)?;
+    let repository = repository.as_path();
     let head = git_text(
         runner,
         repository,
@@ -3790,6 +3814,18 @@ fn session_patch(
     base: &str,
     paths: Option<&[String]>,
 ) -> Result<String> {
+    Ok(
+        String::from_utf8_lossy(&session_patch_bytes(runner, repository, base, paths)?)
+            .into_owned(),
+    )
+}
+
+fn session_patch_bytes(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+    paths: Option<&[String]>,
+) -> Result<Vec<u8>> {
     let mut arguments = SESSION_DIFF_CONFIG.map(String::from).to_vec();
     if paths.is_some() {
         arguments.push("--literal-pathspecs".to_owned());
@@ -3812,8 +3848,7 @@ fn session_patch(
     } else {
         arguments.push(":/".to_owned());
     }
-    let patch = git_bytes_owned(runner, repository, &arguments, "diff tracked session paths")?;
-    Ok(String::from_utf8_lossy(&patch).into_owned())
+    git_bytes_owned(runner, repository, &arguments, "diff tracked session paths")
 }
 
 fn nul_records(bytes: &[u8]) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {

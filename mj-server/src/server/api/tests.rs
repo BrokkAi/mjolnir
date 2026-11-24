@@ -1472,6 +1472,11 @@ struct FakeBackend {
     file_pending: bool,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
+    /// What `export_patch` answers; `None` is a refusal.
+    patch: Option<ExportPatch>,
+    patch_requests: Mutex<Vec<String>>,
+    /// Makes `export_patch` wait forever, and records when its future is dropped.
+    patch_pending: Option<Arc<std::sync::atomic::AtomicBool>>,
     installation_token: Option<String>,
     /// When set, the diff fails outright rather than being refused.
     diff_fails: bool,
@@ -2113,6 +2118,24 @@ impl SubagentBackend for FakeBackend {
             let created = FakeWorkspaces::record(&name);
             workspaces.push(created.clone());
             Ok(created)
+        })
+    }
+    fn export_patch(&self, session_id: String) -> BoxFuture<'_, Result<ExportPatch, ExportError>> {
+        Box::pin(async move {
+            self.patch_requests.lock().unwrap().push(session_id);
+            if let Some(dropped) = &self.patch_pending {
+                struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Dropped {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                let _dropped = Dropped(dropped.clone());
+                std::future::pending::<()>().await;
+            }
+            self.patch
+                .clone()
+                .ok_or_else(|| ExportError::Refused("this session has no checkpoint".into()))
         })
     }
     fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
@@ -6273,9 +6296,13 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
 }
 
 #[tokio::test]
-async fn diff_route_preserves_repeated_paths_and_export_selects_the_full_patch() {
+async fn diff_route_preserves_repeated_paths_and_export_serves_patch_bytes_with_a_notice() {
     let backend = Arc::new(FakeBackend {
         diff: Some(r#"{"diff":"+new\n","base":"aaaa","head":"bbbb","tracked_files":[{"path":"tracked","insertions":1,"deletions":0,"binary":false}],"untracked_files":["new.txt"],"untracked_total":1}"#.into()),
+        patch: Some(ExportPatch {
+            bytes: b"diff --git a/f b/f\n+caf\xe9 \xff\n".to_vec(),
+            notice: Some("relative to saved HEAD\r\nx-injected: 1 \u{e9}".into()),
+        }),
         ..FakeBackend::default()
     });
     let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
@@ -6302,24 +6329,61 @@ async fn diff_route_preserves_repeated_paths_and_export_selects_the_full_patch()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_TYPE], "text/x-diff");
     assert_eq!(
-        response.headers()[CONTENT_TYPE],
-        "text/x-diff; charset=utf-8"
+        response.headers()[EXPORT_NOTICE_HEADER],
+        "relative to saved HEAD??x-injected: 1 ?"
+    );
+    assert!(response.headers().get("x-injected").is_none());
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"diff --git a/f b/f\n+caf\xe9 \xff\n");
+    assert_eq!(
+        backend.patch_requests.lock().unwrap().as_slice(),
+        ["session-1"]
     );
     assert_eq!(
         backend.diff_options.lock().unwrap().as_slice(),
-        [
-            DiffOptions {
-                base: Some("HEAD^".into()),
-                json: true,
-                paths: vec!["-literal".into(), "src/file & notes".into(), String::new()],
-                full_patch: false,
-            },
-            DiffOptions {
-                full_patch: true,
-                ..DiffOptions::default()
-            },
-        ]
+        [DiffOptions {
+            base: Some("HEAD^".into()),
+            json: true,
+            paths: vec!["-literal".into(), "src/file & notes".into(), String::new()],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_a_patch_export_and_drops_its_work() {
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let backend = Arc::new(FakeBackend {
+        patch_pending: Some(dropped.clone()),
+        shutdown: shutdown.clone(),
+        ..FakeBackend::default()
+    });
+    let (app, ..) = api_app(backend.clone(), |_| {});
+    let export = mj_core::runtime::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"patch"}"#))
+                .unwrap(),
+        ),
+    );
+    while backend.patch_requests.lock().unwrap().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!dropped.load(std::sync::atomic::Ordering::Acquire));
+    shutdown.cancel();
+    let response = export.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["code"], DAEMON_HANDOFF_CODE);
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::Acquire),
+        "the export's work must be dropped, not left running"
     );
 }
 

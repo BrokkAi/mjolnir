@@ -3197,6 +3197,56 @@ fn a_session_diff_from_a_subdirectory_covers_the_checkout_without_writing_object
 }
 
 #[test]
+fn a_session_patch_keeps_every_byte_and_applies_to_the_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("work");
+    initialize_repository(&root);
+    // Bytes that are not UTF-8, in text Git diffs line by line.
+    commit_file(&root, "latin.txt", b"caf\xe9\nkeep\n", "text");
+    commit_file(&root, "both.txt", b"one\ntwo\nthree\n", "both");
+    commit_file(&root, "blob.bin", &[0, 1, 2, 3, 255], "binary");
+    let base = git_line(&root, &["rev-parse", "HEAD"]);
+
+    fs::write(root.join("latin.txt"), b"caf\xe9 \xff au lait\nkeep\n").unwrap();
+    fs::write(root.join("blob.bin"), [0, 9, 8, 7, 254, 253]).unwrap();
+    // One path edited twice: the first edit is staged, the second is not.
+    fs::write(root.join("both.txt"), b"ONE\ntwo\nthree\n").unwrap();
+    git(&root, &["add", "both.txt"]);
+    fs::write(root.join("both.txt"), b"ONE\ntwo\nTHREE\n").unwrap();
+
+    let patch = session_diff_patch_bytes(&SystemGit, &root, Some(&base), None).unwrap();
+    assert!(String::from_utf8(patch.clone()).is_err());
+    assert!(
+        patch
+            .windows(b"caf\xe9 \xff au lait".len())
+            .any(|window| window == b"caf\xe9 \xff au lait")
+    );
+    assert!(String::from_utf8_lossy(&patch).contains("GIT binary patch"));
+
+    let fresh = temp.path().join("fresh");
+    git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            root.to_str().unwrap(),
+            fresh.to_str().unwrap(),
+        ],
+    );
+    git(&fresh, &["checkout", "-q", &base]);
+    let patch_file = temp.path().join("work.patch");
+    fs::write(&patch_file, &patch).unwrap();
+    git(&fresh, &["apply", "--binary", patch_file.to_str().unwrap()]);
+    for name in ["latin.txt", "both.txt", "blob.bin"] {
+        assert_eq!(
+            fs::read(fresh.join(name)).unwrap(),
+            fs::read(root.join(name)).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn a_session_diff_includes_submodule_pointer_changes_despite_git_ignore_settings() {
     let temp = tempfile::tempdir().unwrap();
     let origin = temp.path().join("upstream");
