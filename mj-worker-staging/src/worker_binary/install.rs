@@ -4,7 +4,7 @@ use super::*;
 mod profile_transfer;
 use crate::targets::CommandOutput;
 use mj_core::targets::SshTrafficClass;
-pub use profile_transfer::ProfileContentManifest;
+pub use profile_transfer::{ProfileContentManifest, profile_upload_generation};
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
 pub fn append_hel_target_environment(
@@ -1039,23 +1039,8 @@ pub fn install_worker_profile_files(
     } = endpoint;
     let upload = ssh.map(|_| format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING));
     if let (Some(ssh), Some(upload)) = (ssh, &upload) {
-        execute_checked(
-            executor,
-            crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["mkdir", "-p", upload])
-                .purpose("create remote upload staging"),
-        )?;
-        for (source, name) in [
-            (launch_config, "launch.json"),
-            (ownership, "ownership.json"),
-        ] {
-            upload_worker_file(
-                executor,
-                ssh,
-                source,
-                &format!("{upload}/{name}"),
-                "upload remote container worker file",
-            )?;
-        }
+        // The profile upload creates `{upload}` (under umask 077); the two
+        // worker files travel with the install script below.
         let staged_profile = format!("{upload}/profile");
         match engine {
             // A Nitro guest does not share its profile objects with the
@@ -1140,9 +1125,25 @@ pub fn install_worker_profile_files(
         .purpose("restrict harness profile permissions"),
     ];
     if let (Some(ssh), Some(upload)) = (ssh, upload) {
+        // The worker files arrive on the script's stdin, so they cost no SSH
+        // command of their own and stay out of argv. The first step unpacks
+        // them into the staging the profile upload created.
+        let worker_files = worker_files_archive(&[
+            ("launch.json", launch_config),
+            ("ownership.json", ownership),
+        ])?;
+        let stage_files = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                "umask 077; mkdir -p -- \"$1\"; exec tar -xf - --no-same-owner --no-same-permissions -C \"$1\"",
+                "mj-stage-worker-files",
+                &upload,
+            ],
+        );
         // Remove the staging only after all install steps succeed.
-        let steps = commands
-            .into_iter()
+        let steps = std::iter::once(stage_files)
+            .chain(commands)
             .chain([CommandSpec::new("rm", ["-rf", "--", &upload])])
             .map(|command| {
                 targets::CommandStep::new(
@@ -1157,7 +1158,8 @@ pub fn install_worker_profile_files(
         execute_checked(
             executor,
             targets::ssh_command_owned(SshTrafficClass::Bulk, ssh, targets::step_script(steps))
-                .purpose("install remote container worker"),
+                .purpose("install remote container worker")
+                .with_sensitive_stdin(worker_files),
         )?;
     } else {
         for command in commands {
@@ -1165,6 +1167,20 @@ pub fn install_worker_profile_files(
         }
     }
     Ok(())
+}
+
+/// An uncompressed tar of small private files, each mode 0600.
+fn worker_files_archive(files: &[(&str, &Path)]) -> Result<Vec<u8>> {
+    let mut archive = tar::Builder::new(Vec::new());
+    for (name, source) in files {
+        let bytes = std::fs::read(source)
+            .with_context(|| format!("read worker upload {}", source.display()))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o600);
+        archive.append_data(&mut header, name, bytes.as_slice())?;
+    }
+    Ok(archive.into_inner()?)
 }
 
 /// Refresh configuration without removing native history or skills the harness
@@ -1600,6 +1616,7 @@ while IFS= read -r key; do
     [ -f "$pins/$key" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
 done < "$work/.mj-keys"
 trap 'rm -rf -- "$work" "$pins"' EXIT
+case "$destination" in */*) mkdir -p -- "${destination%/*}";; esac
 cp -RL -- "$work/profile" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }
 mj_profile_quiescent"#;
 
