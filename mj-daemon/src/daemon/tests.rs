@@ -1,8 +1,10 @@
 use super::*;
 use crate::server::api::TerminalOperations;
+#[cfg(unix)]
+use mj_client::http::ImportSessionMetadata;
 use mj_client::http::{
-    ImportSessionMetadata, LifecycleCompletion, SessionCommandRequest,
-    StartupPromptOutcomesRequest, StartupPromptRequest, SuspendPreflightRequest,
+    LifecycleCompletion, SessionCommandRequest, StartupPromptOutcomesRequest, StartupPromptRequest,
+    SuspendPreflightRequest,
 };
 use mj_controller::controller::test_support::RefusingExecutor;
 use mj_core::subagent::SubagentRecord;

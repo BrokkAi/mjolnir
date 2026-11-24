@@ -898,14 +898,14 @@ async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
 }
 
 /// Wait for the viewer readiness publication over the terminal HTTP API.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub async fn wait_for_web_access(
     client: &mj_client::http::HttpDaemonClient,
 ) -> Result<mj_client::web::WebViewerAccess> {
     wait_for_web_access_with_timeout(client, START_TIMEOUT).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn wait_for_web_access_with_timeout(
     client: &mj_client::http::HttpDaemonClient,
     timeout: Duration,
