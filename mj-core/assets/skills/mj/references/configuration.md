@@ -682,10 +682,12 @@ instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
 `KIMI_CODE_HOME`, `GROK_HOME`, DSH's
 `DSH_ACP_DATA_DIR`, and `XDG_CONFIG_HOME` for Muse and OpenCode. Muse and
 OpenCode also reserve `XDG_DATA_HOME`; their homes must end in `/muse` and `/opencode`,
-respectively. A DSH profile also cannot set `DSH_ACP_SYSTEM_PROMPT`
-(put instructions in `AGENTS.md` in the profile home) or
-`DSH_ACP_PERMISSION_MODE` (the target's permission mode decides it); a profile
-that sets either fails to load. Other dsh-acp settings may go in
+respectively. A DSH profile also cannot set `DSH_ACP_DSH_HOME` (native DSH
+state lives under the profile home), `DSH_ACP_SYSTEM_PROMPT` (put instructions
+in `AGENTS.md` in the profile home), or `DSH_ACP_PERMISSION_MODE` (the target's
+permission mode decides it); a profile that sets any of them fails to load.
+Other
+dsh-acp settings may go in
 `environment`: `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`),
 `DEEPSEEK_MODEL` (default `deepseek-flash`), and `DSH_ACP_MODELS` (default
 `deepseek-flash,deepseek-v4-pro`).
@@ -693,7 +695,7 @@ that sets either fails to load. Other dsh-acp settings may go in
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
 cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
-only when it is 0.4.0 or newer, otherwise the pinned npm package. Containers
+only when it is 0.8.0 or newer, otherwise the pinned npm package. Containers
 use their image-provided runtime or the documented installer fallback. The
 `mj login` command invokes the harness's canonical controller-side command from
 `PATH`.

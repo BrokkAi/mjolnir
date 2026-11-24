@@ -109,6 +109,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
     task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
+    antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<Option<u64>>>>,
 ) -> Result<()> {
     let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
     run_relay_coordinator(
@@ -121,6 +122,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
         verdict,
         capture,
         Some(startup),
+        antigravity_refresh,
     )
     .await
 }
@@ -152,6 +154,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         verdict,
         capture,
         None,
+        None,
     )
     .await
 }
@@ -167,6 +170,7 @@ fn run_relay_coordinator(
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
     capture: Option<crate::work_facts::WorkObserver>,
     mut startup: Option<HarnessStartup>,
+    mut antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<Option<u64>>>>,
 ) -> impl std::future::Future<Output = Result<()>> + Send {
     // Capturing a turn's work facts makes this future large. Keep its state
     // on the heap rather than embedding it in every startup/capture wrapper;
@@ -255,6 +259,9 @@ fn run_relay_coordinator(
                 let cut_held = relay.worker_writes_held();
                 (cut_held || relay.close_pending(), cut_held)
             };
+            if held && let Some(monitor) = task_monitors.antigravity.as_mut() {
+                monitor.fail_idle_waiters();
+            }
             if !cut_held
                 && relay
                     .lock()
@@ -593,12 +600,20 @@ fn run_relay_coordinator(
                         .refresh(&relay, false)
                         .await?;
                 }
+                reply = async { antigravity_refresh.as_mut().expect("guarded refresh receiver").recv().await }, if antigravity_refresh.is_some() => {
+                    if let Some(reply) = reply {
+                        if held { let _ = reply.send(None); }
+                        else if let Some(monitor) = task_monitors.antigravity.as_mut() {
+                            monitor.request_idle_reservation_refresh(&relay, reply)?;
+                        } else {
+                            let epoch = relay.lock().expect("relay state lock poisoned").antigravity_hook_epoch();
+                            let _ = reply.send(Some(epoch));
+                        }
+                    } else { antigravity_refresh = None; }
+                }
+                result = async { task_monitors.antigravity.as_mut().expect("guarded scan").finish_in_flight_scan(&relay).await }, if task_monitors.antigravity.as_ref().is_some_and(AntigravityTaskMonitor::has_in_flight_scan) && !held => { result?; }
                 _ = antigravity_poll.tick(), if task_monitors.antigravity.is_some() && !held => {
-                    task_monitors.antigravity
-                        .as_mut()
-                        .expect("Antigravity poll branch is guarded")
-                        .refresh(&relay, false)
-                        .await?;
+                    task_monitors.antigravity.as_mut().expect("guarded poll").start_periodic_poll(&relay)?;
                 }
                 _ = verdict_poll.tick(), if verdict.is_some() => {}
                 result = login_reads.join_next(), if !login_reads.is_empty() => {
@@ -2255,6 +2270,7 @@ mod startup_tests {
                 None,
                 None,
                 Some(startup),
+                None,
             ));
             match arrival {
                 Arrival::AdvancesThenStalls => {

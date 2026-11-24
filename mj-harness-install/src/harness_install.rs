@@ -13,9 +13,9 @@ use mj_core::config::{ExecutionPolicy, HarnessKind};
 use mj_core::file_lock::FileLock;
 use mj_core::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
-    NODE_VERSION, harness_uses_node_runtime, managed_harness_cache_root,
-    managed_harness_install_dir, managed_harness_manifest_matches, managed_node_cache_root,
-    npm_bridge, pin,
+    NODE_MINIMUM_VERSION, NODE_VERSION, harness_node_minimum_version, harness_uses_node_runtime,
+    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches,
+    managed_node_cache_root, node_version_is_at_least, npm_bridge, pin,
 };
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
@@ -1444,7 +1444,21 @@ pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Resu
 pub async fn ensure_node_runtime(
     environment: &mut BTreeMap<String, String>,
 ) -> Result<Option<ManagedNodeRuntime>> {
-    if system_node_is_compatible(environment).await {
+    ensure_node_runtime_with_minimum(environment, NODE_MINIMUM_VERSION).await
+}
+
+pub async fn ensure_node_runtime_for(
+    harness: HarnessKind,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<Option<ManagedNodeRuntime>> {
+    ensure_node_runtime_with_minimum(environment, harness_node_minimum_version(harness)).await
+}
+
+async fn ensure_node_runtime_with_minimum(
+    environment: &mut BTreeMap<String, String>,
+    minimum_version: &str,
+) -> Result<Option<ManagedNodeRuntime>> {
+    if system_node_is_compatible(environment, minimum_version).await {
         return Ok(None);
     }
     let root = managed_node_cache_root(
@@ -1464,7 +1478,7 @@ async fn ensure_node_runtime_from_metadata(
     environment: &mut BTreeMap<String, String>,
     metadata: &serde_json::Value,
 ) -> Result<Option<ManagedNodeRuntime>> {
-    if system_node_is_compatible(environment).await {
+    if system_node_is_compatible(environment, NODE_MINIMUM_VERSION).await {
         return Ok(None);
     }
     install_managed_node(root, environment, metadata)
@@ -1659,12 +1673,15 @@ fn ensure_node_artifact_platform(platform: &serde_json::Value) -> Result<()> {
     };
     anyhow::ensure!(
         Path::new(interpreter).is_file(),
-        "Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter {interpreter} is missing. Install Node.js 22 or newer with npm and npx on the target PATH"
+        "Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter {interpreter} is missing. Install a supported Node.js with npm and npx on the target PATH"
     );
     Ok(())
 }
 
-async fn system_node_is_compatible(environment: &BTreeMap<String, String>) -> bool {
+async fn system_node_is_compatible(
+    environment: &BTreeMap<String, String>,
+    minimum_version: &str,
+) -> bool {
     if crate::program_path::find_program_on_path("node", environment.get("PATH").map(OsStr::new))
         .is_none()
     {
@@ -1686,7 +1703,10 @@ async fn system_node_is_compatible(environment: &BTreeMap<String, String>) -> bo
         }
     };
     if !output.status.success()
-        || !node_version_is_supported(String::from_utf8_lossy(&output.stdout).trim())
+        || !node_version_is_at_least(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            minimum_version,
+        )
     {
         if !output.status.success() {
             tracing::warn!(
@@ -1781,7 +1801,7 @@ async fn managed_node_health(
             output.status
         )));
     }
-    if !node_version_is_supported(version) {
+    if !node_version_is_at_least(version, NODE_MINIMUM_VERSION) {
         return Ok(ManagedNodeHealth::Unusable(format!(
             "node reports unsupported version {version:?}"
         )));
@@ -1818,14 +1838,6 @@ async fn bounded_env_output(
     mj_core::subprocess::run_bounded(command, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .context("probe Node.js runtime")
-}
-
-fn node_version_is_supported(version: &str) -> bool {
-    version
-        .strip_prefix('v')
-        .and_then(|version| version.split('.').next())
-        .and_then(|major| major.parse::<u64>().ok())
-        .is_some_and(|major| major >= 22)
 }
 
 fn prepend_path(environment: &mut BTreeMap<String, String>, bin: &Path) -> Result<()> {
@@ -2840,7 +2852,7 @@ mod tests {
         );
         let error = ensure_node_artifact_platform(&platform).unwrap_err();
         assert!(error.to_string().contains("required program interpreter"));
-        assert!(error.to_string().contains("Install Node.js 22 or newer"));
+        assert!(error.to_string().contains("Install a supported Node.js"));
     }
 
     #[test]
@@ -3456,6 +3468,26 @@ ln -s '{dispatcher}' "$cli"
         assert!(runtime.is_none());
         assert_eq!(environment["PATH"], original_path);
         assert!(!temp.path().join("cache/mjolnir/node").exists());
+    }
+
+    #[test]
+    fn dsh_does_not_reuse_node_22_for_its_pinned_npm_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
+        let tools = temp.path().join("bin");
+        executable(
+            &tools.join("node"),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.22.0; fi\n",
+        );
+
+        assert!(run_async(system_node_is_compatible(
+            &environment,
+            NODE_MINIMUM_VERSION
+        )));
+        assert!(!run_async(system_node_is_compatible(
+            &environment,
+            harness_node_minimum_version(HarnessKind::Dsh)
+        )));
     }
 
     #[test]
