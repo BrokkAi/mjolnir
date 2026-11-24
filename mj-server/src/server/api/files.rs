@@ -527,7 +527,14 @@ pub(super) async fn export(
             Ok(Json(pushed).into_response())
         }
         ExportKind::Bundle => {
-            let bundle = backend.bundle(session_id.clone()).await?;
+            // Like a patch, a bundle is a repeatable read that can take
+            // minutes to build from a stopped session's checkpoint.
+            let bundle = tokio::select! {
+                result = backend.bundle(session_id.clone()) => result?,
+                () = state.shutdown.cancelled() => return Err(ApiFailure::unavailable(
+                    "the daemon stopped during the bundle export; reconnect and retry",
+                ).with_code(Some(DAEMON_HANDOFF_CODE))),
+            };
             // The filename reaches a header, so keep it to characters that
             // cannot end the quoted string or split the response.
             let filename: String = format!("{session_id}-{}.bundle", bundle.repository)

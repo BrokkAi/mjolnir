@@ -9,19 +9,20 @@
 //! stopped session starts from that one scratch checkout.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use mj_checkpoint::archive::{
-    ArchiveManifest, RepositoryManifest, RepositoryMetadata, SystemGit, managed_base_is_available,
-    session_diff_patch_bytes,
+    ArchiveManifest, ArchivePurgeCancel, RepositoryManifest, RepositoryMetadata,
+    SessionExportError, managed_base_is_available, session_bundle_bytes, session_diff_patch_bytes,
 };
 use mj_core::state::{
     ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget, SessionRecord, SessionState,
 };
 
-use crate::controller::resume::verify_resume_checkpoint;
+use crate::controller::resume::verify_resume_checkpoint_unless;
 use crate::controller::worktree::{
-    ManagedCloneRestoreOutcome, restore_legacy_worktree_as_managed_clone,
+    ExecutorGit, ManagedCloneRestoreOutcome, restore_legacy_worktree_as_managed_clone,
     restore_managed_clone_origin_delta,
 };
 use crate::targets::CommandExecutor;
@@ -42,6 +43,15 @@ impl From<anyhow::Error> for CheckpointExportError {
     }
 }
 
+impl From<SessionExportError> for CheckpointExportError {
+    fn from(error: SessionExportError) -> Self {
+        match error {
+            SessionExportError::Refused(reason) => Self::Refused(reason),
+            SessionExportError::Failed(error) => Self::Failed(error),
+        }
+    }
+}
+
 /// Whether an export must come from the stored checkpoint because the session
 /// has no checkout to read. A stopped session can keep a locator while its
 /// cleanup is deferred; its checkpoint is still the only copy of its work.
@@ -53,11 +63,10 @@ pub fn export_reads_checkpoint(record: &SessionRecord) -> bool {
 /// non-bare checkout. The directory is removed when this is dropped.
 pub struct ScratchCheckout {
     _directory: tempfile::TempDir,
-    /// The top level of the restored checkout.
+    /// The top level of the restored checkout. Whole-checkout exports run
+    /// here: the subdirectory the session worked in is not restored when it
+    /// held nothing Git tracks.
     pub top_level: PathBuf,
-    /// The directory the session worked in: the top level, or the
-    /// subdirectory of it the checkpoint recorded.
-    pub repository: PathBuf,
     pub metadata: RepositoryMetadata,
     /// The launch base the session record names, when it names one.
     pub recorded_base: Option<String>,
@@ -70,9 +79,13 @@ pub struct ScratchCheckout {
 /// this host and uses the same object format, otherwise a clone of the origin
 /// the checkpoint names. A checkpoint that cannot be rebuilt here is refused,
 /// and the refusal says how to get the work another way.
+///
+/// Every phase stops when the executor reports cancellation: archive
+/// verification, pack spooling and each Git command run through it. The
+/// executor is cloned into the archive reader's cancellation probe.
 pub fn materialize_scratch_checkout(
     record: &SessionRecord,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Clone + Send + Sync + 'static),
 ) -> Result<ScratchCheckout, CheckpointExportError> {
     let session_id = &record.id;
     let checkpoint = record.checkpoint.as_deref().ok_or_else(|| {
@@ -86,7 +99,11 @@ pub fn materialize_scratch_checkout(
             checkpoint.archive_path.display()
         )));
     }
-    let verified = verify_resume_checkpoint(session_id, checkpoint)?;
+    let cancel: ArchivePurgeCancel = {
+        let probe = executor.clone();
+        Arc::new(move || probe.cancellation_requested())
+    };
+    let verified = verify_resume_checkpoint_unless(session_id, checkpoint, Some(&cancel))?;
     let primary = primary_repository(&verified.manifest)?;
     if primary.metadata.plain_directory {
         return Err(CheckpointExportError::Refused(
@@ -144,6 +161,7 @@ pub fn materialize_scratch_checkout(
             &scratch_worktree,
             &verified.archive_path,
             &manifest,
+            Some(&cancel),
         )
     };
     restored.map_err(|error| {
@@ -151,14 +169,9 @@ pub fn materialize_scratch_checkout(
             "rebuild the session's checkout from its checkpoint on this host; if its origin or source repository is not reachable from here, resume the session and export from there",
         ))
     })?;
-    let repository = match &primary.metadata.checkout_subdirectory {
-        Some(subdirectory) => top_level.join(subdirectory),
-        None => top_level.clone(),
-    };
     Ok(ScratchCheckout {
         _directory: directory,
         top_level,
-        repository,
         metadata: primary.metadata.clone(),
         recorded_base: record
             .managed_worktree
@@ -183,21 +196,32 @@ pub struct CheckpointPatch {
 /// because commits the session made are then not in the patch.
 pub fn checkpoint_patch(
     record: &SessionRecord,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Clone + Send + Sync + 'static),
 ) -> Result<CheckpointPatch, CheckpointExportError> {
     let scratch = materialize_scratch_checkout(record, executor)?;
-    patch_from_scratch(&scratch).map_err(CheckpointExportError::Failed)
+    patch_from_scratch(&scratch, executor).map_err(CheckpointExportError::Failed)
 }
 
-fn patch_from_scratch(scratch: &ScratchCheckout) -> anyhow::Result<CheckpointPatch> {
-    let candidates = [
+/// The launch bases a scratch checkout offers, best first: the one the session
+/// record names, then the one the checkpoint recorded.
+fn base_candidates(scratch: &ScratchCheckout) -> impl Iterator<Item = &str> {
+    [
         scratch.recorded_base.as_deref(),
         Some(scratch.metadata.base_commit.as_str()).filter(|base| !base.is_empty()),
-    ];
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn patch_from_scratch(
+    scratch: &ScratchCheckout,
+    executor: &(impl CommandExecutor + Sync),
+) -> anyhow::Result<CheckpointPatch> {
+    let git = ExecutorGit::local(executor);
     let mut unavailable = None;
-    for base in candidates.into_iter().flatten() {
-        if managed_base_is_available(&SystemGit, &scratch.repository, base)? {
-            let bytes = session_diff_patch_bytes(&SystemGit, &scratch.repository, Some(base), None)
+    for base in base_candidates(scratch) {
+        if managed_base_is_available(&git, &scratch.top_level, base)? {
+            let bytes = session_diff_patch_bytes(&git, &scratch.top_level, Some(base), None)
                 .map_err(|error| anyhow!("{error}"))?;
             return Ok(CheckpointPatch {
                 bytes,
@@ -206,7 +230,7 @@ fn patch_from_scratch(scratch: &ScratchCheckout) -> anyhow::Result<CheckpointPat
         }
         unavailable.get_or_insert(base);
     }
-    let bytes = session_diff_patch_bytes(&SystemGit, &scratch.repository, Some("HEAD"), None)
+    let bytes = session_diff_patch_bytes(&git, &scratch.top_level, Some("HEAD"), None)
         .map_err(|error| anyhow!("{error}"))?;
     let reason = match unavailable {
         Some(base) => format!("the session's launch base {base} is not in the restored repository"),
@@ -217,6 +241,39 @@ fn patch_from_scratch(scratch: &ScratchCheckout) -> anyhow::Result<CheckpointPat
         notice: Some(format!(
             "{reason}, so the patch holds the uncommitted tracked changes relative to the saved HEAD; commits the session made are in `mj export --kind bundle`"
         )),
+    })
+}
+
+/// A session's committed history as a native Git bundle.
+#[derive(Debug, Clone)]
+pub struct CheckpointBundle {
+    /// The id of the repository the bundle holds.
+    pub repository: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The bundle a live export would produce, rebuilt from the stored checkpoint.
+///
+/// The base is chosen as the patch's is. A checkpoint with no usable launch
+/// base bundles what `origin` does not have. A session with no commits beyond
+/// that base is refused, pointing at the patch export for its edits.
+pub fn checkpoint_bundle(
+    record: &SessionRecord,
+    executor: &(impl CommandExecutor + Clone + Send + Sync + 'static),
+) -> Result<CheckpointBundle, CheckpointExportError> {
+    let scratch = materialize_scratch_checkout(record, executor)?;
+    let git = ExecutorGit::local(executor);
+    let mut base = None;
+    for candidate in base_candidates(&scratch) {
+        if managed_base_is_available(&git, &scratch.top_level, candidate)? {
+            base = Some(candidate);
+            break;
+        }
+    }
+    let bytes = session_bundle_bytes(&git, &scratch.top_level, base, None, base.is_none())?;
+    Ok(CheckpointBundle {
+        repository: scratch.metadata.id,
+        bytes,
     })
 }
 
@@ -272,6 +329,8 @@ fn scratch_worktree(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use mj_checkpoint::archive::{
         GitCollectionSpec, GitHistoryMode, RepositorySnapshot, SystemGit,
@@ -279,6 +338,7 @@ mod tests {
     use mj_checkpoint::snapshot::{
         CaptureConsent, CheckoutOwnership, ExclusionSource, RepositoryInput, SessionCaptureConsent,
     };
+    use mj_core::targets::{CancellableProcessExecutor, CommandOutput};
 
     use super::*;
     use crate::controller::test_support::{
@@ -558,6 +618,344 @@ mod tests {
             &patch.bytes,
             &["committed.txt", "latin.txt", "both.txt", "blob.bin"],
         );
+    }
+
+    /// Records every command and cancels the operation once a Git clone has
+    /// run, as a client leaving or a daemon handoff would mid-export.
+    #[derive(Clone)]
+    struct CancelAfterClone {
+        inner: CancellableProcessExecutor,
+        cancel_after_clone: bool,
+        commands: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl CancelAfterClone {
+        fn new(cancelled: bool, cancel_after_clone: bool) -> Self {
+            Self {
+                inner: CancellableProcessExecutor::new(Arc::new(AtomicBool::new(cancelled))),
+                cancel_after_clone,
+                commands: Arc::default(),
+            }
+        }
+
+        fn ran(&self, word: &str) -> bool {
+            self.commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|command| command.split(' ').any(|part| part == word))
+        }
+    }
+
+    impl CommandExecutor for CancelAfterClone {
+        fn execute(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<CommandOutput> {
+            self.commands.lock().unwrap().push(format!(
+                "{} {}",
+                command.program,
+                command.args.join(" ")
+            ));
+            let output = CommandExecutor::execute(&self.inner, command);
+            if self.cancel_after_clone && command.args.iter().any(|argument| argument == "clone") {
+                self.inner
+                    .cancellation_flag()
+                    .store(true, Ordering::Release);
+            }
+            output
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.inner.cancellation_requested()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.inner.cancellation_requested_without_deadline()
+        }
+
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            self.inner.pause_deadline()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<CommandOutput> {
+            self.inner.execute_without_deadline(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.inner
+                .execute_with_stdin_without_deadline(command, input)
+        }
+    }
+
+    // Hard-won: review of d2a0f9806: only the clone ran through the cancellable
+    // executor, so archive verification, restore and diff ran on after a disconnect.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn a_cancelled_export_stops_before_it_restores_or_reads_the_work() {
+        let fixture = fixture(true);
+        let record = stopped_session(
+            &fixture,
+            origin_delta_repository(&fixture, &fixture.base.clone()),
+        );
+
+        // Cancelled before it starts: the archive is not even verified, so no
+        // command runs.
+        let executor = CancelAfterClone::new(true, false);
+        let error = checkpoint_patch(&record, &executor).unwrap_err();
+        let CheckpointExportError::Failed(error) = error else {
+            panic!("a cancelled export is a failure, not a refusal");
+        };
+        assert!(
+            mj_checkpoint::archive::archive_verification_cancelled(&error),
+            "{error:#}"
+        );
+        assert!(executor.commands.lock().unwrap().is_empty());
+
+        // Cancelled once the checkout is cloned: restore and diff never run.
+        let executor = CancelAfterClone::new(false, true);
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            checkpoint_patch(&record, &executor),
+            Err(CheckpointExportError::Failed(_))
+        ));
+        assert!(executor.ran("clone"));
+        assert!(
+            !executor.ran("diff"),
+            "{:?}",
+            executor.commands.lock().unwrap()
+        );
+        assert!(started.elapsed() < Duration::from_secs(30));
+
+        let executor = CancelAfterClone::new(false, true);
+        assert!(matches!(
+            checkpoint_bundle(&record, &executor),
+            Err(CheckpointExportError::Failed(_))
+        ));
+        assert!(!executor.ran("bundle"));
+    }
+
+    // Hard-won: review of d2a0f9806: the scratch restore appended `/.mj/clones/`
+    // to the user's own `.git/info/exclude`.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn an_export_leaves_the_source_repositorys_exclude_file_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = fixture(false);
+        let mut record = stopped_session(&fixture, origin_delta_repository(&fixture, ""));
+        record.managed_worktree = Some(Box::new(ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
+            source_project_directory: fixture.source.clone(),
+            source_repository: fixture.source.clone(),
+            worktree_root: fixture.work.clone(),
+            branch: "feature/export".into(),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: Some(fixture.base.clone()),
+        }));
+        let exclude = fixture.source.join(".git/info/exclude");
+        let before = std::fs::read(&exclude).unwrap();
+        // A write would fail outright, not just change the file.
+        std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        checkpoint_patch(&record, &ProcessExecutor).unwrap();
+        assert_eq!(std::fs::read(&exclude).unwrap(), before);
+    }
+
+    // Hard-won: review of d2a0f9806: export ran Git in the recorded checkout
+    // subdirectory, which a restore does not create when it holds nothing tracked.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn an_export_works_when_the_sessions_subdirectory_was_not_restored() {
+        let fixture = fixture(true);
+        let mut repository = origin_delta_repository(&fixture, &fixture.base.clone());
+        repository.metadata.checkout_subdirectory = Some(PathBuf::from("ignored-or-empty"));
+        let record = stopped_session(&fixture, repository);
+
+        let scratch = materialize_scratch_checkout(&record, &ProcessExecutor).unwrap();
+        assert!(!scratch.top_level.join("ignored-or-empty").exists());
+        drop(scratch);
+
+        let patch = checkpoint_patch(&record, &ProcessExecutor).unwrap();
+        assert_eq!(patch.bytes, live_patch(&fixture, &fixture.base));
+        assert!(
+            !checkpoint_bundle(&record, &ProcessExecutor)
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
+    }
+
+    /// Fetch `bundle` into a clone of the base, and return the commits it
+    /// brought beyond the base, newest first, plus the session's saved heads.
+    fn import_bundle(fixture: &Fixture, bundle: &[u8]) -> (Vec<String>, String) {
+        assert!(bundle.starts_with(b"# v"), "a native Git bundle");
+        let file = fixture.temp.path().join("export.bundle");
+        std::fs::write(&file, bundle).unwrap();
+        let fresh = fixture.temp.path().join("fresh-bundle");
+        let _ = std::fs::remove_dir_all(&fresh);
+        test_git(
+            fixture.temp.path(),
+            &[
+                "clone",
+                fixture.source.to_str().unwrap(),
+                fresh.to_str().unwrap(),
+            ],
+        );
+        test_git(&fresh, &["bundle", "verify", file.to_str().unwrap()]);
+        test_git(
+            &fresh,
+            &[
+                "fetch",
+                "-q",
+                file.to_str().unwrap(),
+                "HEAD:refs/heads/imported",
+            ],
+        );
+        let commits = test_git(
+            &fresh,
+            &["rev-list", "imported", &format!("^{}", fixture.base)],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect();
+        let heads = test_git(&fresh, &["bundle", "list-heads", file.to_str().unwrap()]);
+        (commits, heads)
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn a_stopped_session_exports_a_bundle_of_its_commits_without_its_stash_or_edits() {
+        let fixture = fixture(true);
+        // One commit is already on origin, a second is not, a stash holds one
+        // edit, and the rest stay as uncommitted edits.
+        test_git(&fixture.work, &["push", "-q", "origin", "HEAD:main"]);
+        write_file(&fixture.work.join("second.txt"), b"second\n");
+        test_git(&fixture.work, &["add", "second.txt"]);
+        test_git(&fixture.work, &["commit", "-q", "-m", "unpushed"]);
+        test_git(&fixture.work, &["stash", "push", "-q", "--", "latin.txt"]);
+        let stash = test_git(&fixture.work, &["rev-parse", "refs/stash"]);
+        let head = test_git(&fixture.work, &["rev-parse", "HEAD"]);
+        let mut worktree_record = stopped_session(
+            &fixture,
+            origin_delta_repository(&fixture, &fixture.base.clone()),
+        );
+        worktree_record.managed_worktree = None;
+
+        let bundle = checkpoint_bundle(&worktree_record, &ProcessExecutor).unwrap();
+        assert_eq!(bundle.repository, "project");
+        let (commits, heads) = import_bundle(&fixture, &bundle.bytes);
+        assert_eq!(commits.len(), 2, "pushed and unpushed commits: {commits:?}");
+        assert_eq!(commits[0], head);
+        assert!(!heads.contains("refs/stash"), "{heads}");
+        assert!(!bundle.bytes.is_empty());
+        let fresh = fixture.temp.path().join("fresh-bundle");
+        let missing = std::process::Command::new("git")
+            .current_dir(&fresh)
+            .args(["cat-file", "-e", &stash])
+            .status()
+            .unwrap();
+        assert!(!missing.success(), "the stash commit is not in the bundle");
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn a_stopped_session_with_only_edits_is_refused_a_bundle_and_pointed_at_the_patch() {
+        // #1674: the commit-free session whose bundle export used to fail.
+        let fixture = fixture(false);
+        let mut record = stopped_session(&fixture, origin_delta_repository(&fixture, ""));
+        record.managed_worktree = Some(Box::new(ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
+            source_project_directory: fixture.source.clone(),
+            source_repository: fixture.source.clone(),
+            worktree_root: fixture.work.clone(),
+            branch: "feature/export".into(),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: Some(fixture.base.clone()),
+        }));
+        let Err(CheckpointExportError::Refused(reason)) =
+            checkpoint_bundle(&record, &ProcessExecutor)
+        else {
+            panic!("a session without commits has no bundle");
+        };
+        assert!(
+            reason.contains("no commits beyond the session base"),
+            "{reason}"
+        );
+        assert!(reason.contains("mj export --kind patch"), "{reason}");
+
+        // The same checkpoint with no recorded base is compared with origin.
+        record.managed_worktree = None;
+        let Err(CheckpointExportError::Refused(reason)) =
+            checkpoint_bundle(&record, &ProcessExecutor)
+        else {
+            panic!("a session without commits has no bundle");
+        };
+        assert!(reason.contains("no commits beyond origin"), "{reason}");
+        assert!(reason.contains("mj export --kind patch"), "{reason}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn an_older_checkpoint_with_no_base_bundles_the_commits_origin_lacks() {
+        let fixture = fixture(true);
+        let record = stopped_session(&fixture, origin_delta_repository(&fixture, ""));
+        let head = test_git(&fixture.work, &["rev-parse", "HEAD"]);
+
+        let bundle = checkpoint_bundle(&record, &ProcessExecutor).unwrap();
+        let (commits, _) = import_bundle(&fixture, &bundle.bytes);
+        assert_eq!(commits, [head]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
+    fn a_stopped_session_with_a_legacy_checkpoint_exports_its_bundle() {
+        let fixture = fixture(true);
+        let mut repository = mj_checkpoint::archive::collect_git_snapshot(
+            &SystemGit,
+            &fixture.work,
+            &GitCollectionSpec {
+                id: "project".into(),
+                relative_destination: "project".into(),
+                history: GitHistoryMode::DeltaFrom(fixture.base.clone()),
+                origin_override: None,
+            },
+        )
+        .unwrap();
+        repository.metadata.base_commit = fixture.base.clone();
+        let record = stopped_session(&fixture, repository);
+        let head = test_git(&fixture.work, &["rev-parse", "HEAD"]);
+
+        let bundle = checkpoint_bundle(&record, &ProcessExecutor).unwrap();
+        let (commits, _) = import_bundle(&fixture, &bundle.bytes);
+        assert_eq!(commits, [head]);
     }
 
     #[test]

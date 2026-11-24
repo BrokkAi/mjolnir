@@ -1982,6 +1982,15 @@ fn inspect_raw_project(
     })
 }
 
+/// Whether the checkout lives under its source repository, where the exclusion
+/// of `.mj/clones/` belongs. A checkout built elsewhere (an export's scratch
+/// directory) must leave the user's repository configuration alone.
+fn managed_checkout_is_inside_source(checkout: &ManagedWorktree) -> bool {
+    checkout
+        .worktree_root
+        .starts_with(&checkout.source_repository)
+}
+
 fn ensure_managed_worktree_excluded(
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
@@ -2187,7 +2196,11 @@ pub(super) fn create_managed_worktree(
 
 enum CloneSeedMode<'a> {
     FreshBranch,
-    LocalSnapshot(&'a mj_checkpoint::snapshot::WorkspaceSnapshot),
+    /// Apply the snapshot with `git`, which carries the caller's cancellation.
+    LocalSnapshot {
+        snapshot: &'a mj_checkpoint::snapshot::WorkspaceSnapshot,
+        git: &'a dyn mj_checkpoint::archive::GitCommandRunner,
+    },
     RemoteSnapshot {
         object_format: &'a str,
         origin_url: Option<&'a str>,
@@ -2198,7 +2211,7 @@ impl<'a> CloneSeedMode<'a> {
     fn snapshot_object_format(&self) -> Option<&'a str> {
         match self {
             Self::FreshBranch => None,
-            Self::LocalSnapshot(snapshot) => Some(snapshot.metadata.object_format.as_str()),
+            Self::LocalSnapshot { snapshot, .. } => Some(snapshot.metadata.object_format.as_str()),
             Self::RemoteSnapshot { object_format, .. } => Some(*object_format),
         }
     }
@@ -2206,14 +2219,19 @@ impl<'a> CloneSeedMode<'a> {
     fn snapshot_origin_url(&self) -> Option<&'a str> {
         match self {
             Self::FreshBranch => None,
-            Self::LocalSnapshot(snapshot) => snapshot.metadata.origin_url.as_deref(),
+            Self::LocalSnapshot { snapshot, .. } => snapshot.metadata.origin_url.as_deref(),
             Self::RemoteSnapshot { origin_url, .. } => *origin_url,
         }
     }
 
-    fn local_snapshot(&self) -> Option<&'a mj_checkpoint::snapshot::WorkspaceSnapshot> {
+    fn local_snapshot(
+        &self,
+    ) -> Option<(
+        &'a mj_checkpoint::snapshot::WorkspaceSnapshot,
+        &'a dyn mj_checkpoint::archive::GitCommandRunner,
+    )> {
         match self {
-            Self::LocalSnapshot(snapshot) => Some(snapshot),
+            Self::LocalSnapshot { snapshot, git } => Some((snapshot, *git)),
             Self::FreshBranch | Self::RemoteSnapshot { .. } => None,
         }
     }
@@ -2436,15 +2454,11 @@ fn create_managed_clone_with_snapshot(
                 .purpose("seed independent managed clone from origin"),
             )?;
         }
-        let notices = if let Some(snapshot) = mode.local_snapshot() {
+        let notices = if let Some((snapshot, git)) = mode.local_snapshot() {
             let mut notices = snapshot.notices.clone();
             // Restore runs Git fetches; keep them off the async workers.
             notices.extend(mj_core::runtime::off_async_worker(|| {
-                mj_checkpoint::snapshot::restore_workspace_snapshot(
-                    &mj_checkpoint::archive::SystemGit,
-                    snapshot,
-                    &staging,
-                )
+                mj_checkpoint::snapshot::restore_workspace_snapshot(git, snapshot, &staging)
             })?);
             notices
         } else {
@@ -2465,9 +2479,9 @@ fn create_managed_clone_with_snapshot(
             .purpose("publish managed clone checkout"),
         )?;
         published = true;
-        if let Some(snapshot) = mode.local_snapshot() {
+        if let Some((snapshot, git)) = mode.local_snapshot() {
             mj_checkpoint::snapshot::repair_workspace_snapshot(
-                &mj_checkpoint::archive::SystemGit,
+                git,
                 snapshot,
                 &checkout.worktree_root,
             )?;
@@ -2676,7 +2690,7 @@ fn clone_local_preference(key: &str) -> bool {
 /// call created it, so a failed resume can put the session back into its
 /// stopped, checkout-free state.
 pub(super) fn restore_managed_clone_origin_delta(
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     worktree: &ManagedWorktree,
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
@@ -2698,6 +2712,7 @@ pub(super) fn restore_managed_clone_origin_delta(
                 "check whether source repository is a Git repository",
             ))
             .is_ok_and(|output| output.status == 0)
+        && managed_checkout_is_inside_source(worktree)
     {
         ensure_managed_worktree_excluded(
             executor,
@@ -2708,14 +2723,20 @@ pub(super) fn restore_managed_clone_origin_delta(
     }
     match &worktree.target {
         ManagedWorktreeTarget::Local => {
-            let spooled = mj_checkpoint::checkpoint::spool_origin_delta_snapshot(
-                archive, manifest, repository,
+            let spooled = mj_checkpoint::checkpoint::spool_origin_delta_snapshot_unless(
+                archive,
+                manifest,
+                repository,
+                &|| executor.cancellation_requested(),
             )?
             .context("origin delta metadata is missing")?;
             let notices = create_managed_clone_with_snapshot(
                 executor,
                 worktree,
-                CloneSeedMode::LocalSnapshot(spooled.snapshot()),
+                CloneSeedMode::LocalSnapshot {
+                    snapshot: spooled.snapshot(),
+                    git: &ExecutorGit::local(executor),
+                },
             )?;
             Ok(ManagedCloneRestoreOutcome::RestoredLocally(notices))
         }
@@ -2779,10 +2800,11 @@ pub(super) fn upgrade_legacy_worktree_to_clone(
 /// 3. Apply the archived legacy delta and check out the saved commit on the
 ///    saved branch name, or as a detached HEAD (with a notice) on collision.
 pub(super) fn restore_legacy_worktree_as_managed_clone(
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     checkout: &ManagedWorktree,
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
+    cancel: Option<&mj_checkpoint::archive::ArchivePurgeCancel>,
 ) -> Result<Vec<String>> {
     ensure!(
         checkout.kind == ManagedCheckoutKind::Clone,
@@ -2805,6 +2827,7 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
                 "check whether source repository is a Git repository",
             ))
             .is_ok_and(|output| output.status == 0)
+        && managed_checkout_is_inside_source(checkout)
     {
         ensure_managed_worktree_excluded(
             executor,
@@ -2986,7 +3009,8 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
         let notices = mj_checkpoint::checkpoint::restore_single_repository_into_clone(
             archive,
             &staging,
-            &mj_checkpoint::archive::SystemGit,
+            &ExecutorGit::local(executor),
+            cancel,
         )?;
         execute_checked(
             executor,

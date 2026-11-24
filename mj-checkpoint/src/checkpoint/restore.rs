@@ -726,6 +726,17 @@ pub fn spool_origin_delta_snapshot(
     manifest: &crate::archive::ArchiveManifest,
     repository: &crate::archive::RepositoryManifest,
 ) -> Result<Option<SpooledWorkspaceSnapshot>> {
+    spool_origin_delta_snapshot_unless(archive_path, manifest, repository, &|| false)
+}
+
+/// [`spool_origin_delta_snapshot`] that stops copying the pack with
+/// [`crate::archive::ArchiveReadCancelled`] once `cancelled` returns true.
+pub fn spool_origin_delta_snapshot_unless(
+    archive_path: &Path,
+    manifest: &crate::archive::ArchiveManifest,
+    repository: &crate::archive::RepositoryManifest,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<SpooledWorkspaceSnapshot>> {
     let Some(delta) = repository.metadata.origin_delta.as_deref() else {
         return Ok(None);
     };
@@ -748,7 +759,7 @@ pub fn spool_origin_delta_snapshot(
             let mut temp = tempfile::NamedTempFile::new()
                 .context("create temporary origin delta pack file")?;
             crate::archive::CheckpointPayloadReader::open(archive_path)?
-                .copy_payload(descriptor, temp.as_file_mut())
+                .copy_payload_unless(descriptor, temp.as_file_mut(), cancelled)
                 .context("stream origin delta pack payload")?;
             std::io::Write::flush(temp.as_file_mut())
                 .context("flush temporary origin delta pack file")?;
@@ -1007,9 +1018,10 @@ pub fn restore_single_repository_into_clone(
     archive_path: &Path,
     repository_path: &Path,
     git: &dyn GitCommandRunner,
+    cancel: Option<&crate::archive::ArchivePurgeCancel>,
 ) -> Result<Vec<String>> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
-    let archive = crate::archive::read_archive_repositories(archive_path)?;
+    let archive = crate::archive::read_archive_repositories_unless(archive_path, cancel)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!("an isolated clone requires exactly one archived repository");
     };

@@ -1640,6 +1640,110 @@ async fn a_stopped_sessions_patch_export_reads_its_checkpoint_even_with_a_locato
     }
 }
 
+/// A bundle of a session with no checkout comes from its stored checkpoint, as
+/// does one of a live session whose own lifecycle operation is busy: neither
+/// asks the worker for a fresh checkpoint, and both rebuild the work in a
+/// scratch checkout (#1674).
+#[tokio::test]
+async fn a_bundle_export_without_a_fresh_checkpoint_reads_the_stored_checkpoint() {
+    struct Records {
+        record: SessionRecord,
+        busy: bool,
+        checkpoints_taken: std::sync::atomic::AtomicUsize,
+    }
+    impl ExportRuntime for Records {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.record.id).then(|| self.record.clone())
+        }
+        fn checkpoint_now(
+            &self,
+            session_id: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            self.checkpoints_taken
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let busy = self.busy;
+            Box::pin(async move {
+                if busy {
+                    return Err(anyhow::Error::new(crate::daemon::SessionLifecycleBusy {
+                        session_id,
+                        operation: "resume",
+                        age_seconds: 3,
+                    }));
+                }
+                bail!("an export of a stopped session takes no checkpoint")
+            })
+        }
+    }
+    let backend_for = |record: SessionRecord, busy: bool| {
+        let (submitted_tx, _submitted) = mpsc::unbounded_channel();
+        let exports = Arc::new(Records {
+            record: record.clone(),
+            busy,
+            checkpoints_taken: Default::default(),
+        });
+        let backend = ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: record.id.clone(),
+                accepted_ordinal: 1,
+                submitted: submitted_tx,
+                view: None,
+            })),
+            running_states(),
+            exports.clone(),
+        );
+        (backend, exports)
+    };
+    let local = Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/nonexistent/worker-root".into(),
+    });
+    let missing_archive = Box::new(mj_core::state::CheckpointMetadata {
+        archive_path: "/nonexistent/checkpoint.hel.zip".into(),
+        sha256: "0".repeat(64),
+        created_at: "2026-08-14T12:00:00Z".into(),
+        event_frontier: 0,
+    });
+
+    // Stopped with a locator: no fresh checkpoint, and the stored one is read.
+    let mut stopped = mj_controller::controller::test_support::checkpoint_test_session("stopped-1");
+    stopped.state = SessionState::Stopped;
+    stopped.target = Some(local.clone());
+    stopped.checkpoint = Some(missing_archive.clone());
+    let (backend, exports) = backend_for(stopped, false);
+    match backend.bundle("stopped-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("checkpoint archive"), "{reason}")
+        }
+        other => panic!("expected the stored checkpoint to be read, got {other:?}"),
+    }
+    assert_eq!(
+        exports
+            .checkpoints_taken
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+
+    // Live and busy: the last durable checkpoint is read the same way.
+    let mut busy = mj_controller::controller::test_support::checkpoint_test_session("busy-1");
+    busy.state = SessionState::Running;
+    busy.target = Some(local);
+    busy.checkpoint = Some(missing_archive);
+    let (backend, _) = backend_for(busy.clone(), true);
+    match backend.bundle("busy-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("checkpoint archive"), "{reason}")
+        }
+        other => panic!("expected the stored checkpoint to be read, got {other:?}"),
+    }
+    busy.checkpoint = None;
+    let (backend, _) = backend_for(busy, true);
+    match backend.bundle("busy-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("no earlier checkpoint"), "{reason}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
 /// A relative export path resolves against the directory the agent runs in,
 /// not the workspace root above it. For a bare project session those differ by
 /// one level, which is why a file the agent had just written was refused as

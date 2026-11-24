@@ -6036,37 +6036,14 @@ impl SubagentBackend for ApiBackend {
                     notice: None,
                 });
             }
-            // A stopped session's work is rebuilt from its checkpoint in a
-            // scratch checkout, which can take minutes for a large repository.
-            // It is blocking work that owns nothing the daemon must wait for
-            // at handoff, so it holds no admission; dropping this future (the
-            // client left, or the server is stopping) cancels its Git
-            // processes.
-            let token = tokio_util::sync::CancellationToken::new();
-            let _cancel = token.clone().drop_guard();
-            let patch = mj_core::runtime::spawn_blocking(move || {
-                let executor =
-                    CancellableProcessExecutor::new(Default::default()).with_cancellation(token);
-                mj_controller::controller::checkpoint_patch(&record, &executor)
+            let patch = export_from_checkpoint(record, |record, executor| {
+                mj_controller::controller::checkpoint_patch(record, executor)
             })
-            .await
-            .map_err(|error| {
-                ExportError::Failed(anyhow!(
-                    "the checkpoint patch export task panicked: {error}"
-                ))
-            })?;
-            match patch {
-                Ok(patch) => Ok(ExportPatch {
-                    bytes: patch.bytes,
-                    notice: patch.notice,
-                }),
-                Err(mj_controller::controller::CheckpointExportError::Refused(reason)) => {
-                    Err(ExportError::Refused(reason))
-                }
-                Err(mj_controller::controller::CheckpointExportError::Failed(error)) => {
-                    Err(ExportError::Failed(error))
-                }
-            }
+            .await?;
+            Ok(ExportPatch {
+                bytes: patch.bytes,
+                notice: patch.notice,
+            })
         })
     }
 
@@ -6210,13 +6187,15 @@ impl SubagentBackend for ApiBackend {
                 .exports
                 .session_record(&session_id)
                 .ok_or_else(|| ExportError::Refused(format!("unknown session {session_id}")))?;
+            // A session with no checkout has only its stored checkpoint, which
+            // is rebuilt into a scratch checkout and bundled from there.
+            if mj_controller::controller::export_reads_checkpoint(&record) {
+                return bundle_from_stored_checkpoint(record).await;
+            }
             // A live session's work is only in the archive once it has been
-            // checkpointed, so take a fresh checkpoint; a stopped session's
-            // last checkpoint already holds everything it did.
-            let archive_path = match record.target {
-                Some(_) => match supervised_checkpoint(self.exports.clone(), session_id.clone())
-                    .await
-                {
+            // checkpointed, so take a fresh checkpoint.
+            let archive_path =
+                match supervised_checkpoint(self.exports.clone(), session_id.clone()).await {
                     Ok(checkpoint) => checkpoint.archive_path,
                     // The session has its own lifecycle operation in flight
                     // (resume/close/move); a fresh checkpoint would fight it, so
@@ -6227,28 +6206,15 @@ impl SubagentBackend for ApiBackend {
                             .downcast_ref::<crate::daemon::SessionLifecycleBusy>()
                             .is_some() =>
                     {
-                        record
-                            .checkpoint
-                            .ok_or_else(|| {
-                                ExportError::Refused(format!(
-                                    "{error}, and has no earlier checkpoint to export a bundle from"
-                                ))
-                            })?
-                            .archive_path
+                        if record.checkpoint.is_none() {
+                            return Err(ExportError::Refused(format!(
+                                "{error}, and has no earlier checkpoint to export a bundle from"
+                            )));
+                        }
+                        return bundle_from_stored_checkpoint(record).await;
                     }
                     Err(error) => return Err(checkpoint_export_error(error)),
-                },
-                None => {
-                    record
-                        .checkpoint
-                        .ok_or_else(|| {
-                            ExportError::Refused(
-                                "this session has no checkpoint to export a bundle from".into(),
-                            )
-                        })?
-                        .archive_path
-                }
-            };
+                };
             let bundles = export_blocking("verify the checkpoint bundles", move || {
                 mj_checkpoint::archive::verify_repository_bundles_streaming(&archive_path)
             })
@@ -6274,6 +6240,53 @@ impl SubagentBackend for ApiBackend {
             })
         })
     }
+}
+
+/// Rebuild a stopped session's work from its stored checkpoint in a scratch
+/// checkout, which can take minutes for a large repository. It is blocking
+/// work that owns nothing the daemon must wait for at handoff, so it holds no
+/// admission; dropping this future (the client left, or the server is
+/// stopping) cancels its archive reads and Git processes.
+async fn export_from_checkpoint<T: Send + 'static>(
+    record: mj_core::state::SessionRecord,
+    export: impl FnOnce(
+        &mj_core::state::SessionRecord,
+        &CancellableProcessExecutor,
+    ) -> std::result::Result<T, mj_controller::controller::CheckpointExportError>
+    + Send
+    + 'static,
+) -> std::result::Result<T, ExportError> {
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancel = token.clone().drop_guard();
+    let exported = mj_core::runtime::spawn_blocking(move || {
+        let executor = CancellableProcessExecutor::new(Default::default()).with_cancellation(token);
+        export(&record, &executor)
+    })
+    .await
+    .map_err(|error| {
+        ExportError::Failed(anyhow!("the checkpoint export task panicked: {error}"))
+    })?;
+    exported.map_err(|error| match error {
+        mj_controller::controller::CheckpointExportError::Refused(reason) => {
+            ExportError::Refused(reason)
+        }
+        mj_controller::controller::CheckpointExportError::Failed(error) => {
+            ExportError::Failed(error)
+        }
+    })
+}
+
+async fn bundle_from_stored_checkpoint(
+    record: mj_core::state::SessionRecord,
+) -> std::result::Result<BundleExport, ExportError> {
+    let bundle = export_from_checkpoint(record, |record, executor| {
+        mj_controller::controller::checkpoint_bundle(record, executor)
+    })
+    .await?;
+    Ok(BundleExport {
+        repository: bundle.repository,
+        bytes: bundle.bytes,
+    })
 }
 
 // Refresh the default before selecting a model, so the exemption belongs to

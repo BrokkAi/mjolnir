@@ -3247,6 +3247,171 @@ fn a_session_patch_keeps_every_byte_and_applies_to_the_base() {
 }
 
 #[test]
+fn copying_a_large_payload_stops_when_cancelled() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.hel.zip");
+    let mut archive_input = input();
+    // More than one 64KB buffer, so cancellation lands mid-copy.
+    archive_input.repositories[0].committed_bundle = vec![7; 300_000];
+    let verified = write_archive_atomic(&path, &archive_input).unwrap();
+    let descriptor = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| payload.size == 300_000)
+        .expect("the large payload")
+        .clone();
+
+    let writes = std::cell::Cell::new(0_usize);
+    struct Counting<'a>(&'a std::cell::Cell<usize>);
+    impl Write for Counting<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.set(self.0.get() + 1);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let error = CheckpointPayloadReader::open(&path)
+        .unwrap()
+        .copy_payload_unless(&descriptor, &mut Counting(&writes), &|| writes.get() >= 2)
+        .unwrap_err();
+    assert!(archive_verification_cancelled(&error), "{error:#}");
+    assert_eq!(
+        writes.get(),
+        2,
+        "the copy stopped at the first probe that said so"
+    );
+
+    CheckpointPayloadReader::open(&path)
+        .unwrap()
+        .copy_payload_unless(&descriptor, &mut std::io::sink(), &|| false)
+        .unwrap();
+}
+
+#[test]
+fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    git(
+        temp.path(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let work = clone_repository(temp.path(), &origin, "work");
+    commit_file(&work, "tracked.txt", b"base\n", "base");
+    git(&work, &["push", "-q", "-u", "origin", "main"]);
+    let base = git_line(&work, &["rev-parse", "HEAD"]);
+
+    // One commit already pushed to origin, one that is not, a stash and a
+    // dirty file: only the commits belong in a bundle.
+    commit_file(&work, "pushed.txt", b"pushed\n", "pushed");
+    git(&work, &["push", "-q", "origin", "main"]);
+    let pushed = git_line(&work, &["rev-parse", "HEAD"]);
+    git(&work, &["checkout", "-q", "-b", "feature"]);
+    commit_file(&work, "local.txt", b"local\n", "local");
+    let head = git_line(&work, &["rev-parse", "HEAD"]);
+    git(&work, &["tag", "session-tag"]);
+    fs::write(work.join("tracked.txt"), b"stashed edit\n").unwrap();
+    git(&work, &["stash", "push", "-q"]);
+    let stash = git_line(&work, &["rev-parse", "refs/stash"]);
+    fs::write(work.join("tracked.txt"), b"dirty edit\n").unwrap();
+
+    let assert_bundle_fetches = |bytes: &[u8], prerequisite: &str, expected_new: &[&str]| {
+        let bundle = temp.path().join("session.bundle");
+        fs::write(&bundle, bytes).unwrap();
+        assert!(bytes.starts_with(b"# v"), "a native Git bundle header");
+        // The bundle assumes the base and nothing newer, so what the base
+        // already holds is not carried.
+        let header = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).into_owned();
+        assert!(header.contains(&format!("\n-{prerequisite}")), "{header}");
+        let fresh = temp.path().join("fresh");
+        let _ = fs::remove_dir_all(&fresh);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                fresh.to_str().unwrap(),
+            ],
+        );
+        git(&fresh, &["bundle", "verify", bundle.to_str().unwrap()]);
+        git(
+            &fresh,
+            &[
+                "fetch",
+                "-q",
+                bundle.to_str().unwrap(),
+                "refs/heads/feature:refs/heads/imported",
+                "refs/tags/session-tag:refs/tags/session-tag",
+            ],
+        );
+        assert_eq!(git_line(&fresh, &["rev-parse", "imported"]), head);
+        for commit in expected_new {
+            git(&fresh, &["cat-file", "-e", &format!("{commit}^{{commit}}")]);
+        }
+        let heads = git_line(&fresh, &["bundle", "list-heads", bundle.to_str().unwrap()]);
+        assert!(!heads.contains("refs/stash"), "{heads}");
+        let missing_stash = std::process::Command::new("git")
+            .current_dir(&fresh)
+            .args(["cat-file", "-e", &stash])
+            .status()
+            .unwrap();
+        assert!(!missing_stash.success(), "the stash commit is not bundled");
+    };
+
+    // A launch base bundles everything beyond it, including what was pushed.
+    let bytes = session_bundle_bytes(&SystemGit, &work, Some(&base), None, false).unwrap();
+    assert_bundle_fetches(&bytes, &base, &[&pushed, &head]);
+
+    // With no base, origin's own commits are left out.
+    let bytes = session_bundle_bytes(&SystemGit, &work, None, None, true).unwrap();
+    assert_bundle_fetches(&bytes, &pushed, &[&head]);
+    let fresh = temp.path().join("fresh");
+    assert_eq!(
+        git_line(&fresh, &["rev-list", "--count", "imported", "^origin/main"]),
+        "1"
+    );
+
+    // No base and no fallback is not a guess.
+    let error = session_bundle_bytes(&SystemGit, &work, None, None, false).unwrap_err();
+    assert!(matches!(error, SessionExportError::Refused(_)), "{error}");
+
+    // Nothing beyond the base: a refusal that names the patch export.
+    git(&work, &["checkout", "-q", "main"]);
+    git(&work, &["reset", "-q", "--hard", &base]);
+    git(&work, &["branch", "-q", "-D", "feature"]);
+    git(&work, &["tag", "-d", "session-tag"]);
+    git(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let SessionExportError::Refused(reason) =
+        session_bundle_bytes(&SystemGit, &work, Some(&base), None, false).unwrap_err()
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        reason.contains("no commits beyond the session base"),
+        "{reason}"
+    );
+    assert!(reason.contains("mj export --kind patch"), "{reason}");
+    git(&work, &["fetch", "-q", "origin"]);
+    let SessionExportError::Refused(reason) =
+        session_bundle_bytes(&SystemGit, &work, None, None, true).unwrap_err()
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(reason.contains("no commits beyond origin"), "{reason}");
+    assert!(reason.contains("mj export --kind patch"), "{reason}");
+}
+
+#[test]
 fn a_session_diff_includes_submodule_pointer_changes_despite_git_ignore_settings() {
     let temp = tempfile::tempdir().unwrap();
     let origin = temp.path().join("upstream");

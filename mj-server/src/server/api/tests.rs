@@ -1477,6 +1477,9 @@ struct FakeBackend {
     patch_requests: Mutex<Vec<String>>,
     /// Makes `export_patch` wait forever, and records when its future is dropped.
     patch_pending: Option<Arc<std::sync::atomic::AtomicBool>>,
+    bundle_requests: Mutex<Vec<String>>,
+    /// Makes `bundle` wait forever, and records when its future is dropped.
+    bundle_pending: Option<Arc<std::sync::atomic::AtomicBool>>,
     installation_token: Option<String>,
     /// When set, the diff fails outright rather than being refused.
     diff_fails: bool,
@@ -2138,8 +2141,19 @@ impl SubagentBackend for FakeBackend {
                 .ok_or_else(|| ExportError::Refused("this session has no checkpoint".into()))
         })
     }
-    fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
-        Box::pin(async {
+    fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
+        Box::pin(async move {
+            self.bundle_requests.lock().unwrap().push(session_id);
+            if let Some(dropped) = &self.bundle_pending {
+                struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Dropped {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                let _dropped = Dropped(dropped.clone());
+                std::future::pending::<()>().await;
+            }
             if self.target_access_missing {
                 return Err(missing_target_access_error());
             }
@@ -6372,6 +6386,40 @@ async fn shutdown_interrupts_a_patch_export_and_drops_its_work() {
         ),
     );
     while backend.patch_requests.lock().unwrap().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!dropped.load(std::sync::atomic::Ordering::Acquire));
+    shutdown.cancel();
+    let response = export.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["code"], DAEMON_HANDOFF_CODE);
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::Acquire),
+        "the export's work must be dropped, not left running"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_a_bundle_export_and_drops_its_work() {
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let backend = Arc::new(FakeBackend {
+        bundle_pending: Some(dropped.clone()),
+        shutdown: shutdown.clone(),
+        ..FakeBackend::default()
+    });
+    let (app, ..) = api_app(backend.clone(), |_| {});
+    let export = mj_core::runtime::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"bundle"}"#))
+                .unwrap(),
+        ),
+    );
+    while backend.bundle_requests.lock().unwrap().is_empty() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(!dropped.load(std::sync::atomic::Ordering::Acquire));
