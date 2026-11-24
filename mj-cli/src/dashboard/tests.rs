@@ -780,11 +780,7 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
         .expect("the selection covers text");
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
-        vec![
-            "  claude-1: refreshing…",
-            "OPENAI",
-            "  codex-1: refreshing…",
-        ]
+        vec![" + refreshing…", "OPENAI", " + refreshing…",]
     );
     // Exactly the two selected pane rows are reversed, border columns and
     // the pane above included.

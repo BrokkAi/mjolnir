@@ -1971,7 +1971,7 @@ func TestAuthenticationRecoveryHandlesBothOrdersOfInstallAndFailure(t *testing.T
 		fresh := []byte(`{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}`)
 		runtimeRelayWriteFile(t, path, old)
 		durable := runtimeRelayOpen(t, root, "test")
-		durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, durable, core.HarnessKindClaude)
 		loginPath := path
 		durable.authenticationLoginPath = &loginPath
 		initialRevision, _ := durable.loginIdentity.snapshot()
@@ -2082,7 +2082,7 @@ func TestAStalledLoginReadDoesNotBlockRelayEventsOrShutdown(t *testing.T) {
 	path := filepath.Join(root, "login.json")
 	gate := stalledReadFile(path)
 	durable := runtimeRelayOpen(t, root, "test")
-	durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, durable, core.HarnessKindClaude)
 	durable.authenticationLoginPath = &path
 	_, err := durable.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}})
 	runtimeRelayMust(t, err)
@@ -7184,7 +7184,7 @@ func TestCapacityRetryDispatchesWithoutAControllerAfterTheDeadline(t *testing.T)
 		temp := t.TempDir()
 		state := runtimeRelayOpen(t, temp, "1.0.0")
 		state.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
-		state.SetTurnVerdictHarness(core.HarnessKindCodex)
+		setVerdictHarness(t, state, core.HarnessKindCodex)
 		_, err := state.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}})
 		runtimeRelayMust(t, err)
 		runtimeRelayTestsSubmit(t, state, "capacity-original", runtimeRelayTestsPrompt("work"))
@@ -8045,7 +8045,19 @@ func TestAReadyBarrierKeepsDrainingRuntimeEventsPastTheChannelCapacity(t *testin
 			t.Fatal("the coordinator stopped draining runtime events behind the barrier")
 		}
 	}
-	waitUntil(t, func() bool { return len(events) == 0 }, "the coordinator never drained the channel")
+	// Rust waits for the channel's capacity to return. Its single-threaded
+	// test runtime finishes handling a received event before yielding, so a
+	// drained channel there means every notice is held. A goroutine receives
+	// first and takes the relay after, so here wait for the relay to hold
+	// all of them too.
+	waitUntil(t, func() bool {
+		if len(events) != 0 {
+			return false
+		}
+		observed := relay.Observe()
+		defer observed.Unlock()
+		return len(observed.heldWrites) == len(sent)
+	}, "the coordinator never drained the channel")
 	if got := runtimeRelayOperationalState(relay).LatestOrdinal; got != cut.Ordinal {
 		t.Fatalf("latest ordinal = %d, cut at %d", got, cut.Ordinal)
 	}
@@ -8844,7 +8856,7 @@ func TestAntigravityConnectedWithHookPublishesSteeringAndEnablesAutomaticSteerin
 	runtimeRelayMust(t, err)
 	relay := NewRelayCell(durable)
 	guard := relay.Lock()
-	guard.SetTurnVerdictHarness(core.HarnessKindAntigravity)
+	setVerdictHarness(t, guard.DurableRelay, core.HarnessKindAntigravity)
 	guard.SetSteeringDeliveryMode(core.HarnessKindAntigravity, true)
 	guard.Unlock()
 	agentName, agentVersion := "antigravity", "1.5.11"

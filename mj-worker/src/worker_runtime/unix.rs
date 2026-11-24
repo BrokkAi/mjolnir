@@ -5395,7 +5395,10 @@ mod preparation_tests {
         let source_wrapper = startup.git_setup.path().join("bin/gh");
         let expected = startup.launch.spec.environment;
         let expected_path: Vec<_> = std::env::split_paths(&expected["PATH"]).collect();
-        assert_eq!(expected_path[0], startup.git_setup.path().join("bin"));
+        assert!(
+            expected_path.contains(&startup.git_setup.path().join("bin")),
+            "the accepted Git setup remains on PATH: {expected_path:?}"
+        );
         assert_eq!(
             std::path::Path::new(&expected["GIT_CONFIG_GLOBAL"]),
             source_config
@@ -5486,8 +5489,19 @@ mod preparation_tests {
             );
             let replacement_path: Vec<_> =
                 std::env::split_paths(&spec_environment["PATH"]).collect();
-            assert_eq!(replacement_path[0], candidate_dir.join("bin"));
-            assert_eq!(replacement_path[1..], expected_path[1..]);
+            let source_index = expected_path
+                .iter()
+                .position(|entry| entry == &source_config.parent().unwrap().join("bin"))
+                .expect("the accepted Git setup is on PATH");
+            assert_eq!(replacement_path[source_index], candidate_dir.join("bin"));
+            assert_eq!(
+                replacement_path[..source_index],
+                expected_path[..source_index]
+            );
+            assert_eq!(
+                replacement_path[source_index + 1..],
+                expected_path[source_index + 1..]
+            );
             for name in ["PATH", "GIT_CONFIG_GLOBAL"] {
                 assert_eq!(shell_environment.get(name), spec_environment.get(name));
             }

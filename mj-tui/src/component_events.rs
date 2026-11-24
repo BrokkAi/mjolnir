@@ -297,8 +297,14 @@ mod tests {
     fn clicking_a_profile_row_below_the_heading_selects_that_profile() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_new();
-        // The heading row sits above the profiles, so the third profile is the
-        // fourth display row; the click has to land on the profile, not the row.
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new-session wizard did not open");
+        };
+        wizard
+            .expanded_providers
+            .insert(mj_core::config::QuotaProvider::OpenAI);
+        // The provider heading sits above its profiles, so the third profile
+        // is below the heading rather than on it.
         let position = point(&draw(&mut dashboard), "codex-2");
         click(&mut dashboard, position);
         assert!(

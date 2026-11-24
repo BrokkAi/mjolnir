@@ -286,7 +286,7 @@ mod tests {
 
         // Its containers run Linux in a VM that these host paths do not describe.
         let container = MacHost::default();
-        assert!(prepare(&config, "podman", &mut mounts, &container).is_none());
+        assert!(prepare(&config, "docker", &mut mounts, &container).is_none());
         assert!(mounts.is_empty());
         assert_eq!(*container.ran.lock().unwrap(), ["uname"]);
     }

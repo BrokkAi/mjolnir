@@ -14,7 +14,7 @@ import (
 )
 
 // Version is the release this build reports; it tracks the Rust workspace.
-const Version = "2.73.0"
+const Version = core.PackageVersion
 
 // globalOptions are the options the Rust Cli struct holds.
 type globalOptions struct {

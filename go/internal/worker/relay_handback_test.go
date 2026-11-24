@@ -21,7 +21,7 @@ func handbackOpen(t *testing.T, root string) *DurableRelay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	return relay
 }
 

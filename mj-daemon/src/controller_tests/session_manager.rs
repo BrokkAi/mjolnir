@@ -131,10 +131,12 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
         1,
         "a slow result must have only one delivery attempt"
     );
-    // A second slow reply is safe to cancel during handoff: the result is
-    // persisted before delivery, and must remain available to the next daemon.
+    // A second slow reply is safe to cancel during handoff. Unlike ListAgents,
+    // ListProfiles is a mutating-effect path, so its result is persisted
+    // before delivery and must remain available to the next daemon.
     let request = mj_core::subagent::SubagentToolRequest {
         request_id: "slow-reply-at-handoff".into(),
+        action: mj_core::subagent::SubagentToolAction::ListProfiles,
         ..request
     };
     std::fs::write(
@@ -158,6 +160,12 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     })
     .await
     .expect("the second reply reaches the slow exchange");
+    assert!(
+        mj_controller::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
+            .unwrap()
+            .is_some(),
+        "the second reply remains durable until its delivery is acknowledged"
+    );
     // The original check deliberately left dashboard updates unconsumed.
     // For handoff, consume them as the daemon does: each queued update holds
     // admission until its reader advances. Delivery itself must hold none.

@@ -220,7 +220,7 @@ pub fn native_project_directory(
         if let Some(cwd) = cwd {
             let cwd = PathBuf::from(cwd);
             ensure!(
-                cwd.is_absolute(),
+                mj_core::target_path::is_absolute_on_host_or_target(&cwd),
                 "native project directory is not absolute"
             );
             return Ok(cwd);

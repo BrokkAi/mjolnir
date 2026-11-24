@@ -13,10 +13,14 @@
 package buildcache
 
 import (
+	"errors"
+	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/targets"
 )
 
 // homeLifetime is how long a resolved login home is reused. A home does not
@@ -95,7 +99,29 @@ const (
 // Platform asks the host itself, not the controller or a container on that
 // host.
 func (h CacheHost) Platform(executor core.CommandExecutor) (HostPlatform, error) {
-	panic("unported: mj-build-cache/src/cache_host.rs CacheHost::platform")
+	if h.SSH == nil && runtime.GOOS == "windows" {
+		return HostPlatformWindows, nil
+	}
+	command := h.Command([]string{"uname", "-sm"}, "detect build cache host platform")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return 0, err
+	}
+	if output.Status != 0 {
+		return 0, fmt.Errorf("%s failed with status %d: %s", command.Purpose, output.Status, trimmedLossy(output.Stderr))
+	}
+	text, err := fromUTF8(output.Stdout)
+	if err != nil {
+		return 0, fmt.Errorf("decode build cache host platform: %w", err)
+	}
+	platform, err := targets.TargetPlatformParse(text)
+	if err != nil {
+		return 0, err
+	}
+	if platform.Os == targets.TargetOsDarwin {
+		return HostPlatformDarwin, nil
+	}
+	return HostPlatformLinux, nil
 }
 
 // CacheHostForTarget is the host whose caches a runtime target's containers
@@ -134,7 +160,20 @@ func CacheHostForMachine(machine core.Machine) (CacheHost, bool) {
 // target's paths live on its machine, and an EC2 template's editable paths
 // are this machine's, because no instance exists before a session starts.
 func CacheHostForPathTarget(target core.TargetTemplate) (CacheHost, error) {
-	panic("unported: mj-build-cache/src/cache_host.rs CacheHost::for_path_target")
+	switch target := target.(type) {
+	case core.TargetTemplateSshBare:
+		return cacheHostForSSHInput(target.SSH)
+	case core.TargetTemplateSshPodman:
+		return cacheHostForSSHInput(target.SSH)
+	case core.TargetTemplateSshDocker:
+		return cacheHostForSSHInput(target.SSH)
+	case core.TargetTemplateSshAppleContainer:
+		return cacheHostForSSHInput(target.SSH)
+	case core.TargetTemplateSshNitro:
+		return cacheHostForSSHInput(target.SSH)
+	}
+	// Local bare, Podman, Docker, Apple container and EC2.
+	return CacheHost{}, nil
 }
 
 // CacheHostForPathMachine is the host that owns a path on a configured
@@ -165,7 +204,42 @@ func cacheHostForSSHInput(ssh core.SshConnection) (CacheHost, error) {
 // Home is the login home on this host, cached for ten minutes per host. Only
 // a successful answer is cached; a host that was unreachable is retried.
 func (h CacheHost) Home(executor core.CommandExecutor) (string, error) {
-	panic("unported: mj-build-cache/src/cache_host.rs CacheHost::home")
+	if h.SSH == nil {
+		home, ok := core.UserHome()
+		if !ok {
+			return "", errors.New("Cannot expand ~: the home directory is unavailable.")
+		}
+		return home, nil
+	}
+	key := h.Key()
+	homes.Lock()
+	resolved, ok := homes.byHost[key]
+	homes.Unlock()
+	if ok && time.Since(resolved.recorded) < homeLifetime {
+		return resolved.home, nil
+	}
+	command := h.ShellCommand(`printf '%s' "$HOME"`, homeLabel, nil, "resolve remote home directory")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return "", err
+	}
+	if output.Status != 0 {
+		return "", fmt.Errorf("Could not resolve remote home: %s", trimmedLossy(output.Stderr))
+	}
+	home, err := fromUTF8(output.Stdout)
+	if err != nil {
+		return "", fmt.Errorf("Remote home is not valid UTF-8: %w", err)
+	}
+	if home == "" {
+		return "", errors.New("Remote home is empty")
+	}
+	if !core.IsAbsolute(home) {
+		return "", errors.New("Remote home is not absolute")
+	}
+	homes.Lock()
+	homes.byHost[key] = resolvedHome{recorded: time.Now(), home: home}
+	homes.Unlock()
+	return home, nil
 }
 
 // Key is an identity for this host, used to key cached host-side answers.

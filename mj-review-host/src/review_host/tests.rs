@@ -3509,8 +3509,9 @@ async fn a_restored_reviewer_can_hand_back_its_preloaded_prompt() {
     let environment = FakeEnvironment::new();
     let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
     let mut handback = stored_handback(&environment, "reviewer-1", "real defect").unwrap();
-    let group =
-        mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&format!("key-{}", children[0]));
+    let startup_key = mj_core::subagent::SubagentKind::Reviewer
+        .startup_request_key(&format!("key-{}", children[0]));
+    let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&startup_key);
     handback.command_id = mj_store::database::startup_step_id(&group, "prompt");
     environment.standings.lock().unwrap().insert(
         children[0].clone(),

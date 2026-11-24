@@ -937,6 +937,9 @@ fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("Retry launch"));
+    #[cfg(target_os = "macos")]
+    assert!(error.contains(mj_targets::targets::PODMAN_UNSUPPORTED_ON_MACOS));
+    #[cfg(not(target_os = "macos"))]
     assert!(error.contains("Podman 4.0.0"));
 }
 

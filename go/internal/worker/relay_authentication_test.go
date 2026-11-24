@@ -24,7 +24,7 @@ func authenticationOpen(t *testing.T, root string) *DurableRelay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	if _, err := relay.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}}); err != nil {
 		t.Fatal(err)
 	}

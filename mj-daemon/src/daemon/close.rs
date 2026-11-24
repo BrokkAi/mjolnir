@@ -47,7 +47,9 @@ impl RuntimeState {
                 &ProcessExecutor,
             )
             .await?;
-        self.persist_suspension_intent(session_id, None).await
+        self.persist_suspension_intent(session_id, None)
+            .await
+            .map(drop)
     }
 
     pub async fn suspend_preflight(
@@ -67,9 +69,9 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: &str,
         consent: Option<&mj_core::suspend_consent::SuspendConsent>,
-    ) -> Result<()> {
+    ) -> Result<SessionRecord> {
         let consent = consent.cloned();
-        blocking({
+        let previous = blocking({
             let session_id = session_id.to_owned();
             move || {
                 ensure!(
@@ -84,6 +86,7 @@ impl RuntimeState {
                     .sessions
                     .get_mut(&session_id)
                     .with_context(|| format!("unknown session {session_id}"))?;
+                let previous = record.clone();
                 let ready_move = mj_controller::controller::move_session::move_destination_before_close(record)?;
                 if matches!(
                     record.state,
@@ -104,13 +107,13 @@ impl RuntimeState {
                     ready_move.as_ref(),
                     consent.as_ref(),
                 )?;
-                Ok(())
+                Ok(previous)
             }
         })
         .await?;
         self.reload_controller().await?;
         self.publish_revision();
-        Ok(())
+        Ok(previous)
     }
 
     pub async fn suspend_session(self: &Arc<Self>, session_id: String) -> Result<()> {
@@ -300,21 +303,24 @@ impl RuntimeState {
                             })
                             .await?;
                         }
-                        if let Err(error) = state
+                        let accepted_record = match state
                             .persist_suspension_intent(&session_id, Some(&consent))
                             .await
                         {
-                            if invocation == SuspendInvocation::Parent {
-                                let id = session_id.clone();
-                                let _ = blocking(move || {
-                                    mj_controller::database::set_subagent_resume_with_parent(
-                                        &id, false,
-                                    )
-                                })
-                                .await;
+                            Ok(previous) => previous,
+                            Err(error) => {
+                                if invocation == SuspendInvocation::Parent {
+                                    let id = session_id.clone();
+                                    let _ = blocking(move || {
+                                        mj_controller::database::set_subagent_resume_with_parent(
+                                            &id, false,
+                                        )
+                                    })
+                                    .await;
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
-                        }
+                        };
                         accepted.send_replace(Some(Ok(())));
                         let children = if matches!(
                             invocation,
@@ -379,6 +385,7 @@ impl RuntimeState {
                                 session_id.clone(),
                                 control,
                                 consent,
+                                Some(accepted_record),
                             )
                             .await;
                         if invocation == SuspendInvocation::Parent {
@@ -848,6 +855,7 @@ impl RuntimeState {
                             session_id,
                             control,
                             mj_core::suspend_consent::SuspendConsent::default(),
+                            None,
                         )
                         .await
                 },
@@ -868,6 +876,7 @@ impl RuntimeState {
         session_id: String,
         control: LifecycleControl,
         consent: mj_core::suspend_consent::SuspendConsent,
+        accepted_record: Option<SessionRecord>,
     ) -> Result<DaemonLifecycleResult> {
         let cancelled = control.cancelled.clone();
         let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
@@ -878,15 +887,41 @@ impl RuntimeState {
             self.clone(),
             session_id.clone(),
         );
-        self.suspend_with_loaded_controller(
-            session_admission,
-            &session_id,
-            &mut controller,
-            &executor,
-            &consent,
-            Some(&control),
-        )
-        .await
+        let result = self
+            .suspend_with_loaded_controller(
+                session_admission,
+                &session_id,
+                &mut controller,
+                &executor,
+                &consent,
+                Some(&control),
+            )
+            .await;
+        if result.is_err()
+            && let Some(accepted) = accepted_record
+        {
+            let id = session_id.clone();
+            let restored = blocking(move || {
+                let Some(mut durable) = mj_controller::database::read_durable_session_record(&id)?
+                else {
+                    return Ok(());
+                };
+                if durable.state == SessionState::Closing
+                    && durable.target == accepted.target
+                    && durable.checkpoint == accepted.checkpoint
+                {
+                    durable.state = accepted.state;
+                    durable.updated_at = chrono::Utc::now().to_rfc3339();
+                    mj_controller::database::save_session(&durable)?;
+                }
+                Ok(())
+            })
+            .await;
+            if let Err(error) = restored {
+                tracing::warn!(%session_id, %error, "could not roll back accepted suspension state");
+            }
+        }
+        result
     }
 
     /// `commit` is the control a daemon close commits through at its point of

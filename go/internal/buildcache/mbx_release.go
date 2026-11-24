@@ -25,10 +25,16 @@
 package buildcache
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/store"
@@ -218,7 +224,59 @@ func BuildStateReleaseManagedCheckout(ssh *core.SshTarget, root string) BuildSta
 // session owns, one that never had build state Mjolnir can name, and a
 // container that ran without the cache.
 func BuildStateReleaseForEnvironment(sessionID string, placement *store.EnvironmentPlacement, backend *core.TargetsTargetLocator, config *core.Config) *BuildStateRelease {
-	panic("unported: mj-build-cache/src/mbx/release.rs BuildStateRelease::for_environment")
+	host, root, ok := environmentWorkspaceRoot(sessionID, placement, backend)
+	if !ok {
+		return nil
+	}
+	var releaseFrom releaseStore
+	var preferredMbx *string
+	if backend.Kind != core.TargetsTargetLocatorSshBare {
+		cache := placement.BuildCache
+		if cache == nil {
+			return nil
+		}
+		if host.Key() != cache.Host {
+			slog.Warn("the build cache was recorded on another host, so its state is not released",
+				"session_id", sessionID, "recorded", cache.Host, "actual", host.Key())
+			return nil
+		}
+		releaseFrom = releaseStore{shared: true, directory: cache.Directory}
+		preferred := CacheBinaryPath(cache.Directory)
+		preferredMbx = &preferred
+	}
+	var repositories []string
+	switch {
+	case placement.Repositories != nil:
+		repositories = *placement.Repositories
+	default:
+		bundle, ok := config.Bundles[placement.BundleID]
+		if !ok {
+			return nil
+		}
+		for _, repository := range bundle.Repositories {
+			repositories = append(repositories, repository.Destination)
+		}
+	}
+	workspaces := make([]string, 0, len(repositories))
+	for _, destination := range repositories {
+		workspaces = append(workspaces, core.Join(root, destination))
+	}
+	var legacyMbxRoot *string
+	if releaseFrom.shared && host.IsLocal() {
+		legacy := pathJoin(core.DataDir(), "mbx")
+		legacyMbxRoot = &legacy
+	}
+	if len(workspaces) == 0 {
+		return nil
+	}
+	return &BuildStateRelease{
+		host:          host,
+		store:         releaseFrom,
+		preferredMbx:  preferredMbx,
+		legacyMbxRoot: legacyMbxRoot,
+		cleanupRoot:   &root,
+		workspaces:    workspaces,
+	}
 }
 
 // Excluding is this release without anything under the workspace root of
@@ -231,23 +289,107 @@ func BuildStateReleaseForEnvironment(sessionID string, placement *store.Environm
 // continues in. Any path under the live root is kept, whether or not the
 // live target has the build cache.
 func (r BuildStateRelease) Excluding(liveSession *core.SessionRecord, liveBackend *core.TargetsTargetLocator) *BuildStateRelease {
-	panic("unported: mj-build-cache/src/mbx/release.rs BuildStateRelease::excluding")
+	if liveSession != nil {
+		if host, root, ok := workspaceRoot(liveSession, liveBackend); ok && host.Key() == r.host.Key() {
+			if r.cleanupRoot != nil && (pathStartsWith(*r.cleanupRoot, root) || pathStartsWith(root, *r.cleanupRoot)) {
+				r.cleanupRoot = nil
+			}
+			kept := []string{}
+			for _, workspace := range r.workspaces {
+				if !pathStartsWith(workspace, root) {
+					kept = append(kept, workspace)
+				}
+			}
+			r.workspaces = kept
+		}
+	}
+	if len(r.workspaces) == 0 && r.cleanupRoot == nil {
+		return nil
+	}
+	return &r
 }
 
 // Run releases the target root, or each known workspace for older mbx.
 // Never fails: a release that does not complete is logged, shown to the
 // person, and recorded for `mj doctor`.
 func (r *BuildStateRelease) Run(executor core.CommandExecutor) {
-	panic("unported: mj-build-cache/src/mbx/release.rs BuildStateRelease::run")
+	if !enabled() {
+		return
+	}
+	command := r.command()
+	output, err := executor.ExecuteCleanupWithTimeout(&command, releaseTimeout)
+	var failure string
+	notConfirmed := false
+	switch {
+	case err == nil && output.Status == 0:
+		stdout := lossy(output.Stdout)
+		if strings.TrimSpace(stdout) == absent {
+			slog.Debug("no mbx on this host, so there is no build state to release", "host", r.host.Key())
+		} else {
+			// mbx exits 0 when it keeps a target a running command holds, and
+			// says so on stderr.
+			slog.Info("released the mbx build state of removed workspaces",
+				"host", r.host.Key(), "workspaces", r.workspaces,
+				"output", strings.TrimSpace(stdout), "warnings", trimmedLossy(output.Stderr))
+		}
+		return
+	case err == nil:
+		failure = fmt.Sprintf("exit status %d: %s", output.Status, trimmedLossy(output.Stderr))
+	case cleanupWasInterrupted(err):
+		failure = fmt.Sprintf("mj stopped waiting for mbx clean; it may still be running: %s", alternate(err))
+		notConfirmed = true
+	default:
+		failure = alternate(err)
+	}
+	workspaces := strings.Join(r.workspaces, ", ")
+	if notConfirmed {
+		slog.Warn("mj stopped waiting for mbx clean; it may still be running",
+			"host", r.host.Key(), "workspaces", workspaces, "error", failure)
+		executor.NotifyNotice(fmt.Sprintf("mj stopped waiting for mbx clean on %s; it may still be running. "+
+			"`mj doctor` shows how to retry it for %s.", r.host.Key(), workspaces))
+	} else {
+		slog.Warn("mbx kept the build state of removed workspaces",
+			"host", r.host.Key(), "workspaces", workspaces, "error", failure)
+		executor.NotifyNotice(fmt.Sprintf("The Rust build cache on %s still holds build output for %s: %s. "+
+			"`mj doctor` shows how to remove it.", r.host.Key(), workspaces, failure))
+	}
+	if err := recordFailure(r, failure); err != nil {
+		slog.Warn("could not record the failed mbx release for mj doctor", "error", alternate(err))
+	}
 }
 
 func (r *BuildStateRelease) command() core.CommandSpec {
-	panic("unported: mj-build-cache/src/mbx/release.rs BuildStateRelease::command")
+	mode, directory, configHome := "native", "", ""
+	if r.store.shared {
+		mode, directory, configHome = "shared", r.store.directory, configurationHome(r.store.directory)
+	}
+	text := func(value *string) string {
+		if value == nil {
+			return ""
+		}
+		return *value
+	}
+	arguments := []string{mode, directory, configHome, text(r.preferredMbx), text(r.legacyMbxRoot), text(r.cleanupRoot)}
+	arguments = append(arguments, r.workspaces...)
+	return r.host.ShellCommand(releaseScript, releaseLabel, arguments,
+		"release the mbx build state of removed workspaces").PreserveChildrenOnCancel()
 }
 
 // remediation is the remediation `mj doctor` prints for this release.
 func (r *BuildStateRelease) remediation() string {
-	panic("unported: mj-build-cache/src/mbx/release.rs BuildStateRelease::remediation")
+	environment := ""
+	if r.store.shared {
+		environment = fmt.Sprintf("MBX_CACHE_DIR=%s XDG_CONFIG_HOME=%s ", r.store.directory, configurationHome(r.store.directory))
+	}
+	commands := make([]string, 0, len(r.workspaces))
+	for _, workspace := range r.workspaces {
+		commands = append(commands, environment+"mbx clean "+workspace)
+	}
+	fallback := strings.Join(commands, "; ")
+	if r.cleanupRoot == nil {
+		return fallback
+	}
+	return fmt.Sprintf("%smbx clean --under %s (older mbx: %s)", environment, *r.cleanupRoot, fallback)
 }
 
 // workspaceRoot is the host and directory under which a session's own target
@@ -261,7 +403,38 @@ func workspaceRoot(session *core.SessionRecord, backend *core.TargetsTargetLocat
 }
 
 func environmentWorkspaceRoot(sessionID string, placement *store.EnvironmentPlacement, backend *core.TargetsTargetLocator) (CacheHost, string, bool) {
-	panic("unported: mj-build-cache/src/mbx/release.rs environment_workspace_root")
+	if core.IsBorrowed(backend) {
+		return CacheHost{}, "", false
+	}
+	switch backend.Kind {
+	case core.TargetsTargetLocatorSshBare:
+		// The root is released with `mbx clean --under`, so it must be this
+		// session's alone: a shared directory would release every session
+		// in it.
+		if placement.ProjectDirectory == nil && core.VerifySessionWorkspace(backend.Workspace, sessionID) == nil {
+			ssh := backend.SSH.Clone()
+			return CacheHost{SSH: &ssh}, backend.Workspace, true
+		}
+	case core.TargetsTargetLocatorLocalPodman, core.TargetsTargetLocatorLocalDocker,
+		core.TargetsTargetLocatorSshPodman, core.TargetsTargetLocatorSshDocker,
+		core.TargetsTargetLocatorSshAppleContainer:
+		// Only a per-session workspace: the legacy shared `/workspace` would
+		// name every legacy session's checkout at once.
+		if placement.ContainerWorkspace == nil {
+			return CacheHost{}, "", false
+		}
+		workspace := *placement.ContainerWorkspace
+		expected, err := core.NewContainerWorkspace(sessionID)
+		if err != nil || !pathEqual(workspace, expected) {
+			return CacheHost{}, "", false
+		}
+		host, ok := HostForLocator(backend)
+		if !ok {
+			return CacheHost{}, "", false
+		}
+		return host, workspace, true
+	}
+	return CacheHost{}, "", false
 }
 
 // configurationHome is the `XDG_CONFIG_HOME` under which the containers' mbx
@@ -285,7 +458,28 @@ type failure struct {
 
 // UnmarshalJSON requires every field, as serde does.
 func (f *failure) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-build-cache/src/mbx/release.rs Failure::deserialize")
+	var wire struct {
+		AtSecs      *uint64 `json:"at_secs"`
+		Host        *string `json:"host"`
+		Error       *string `json:"error"`
+		Remediation *string `json:"remediation"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	for _, field := range []struct {
+		name    string
+		present bool
+	}{
+		{"at_secs", wire.AtSecs != nil}, {"host", wire.Host != nil},
+		{"error", wire.Error != nil}, {"remediation", wire.Remediation != nil},
+	} {
+		if !field.present {
+			return fmt.Errorf("missing field `%s`", field.name)
+		}
+	}
+	*f = failure{AtSecs: *wire.AtSecs, Host: *wire.Host, Error: *wire.Error, Remediation: *wire.Remediation}
+	return nil
 }
 
 func failuresPath() string {
@@ -295,7 +489,40 @@ func failuresPath() string {
 // recordFailure appends one line. A line this short is one `write` on an
 // append-mode file, so concurrent teardowns do not interleave.
 func recordFailure(release *BuildStateRelease, errorText string) error {
-	panic("unported: mj-build-cache/src/mbx/release.rs record_failure")
+	path := failuresPath()
+	if parent, ok := pathParent(path); ok && parent != "" {
+		if err := os.MkdirAll(parent, 0o777); err != nil {
+			return err
+		}
+	}
+	info, err := os.Stat(path)
+	restart := err == nil && uint64(info.Size()) > failuresMaxBytes
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if restart {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, flags, 0o666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	errorRunes := []rune(errorText)
+	if len(errorRunes) > 512 {
+		errorRunes = errorRunes[:512]
+	}
+	var line bytes.Buffer
+	encoder := json.NewEncoder(&line)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(failure{
+		AtSecs:      nowSecs(),
+		Host:        release.host.Key(),
+		Error:       string(errorRunes),
+		Remediation: release.remediation(),
+	}); err != nil {
+		return err
+	}
+	_, err = file.Write(line.Bytes())
+	return err
 }
 
 func nowSecs() uint64 {
@@ -327,7 +554,28 @@ type ReleaseFailure struct {
 // RecentReleaseFailures is the releases that failed within
 // FailureReportSecs, newest last.
 func RecentReleaseFailures() []ReleaseFailure {
-	panic("unported: mj-build-cache/src/mbx/release.rs recent_release_failures")
+	failures := []ReleaseFailure{}
+	data, err := os.ReadFile(failuresPath())
+	if err != nil || !utf8.Valid(data) {
+		return failures
+	}
+	now := nowSecs()
+	var since uint64
+	if now > FailureReportSecs {
+		since = now - FailureReportSecs
+	}
+	for _, line := range rustLines(string(data)) {
+		var recorded failure
+		if err := json.Unmarshal([]byte(line), &recorded); err != nil || recorded.AtSecs < since {
+			continue
+		}
+		failures = append(failures, ReleaseFailure{
+			Host:        recorded.Host,
+			Error:       recorded.Error,
+			Remediation: recorded.Remediation,
+		})
+	}
+	return failures
 }
 
 // releasesEnabledForTest is Rust's thread-local ENABLED. Most controller

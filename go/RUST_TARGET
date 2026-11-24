@@ -1,0 +1,11 @@
+# The Rust commit the Go build matches, and how far the replay has got.
+# target: the Rust commit the Go build is meant to match (taken from the
+#   v2.75.0 tag on 2026-11-24; the tag may move while that release is in
+#   flight, the commit does not).
+# replayed-through: the last Rust commit whose changes are in go/ (commits
+#   after it, up to the target, still have to be replayed one by one; see
+#   "How to work" rule 6 in .agents/plans/go-port.md).
+# already-applied: later Rust commits whose go/ changes landed early.
+target 5b68df737775f748e6d3e9207930e5467c31e397
+replayed-through 3dde0c11b5832be0a9d810662216d82f9d7e9696
+already-applied 0fc96c573 b1200383e e14e4a6fe e818721b6 8a8ea94d0

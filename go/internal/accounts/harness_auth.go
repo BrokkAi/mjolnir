@@ -7,9 +7,12 @@
 package accounts
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -33,14 +36,73 @@ func HarnessIsAuthenticatedWithExecutor(profile *core.HarnessProfile, executor c
 // for either case. A harness without a login or a configuration file, such
 // as DSH, is proven by its key alone.
 func HarnessIsAuthenticatedWith(profile *core.HarnessProfile, isDefaultHome bool, executor core.CommandExecutor) bool {
-	panic("unported: mj-accounts/src/harness_auth.rs harness_is_authenticated_with")
+	kind := profile.Kind
+	home := profile.Home
+	switch profile.AuthScheme().(type) {
+	case core.AuthSchemeAwsCredentialChain:
+		// AWS credentials can come from a role or an external credential
+		// process; there is no harness login file. Doctor probes the chain
+		// separately.
+		return true
+	case core.AuthSchemeNativeLoginStore:
+		// OpenCode keeps its logins in its own database, or takes a provider
+		// key from its environment; doctor reports a database it cannot read.
+		logins, err := ProfileLogins(profile)
+		return (err == nil && logins != nil) || len(profile.OpencodeEnvironmentLogins()) > 0
+	}
+	// A harness without a login reads its key from its environment, so no
+	// file can prove it; the key itself does.
+	if envKey, ok := kind.APIKeyVariable(); ok {
+		return profile.SuppliesAPIKey(envKey)
+	}
+	// On a Mac the Keychain item is the only Claude login. A
+	// `.credentials.json` there (a profile home's, left by earlier releases,
+	// or Claude Code's plaintext fallback) is not one, so the marker proves
+	// nothing, and every profile shares the item: asking the CLI about a
+	// scoped home would only report the default profile's state again.
+	if _, keychain := kind.LoginStore(core.HarnessHostCurrent(), home).(core.HarnessLoginStoreMacKeychain); keychain {
+		return ClaudeKeychainReportsAuthenticated(executor)
+	}
+	if harnessAuthIsFile(profile.AuthenticationMarker()) ||
+		(kind == core.HarnessKindKimi && harnessAuthIsFile(filepath.Join(home, "credentials"))) {
+		return true
+	}
+	if kind != core.HarnessKindClaude {
+		return false
+	}
+	// The default home on a host without a Keychain has no marker, so there
+	// is no login: setting `CLAUDE_CONFIG_DIR` for the default home would
+	// change Claude's profile selection.
+	if isDefaultHome {
+		return false
+	}
+	return ClaudeCLIReportsAuthenticated(home, executor)
+}
+
+// harnessAuthIsFile is Rust's Path::is_file: the path exists, following symlinks, and
+// is a regular file.
+func harnessAuthIsFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // ClaudeCLIReportsAuthenticated asks Claude Code about a scoped profile.
 // Setting `CLAUDE_CONFIG_DIR` for the default home changes Claude's profile
 // selection, so the default home is never asked.
 func ClaudeCLIReportsAuthenticated(home string, executor core.CommandExecutor) bool {
-	panic("unported: mj-accounts/src/harness_auth.rs claude_cli_reports_authenticated")
+	command := core.NewCommandSpec("claude", []string{"auth", "status", "--json"}).
+		WithPurpose("check Claude Code authentication")
+	command.Env[core.HarnessKindClaude.HomeEnv()] = home
+	output, err := executor.Execute(&command)
+	if err != nil || output.Status != 0 {
+		return false
+	}
+	var status any
+	if json.Unmarshal(output.Stdout, &status) != nil {
+		return false
+	}
+	loggedIn, ok := harnessAuthJSONPointer(status, "loggedIn").(bool)
+	return ok && loggedIn
 }
 
 // ClaudeKeychainReportsAuthenticated is whether the Keychain holds a Claude
@@ -102,7 +164,29 @@ const securityItemNotFound = 44
 // them. It fails only when `security` cannot run or the item holds no
 // usable login.
 func ReadClaudeKeychainLogin(executor core.CommandExecutor) (KeychainLogin, error) {
-	panic("unported: mj-accounts/src/harness_auth.rs read_claude_keychain_login")
+	command := core.NewCommandSpec("security", []string{
+		"find-generic-password",
+		"-a",
+		ClaudeKeychainAccount(),
+		"-s",
+		core.ClaudeKeychainService,
+		"-w",
+	}).WithPurpose("read Claude Code authentication from the macOS Keychain")
+	command.SensitiveOutput = true
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return nil, fmt.Errorf("read Claude Code's login from the macOS Keychain: %w", err)
+	}
+	if output.Status == securityItemNotFound {
+		return KeychainLoginMissing{}, nil
+	}
+	if output.Status != 0 {
+		return KeychainLoginUnreadable{Status: output.Status}, nil
+	}
+	if !ClaudeCredentialsContainLogin(output.Stdout) {
+		return nil, fmt.Errorf("the macOS Keychain item \"%s\" does not contain a usable Claude login", core.ClaudeKeychainService)
+	}
+	return KeychainLoginPresent{Login: output.Stdout}, nil
 }
 
 // ClaudeKeychainCredentials is Claude Code's Keychain login for a reader
@@ -124,5 +208,33 @@ func ClaudeKeychainCredentials(executor core.CommandExecutor) ([]byte, error) {
 }
 
 func ClaudeCredentialsContainLogin(credentials []byte) bool {
-	panic("unported: mj-accounts/src/harness_auth.rs claude_credentials_contain_login")
+	var document any
+	if json.Unmarshal(credentials, &document) != nil {
+		return false
+	}
+	for _, pointer := range [][]string{
+		{"claudeAiOauth", "accessToken"},
+		{"claudeAiOauth", "refreshToken"},
+		{"oauth", "accessToken"},
+		{"apiKey"},
+	} {
+		if value, ok := harnessAuthJSONPointer(document, pointer...).(string); ok && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// harnessAuthJSONPointer follows object keys through a decoded JSON document, as
+// serde_json's Value::pointer does for a path of object keys. Nil when a
+// step is missing or not an object.
+func harnessAuthJSONPointer(document any, keys ...string) any {
+	for _, key := range keys {
+		object, ok := document.(map[string]any)
+		if !ok {
+			return nil
+		}
+		document = object[key]
+	}
+	return document
 }

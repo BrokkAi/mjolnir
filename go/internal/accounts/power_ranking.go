@@ -14,13 +14,17 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -50,6 +54,40 @@ type PowerRankingEntry struct {
 	Minutes         *float64 `json:"minutes"`
 }
 
+// MarshalJSON writes the row as serde does: fields in declaration order,
+// absent options as null, floats in serde_json's form.
+func (e PowerRankingEntry) MarshalJSON() ([]byte, error) {
+	return jsonvalue.Marshal(e.value())
+}
+
+func (e PowerRankingEntry) value() jsonvalue.Object {
+	optionalText := func(value *string) any {
+		if value == nil {
+			return nil
+		}
+		return *value
+	}
+	optionalFloat := func(value *float64) any {
+		if value == nil {
+			return nil
+		}
+		return *value
+	}
+	return jsonvalue.Object{
+		{Key: "config", Value: e.Config},
+		{Key: "model", Value: e.Model},
+		{Key: "effort", Value: optionalText(e.Effort)},
+		{Key: "harness", Value: optionalText(e.Harness)},
+		{Key: "tasks_per_200_sub", Value: optionalFloat(e.TasksPer200Sub)},
+		{Key: "tasks_per_200_api", Value: optionalFloat(e.TasksPer200API)},
+		{Key: "weekly_budget_usd", Value: optionalFloat(e.WeeklyBudgetUsd)},
+		{Key: "plan_usd_per_month", Value: optionalFloat(e.PlanUsdPerMonth)},
+		{Key: "plan_assumed", Value: e.PlanAssumed},
+		{Key: "basis", Value: e.Basis},
+		{Key: "minutes", Value: optionalFloat(e.Minutes)},
+	}
+}
+
 func (e *PowerRankingEntry) UnmarshalJSON(data []byte) error {
 	type plain PowerRankingEntry
 	return powerRankingDecode(data, (*plain)(e), "config", "model", "basis")
@@ -69,12 +107,26 @@ type PowerRankingSnapshot struct {
 }
 
 func (s PowerRankingSnapshot) MarshalJSON() ([]byte, error) {
-	type plain PowerRankingSnapshot
-	value := plain(s)
-	if value.Entries == nil {
-		value.Entries = []PowerRankingEntry{}
+	return jsonvalue.Marshal(s.value())
+}
+
+func (s PowerRankingSnapshot) value() jsonvalue.Object {
+	optionalText := func(value *string) any {
+		if value == nil {
+			return nil
+		}
+		return *value
 	}
-	return json.Marshal(value)
+	entries := make([]any, 0, len(s.Entries))
+	for _, entry := range s.Entries {
+		entries = append(entries, entry.value())
+	}
+	return jsonvalue.Object{
+		{Key: "schema_version", Value: s.SchemaVersion},
+		{Key: "as_of", Value: optionalText(s.AsOf)},
+		{Key: "source_commit", Value: optionalText(s.SourceCommit)},
+		{Key: "entries", Value: entries},
+	}
 }
 
 func (s *PowerRankingSnapshot) UnmarshalJSON(data []byte) error {
@@ -106,7 +158,45 @@ func PowerRankingSnapshotBaseline() *PowerRankingSnapshot {
 // Lookup matches modelIdentity and effort for harness against this
 // snapshot. Nil when nothing matches.
 func (s *PowerRankingSnapshot) Lookup(modelIdentity string, effort *string, harness core.HarnessKind) *PowerRankingLookup {
-	panic("unported: mj-accounts/src/power_ranking.rs PowerRankingSnapshot::lookup")
+	var matched []PowerRankingEntry
+	for _, alias := range modelAliases(modelIdentity) {
+		for _, entry := range s.Entries {
+			if powerRankingASCIILower(entry.Model) == alias {
+				matched = append(matched, entry)
+			}
+		}
+		if len(matched) > 0 {
+			break
+		}
+	}
+	if len(matched) == 0 {
+		return nil
+	}
+	matched = entriesForHarness(matched, harness)
+	if len(matched) == 0 {
+		return nil
+	}
+	return pickEffort(matched, powerRankingLowerEffort(effort))
+}
+
+// powerRankingASCIILower is Rust's `str::to_ascii_lowercase`.
+func powerRankingASCIILower(text string) string {
+	lowered := []byte(text)
+	for index, b := range lowered {
+		if 'A' <= b && b <= 'Z' {
+			lowered[index] = b + ('a' - 'A')
+		}
+	}
+	return string(lowered)
+}
+
+// powerRankingLowerEffort is the effort lowercased as Rust's lookups ask.
+func powerRankingLowerEffort(effort *string) *string {
+	if effort == nil {
+		return nil
+	}
+	lowered := powerRankingASCIILower(*effort)
+	return &lowered
 }
 
 // PowerRankingLookup is a row chosen for a model, or the geometric mean of
@@ -195,13 +285,58 @@ func (s *PowerRankingStore) Snapshot() PowerRankingSnapshot {
 // unranked effort falls back to `high`, then `medium`, then the geometric
 // mean of the ranked efforts for that model and harness.
 func (s *PowerRankingStore) Lookup(modelIdentity string, effort *string, harness core.HarnessKind) *PowerRankingLookup {
-	panic("unported: mj-accounts/src/power_ranking.rs PowerRankingStore::lookup")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var entries []PowerRankingEntry
+	found := false
+	for _, alias := range modelAliases(modelIdentity) {
+		if entries, found = s.state.ranked.byModel[alias]; found {
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	matched := entriesForHarness(entries, harness)
+	if len(matched) == 0 {
+		return nil
+	}
+	return pickEffort(matched, powerRankingLowerEffort(effort))
 }
 
 // Refresh fetches when the disk cache is missing, older than 24 hours, or
 // from another `mj` version. A failed fetch keeps the current snapshot.
 func (s *PowerRankingStore) Refresh(ctx context.Context, nowSeconds uint64) error {
-	panic("unported: mj-accounts/src/power_ranking.rs PowerRankingStore::refresh")
+	s.mu.Lock()
+	fresh := s.state.isFresh(nowSeconds)
+	s.mu.Unlock()
+	if fresh {
+		return nil
+	}
+	fetched, err := fetchPowerRankingSnapshot(ctx, s.url)
+	if err != nil {
+		slog.Warn("power-ranking refresh failed; keeping the current snapshot", "error", err)
+		return err
+	}
+	cache := powerRankingCacheFile{
+		MjVersion:             core.PackageVersion,
+		FetchedAtEpochSeconds: nowSeconds,
+		Snapshot:              fetched,
+	}
+	writeErr := writePowerRankingCache(s.cachePath, &cache)
+	s.mu.Lock()
+	fetchedAt := nowSeconds
+	version := cache.MjVersion
+	s.state.fetchedAtEpochSeconds = &fetchedAt
+	s.state.mjVersion = &version
+	s.state.ranked = newPowerRankingRanked(cache.Snapshot)
+	s.mu.Unlock()
+	if writeErr != nil {
+		slog.Warn("power-ranking cache write failed; updated in-memory snapshot",
+			"error", writeErr, "path", s.cachePath)
+		return writeErr
+	}
+	return nil
 }
 
 func (s *powerRankingState) isFresh(nowSeconds uint64) bool {
@@ -217,7 +352,34 @@ func (s *powerRankingState) isFresh(nowSeconds uint64) bool {
 }
 
 func newPowerRankingRanked(snapshot PowerRankingSnapshot) powerRankingRanked {
-	panic("unported: mj-accounts/src/power_ranking.rs Ranked::new")
+	byModel := map[string][]PowerRankingEntry{}
+	for _, entry := range snapshot.Entries {
+		byModel[entry.Model] = append(byModel[entry.Model], entry)
+	}
+	// `opus/xhigh` is published as model `claude-opus-5`. Index that shorter
+	// config spelling too, unless it already names another model.
+	for _, entry := range snapshot.Entries {
+		stem, _, _ := strings.Cut(entry.Config, "/")
+		if stem == "" || stem == entry.Model {
+			continue
+		}
+		bucket, exists := byModel[stem]
+		if !exists {
+			bucket = []PowerRankingEntry{}
+		}
+		other := false
+		for _, existing := range bucket {
+			if existing.Model != entry.Model {
+				other = true
+				break
+			}
+		}
+		if !other {
+			bucket = append(bucket, entry)
+		}
+		byModel[stem] = bucket
+	}
+	return powerRankingRanked{snapshot: snapshot, byModel: byModel}
 }
 
 var powerRankingBaseline = sync.OnceValue(func() *PowerRankingSnapshot {
@@ -229,7 +391,19 @@ var powerRankingBaseline = sync.OnceValue(func() *PowerRankingSnapshot {
 })
 
 func loadPowerRankingState(cachePath string, nowSeconds uint64) powerRankingState {
-	panic("unported: mj-accounts/src/power_ranking.rs load_state")
+	if cache := readPowerRankingCache(cachePath); cache != nil && cache.MjVersion == core.PackageVersion {
+		// A stale same-version cache stays in memory so a failed refresh
+		// keeps the last good table. A timestamp in the future is clamped so
+		// a skewed clock cannot keep the cache fresh forever.
+		fetchedAt := min(cache.FetchedAtEpochSeconds, nowSeconds)
+		version := cache.MjVersion
+		return powerRankingState{
+			ranked:                newPowerRankingRanked(cache.Snapshot),
+			fetchedAtEpochSeconds: &fetchedAt,
+			mjVersion:             &version,
+		}
+	}
+	return powerRankingState{ranked: newPowerRankingRanked(*powerRankingBaseline())}
 }
 
 func readPowerRankingCache(path string) *powerRankingCacheFile {
@@ -246,11 +420,56 @@ func readPowerRankingCache(path string) *powerRankingCacheFile {
 }
 
 func writePowerRankingCache(path string, cache *powerRankingCacheFile) error {
-	panic("unported: mj-accounts/src/power_ranking.rs write_cache")
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o777); err != nil {
+		return fmt.Errorf("create %s: %w", parent, err)
+	}
+	body, err := jsonvalue.Marshal(jsonvalue.Object{
+		{Key: "mj_version", Value: cache.MjVersion},
+		{Key: "fetched_at_epoch_seconds", Value: cache.FetchedAtEpochSeconds},
+		{Key: "snapshot", Value: cache.Snapshot.value()},
+	})
+	if err != nil {
+		return fmt.Errorf("encode power-ranking cache: %w", err)
+	}
+	// Rust's `Path::with_extension("json.tmp")`.
+	temporary := strings.TrimSuffix(path, filepath.Ext(path)) + ".json.tmp"
+	if err := os.WriteFile(temporary, body, 0o666); err != nil {
+		return fmt.Errorf("write %s: %w", temporary, err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
 }
 
 func fetchPowerRankingSnapshot(ctx context.Context, url string) (PowerRankingSnapshot, error) {
-	panic("unported: mj-accounts/src/power_ranking.rs fetch_snapshot")
+	client := &http.Client{Timeout: powerRankingFetchTimeout}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return PowerRankingSnapshot{}, fmt.Errorf("fetch %s: %w", url, err)
+	}
+	request.Header.Set("User-Agent", "mj/"+core.PackageVersion)
+	response, err := client.Do(request)
+	if err != nil {
+		return PowerRankingSnapshot{}, fmt.Errorf("fetch %s: %w", url, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return PowerRankingSnapshot{}, fmt.Errorf("power-ranking fetch returned %s", reqwestStatusDisplay(response.StatusCode))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return PowerRankingSnapshot{}, fmt.Errorf("decode power-ranking JSON: %w", err)
+	}
+	var snapshot PowerRankingSnapshot
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		return PowerRankingSnapshot{}, fmt.Errorf("decode power-ranking JSON: %w", err)
+	}
+	if snapshot.SchemaVersion != 1 {
+		return PowerRankingSnapshot{}, fmt.Errorf("power-ranking schema_version %d is not supported", snapshot.SchemaVersion)
+	}
+	return snapshot, nil
 }
 
 func entriesForHarness(entries []PowerRankingEntry, harness core.HarnessKind) []PowerRankingEntry {
@@ -271,7 +490,27 @@ func entriesForHarness(entries []PowerRankingEntry, harness core.HarnessKind) []
 }
 
 func pickEffort(entries []PowerRankingEntry, effort *string) *PowerRankingLookup {
-	panic("unported: mj-accounts/src/power_ranking.rs pick_effort")
+	find := func(wanted string) *PowerRankingEntry {
+		for index := range entries {
+			if entries[index].Effort != nil && *entries[index].Effort == wanted {
+				return &entries[index]
+			}
+		}
+		return nil
+	}
+	if effort != nil {
+		if found := find(*effort); found != nil {
+			lookup := lookupFrom(found, false)
+			return &lookup
+		}
+	}
+	for _, fallback := range []string{"high", "medium"} {
+		if found := find(fallback); found != nil {
+			lookup := lookupFrom(found, false)
+			return &lookup
+		}
+	}
+	return powerRankingGeometricMean(entries)
 }
 
 func lookupFrom(entry *PowerRankingEntry, geometricMean bool) PowerRankingLookup {
@@ -291,7 +530,35 @@ func lookupFrom(entry *PowerRankingEntry, geometricMean bool) PowerRankingLookup
 }
 
 func powerRankingGeometricMean(entries []PowerRankingEntry) *PowerRankingLookup {
-	panic("unported: mj-accounts/src/power_ranking.rs geometric_mean")
+	if len(entries) == 0 {
+		return nil
+	}
+	first := &entries[0]
+	values := func(field func(*PowerRankingEntry) *float64) []float64 {
+		collected := []float64{}
+		for index := range entries {
+			if value := field(&entries[index]); value != nil {
+				collected = append(collected, *value)
+			}
+		}
+		return collected
+	}
+	planAssumed := false
+	for _, entry := range entries {
+		planAssumed = planAssumed || entry.PlanAssumed
+	}
+	return &PowerRankingLookup{
+		Model:           first.Model,
+		Harness:         first.Harness,
+		TasksPer200Sub:  meanOf(values(func(entry *PowerRankingEntry) *float64 { return entry.TasksPer200Sub })),
+		TasksPer200API:  meanOf(values(func(entry *PowerRankingEntry) *float64 { return entry.TasksPer200API })),
+		WeeklyBudgetUsd: meanOf(values(func(entry *PowerRankingEntry) *float64 { return entry.WeeklyBudgetUsd })),
+		PlanUsdPerMonth: meanOf(values(func(entry *PowerRankingEntry) *float64 { return entry.PlanUsdPerMonth })),
+		PlanAssumed:     planAssumed,
+		Basis:           "geometric-mean",
+		Minutes:         meanOf(values(func(entry *PowerRankingEntry) *float64 { return entry.Minutes })),
+		GeometricMean:   true,
+	}
 }
 
 // meanOf is the geometric mean of the finite positive values, nil when
@@ -313,7 +580,42 @@ func meanOf(values []float64) *float64 {
 
 // modelAliases is the query forms that should hit one stored model id.
 func modelAliases(model string) []string {
-	panic("unported: mj-accounts/src/power_ranking.rs model_aliases")
+	normalized := stripContextHints(core.NormalizeModel(model))
+	// Kimi advertises `kimi-code/k3.1-pro`; the table stores `kimi-k3.1-pro`.
+	normalized = strings.TrimPrefix(normalized, "kimi-code/")
+	stripped := normalized
+	if trimmed, ok := strings.CutSuffix(normalized, "-dsh"); ok {
+		stripped = trimmed
+	} else if trimmed, ok := strings.CutSuffix(normalized, "-mj"); ok {
+		stripped = trimmed
+	}
+	keys := []string{}
+	push := func(key string) {
+		if key == "" {
+			return
+		}
+		for _, existing := range keys {
+			if existing == key {
+				return
+			}
+		}
+		keys = append(keys, key)
+	}
+	push(stripped)
+	if body, ok := claudeBody(stripped); ok {
+		for _, form := range []string{body, swapDigitSeparators(body)} {
+			push("claude-" + form)
+			push(form)
+		}
+	}
+	if isKimi(stripped) {
+		body := strings.TrimPrefix(stripped, "kimi-")
+		for _, form := range []string{body, swapDigitSeparators(body)} {
+			push("kimi-" + form)
+			push(form)
+		}
+	}
+	return keys
 }
 
 // stripContextHints drops context-window hints such as `[1m]` from
@@ -359,5 +661,20 @@ func isKimi(model string) bool {
 // swapDigitSeparators: `5.5` and `5-5` name the same Claude or Kimi version.
 // Other hyphens stay.
 func swapDigitSeparators(model string) string {
-	panic("unported: mj-accounts/src/power_ranking.rs swap_digit_separators")
+	chars := []rune(model)
+	isDigit := func(ch rune) bool { return '0' <= ch && ch <= '9' }
+	var swapped strings.Builder
+	swapped.Grow(len(model))
+	for index, ch := range chars {
+		betweenDigits := index > 0 && index+1 < len(chars) && isDigit(chars[index-1]) && isDigit(chars[index+1])
+		switch {
+		case ch == '.' && betweenDigits:
+			swapped.WriteRune('-')
+		case ch == '-' && betweenDigits:
+			swapped.WriteRune('.')
+		default:
+			swapped.WriteRune(ch)
+		}
+	}
+	return swapped.String()
 }

@@ -6,10 +6,16 @@ package buildcache
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/targets"
 )
 
 const cacheContainerRoot = "/run/hel/git-cache"
@@ -85,7 +91,31 @@ func (h CacheHost) gitShellCommand(script string, arguments []string, purpose st
 // host. The engine is a property of the runtime, not of the machine, so the
 // caller names it.
 func (h CacheHost) managedSessions(engine string, executor core.CommandExecutor) ([]string, error) {
-	panic("unported: mj-build-cache/src/git_cache.rs CacheHost::managed_sessions")
+	var remote []string
+	if engine == "container" {
+		remote = []string{"container", "list", "--all", "--format", "json"}
+	} else {
+		remote = []string{engine, "ps", "--all", "--filter", "label=" + core.ManagedLabel + "=true", "--format", "json"}
+	}
+	command := h.Command(remote, "find live container Git cache snapshots").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageCloning})
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return nil, err
+	}
+	output, err = checked(output, &command)
+	if err != nil {
+		return nil, err
+	}
+	managed, err := targets.ManagedSessionsFromContainerJSON(output.Stdout)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]string, 0, len(managed))
+	for _, session := range managed {
+		sessions = append(sessions, session.SessionID)
+	}
+	return sessions, nil
 }
 
 // PreparedCloneCache is a session's prepared clone-cache snapshots on their
@@ -115,7 +145,159 @@ type ExactCheckout struct {
 // misses and checkout can reach the remote. githubToken and exactCheckout
 // are nil when absent.
 func Prepare(target *core.TargetsTargetTemplate, sessionID string, bundle *core.ProjectBundleSpec, mounts *[]core.AdditionalMount, githubToken *string, exactCheckout *ExactCheckout, executor core.CommandExecutor) (*PreparedCloneCache, error) {
-	panic("unported: mj-build-cache/src/git_cache.rs prepare")
+	host, hostOK := CacheHostForTarget(target)
+	engine, engineOK := target.ContainerEngine()
+	if !hostOK || !engineOK {
+		return nil, nil
+	}
+	if err := bundle.Validate(); err != nil {
+		return nil, err
+	}
+	exactFor := func(destination, source string, cutoff *core.HistoryCutoff) *string {
+		if exactCheckout != nil && exactCheckout.Destination == destination && cutoff == nil && core.IsHostOnlyGitSource(source) {
+			commit := exactCheckout.Commit
+			return &commit
+		}
+		return nil
+	}
+	type snapshotSource struct {
+		source   string
+		cutoff   *core.HistoryCutoff
+		exact    *string
+		required bool
+	}
+	// Keyed and ordered by snapshot name, as Rust's BTreeMap is; a later
+	// repository with the same name replaces an earlier one.
+	repositories := map[string]snapshotSource{}
+	for _, repository := range bundle.Repositories {
+		source := *repository.URL
+		cutoff := repository.HistoryCutoff
+		exact := exactFor(repository.Destination, source, cutoff)
+		repositories[snapshotName(source, cutoff, exact)] = snapshotSource{
+			source: source, cutoff: cutoff, exact: exact, required: core.IsHostOnlyGitSource(source),
+		}
+	}
+	names := slices.Sorted(maps.Keys(repositories))
+	var required []string
+	for _, name := range names {
+		if repositories[name].required {
+			required = append(required, core.DisplayURL(repositories[name].source))
+		}
+	}
+	requiredSources := strings.Join(required, ", ")
+	for _, mount := range *mounts {
+		if pathStartsWith(mount.Destination, cacheContainerRoot) || pathStartsWith(cacheContainerRoot, mount.Destination) {
+			if requiredSources != "" {
+				return nil, core.RefusalPrecondition(fmt.Sprintf(
+					"Cannot mount the host-only Git sources %s. Move the attached directory that overlaps %s.",
+					requiredSources, cacheContainerRoot))
+			}
+			executor.NotifyNotice("Clone cache disabled because an attached directory overlaps /run/hel/git-cache.")
+			return nil, nil
+		}
+	}
+
+	stage := core.NewProvisionStageGuard(executor, core.ProvisionStage{Kind: core.ProvisionStageCloning})
+	defer stage.End()
+	home, err := cacheHome(host, executor)
+	if err != nil {
+		if requiredSources != "" {
+			return nil, core.RefusalPrecondition(fmt.Sprintf(
+				"Cannot prepare host-only Git sources %s on the container host. Make sure Git and sh are available and the host has an absolute home directory.",
+				requiredSources)).Wrap(err)
+		}
+		executor.NotifyNotice(fmt.Sprintf("Clone cache unavailable on the container host: %s; using direct clones.", alternate(err)))
+		return nil, nil
+	}
+	cacheRoot := pathJoin(home, cacheRelativeRoot)
+	sessionRoot := pathJoin(pathJoin(cacheRoot, "sessions"), sessionID)
+
+	type prepared struct {
+		name      string
+		source    string
+		required  bool
+		reference string
+		err       error
+	}
+	results := make([]prepared, len(names))
+	var running sync.WaitGroup
+	for index, name := range names {
+		entry := repositories[name]
+		results[index] = prepared{name: name, source: entry.source, required: entry.required}
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			defer func() {
+				if payload := recover(); payload != nil {
+					results[index].err = fmt.Errorf("clone-cache preparation thread panicked: %s", core.CommandThreadPanicMessage(payload))
+				}
+			}()
+			snapshot := pathJoin(sessionRoot, name)
+			err := prepareRepository(host, cacheRoot, repositoryCacheKey(entry.source), entry.source, snapshot,
+				entry.cutoff, entry.exact, githubToken, executor)
+			if err != nil {
+				results[index].err = err
+				return
+			}
+			results[index].reference = cacheContainerRoot + "/" + name
+		}()
+	}
+	running.Wait()
+
+	references := map[string]string{}
+	var failures []error
+	for _, result := range results {
+		switch {
+		case result.err == nil:
+			references[result.name] = result.reference
+		case result.required:
+			failures = append(failures, core.RefusalPrecondition(fmt.Sprintf(
+				"Cannot prepare %s on the container host. Verify that the host can fetch the source with Git and write its cache. For a pinned checkout, verify that the requested commits are available from the source.",
+				core.DisplayURL(result.source))).Wrap(result.err))
+		default:
+			executor.NotifyNotice(fmt.Sprintf("Clone cache preparation failed: %s; using a direct checkout for that repository.", alternate(result.err)))
+		}
+	}
+	if len(failures) > 0 || len(references) == 0 {
+		if err := cleanupSessionRoot(host, sessionRoot, executor); err != nil {
+			executor.NotifyNotice(fmt.Sprintf("Could not remove the failed Git checkout snapshot: %s", alternate(err)))
+		}
+		if len(failures) > 0 {
+			for _, additional := range failures[1:] {
+				executor.NotifyNotice(alternate(additional))
+			}
+			return nil, failures[0]
+		}
+		return nil, nil
+	}
+	for index := range bundle.Repositories {
+		repository := &bundle.Repositories[index]
+		source := *repository.URL
+		cutoff := repository.HistoryCutoff
+		name := snapshotName(source, cutoff, exactFor(repository.Destination, source, cutoff))
+		repository.Reference = nil
+		if reference, ok := references[name]; ok {
+			repository.Reference = &reference
+		}
+	}
+	*mounts = append(*mounts, core.AdditionalMount{
+		Source:      sessionRoot,
+		Destination: cacheContainerRoot,
+		Access:      core.MountAccessRo,
+	})
+
+	liveSessions, err := host.managedSessions(engine, executor)
+	if err != nil {
+		executor.NotifyNotice(fmt.Sprintf("Clone-cache orphan cleanup was skipped: %s", alternate(err)))
+		liveSessions = []string{sessionID}
+	}
+	if !slices.Contains(liveSessions, sessionID) {
+		liveSessions = append(liveSessions, sessionID)
+	}
+	if err := collectGarbage(host, cacheRoot, liveSessions, executor); err != nil {
+		executor.NotifyNotice(fmt.Sprintf("Clone-cache cleanup was skipped: %s", alternate(err)))
+	}
+	return &PreparedCloneCache{host: host, sessionRoot: sessionRoot}, nil
 }
 
 // snapshotName names a snapshot. Snapshots share the mirror, but each source
@@ -138,11 +320,49 @@ func snapshotName(source string, cutoff *core.HistoryCutoff, exact *string) stri
 }
 
 func cacheHome(host CacheHost, executor core.CommandExecutor) (string, error) {
-	panic("unported: mj-build-cache/src/git_cache.rs cache_home")
+	command := host.gitShellCommand(`command -v git >/dev/null 2>&1 || exit 127; printf '%s' "$HOME"`, nil,
+		"locate the container host Git cache")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return "", err
+	}
+	output, err = checked(output, &command)
+	if err != nil {
+		return "", err
+	}
+	home, err := fromUTF8(output.Stdout)
+	if err != nil {
+		return "", fmt.Errorf("decode container host home directory: %w", err)
+	}
+	if !core.IsAbsoluteOnHostOrTarget(home) {
+		return "", errors.New("container host HOME is not absolute")
+	}
+	return home, nil
 }
 
 func repositoryCacheKey(source string) string {
-	panic("unported: mj-build-cache/src/git_cache.rs repository_cache_key")
+	var identity string
+	if repository := core.ParseGithubRemote(source, core.ShorthandAllowed); repository != nil {
+		identity = "github.com/" + asciiLower(repository.Owner) + "/" + asciiLower(repository.Repository)
+	} else {
+		// Resolution has already expanded shorthands and Git's configured URL
+		// rewrites. Preserve user, port, and the entire transport path here:
+		// two accounts or paths on one server can serve different objects.
+		// RepositoryIdentity::Network drops userinfo and the .git suffix.
+		identity = "git:" + source
+	}
+	digest := sha256.Sum256([]byte(identity))
+	return core.LowerHex(digest[:])
+}
+
+// asciiLower is Rust's `str::to_ascii_lowercase`.
+func asciiLower(text string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
 }
 
 // MirrorRepoRelativePath is the home-relative path to the host clone-cache
@@ -298,7 +518,63 @@ chmod a+rx "$(dirname "$snapshot")"
 `
 
 func prepareRepository(host CacheHost, cacheRoot, key, source, snapshot string, cutoff *core.HistoryCutoff, exact *string, githubToken *string, executor core.CommandExecutor) error {
-	panic("unported: mj-build-cache/src/git_cache.rs prepare_repository")
+	exactRef := ""
+	if exact != nil {
+		if !core.IsObjectID(*exact) {
+			return errors.New("invalid exact checkout commit")
+		}
+		exactRef = core.HostSnapshotExactRefs + "/" + *exact
+	}
+	var token *string
+	if githubToken != nil && core.IsGithubHTTPSURL(source) {
+		token = githubToken
+	}
+	flag := func(value bool) string {
+		if value {
+			return "1"
+		}
+		return "0"
+	}
+	var sshCommand string
+	if host.IsLocal() {
+		sshCommand, _ = core.LocalGitSSHCommand()
+	} else {
+		var err error
+		if sshCommand, err = core.RemoteGitSSHCommand(); err != nil {
+			return err
+		}
+	}
+	sourceID := sha256.Sum256([]byte(source))
+	arguments := []string{
+		cacheRoot,
+		key,
+		source,
+		snapshot,
+		flag(token != nil),
+		sshCommand,
+		core.LowerHex(sourceID[:]),
+		flag(core.IsHostOnlyGitSource(source)),
+		exactRef,
+	}
+	if cutoff != nil {
+		if err := cutoff.Validate(); err != nil {
+			return err
+		}
+		arguments = append(arguments, cutoff.Commits()...)
+	}
+	command := host.gitShellCommand(prepareRepositoryScript, arguments,
+		fmt.Sprintf("prepare cached Git objects for %s", core.DisplayURL(source)))
+	if token != nil {
+		command = command.WithSensitiveStdin(append([]byte(*token), '\n'))
+	}
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	if _, err := checked(output, &command); err != nil {
+		return errors.New(strings.ReplaceAll(err.Error(), source, core.DisplayURL(source)))
+	}
+	return nil
 }
 
 const cacheGCScript = `

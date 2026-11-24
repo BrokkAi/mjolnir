@@ -1,5 +1,11 @@
 # Brief: porting mj-core to Go package `core`
 
+> Read `.agents/plans/go-port.md`, section "How to work", first. These are
+> translation rules only. No Go change is merged until it passes the plan's
+> gates: build and vet, the end-to-end scenario suite for every part already
+> in Go, and an independent test-fidelity review (the plan's "Test fidelity
+> rules").
+
 Read `.agents/plans/go-port.md` first (the ExecPlan; its library table says
 which Go package replaces each Rust dependency). This brief adds the rules
 for `mj-core`, which every agent porting a part of it follows.

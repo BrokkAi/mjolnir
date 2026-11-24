@@ -879,7 +879,9 @@ fn session_launch_config_with_source(
     // to it from the profile default before the first turn (issue 1217).
     launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
     if let Some(child) = subagent.as_ref() {
-        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key);
+        let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+            &child.kind.startup_request_key(&child.request_key),
+        );
         let steps = crate::database::load_startup_group(session_id, &group)?;
         // The assignment is delivered at most once per session history.
         // A restore deletes the worker's command receipts, so the history
@@ -1166,10 +1168,10 @@ mod tests {
         session.native_session_id = None;
         session.project_directory = Some(dir.path().to_owned());
         session.container_workspace = Some(crate::targets::new_container_workspace(id).unwrap());
-        let locator = TargetLocator::LocalPodman {
+        session.target_template_id = "docker".into();
+        let locator = TargetLocator::LocalDocker {
             container_id: "c".repeat(64),
             borrowed_from: None,
-            workspace_storage: Default::default(),
         };
         let backend = backend_locator(&locator, &session, &config).unwrap();
         session.target = Some(Box::new(locator));

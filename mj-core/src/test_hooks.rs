@@ -149,6 +149,14 @@ pub fn fake_command_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-command.sh")
 }
 
+/// A checked-in dispatcher that runs the adjacent `.script` without the
+/// lifecycle shortcuts in [`fake_command_dispatcher`].
+#[cfg(unix)]
+#[doc(hidden)]
+pub fn script_only_fake_dispatcher() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/script-only-command.sh")
+}
+
 /// A worker stand-in carrying the build identity a test binary reports.
 /// Built before tests start, so executing it cannot race a test's writer.
 #[cfg(unix)]
