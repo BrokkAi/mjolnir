@@ -496,18 +496,28 @@ func (c *clapCommand) finish(args []string) error {
 		}
 	}
 	all := c.allArgs()
-	matched := c.matched(all)
+	matched := c.matched(all, true)
 	if err := c.checkConflicts(all, matched); err != nil {
 		return err
 	}
 	return c.checkRequired(all, matched)
 }
 
-// matched is the arguments the command line gave, in clap's matcher order.
-func (c *clapCommand) matched(all []*clapArg) []*clapArg {
+// matched is the arguments in this command's own clap matcher, in matcher
+// order: what the command line gave after the command's name and, once
+// parsing is done, what an environment variable gives (clap's add_env, which
+// runs before validation). A global option given before the command's name
+// is in the ancestor's matcher, not this one: clap validates each command
+// with its own matcher and copies globals down only after parsing, so
+// `mj --instance x usage` names no `--instance` in its usage.
+func (c *clapCommand) matched(all []*clapArg, parsingDone bool) []*clapArg {
+	// The flags this command's own parse set: pflag records them per flag
+	// set, while the global's value is shared with the ancestor's.
+	here := map[string]bool{}
+	c.cmd.Flags().Visit(func(flag *pflag.Flag) { here[flag.Name] = true })
 	var matched []*clapArg
 	for _, arg := range all {
-		if arg.present() {
+		if arg.present() && (arg.owner == c || here[arg.long]) {
 			matched = append(matched, arg)
 		}
 	}
@@ -517,6 +527,16 @@ func (c *clapCommand) matched(all []*clapArg) []*clapArg {
 		}
 		return cmp.Compare(a.matchedAt[1], b.matchedAt[1])
 	})
+	if parsingDone {
+		for _, arg := range all {
+			if arg.env == "" || slices.Contains(matched, arg) {
+				continue
+			}
+			if _, set := os.LookupEnv(arg.env); set {
+				matched = append(matched, arg)
+			}
+		}
+	}
 	return matched
 }
 
@@ -1053,7 +1073,7 @@ func clapFlagError(cmd *cobra.Command, err error) error {
 		meta := clapOf(cmd)
 		all := meta.allArgs()
 		usage := usageLine(cmd)
-		if used := visibleIDs(meta.matched(all)); len(used) > 0 {
+		if used := visibleIDs(meta.matched(all, false)); len(used) > 0 {
 			usage = meta.smartUsage(all, meta.requiredGraph(), used)
 		}
 		return &UsageError{Message: fmt.Sprintf("unexpected argument '%s' found", name), Command: cmd, usage: usage}
