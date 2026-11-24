@@ -815,11 +815,52 @@ impl Controller {
             };
             let owner = crate::worker_lifecycle::WorkerPermit::acquire(session_id, admission)?;
             owner.verify_cached_target(&self.state)?;
+            let user_cancelled = || {
+                record.state == SessionState::Closing
+                    && executor.cancellation_requested()
+                    && !executor.shutdown_interrupted()
+            };
             executor.begin_resumable_work()?;
             let result = mj_core::runtime::off_async_worker(|| {
                 targets::ensure_recovery_target_running(executor, Some(&plan))
             });
-            executor.end_resumable_work("continue suspend on retained target")?;
+            // Cancellation can interrupt the probe or start before the
+            // accepted operation is reachable. Confirm ownership and state
+            // again before touching its records.
+            let recovered_after_cancel = if result.is_err() && user_cancelled() {
+                match mj_core::runtime::off_async_worker(|| {
+                    targets::ensure_recovery_target_running(&ProcessExecutor, Some(&plan))
+                }) {
+                    Ok(outcome) => Some(outcome),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            error = %format_args!("{error:#}"),
+                            "could not recover suspend target after cancellation"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let readmission = executor.end_resumable_work("continue suspend on retained target");
+            let observed = result.as_ref().ok().copied().or(recovered_after_cancel);
+            let record_cancellation = matches!(
+                observed,
+                Some(
+                    targets::TargetRecoveryOutcome::AlreadyRunning
+                        | targets::TargetRecoveryOutcome::Started
+                )
+            ) && user_cancelled();
+            readmission?;
+            if record_cancellation {
+                let attempt = OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?;
+                if attempt.accepted() {
+                    Self::record_suspend_cancellation(&attempt)?;
+                    return Ok(observed);
+                }
+            }
             result.map(Some)
         };
         let recovered = if record.state == SessionState::Closing {
@@ -833,6 +874,19 @@ impl Controller {
             ).into());
         }
         Ok(())
+    }
+
+    fn record_suspend_cancellation(attempt: &OriginDeltaSuspend) -> Result<String> {
+        if let Some(reason) = attempt.restart_reason(&ProcessExecutor)? {
+            return Ok(reason);
+        }
+        let reason = if attempt.already_quiescent() {
+            "operation cancelled before parked capture"
+        } else {
+            "suspend was cancelled"
+        };
+        attempt.record_restart(&anyhow::anyhow!(reason), &ProcessExecutor)?;
+        Ok(reason.to_owned())
     }
 
     #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
@@ -1150,26 +1204,13 @@ impl Controller {
         )?;
 
         let restart_reason = |attempt: &OriginDeltaSuspend| -> Result<Option<String>> {
-            let cancelled = user_cancelled();
-            let restart = if cancelled {
-                attempt.restart_reason(&ProcessExecutor)
-            } else {
+            if !user_cancelled() {
                 attempt.restart_reason(executor)
-            };
-            if !owning_suspend {
-                return restart;
-            }
-            let restart = restart?;
-            if !cancelled || restart.is_some() {
-                return Ok(restart);
-            }
-            let reason = if attempt.already_quiescent() {
-                "operation cancelled before parked capture"
+            } else if owning_suspend {
+                Self::record_suspend_cancellation(attempt).map(Some)
             } else {
-                "suspend was cancelled"
-            };
-            attempt.record_restart(&anyhow::anyhow!(reason), &ProcessExecutor)?;
-            Ok(Some(reason.to_owned()))
+                attempt.restart_reason(&ProcessExecutor)
+            }
         };
         let mut restart = None;
         if let Some(attempt) = origin_delta.as_mut() {
