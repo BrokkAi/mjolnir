@@ -1114,7 +1114,12 @@ func clapFlagError(cmd *cobra.Command, err error) error {
 		name := valueRequired.GetSpecifiedName()
 		for _, arg := range clapOf(cmd).allArgs() {
 			if arg.long == name || arg.short == name {
-				return &UsageError{Message: fmt.Sprintf("a value is required for '%s' but none was supplied", arg.display(true)), Command: cmd, noUsage: true}
+				// clap's empty_value names the values the option takes.
+				message := fmt.Sprintf("a value is required for '%s' but none was supplied", arg.display(true))
+				if len(arg.possible) > 0 {
+					message += "\n  [possible values: " + strings.Join(arg.possible, ", ") + "]"
+				}
+				return &UsageError{Message: message, Command: cmd, noUsage: true}
 			}
 		}
 	}
