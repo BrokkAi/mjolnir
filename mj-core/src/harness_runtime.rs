@@ -22,6 +22,8 @@ const MANAGED_NODE_DIR: &str = "node";
 /// The exact Node.js release Mjolnir installs when the target has no
 /// compatible runtime. Keep this in lockstep with `mj-harness-install/assets/node/runtime.json`.
 pub const NODE_VERSION: &str = "24.22.1";
+pub const NODE_MINIMUM_VERSION: &str = "22.0.0";
+pub const DSH_ACP_MINIMUM_NODE_VERSION: &str = "24.9.0";
 
 /// Keep in lockstep with `mj-harness-install/assets/mise/runtime.json`. Static musl binary hashes:
 /// https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
@@ -125,12 +127,57 @@ pub const CLAUDE_CLI_VERSION: &str = "2.1.326";
 pub const KIMI_VERSION: &str = "2.6.3";
 pub const GROK_VERSION: &str = "1.0.89";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
-pub const MUSE_ACP_VERSION: &str = "0.25.0";
-pub const MUSE_VERSION: &str = "1.4.23-R8977.1";
+pub const MUSE_ACP_VERSION: &str = "0.26.0";
+pub const MUSE_VERSION: &str = "1.4.25-R9361.1";
 pub const OPENCODE_VERSION: &str = "2.2.7";
-pub const DSH_ACP_VERSION: &str = "0.7.0";
+pub const DSH_ACP_VERSION: &str = "0.8.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 pub const ANTIGRAVITY_VERSION: &str = "1.5.11";
+
+pub const fn harness_node_minimum_version(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::Dsh => DSH_ACP_MINIMUM_NODE_VERSION,
+        _ => NODE_MINIMUM_VERSION,
+    }
+}
+
+pub fn node_version_is_at_least(version: &str, minimum: &str) -> bool {
+    fn components(version: &str) -> Option<(u64, u64, u64)> {
+        let version = version.trim().trim_start_matches('v');
+        let mut parts = version.split('.');
+        let mut component = || {
+            parts
+                .next()
+                .unwrap_or("0")
+                .split('-')
+                .next()?
+                .parse::<u64>()
+                .ok()
+        };
+        Some((component()?, component()?, component()?))
+    }
+    components(version)
+        .zip(components(minimum))
+        .is_some_and(|(version, minimum)| version >= minimum)
+}
+
+/// A shell expression that succeeds when `node` meets `minimum`.
+pub fn node_version_check_script(minimum: &str) -> String {
+    node_version_check_for_script("node", minimum)
+}
+
+/// A shell expression that succeeds when `executable` meets `minimum`.
+pub fn node_version_check_for_script(executable: &str, minimum: &str) -> String {
+    let mut parts = minimum.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u64>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u64>().ok());
+    let (major, minor) = major
+        .zip(minor)
+        .expect("Node minimum versions start with numeric major and minor versions");
+    format!(
+        "{executable} -e 'const [major, minor] = process.versions.node.split(\".\").map(Number); process.exit(major > {major} || (major === {major} && minor >= {minor}) ? 0 : 1)'"
+    )
+}
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -210,14 +257,16 @@ pub fn undeliverable_dsh_instructions(
 /// dsh-acp reads [`HarnessKind::agent_instructions_file`] from its data
 /// directory, the session working directory and each additional workspace
 /// root, rebuilding that prompt whenever a session is opened. The command
+/// points DSH at a private `dsh-home` inside the staged data directory, then
 /// clears `DSH_ACP_SYSTEM_PROMPT` so a value from the target's login shell
 /// cannot add a second prompt beside the staged file. Without
 /// `DSH_ACP_DATA_DIR` dsh-acp would keep its sessions in a `.dsh-acp`
-/// directory inside the repository, so the command refuses to start.
+/// directory inside the repository and DSH would use the target account's
+/// `~/.dsh`, so the command refuses to start.
 pub fn dsh_acp_script() -> String {
     let kind = HarnessKind::Dsh;
     format!(
-        "if [ -z \"${{{data}:-}}\" ]; then echo 'Mjolnir requires {data} to keep dsh-acp sessions outside the workspace' >&2; exit 1; fi; DSH_ACP_SYSTEM_PROMPT=; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
+        "if [ -z \"${{{data}:-}}\" ]; then echo 'Mjolnir requires {data} to keep dsh-acp sessions outside the workspace' >&2; exit 1; fi; DSH_ACP_DSH_HOME=\"${{{data}}}/dsh-home\"; export DSH_ACP_DSH_HOME; DSH_ACP_SYSTEM_PROMPT=; export DSH_ACP_SYSTEM_PROMPT; exec \"$@\"",
         data = kind.home_env(),
     )
 }
@@ -267,22 +316,22 @@ pub fn dsh_acp_version_supported_script() -> String {
 /// `dsh-acp` when its version supports native instruction loading, otherwise
 /// the pinned npm package through `npx`, running [`dsh_acp_script`] with the
 /// resolved command as its positional arguments. DSH has no managed
-/// installation — the npm package bundles the same release binaries — so this
-/// one script is the whole launch path for bare and container targets alike,
-/// and for the model discovery probe.
+/// installation — the npm package bundles the native bridge and pinned DSH
+/// runtime — so this one script is the whole launch path for bare and
+/// container targets alike, and for the model discovery probe.
 pub fn dsh_acp_launch_script() -> String {
+    let node_check = node_version_check_script(DSH_ACP_MINIMUM_NODE_VERSION);
     format!(
         concat!(
-            "if command -v dsh-acp >/dev/null 2>&1; then if {version_supported}; then ",
+            "if command -v dsh-acp >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && {node_check} && {version_supported}; then ",
             "set -- dsh-acp; ",
-            "elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
+            "elif command -v node >/dev/null 2>&1 && {node_check} && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
             "set -- npx -y {package}@{version}; ",
-            "else echo 'Mjolnir requires dsh-acp {version} or newer to load AGENTS.md; upgrade it or install Node.js 22+, npm, and npx to use the pinned release' >&2; exit 127; fi; ",
-            "elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then ",
-            "set -- npx -y {package}@{version}; ",
-            "else echo 'Mjolnir needs dsh-acp or Node.js, npm, and npx on PATH; install one in the target environment' >&2; exit 127; fi; ",
+            "else echo 'Mjolnir requires dsh-acp {version} or newer with Node.js {node_minimum}+; install or upgrade dsh-acp, Node.js, npm, and npx in the target environment' >&2; exit 127; fi; ",
             "{script}"
         ),
+        node_check = node_check,
+        node_minimum = DSH_ACP_MINIMUM_NODE_VERSION,
         version_supported = dsh_acp_version_supported_script(),
         package = DSH_ACP_PACKAGE,
         version = DSH_ACP_VERSION,
@@ -471,8 +520,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "bin/agy",
         },
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.25.0_muse-1.4.23-R8977.1",
-            display_version: "muse-acp 0.25.0 + Muse Code 1.4.23-R8977.1",
+            install_id: "muse-acp-0.26.0_muse-1.4.25-R9361.1",
+            display_version: "muse-acp 0.26.0 + Muse Code 1.4.25-R9361.1",
             entrypoint: "bin/muse",
             cli_entrypoint: "bin/muse",
         },
@@ -510,8 +559,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "opencode",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.7.0",
-            display_version: "dsh-acp 0.7.0",
+            install_id: "dsh-acp-0.8.0",
+            display_version: "dsh-acp 0.8.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },

@@ -709,6 +709,7 @@ type DeploymentCapacityTarget struct {
 	// local targets write to. Empty for every other host, whose probes carry
 	// their own paths.
 	LocalStoragePaths []string
+	StorageWarning    *string
 	// ProbeError prevents a partial AWS fleet sample when one live instance
 	// cannot be probed yet.
 	ProbeError *string

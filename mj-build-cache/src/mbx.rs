@@ -3,7 +3,9 @@
 //! mbx wraps Cargo: a binary named `cargo` that is really `mbx` intercepts the
 //! build, looks every compiler action up in a content-addressed store, and
 //! restores cached outputs instead of recompiling. Podman and Docker mount
-//! the host store read-write at the same path in each container. Nitro guests
+//! the host store read-write at the same path in each container, and stage the
+//! host's mbx executable and a snapshot of its configuration under each
+//! session's private worker root. Nitro guests
 //! keep their store on the guest filesystem. Mjolnir tells host mbx when a
 //! workspace it removed will never build again (see [`release`]).
 //!
@@ -36,7 +38,6 @@ enum CachePlacement {
     NitroGuest,
 }
 
-const MBX_COPY_RELATIVE: &str = ".mjolnir/bin/mbx";
 /// mbx's running totals, relative to the cache directory.
 const TALLY_RELATIVE: &str = "actions/savings/v1/tally.json";
 const RESOLUTION_LIFETIME: Duration = Duration::from_secs(600);
@@ -92,15 +93,10 @@ fn platform_limit(
 pub struct ResolvedBuildCache {
     /// Cache directory on the host, mounted at the same path in the container.
     pub directory: PathBuf,
-    /// The compatible native mbx executable used to refresh the cache copy.
-    pub native_mbx: NativeMbx,
-    /// A `[target] root` the host configuration relocates outside the cache
-    /// directory, which the container needs mounted at the same path too.
-    pub target_root: Option<PathBuf>,
-    /// Desired policy for the shared machine file, never a private session copy.
-    pub config_file: Option<String>,
-    pub config_directory: PathBuf,
-    pub previous_config: Option<String>,
+    /// The effective `[target] root` of the host's mbx, absolute and
+    /// normalized: its configured root, or `<directory>/targets`. A root
+    /// outside the cache directory is mounted at the same path too.
+    pub target_root: PathBuf,
 }
 
 /// Cached host inspections, keyed by host and per-target settings. An
@@ -112,27 +108,12 @@ type Resolutions = std::collections::BTreeMap<String, (Instant, Result<Inspectio
 static RESOLUTIONS: std::sync::LazyLock<std::sync::Mutex<Resolutions>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Resolutions::new()));
 
-type Applications = std::collections::BTreeMap<String, Result<(), String>>;
-static APPLICATIONS: std::sync::LazyLock<std::sync::Mutex<Applications>> =
-    std::sync::LazyLock::new(Default::default);
-
-type MbxSyncLocks = std::collections::BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>;
-static MBX_SYNC_LOCKS: std::sync::LazyLock<std::sync::Mutex<MbxSyncLocks>> =
-    std::sync::LazyLock::new(Default::default);
-
 /// Whether a caller can be served a memoized answer or needs the host asked
 /// again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Freshness {
     /// Provisioning: an answer from the last `RESOLUTION_LIFETIME` will do.
     Memoized,
-    /// Configuration a session already depends on: a recent successful answer
-    /// will do, but a remembered failure — including a host inspection whose
-    /// cache was `Unavailable` — is asked again. Another caller's failure (such
-    /// as the background policy service timing out on a busy link, or a
-    /// transient reflink outage) must not fail a launch that can now use the
-    /// host.
-    MemoizedSuccess,
     /// The settings screen, which is read precisely when somebody has just
     /// changed something on the host. A fresh answer also replaces the
     /// memoized one, so the next session sees the same thing the screen does.
@@ -149,17 +130,9 @@ fn inspect(
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
     let key = format!("{}|{settings:?}", host.key());
-    if freshness != Freshness::Fresh
+    if freshness == Freshness::Memoized
         && let Some((recorded, inspection)) = RESOLUTIONS.lock().expect("mbx resolutions").get(&key)
         && recorded.elapsed() < RESOLUTION_LIFETIME
-        && (freshness == Freshness::Memoized
-            || inspection.as_ref().is_ok_and(|inspection| {
-                !(inspection.cache.is_none()
-                    && matches!(
-                        inspection.preview.off_reason,
-                        Some(BuildCacheOff::Unavailable(_))
-                    ))
-            }))
     {
         return inspection.clone().map_err(|error| anyhow::anyhow!(error));
     }
@@ -222,57 +195,7 @@ fn resolve_shared(
         );
         return None;
     }
-    match apply_cache(host, settings, cache, executor) {
-        Ok(cache) => Some(cache),
-        Err(error) => {
-            tracing::warn!(
-                host = host.key(),
-                "applying machine build cache configuration failed: {error:#}"
-            );
-            executor.notify_notice(&format!(
-                "Build cache configuration could not be applied: {error:#}"
-            ));
-            None
-        }
-    }
-}
-
-fn apply_cache(
-    host: &CacheHost,
-    settings: &TargetBuildCache,
-    mut cache: ResolvedBuildCache,
-    executor: &impl CommandExecutor,
-) -> Result<ResolvedBuildCache> {
-    let key = format!("{}|{settings:?}", host.key());
-    let result = (|| {
-        if !configuration::apply(host, &cache, executor)? {
-            // Another application won. Accept it only if it already installs
-            // this policy; never replay an older desired value over a newer one.
-            cache = inspect(host, settings, Freshness::Fresh, executor)?
-                .cache
-                .context("build cache became unavailable during application")?;
-            ensure!(
-                cache.previous_config == cache.config_file,
-                "machine build cache policy changed during application; retry with current machine settings"
-            );
-        }
-        cache.previous_config = cache.config_file.clone();
-        if let Some((_, Ok(inspection))) =
-            RESOLUTIONS.lock().expect("mbx resolutions").get_mut(&key)
-        {
-            inspection.cache = Some(cache.clone());
-            inspection.preview.application = BuildCacheApplication::Applied;
-        }
-        Ok(cache)
-    })();
-    APPLICATIONS.lock().expect("mbx applications").insert(
-        key,
-        result
-            .as_ref()
-            .map(|_| ())
-            .map_err(|error| format!("{error:#}")),
-    );
-    result
+    Some(cache)
 }
 
 /// Where a session can keep its build cache. Apple container's host mount
@@ -314,137 +237,6 @@ pub fn preview_build_cache(
         preview.mbx_manual_path_line = profile.manual_path_line;
     }
     Ok(Some(preview))
-}
-
-pub fn machine_cache_host_key(machine: &mj_core::config::Machine) -> Option<String> {
-    CacheHost::for_machine(machine).map(|host| host.key())
-}
-
-/// Apply one machine's desired policy. Both provisioning and the daemon use
-/// the same compare-and-replace operation; native settings are only read.
-pub fn apply_machine_build_cache(
-    machine: &mj_core::config::Machine,
-    mounted_directories: &[PathBuf],
-    executor: &impl CommandExecutor,
-) -> Result<()> {
-    let Some(host) = CacheHost::for_machine(machine) else {
-        return Ok(());
-    };
-    let settings = machine.build_cache().cloned().unwrap_or_default();
-    let inspected = inspect(&host, &settings, Freshness::Fresh, executor)?;
-    if matches!(
-        &inspected.preview.off_reason,
-        Some(BuildCacheOff::UnsupportedPlatform(_))
-    ) {
-        return Ok(());
-    }
-    let cache = inspected
-        .cache
-        .map(|cache| apply_cache(&host, &settings, cache, executor))
-        .transpose()?;
-
-    let native = if let Some(cache) = &cache {
-        Some(cache.native_mbx.clone())
-    } else {
-        match classify_native_mbx(probe_native_version(&host, executor)?) {
-            NativeMbxStatus::Compatible(native) => Some(native),
-            NativeMbxStatus::Absent | NativeMbxStatus::Unknown { .. } => None,
-        }
-    };
-    let Some(native) = native else {
-        // Existing copies remain usable by their mounted containers until the
-        // host has a compatible native mbx again.
-        return Ok(());
-    };
-
-    let mut directories = mounted_directories.to_vec();
-    if let Some(cache) = &cache
-        && !directories.contains(&cache.directory)
-    {
-        directories.push(cache.directory.clone());
-    }
-    for directory in directories {
-        // Existing containers retain their mounts if placement changes. Apply
-        // policy there as before, then refresh every copy those mounts expose.
-        if let Some(cache) = &cache
-            && directory != cache.directory
-        {
-            publish_at(&host, cache, &directory, executor)?;
-        }
-        sync_mbx_binary_from_native(&host, &native, &directory, executor)?;
-    }
-    Ok(())
-}
-
-fn publish_at(
-    host: &CacheHost,
-    cache: &ResolvedBuildCache,
-    directory: &Path,
-    executor: &impl CommandExecutor,
-) -> Result<PathBuf> {
-    let mut projected = cache.clone();
-    projected.config_directory = configuration::shared_directory(directory);
-    projected.previous_config = configuration::read_file(
-        host,
-        &projected.config_directory.join("config.toml"),
-        executor,
-    )?;
-    ensure!(
-        configuration::apply(host, &projected, executor)?,
-        "machine configuration changed during application; retry with current settings"
-    );
-    Ok(projected.config_directory)
-}
-
-/// Upgrade an existing container through its existing cache mount. Resolving
-/// ownership uses its actual host, never a target name that can be reassigned.
-pub fn prepare_session_configuration(
-    config: &Config,
-    backend: &targets::TargetLocator,
-    recorded: &SessionBuildCache,
-    executor: &impl CommandExecutor,
-) -> Result<PathBuf> {
-    let host = host_for_locator(backend).context("build cache has no container host")?;
-    let mut settings = config
-        .machines
-        .values()
-        .filter(|machine| {
-            CacheHost::for_machine(machine).is_some_and(|candidate| candidate.key() == host.key())
-        })
-        .filter_map(|machine| machine.build_cache())
-        .next()
-        .cloned()
-        .unwrap_or_default();
-    // Reuse the launch's original resolution key first. Retained containers
-    // can still mount an older directory, or a cache disabled since launch;
-    // only those need a second resolution projected onto the recorded mount.
-    let inspected = inspect(&host, &settings, Freshness::MemoizedSuccess, executor)?;
-    let needs_projection = inspected
-        .cache
-        .as_ref()
-        .is_some_and(|cache| cache.directory != recorded.directory)
-        || matches!(
-            inspected.preview.off_reason.as_ref(),
-            Some(BuildCacheOff::TurnedOff)
-        );
-    let inspected = if needs_projection {
-        settings.directory = Some(recorded.directory.clone());
-        settings.enabled = Some(true);
-        inspect(&host, &settings, Freshness::MemoizedSuccess, executor)?
-    } else {
-        inspected
-    };
-    let cache = inspected.cache.with_context(|| {
-        format!(
-            "build cache configuration unavailable: {}",
-            inspected
-                .preview
-                .off_reason
-                .map(|reason| reason.to_string())
-                .unwrap_or_else(|| "host inspection returned no cache".into())
-        )
-    })?;
-    publish_at(&host, &cache, &recorded.directory, executor)
 }
 
 /// Native mbx compatibility for a host used by configured container targets.
@@ -629,28 +421,12 @@ fn inspect_host(
     );
 
     let user_managed = true;
-    let config_directory = configuration::shared_directory(&directory);
-    let previous_config =
-        configuration::read_file(host, &config_directory.join("config.toml"), executor)?;
     let text = host_config_file(host, executor)?;
     let limit = match configuration::configured_limit(text.as_deref(), "gc", "max_total_size")? {
         Some(size) => BuildCacheLimit::HostConfiguration(Some(size)),
         None => BuildCacheLimit::MbxDefault(None),
     };
-    let config_file = Some(text.unwrap_or_default());
-    let target_root = config_file
-        .as_deref()
-        .and_then(|text| relocated_target_root(text, &directory));
-    let mut application =
-        configuration::application(previous_config.as_deref(), config_file.as_deref());
-    if application == BuildCacheApplication::Pending
-        && let Some(Err(error)) = APPLICATIONS
-            .lock()
-            .expect("mbx applications")
-            .get(&format!("{}|{settings:?}", host.key()))
-    {
-        application = BuildCacheApplication::Failed(error.clone());
-    }
+    let target_root = effective_target_root(text.as_deref().unwrap_or_default(), &directory);
     // Read before the checks below, so a host that cannot share the cache
     // right now still reports what the cache did while it could.
     let stats = read_stats(host, &directory, executor);
@@ -662,7 +438,9 @@ fn inspect_host(
         directory: Some(directory.clone()),
         max_total_size: Some(limit.clone()),
         user_managed,
-        application: application.clone(),
+        // Sessions stage the host's own configuration when they launch, so
+        // there is nothing left to apply to the machine.
+        application: BuildCacheApplication::Applied,
         budget_note: Some(
             "One budget covers shared compiler outputs, managed worktrees, and incremental state."
                 .into(),
@@ -698,12 +476,12 @@ fn inspect_host(
     // and much slower, and mbx's materializer falls back to it without saying
     // so, which makes this the only place it can be noticed. It is reported
     // rather than disqualifying: a slow cache still beats no cache.
-    if let Some(root) = &target_root {
-        let root_volume = nearest_existing_ancestor(host, root, executor)?;
+    if !mj_core::target_path::is_within(&target_root, &directory) {
+        let root_volume = nearest_existing_ancestor(host, &target_root, executor)?;
         if !cross_reflinks_supported(host, &volume, &root_volume, executor)? {
             tracing::warn!(
                 cache = %directory.display(),
-                target_root = %root.display(),
+                target_root = %target_root.display(),
                 "the host's mbx target root does not share a mount with the build cache, \
                  so restoring a cached output copies every byte instead of cloning it"
             );
@@ -714,11 +492,7 @@ fn inspect_host(
         preview: preview(None),
         cache: Some(ResolvedBuildCache {
             directory,
-            native_mbx: native,
             target_root,
-            config_file,
-            config_directory,
-            previous_config,
         }),
     })
 }
@@ -849,169 +623,41 @@ fn parse_native_probe_output(stdout: &[u8]) -> Result<NativeMbx> {
     })
 }
 
-/// The current native mbx copy visible through the shared cache mount.
+/// The host executable Podman and Docker sessions stage into their private
+/// worker root, or why this host cannot supply one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CachedMbxBinary {
-    pub path: PathBuf,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CachedMbxSync {
-    Ready(CachedMbxBinary),
+pub enum NativeMbxLookup {
+    Ready(NativeMbx),
     Unavailable(String),
 }
 
-const SYNC_MBX_BINARY_SCRIPT: &str = r#"set -eu
-source=$1 destination=$2 expected=$3 probe_script=$4
-directory=$(dirname -- "$destination")
-mkdir -p -- "$directory"
-if command -v flock >/dev/null 2>&1; then
-    exec 9>"$directory/.mbx.lock"
-    flock -x 9
-fi
-probe_matches() {
-    current=$(sh -c "$probe_script" 2>/dev/null) || return 1
-    newline='
-'
-    current_program=${current%%"$newline"*}
-    current_version=${current##* }
-    [ "$current_program" = "$source" ] && [ "$current_version" = "$expected" ]
-}
-if ! probe_matches; then
-    echo "native mbx changed while cache synchronization was waiting" >&2
-    exit 75
-fi
-source_output=$("$source" --version 2>/dev/null) || {
-    echo "native mbx stopped working during cache synchronization" >&2
-    exit 2
-}
-source_version=${source_output##* }
-[ "$source_version" = "$expected" ] || {
-    echo "native mbx changed version during cache synchronization" >&2
-    exit 75
-}
-source_size=$(wc -c < "$source")
-if [ -f "$destination" ] && [ ! -L "$destination" ] && [ -x "$destination" ]; then
-    installed_output=$("$destination" --version 2>/dev/null) || installed_output=
-    installed_version=${installed_output##* }
-    installed_size=$(wc -c < "$destination")
-    if [ "$installed_version" = "$expected" ] && [ "$source_size" -eq "$installed_size" ]; then
-        if ! probe_matches; then
-            echo "native mbx changed during cache synchronization" >&2
-            exit 75
-        fi
-        printf 'unchanged\n'
-        exit 0
-    fi
-fi
-temporary=$(mktemp "${destination}.mjolnir.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-cp -- "$source" "$temporary"
-chmod 755 -- "$temporary"
-temporary_output=$("$temporary" --version 2>/dev/null) || {
-    echo "copied mbx cannot run on the container host" >&2
-    exit 2
-}
-temporary_version=${temporary_output##* }
-temporary_size=$(wc -c < "$temporary")
-[ "$temporary_version" = "$expected" ] && [ "$source_size" -eq "$temporary_size" ] || {
-    echo "copied mbx changed during cache synchronization" >&2
-    exit 2
-}
-mv -f -- "$temporary" "$destination"
-trap - EXIT HUP INT TERM
-if ! probe_matches; then
-    echo "native mbx changed during cache synchronization" >&2
-    exit 75
-fi
-printf 'synced\n'"#;
-
-pub fn cache_binary_path(directory: &Path) -> PathBuf {
-    directory.join(MBX_COPY_RELATIVE)
-}
-
-/// Copy the current compatible host executable into a cache directory that is
-/// already mounted read-write in its containers. A missing or old native mbx
-/// leaves any previous copy untouched.
-pub fn sync_current_mbx_binary(
-    host: &CacheHost,
-    directory: &Path,
+/// Look up the mbx on the host that owns a container. The host is the
+/// container's own, never a target name that can be reassigned.
+pub fn native_mbx_for_container(
+    target: &targets::TargetLocator,
     executor: &impl CommandExecutor,
-) -> Result<CachedMbxSync> {
-    match classify_native_mbx(probe_native_version(host, executor)?) {
-        NativeMbxStatus::Compatible(native) => Ok(CachedMbxSync::Ready(
-            sync_mbx_binary_from_native(host, &native, directory, executor)?,
-        )),
-        status => Ok(CachedMbxSync::Unavailable(cache_unavailable_reason(
-            &status,
-        ))),
-    }
+) -> Result<NativeMbxLookup> {
+    let host = host_for_locator(target).context("build cache has no container host")?;
+    Ok(
+        match classify_native_mbx(probe_native_version(&host, executor)?) {
+            NativeMbxStatus::Compatible(native) => NativeMbxLookup::Ready(native),
+            status => NativeMbxLookup::Unavailable(cache_unavailable_reason(&status)),
+        },
+    )
 }
 
-/// Atomically refresh one cache copy from a version that has already been
-/// classified as compatible. Version and size avoid copying an unchanged
-/// multi-megabyte executable on every resume or reconciliation tick.
-pub fn sync_mbx_binary_from_native(
-    host: &CacheHost,
-    native: &NativeMbx,
-    directory: &Path,
+/// The container host's own `mbx/config.toml` as `cache`'s container must see
+/// it (see [`configuration::reconcile_container_config`]); an empty document
+/// when the host has none. Each session stages this text as its private policy
+/// snapshot.
+pub fn native_config_for_container(
+    target: &targets::TargetLocator,
+    cache: &SessionBuildCache,
     executor: &impl CommandExecutor,
-) -> Result<CachedMbxBinary> {
-    let mut native = match classify_native_mbx(Some(native.clone())) {
-        NativeMbxStatus::Compatible(native) => native,
-        status => bail!("{}", cache_unavailable_reason(&status)),
-    };
-    ensure!(
-        mj_core::target_path::is_absolute_on_host_or_target(directory),
-        "build cache directory is not absolute: {}",
-        directory.display()
-    );
-    let path = cache_binary_path(directory);
-    let key = format!("{}|{}", host.key(), path.display());
-    let lock = MBX_SYNC_LOCKS
-        .lock()
-        .expect("mbx sync locks")
-        .entry(key)
-        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
-        .clone();
-    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
-    for attempt in 0..3 {
-        let command = host.shell_command(
-            SYNC_MBX_BINARY_SCRIPT,
-            LABEL,
-            [
-                native.program.to_string_lossy().into_owned(),
-                path.to_string_lossy().into_owned(),
-                native.version.clone(),
-                NATIVE_VERSION_SCRIPT.to_owned(),
-            ],
-            "synchronize native mbx into the shared cache",
-        );
-        let output = executor.execute(&command)?;
-        if output.status == 0 {
-            return Ok(CachedMbxBinary {
-                path,
-                version: native.version,
-            });
-        }
-        ensure!(
-            output.status == 75,
-            "{} failed with status {}: {}",
-            command.purpose,
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let current = probe_native_version(host, executor)?;
-        native = match classify_native_mbx(current) {
-            NativeMbxStatus::Compatible(native) => native,
-            status => bail!("{}", cache_unavailable_reason(&status)),
-        };
-        if attempt == 2 {
-            bail!("native mbx kept changing during cache synchronization");
-        }
-    }
-    unreachable!("the bounded synchronization retry loop returns or fails")
+) -> Result<String> {
+    let host = host_for_locator(target).context("build cache has no container host")?;
+    let text = host_config_file(&host, executor)?.unwrap_or_default();
+    configuration::reconcile_container_config(&text, cache)
 }
 
 /// The available column of a `df -P` report (the third field of its data row).
@@ -1065,11 +711,73 @@ fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result
     configuration::read_file(host, &directory.join("config.toml"), executor)
 }
 
+#[derive(Default)]
+struct MbxStorageConfig {
+    cache: Option<PathBuf>,
+    target_root: Option<PathBuf>,
+}
+
+fn parse_storage_config(text: &str) -> Result<MbxStorageConfig> {
+    let document: toml::Value = toml::from_str(text).map_err(|error: toml::de::Error| {
+        if let Some(span) = error.span() {
+            let line = text.as_bytes()[..span.start.min(text.len())]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+                + 1;
+            anyhow::anyhow!("parse mbx storage configuration at line {line}: invalid TOML")
+        } else {
+            anyhow::anyhow!("parse mbx storage configuration: invalid TOML")
+        }
+    })?;
+    let string_path = |value: &toml::Value, name: &str| -> Result<PathBuf> {
+        value
+            .as_str()
+            .map(PathBuf::from)
+            .with_context(|| format!("{name} must be a string"))
+    };
+    let cache = document
+        .get("cache_dir")
+        .map(|v| string_path(v, "cache_dir"))
+        .transpose()?;
+    let target_root = if let Some(target) = document.get("target") {
+        let target = target.as_table().context("target must be a table")?;
+        target
+            .get("root")
+            .map(|v| string_path(v, "target.root"))
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(MbxStorageConfig { cache, target_root })
+}
+
+fn read_local_storage_config(path: &Path) -> Result<Option<String>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    std::fs::read_to_string(path).map(Some).map_err(|error| {
+        let dangling =
+            meta.file_type().is_symlink() && error.kind() == std::io::ErrorKind::NotFound;
+        let context = if dangling {
+            format!("read {}: dangling symlink", path.display())
+        } else {
+            format!("read {}", path.display())
+        };
+        anyhow::Error::new(error).context(context)
+    })
+}
+
 /// The local directories mbx uses for its cache and managed targets.
-pub fn local_storage_paths() -> Vec<PathBuf> {
-    let config_file = dirs::config_dir()
-        .map(|directory| directory.join("mbx/config.toml"))
-        .and_then(|path| std::fs::read_to_string(path).ok());
+pub fn local_storage_paths() -> Result<Vec<PathBuf>> {
+    let config_path = dirs::config_dir().map(|directory| directory.join("mbx/config.toml"));
+    let config_file = config_path
+        .as_deref()
+        .map(read_local_storage_config)
+        .transpose()?
+        .flatten();
     let cache_override = std::env::var_os("MBX_CACHE_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -1084,6 +792,15 @@ pub fn local_storage_paths() -> Vec<PathBuf> {
         config_file.as_deref(),
         default_cache,
     )
+    .with_context(|| {
+        format!(
+            "resolve mbx config {}",
+            config_path
+                .as_deref()
+                .unwrap_or(Path::new("<unavailable>"))
+                .display()
+        )
+    })
 }
 
 fn resolve_local_storage_paths(
@@ -1091,22 +808,15 @@ fn resolve_local_storage_paths(
     target_root_override: Option<PathBuf>,
     config_file: Option<&str>,
     default_cache: Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let document = config_file.and_then(|text| toml::from_str::<toml::Value>(text).ok());
-    let configured_cache = document
-        .as_ref()
-        .and_then(|document| document.get("cache_dir"))
-        .and_then(toml::Value::as_str)
-        .map(PathBuf::from);
-    let Some(cache) = cache_override.or(configured_cache).or(default_cache) else {
-        return Vec::new();
+) -> Result<Vec<PathBuf>> {
+    let config = config_file
+        .map(parse_storage_config)
+        .transpose()?
+        .unwrap_or_default();
+    let Some(cache) = cache_override.or(config.cache).or(default_cache) else {
+        return Ok(Vec::new());
     };
-    let configured_target_root = document
-        .as_ref()
-        .and_then(|document| document.get("target"))
-        .and_then(|target| target.get("root"))
-        .and_then(toml::Value::as_str)
-        .map(PathBuf::from);
+    let configured_target_root = config.target_root;
     let target_root = target_root_override
         .or(configured_target_root)
         .map(|root| {
@@ -1117,18 +827,23 @@ fn resolve_local_storage_paths(
             }
         })
         .unwrap_or_else(|| cache.join("targets"));
-    vec![cache, target_root]
+    Ok(vec![cache, target_root])
 }
 
-/// The `[target] root` a host configuration sets, when it lies outside the
-/// cache directory and therefore needs its own mount.
-fn relocated_target_root(config_file: &str, directory: &Path) -> Option<PathBuf> {
-    let document: toml::Value = toml::from_str(config_file)
-        .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error}"))
-        .ok()?;
-    let root = document.get("target")?.get("root")?.as_str()?;
-    let root = directory.join(root);
-    (!root.starts_with(directory)).then_some(root)
+/// The `[target] root` mbx uses under a host configuration: the configured
+/// root (relative to the cache directory unless absolute), or
+/// `<directory>/targets`, normalized so `..` cannot hide where it points. An
+/// unreadable configuration is reported and takes the default, as mbx would
+/// refuse to start on it anyway.
+pub fn effective_target_root(config_file: &str, directory: &Path) -> PathBuf {
+    let configured = parse_storage_config(config_file)
+        .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error:#}"))
+        .ok()
+        .and_then(|config| config.target_root);
+    mj_core::target_path::normalize(&match configured {
+        Some(root) => mj_core::target_path::join(directory, &root),
+        None => directory.join("targets"),
+    })
 }
 
 const NEAREST_ANCESTOR_SCRIPT: &str = r#"d=$1
@@ -1278,8 +993,8 @@ pub fn prepare(
 ) -> Option<SessionBuildCache> {
     let (placement, settings) = supported_host(target)?;
     let CachePlacement::Shared(host) = placement else {
-        // Use the session's identity so the machine policy service never
-        // mistakes this guest directory for a retained host mount.
+        // Use the session's identity so this guest directory is never taken
+        // for a host mount.
         return (settings.enabled != Some(false)).then(|| SessionBuildCache {
             host: format!("nitro:{}", session.id),
             directory: PathBuf::from(NITRO_CACHE_DIRECTORY),
@@ -1291,42 +1006,16 @@ pub fn prepare(
     // shared store's path-keyed records.
     session.container_workspace.as_ref()?;
     let resolved = resolve_shared(&host, &settings, executor)?;
-    // Make mbx available before the checkout exists. Target-side discovery
-    // decides whether to wrap C/C++ tools; a mirror's HEAD can differ from
-    // the session's branch, and Cargo is no longer the only consumer.
-    match sync_current_mbx_binary(&host, &resolved.directory, executor) {
-        Ok(CachedMbxSync::Ready(_)) => {}
-        Ok(CachedMbxSync::Unavailable(reason)) => {
-            tracing::warn!(
-                host = host.key(),
-                "sessions run without the shared build cache: {reason}"
-            );
-            executor.notify_notice(&format!(
-                "The shared Rust build cache is unavailable: {reason}. The session will start without it."
-            ));
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(
-                host = host.key(),
-                "the shared mbx binary could not be synchronized; the session runs without the build cache: {error:#}"
-            );
-            executor.notify_notice(&format!(
-                "The shared Rust build cache is unavailable: {error:#}. The session will start without it."
-            ));
-            return None;
-        }
-    }
     let build_cache = SessionBuildCache {
         host: host.key(),
         directory: resolved.directory,
         max_size: None,
-        target_root: resolved.target_root,
+        target_root: Some(resolved.target_root),
     };
     attach_mounts(&build_cache, mounts).then_some(build_cache)
 }
 
-/// Mount the cache, and a relocated target root, read-write at the same
+/// Mount the cache, and a target root outside it, read-write at the same
 /// absolute paths the host uses. An attached directory that already covers one
 /// of those paths wins, and the session runs without the cache.
 fn attach_mounts(
@@ -1334,7 +1023,7 @@ fn attach_mounts(
     mounts: &mut Vec<targets::AdditionalMount>,
 ) -> bool {
     let mut wanted = vec![build_cache.directory.clone()];
-    wanted.extend(build_cache.target_root.iter().cloned());
+    wanted.extend(build_cache.mounted_target_root().map(Path::to_path_buf));
     for destination in &wanted {
         if mounts.iter().any(|mount| {
             mount.destination.starts_with(destination)
@@ -1347,7 +1036,7 @@ fn attach_mounts(
             return false;
         }
     }
-    for directory in std::iter::once(&build_cache.directory).chain(build_cache.target_root.iter()) {
+    for directory in &wanted {
         mounts.push(targets::AdditionalMount {
             source: directory.clone(),
             destination: directory.clone(),
@@ -1373,16 +1062,6 @@ pub fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheHost> {
     }
 }
 
-/// Refresh a new-scheme session's copy from the host that owns its container.
-pub fn sync_mbx_binary_for_container(
-    target: &targets::TargetLocator,
-    directory: &Path,
-    executor: &impl CommandExecutor,
-) -> Result<CachedMbxSync> {
-    let host = host_for_locator(target).context("build cache has no container host")?;
-    sync_current_mbx_binary(&host, directory, executor)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1397,7 +1076,6 @@ mod tests {
     fn isolated() -> std::sync::MutexGuard<'static, ()> {
         let guard = ISOLATED.lock().unwrap_or_else(|error| error.into_inner());
         RESOLUTIONS.lock().expect("mbx resolutions").clear();
-        APPLICATIONS.lock().expect("mbx applications").clear();
         guard
     }
 
@@ -1607,8 +1285,6 @@ mod tests {
                 assert!(preview.directory.is_none());
                 // An installed native mbx must not enter a container.
                 assert!(resolve(&target, &executor).is_none());
-                apply_machine_build_cache(&machine, &[PathBuf::from("/existing/cache")], &executor)
-                    .unwrap();
                 // Only the platform and the native mbx are asked about: no
                 // GNU-only probes and no writes.
                 let commands = executor.ran();
@@ -1647,72 +1323,10 @@ mod tests {
         };
         let cache = resolve(&target, &executor).unwrap();
         assert_eq!(cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        assert_eq!(cache.previous_config, cache.config_file);
         assert!(
             executor.ran().iter().all(
                 |command| command.starts_with("ssh ") && command.contains("builder@linux.test")
             )
-        );
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
-    fn reconciliation_refreshes_active_mounts_when_cache_policy_is_disabled() {
-        let _isolated = isolated();
-        let machine = mj_core::config::Machine::Local {
-            build_cache: Some(TargetBuildCache {
-                enabled: Some(false),
-                ..Default::default()
-            }),
-        };
-        let executor = ProbeExecutor::new(&native_host());
-        let mounted = PathBuf::from("/existing/cache");
-
-        apply_machine_build_cache(&machine, std::slice::from_ref(&mounted), &executor).unwrap();
-
-        assert!(executor.ran().iter().any(|command| {
-            command.contains("source=$1 destination=$2 expected=$3")
-                && command.contains("/existing/cache/.mjolnir/bin/mbx")
-        }));
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
-    fn recorded_darwin_cache_fails_explicitly_without_writing() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&[
-            ("uname -sm", 0, "Darwin x86_64"),
-            ("$resolved\" --version", 1, ""),
-        ]);
-        let recorded = SessionBuildCache {
-            host: "local".into(),
-            directory: PathBuf::from("/existing/cache"),
-            max_size: None,
-            target_root: None,
-        };
-        let backend = targets::TargetLocator::LocalPodman {
-            container_id: "saved-container".into(),
-            workspace_storage: Default::default(),
-            borrowed_from: None,
-        };
-        let error =
-            prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
-                .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("Linux in a virtual machine"),
-            "{error:#}"
-        );
-        let ran = executor.ran();
-        assert_eq!(ran[0], "uname -sm");
-        assert!(
-            ran[1..].iter().all(|command| command.contains("--version")),
-            "{ran:?}"
         );
     }
 
@@ -1788,18 +1402,12 @@ mod tests {
         ]);
         let resolved = resolve(&podman(None), &executor).unwrap();
         assert_eq!(resolved.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        // The host's own configuration file carries the budget.
+        // Recorded even though it lies in the cache directory, so the session
+        // keeps it if the host's configuration changes.
         assert_eq!(
-            configuration::configured_limit(
-                resolved.config_file.as_deref(),
-                "gc",
-                "max_total_size"
-            )
-            .unwrap(),
-            None
+            resolved.target_root,
+            PathBuf::from("/mnt/fast/mbx-cache/targets")
         );
-        assert_eq!(resolved.target_root, None);
-        assert!(resolved.config_file.unwrap().contains("500GiB"));
         assert!(
             !executor
                 .ran()
@@ -1844,142 +1452,6 @@ mod tests {
         );
     }
 
-    // Hard-won: #1614: a cached Unavailable inspection stayed sticky under MemoizedSuccess for 10 minutes
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
-    fn repaired_reflinks_recover_on_the_next_session_configuration_without_waiting() {
-        struct FailReflinkOnce {
-            base: ProbeExecutor,
-            reflink_attempts: std::sync::atomic::AtomicUsize,
-        }
-
-        impl CommandExecutor for FailReflinkOnce {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                self.cancellation_requested()
-            }
-
-            fn execute_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                let line = format!("{} {}", command.program, command.args.join(" "));
-                if line.contains("mj-reflink")
-                    && self
-                        .reflink_attempts
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                        == 0
-                {
-                    return Ok(CommandOutput {
-                        status: 1,
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                    });
-                }
-                self.base.execute(command)
-            }
-        }
-
-        let _isolated = isolated();
-        let mut answers = native_host();
-        answers.push((".mj-apply.lock", 0, ""));
-        let executor = FailReflinkOnce {
-            base: ProbeExecutor::new(&answers),
-            reflink_attempts: std::sync::atomic::AtomicUsize::new(0),
-        };
-        let recorded = SessionBuildCache {
-            host: "local".into(),
-            directory: PathBuf::from("/mnt/fast/mbx-cache"),
-            max_size: None,
-            target_root: None,
-        };
-        let backend = targets::TargetLocator::LocalPodman {
-            container_id: "saved-container".into(),
-            workspace_storage: Default::default(),
-            borrowed_from: None,
-        };
-
-        let first =
-            prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
-                .unwrap_err();
-        assert!(
-            format!("{first:#}").contains("does not support reflinks"),
-            "{first:#}"
-        );
-        assert_eq!(
-            executor
-                .reflink_attempts
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-
-        let second =
-            prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
-                .expect(
-                    "a repaired host should recover on the next launch inside RESOLUTION_LIFETIME",
-                );
-        assert_eq!(second, configuration::shared_directory(&recorded.directory));
-        assert_eq!(
-            executor
-                .reflink_attempts
-                .load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-
-        // A deliberate TurnedOff setting stays memoized under MemoizedSuccess.
-        let disabled = TargetBuildCache {
-            enabled: Some(false),
-            ..Default::default()
-        };
-        let disabled_executor = ProbeExecutor::new(&native_host());
-        let first_off = inspect(
-            &CacheHost::Local,
-            &disabled,
-            Freshness::MemoizedSuccess,
-            &disabled_executor,
-        )
-        .unwrap();
-        assert!(matches!(
-            first_off.preview.off_reason,
-            Some(BuildCacheOff::TurnedOff)
-        ));
-        let probes_after_first = disabled_executor.ran().len();
-        let second_off = inspect(
-            &CacheHost::Local,
-            &disabled,
-            Freshness::MemoizedSuccess,
-            &disabled_executor,
-        )
-        .unwrap();
-        assert!(matches!(
-            second_off.preview.off_reason,
-            Some(BuildCacheOff::TurnedOff)
-        ));
-        assert_eq!(
-            disabled_executor.ran().len(),
-            probes_after_first,
-            "TurnedOff should remain memoized under MemoizedSuccess"
-        );
-    }
-
     #[test]
     #[cfg_attr(
         windows,
@@ -2010,10 +1482,7 @@ mod tests {
         ]);
         let resolved = resolve(&podman(None), &executor)
             .expect("a target root that copies instead of cloning is slower, not unusable");
-        assert_eq!(
-            resolved.target_root,
-            Some(PathBuf::from("/mnt/slow/mbx-targets"))
-        );
+        assert_eq!(resolved.target_root, PathBuf::from("/mnt/slow/mbx-targets"));
         assert!(
             executor.ran().iter().any(|line| line.contains("src=$1")),
             "the store and the target root are probed as a pair: {:?}",
@@ -2022,15 +1491,86 @@ mod tests {
     }
 
     #[test]
-    fn a_target_root_inside_the_cache_directory_needs_no_second_mount() {
+    fn the_effective_target_root_is_normalized_so_dot_dot_cannot_hide_an_outside_root() {
+        let effective = |config: &str| effective_target_root(config, Path::new("/cache"));
+        assert_eq!(effective(""), PathBuf::from("/cache/targets"));
         assert_eq!(
-            relocated_target_root("[target]\nroot = \"targets\"\n", Path::new("/cache")),
-            None
+            effective("[target]\nroot = \"views\"\n"),
+            PathBuf::from("/cache/views")
         );
         assert_eq!(
-            relocated_target_root("[target]\nroot = \"/cache/targets\"\n", Path::new("/cache")),
-            None
+            effective("[target]\nroot = \"/cache/./targets\"\n"),
+            PathBuf::from("/cache/targets")
         );
+        let escaping = effective("[target]\nroot = \"../outside\"\n");
+        assert_eq!(escaping, PathBuf::from("/outside"));
+        assert!(!mj_core::target_path::is_within(
+            &escaping,
+            Path::new("/cache")
+        ));
+    }
+
+    #[test]
+    fn a_target_root_inside_the_cache_is_recorded_without_a_second_mount() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&native_host());
+        let mut mounts = Vec::new();
+        let build_cache = prepare(
+            &podman(None),
+            &session(Some("/workspace/session-1")),
+            &mut mounts,
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(
+            build_cache.target_root,
+            Some(PathBuf::from("/mnt/fast/mbx-cache/targets"))
+        );
+        assert_eq!(build_cache.mounted_target_root(), None);
+        assert_eq!(
+            mounts
+                .iter()
+                .map(|mount| mount.destination.clone())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("/mnt/fast/mbx-cache")]
+        );
+    }
+
+    // Hard-won: #1597: broken configuration silently measured default filesystems.
+    #[test]
+    fn local_storage_config_reports_broken_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert!(read_local_storage_config(&path).unwrap().is_none());
+        for text in ["[", "cache_dir = 3", "[target]\nroot = 3", "target = 3"] {
+            std::fs::write(&path, text).unwrap();
+            let text = read_local_storage_config(&path).unwrap().unwrap();
+            assert!(
+                resolve_local_storage_paths(Some("/override".into()), None, Some(&text), None)
+                    .is_err()
+            );
+        }
+        for text in [
+            "# config\ncache_dir = \"https://user:super-secret-token@example.com\" invalid",
+            "# config\n\"https://user:super-secret-token@example.com\" = 1\n\"https://user:super-secret-token@example.com\" = 2",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let error = resolve_local_storage_paths(None, None, Some(text), None)
+                .with_context(|| format!("resolve mbx config {}", path.display()))
+                .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains(&path.display().to_string()));
+            assert!(error.contains("at line "), "{error}");
+            assert!(!error.contains("super-secret-token"), "{error}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(directory.path().join("missing"), &path).unwrap();
+            let error = format!("{:#}", read_local_storage_config(&path).unwrap_err());
+            assert!(error.contains(&path.display().to_string()));
+            assert!(error.contains("dangling symlink"));
+        }
     }
 
     #[test]
@@ -2045,7 +1585,8 @@ mod tests {
                      [target]\nroot = \"/mnt/optane/mbx-targets\"\n",
                 ),
                 Some(default_cache.clone()),
-            ),
+            )
+            .unwrap(),
             vec![
                 PathBuf::from("/mnt/optane/mbx-cache"),
                 PathBuf::from("/mnt/optane/mbx-targets"),
@@ -2057,14 +1598,15 @@ mod tests {
                 None,
                 Some("cache_dir = \"/mnt/optane/mbx-cache\"\n[target]\nroot = \"views\"\n"),
                 Some(default_cache.clone()),
-            ),
+            )
+            .unwrap(),
             vec![
                 PathBuf::from("/mnt/optane/mbx-cache"),
                 PathBuf::from("/mnt/optane/mbx-cache/views"),
             ]
         );
         assert_eq!(
-            resolve_local_storage_paths(None, None, None, Some(default_cache.clone())),
+            resolve_local_storage_paths(None, None, None, Some(default_cache.clone())).unwrap(),
             vec![default_cache.clone(), default_cache.join("targets")]
         );
         assert_eq!(
@@ -2073,7 +1615,8 @@ mod tests {
                 Some(PathBuf::from("views")),
                 Some("cache_dir = \"/file/cache\"\n[target]\nroot = \"file-views\"\n"),
                 Some(default_cache),
-            ),
+            )
+            .unwrap(),
             vec![
                 PathBuf::from("/env/cache"),
                 PathBuf::from("/env/cache/views")
@@ -2101,10 +1644,18 @@ mod tests {
         let executor = ProbeExecutor::new(&answers);
         let resolved = resolve(&podman(None), &executor).unwrap();
         assert_eq!(resolved.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        assert_eq!(
-            resolved.native_mbx.program,
-            PathBuf::from("/home/dev/.cargo/bin/mbx")
-        );
+        // Container staging copies the executable the host probe found.
+        let backend = targets::TargetLocator::LocalPodman {
+            container_id: "saved-container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let NativeMbxLookup::Ready(native) = native_mbx_for_container(&backend, &executor).unwrap()
+        else {
+            panic!("the host mbx is compatible");
+        };
+        assert_eq!(native.program, PathBuf::from("/home/dev/.cargo/bin/mbx"));
+        assert_eq!(native.version, MBX_VERSION);
     }
 
     #[test]
@@ -2317,7 +1868,7 @@ mod tests {
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn a_container_session_mounts_the_native_cache_and_records_its_synchronized_binary() {
+    fn a_container_session_mounts_the_native_cache_and_writes_nothing_into_it() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
         let mut mounts = Vec::new();
@@ -2329,9 +1880,15 @@ mod tests {
         )
         .expect("a container session uses the build cache");
         assert_eq!(build_cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        assert_eq!(
-            cache_binary_path(&build_cache.directory),
-            PathBuf::from("/mnt/fast/mbx-cache/.mjolnir/bin/mbx")
+        // The executable and policy are staged per session at launch; nothing
+        // is published into the shared cache directory.
+        assert!(
+            executor
+                .ran()
+                .iter()
+                .all(|command| !command.contains(".mjolnir") && !command.contains("cp -- ")),
+            "{:?}",
+            executor.ran()
         );
         assert_eq!(
             mounts,
@@ -2360,7 +1917,7 @@ mod tests {
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn a_resumed_session_uses_current_machine_policy_instead_of_its_saved_budget() {
+    fn a_resumed_session_resolves_the_host_cache_instead_of_its_saved_budget() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
         let mut record = session(Some("/workspace/session-1"));
@@ -2379,7 +1936,7 @@ mod tests {
             executor
                 .ran()
                 .iter()
-                .any(|line| line.contains(".mj-apply.lock"))
+                .any(|line| line.contains("mj-reflink"))
         );
     }
 
@@ -2407,7 +1964,10 @@ mod tests {
 
         assert_eq!(build_cache.host, "local");
         assert_eq!(build_cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        assert_eq!(build_cache.target_root, None);
+        assert_eq!(
+            build_cache.target_root,
+            Some(PathBuf::from("/mnt/fast/mbx-cache/targets"))
+        );
         assert_eq!(
             mounts
                 .iter()
@@ -2559,560 +2119,6 @@ mod tests {
             parse_native_probe_output(&output.stdout).unwrap().program,
             std::fs::canonicalize(cargo_bin.join("mbx")).unwrap()
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cache_copy_refresh_is_atomic_and_skips_unchanged_binaries() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("native mbx");
-        let native_bin = root.path().join("native-bin");
-        let home = root.path().join("home");
-        let cache = root.path().join("cache with spaces");
-        std::fs::create_dir_all(&native_bin).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        let install = |version: &str| {
-            std::fs::write(&source, format!("#!/bin/sh\nprintf 'mbx {version}\\n'\n")).unwrap();
-            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        let native = |version: &str| NativeMbx {
-            program: source.clone(),
-            version: version.to_owned(),
-        };
-        std::os::unix::fs::symlink(&source, native_bin.join("mbx")).unwrap();
-        struct IsolatedHostExecutor {
-            path: String,
-            home: String,
-        }
-        impl CommandExecutor for IsolatedHostExecutor {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                self.cancellation_requested()
-            }
-
-            fn execute_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                let mut command = command.clone();
-                command.env.insert("PATH".into(), self.path.clone());
-                command.env.insert("HOME".into(), self.home.clone());
-                targets::ProcessExecutor.execute(&command)
-            }
-        }
-        let executor = IsolatedHostExecutor {
-            path: format!("{}:/usr/bin:/bin", native_bin.display()),
-            home: home.display().to_string(),
-        };
-
-        install("1.22.0");
-        let first =
-            sync_mbx_binary_from_native(&CacheHost::Local, &native("1.22.0"), &cache, &executor)
-                .unwrap();
-        let copy = first.path;
-        assert_eq!(copy, cache.join(".mjolnir/bin/mbx"));
-        assert_eq!(
-            std::fs::read(&copy).unwrap(),
-            std::fs::read(&source).unwrap()
-        );
-        assert_eq!(
-            std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        let original_inode = std::fs::metadata(&copy).unwrap().ino();
-
-        let unchanged =
-            sync_mbx_binary_from_native(&CacheHost::Local, &native("1.22.0"), &cache, &executor)
-                .unwrap();
-        assert_eq!(unchanged.path, copy);
-        assert_eq!(std::fs::metadata(&copy).unwrap().ino(), original_inode);
-
-        install("1.23.0");
-        sync_mbx_binary_from_native(&CacheHost::Local, &native("1.23.0"), &cache, &executor)
-            .unwrap();
-        assert_ne!(std::fs::metadata(&copy).unwrap().ino(), original_inode);
-        let version = executor
-            .execute(&CommandSpec::new(
-                copy.to_string_lossy().into_owned(),
-                ["--version"],
-            ))
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&version.stdout).trim(),
-            "mbx 1.23.0"
-        );
-        assert_eq!(
-            std::fs::read_dir(cache.join(".mjolnir/bin"))
-                .unwrap()
-                .count(),
-            2,
-            "publication leaves only the copy and its cross-process lock file"
-        );
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
-    fn cache_sync_reprobes_and_retries_after_another_process_changes_the_host_binary() {
-        struct ReprobeExecutor {
-            syncs: std::sync::atomic::AtomicUsize,
-            commands: Mutex<Vec<CommandSpec>>,
-        }
-
-        impl CommandExecutor for ReprobeExecutor {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                self.cancellation_requested()
-            }
-
-            fn execute_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                self.commands.lock().unwrap().push(command.clone());
-                let (status, stdout, stderr) = match command.purpose.as_str() {
-                    "synchronize native mbx into the shared cache"
-                        if self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 =>
-                    {
-                        (75, Vec::new(), b"native mbx changed".to_vec())
-                    }
-                    "synchronize native mbx into the shared cache" => {
-                        (0, b"synced\n".to_vec(), Vec::new())
-                    }
-                    "read the container host mbx version" => {
-                        (0, b"/opt/mbx/current\nmbx 1.23.0".to_vec(), Vec::new())
-                    }
-                    purpose => bail!("unexpected command purpose {purpose}"),
-                };
-                Ok(CommandOutput {
-                    status,
-                    stdout,
-                    stderr,
-                })
-            }
-        }
-
-        let directory = PathBuf::from("/tmp/mjolnir-mbx-retry");
-        let executor = ReprobeExecutor {
-            syncs: std::sync::atomic::AtomicUsize::new(0),
-            commands: Mutex::new(Vec::new()),
-        };
-        let binary = sync_mbx_binary_from_native(
-            &CacheHost::Local,
-            &NativeMbx {
-                program: PathBuf::from("/opt/mbx/old"),
-                version: "1.22.0".into(),
-            },
-            &directory,
-            &executor,
-        )
-        .unwrap();
-
-        assert_eq!(binary.version, "1.23.0");
-        assert_eq!(
-            executor
-                .commands
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|command| command.purpose.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "synchronize native mbx into the shared cache",
-                "read the container host mbx version",
-                "synchronize native mbx into the shared cache",
-            ]
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cache_sync_without_flock_rechecks_after_rename_and_resynchronizes() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let root = tempfile::tempdir().unwrap();
-        let tools = root.path().join("tools");
-        let home = root.path().join("home");
-        let cache = root.path().join("cache");
-        let old_source = root.path().join("mbx-1.22.0");
-        let new_source = root.path().join("mbx-1.23.0");
-        let native_path = tools.join("mbx");
-        let flipped = root.path().join("flipped");
-        std::fs::create_dir_all(&tools).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-
-        for name in [
-            "sh", "dirname", "mkdir", "readlink", "mktemp", "chmod", "wc", "mv", "rm", "ln",
-        ] {
-            let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-                .map(|directory| directory.join(name))
-                .find(|candidate| candidate.is_file())
-                .unwrap_or_else(|| panic!("could not find test utility {name}"));
-            symlink(executable, tools.join(name)).unwrap();
-        }
-
-        let real_cp = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .map(|directory| directory.join("cp"))
-            .find(|candidate| candidate.is_file())
-            .unwrap();
-        let cp_wrapper = tools.join("cp");
-        std::fs::write(
-            &cp_wrapper,
-            r#"#!/bin/sh
-"$MBX_TEST_REAL_CP" "$@" || exit $?
-if [ ! -e "$MBX_TEST_FLIPPED" ]; then
-    : > "$MBX_TEST_FLIPPED"
-    rm -f -- "$MBX_TEST_NATIVE"
-    ln -s -- "$MBX_TEST_NEW_SOURCE" "$MBX_TEST_NATIVE"
-fi"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&cp_wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for (path, version) in [(&old_source, "1.22.0"), (&new_source, "1.23.0")] {
-            std::fs::write(path, format!("#!/bin/sh\nprintf 'mbx {version}\\n'\n")).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        symlink(&old_source, &native_path).unwrap();
-
-        struct FallbackExecutor {
-            tools: PathBuf,
-            home: PathBuf,
-            real_cp: PathBuf,
-            flipped: PathBuf,
-            native: PathBuf,
-            new_source: PathBuf,
-        }
-        impl CommandExecutor for FallbackExecutor {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                self.cancellation_requested()
-            }
-
-            fn execute_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                let mut command = command.clone();
-                command
-                    .env
-                    .insert("PATH".into(), self.tools.display().to_string());
-                command
-                    .env
-                    .insert("HOME".into(), self.home.display().to_string());
-                command.env.insert(
-                    "MBX_TEST_REAL_CP".into(),
-                    self.real_cp.display().to_string(),
-                );
-                command.env.insert(
-                    "MBX_TEST_FLIPPED".into(),
-                    self.flipped.display().to_string(),
-                );
-                command
-                    .env
-                    .insert("MBX_TEST_NATIVE".into(), self.native.display().to_string());
-                command.env.insert(
-                    "MBX_TEST_NEW_SOURCE".into(),
-                    self.new_source.display().to_string(),
-                );
-                targets::ProcessExecutor.execute(&command)
-            }
-        }
-        let executor = FallbackExecutor {
-            tools,
-            home,
-            real_cp,
-            flipped: flipped.clone(),
-            native: native_path,
-            new_source,
-        };
-
-        let binary = sync_mbx_binary_from_native(
-            &CacheHost::Local,
-            &NativeMbx {
-                program: old_source,
-                version: "1.22.0".into(),
-            },
-            &cache,
-            &executor,
-        )
-        .unwrap();
-
-        assert!(
-            flipped.exists(),
-            "the test copy did not switch host versions"
-        );
-        assert_eq!(binary.version, "1.23.0");
-        let copied = targets::ProcessExecutor
-            .execute(&CommandSpec::new(
-                binary.path.to_string_lossy().into_owned(),
-                ["--version"],
-            ))
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&copied.stdout).trim(), "mbx 1.23.0");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cross_process_cache_sync_cannot_publish_a_stale_host_binary_last() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let root = tempfile::tempdir().unwrap();
-        let source_dir = root.path().join("sources");
-        let native_bin = root.path().join("native-bin");
-        let wrapper_bin = root.path().join("wrapper-bin");
-        let home = root.path().join("home");
-        let cache = root.path().join("cache");
-        let lock = cache.join(".mjolnir/bin/.mbx.lock");
-        let ready = root.path().join("lock-ready");
-        let release = root.path().join("release-lock");
-        std::fs::create_dir_all(&source_dir).unwrap();
-        std::fs::create_dir_all(&native_bin).unwrap();
-        std::fs::create_dir_all(&wrapper_bin).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
-
-        let old_source = source_dir.join("mbx-1.22.0");
-        let new_source = source_dir.join("mbx-1.23.0");
-        for (path, version) in [(&old_source, "1.22.0"), (&new_source, "1.23.0")] {
-            std::fs::write(path, format!("#!/bin/sh\nprintf 'mbx {version}\\n'\n")).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let native_path = native_bin.join("mbx");
-        symlink(&old_source, &native_path).unwrap();
-
-        // Mark the old process as soon as it reaches flock, then delegate to
-        // the real utility. This proves it is waiting on the held lock before
-        // the native install path changes.
-        let flock_wrapper = wrapper_bin.join("flock");
-        std::fs::write(
-            &flock_wrapper,
-            "#!/bin/sh\n[ -z \"${MBX_TEST_FLOCK_MARKER:-}\" ] || : > \"$MBX_TEST_FLOCK_MARKER\"\nexec /usr/bin/flock \"$@\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&flock_wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let path_value = format!(
-            "{}:{}:/usr/bin:/bin",
-            wrapper_bin.display(),
-            native_bin.display()
-        );
-        let executor = crate::targets::ProcessExecutor;
-        let holder_script = r#"set -eu
-exec 9>"$1"
-flock -x 9
-: > "$2"
-while [ ! -e "$3" ]; do sleep 0.01; done"#;
-        let mut holder = CommandSpec::new(
-            "sh",
-            vec![
-                "-c".into(),
-                holder_script.into(),
-                "mbx-lock-holder".into(),
-                lock.to_string_lossy().into_owned(),
-                ready.to_string_lossy().into_owned(),
-                release.to_string_lossy().into_owned(),
-            ],
-        )
-        .purpose("hold test mbx lock");
-        holder.env.insert("PATH".into(), path_value.clone());
-        holder.env.insert("HOME".into(), home.display().to_string());
-        let holder_thread = std::thread::spawn(move || executor.execute(&holder));
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !ready.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if !ready.exists() {
-            std::fs::write(&release, "release").unwrap();
-            let _ = holder_thread.join();
-            panic!("the test lock holder did not acquire flock");
-        }
-
-        let make_sync = |source: &Path, version: &str| {
-            let mut command = CommandSpec::new(
-                "sh",
-                [
-                    "-c".to_owned(),
-                    SYNC_MBX_BINARY_SCRIPT.to_owned(),
-                    "test-mbx-sync".to_owned(),
-                    source.to_string_lossy().into_owned(),
-                    cache_binary_path(&cache).to_string_lossy().into_owned(),
-                    version.to_owned(),
-                    NATIVE_VERSION_SCRIPT.to_owned(),
-                ],
-            )
-            .purpose("run cross-process mbx sync test");
-            command.clear_env = true;
-            command.env.insert("PATH".into(), path_value.clone());
-            command
-                .env
-                .insert("HOME".into(), home.display().to_string());
-            command
-        };
-
-        let old_marker = root.path().join("old-reached-flock");
-        let old_command = make_sync(&old_source, "1.22.0");
-        let old_executor = crate::targets::ProcessExecutor;
-        let old_done = std::sync::Arc::new(AtomicBool::new(false));
-        let old_done_thread = old_done.clone();
-        let mut old_command = old_command;
-        old_command.env.insert(
-            "MBX_TEST_FLOCK_MARKER".into(),
-            old_marker.display().to_string(),
-        );
-        let old_thread = std::thread::spawn(move || {
-            let result = old_executor.execute(&old_command);
-            old_done_thread.store(true, Ordering::SeqCst);
-            result
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !old_marker.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let old_waited = old_marker.exists() && !old_done.load(Ordering::SeqCst);
-
-        std::fs::remove_file(&native_path).unwrap();
-        symlink(&new_source, &native_path).unwrap();
-        let new_command = make_sync(&new_source, "1.23.0");
-        let new_executor = crate::targets::ProcessExecutor;
-        let new_thread = std::thread::spawn(move || new_executor.execute(&new_command));
-        std::thread::sleep(Duration::from_millis(40));
-        std::fs::write(&release, "release").unwrap();
-
-        let holder_output = holder_thread.join().unwrap().unwrap();
-        let old_output = old_thread.join().unwrap().unwrap();
-        let new_output = new_thread.join().unwrap().unwrap();
-        assert_eq!(holder_output.status, 0, "{holder_output:?}");
-        assert!(old_waited, "the stale synchronizer did not wait on flock");
-        assert_eq!(old_output.status, 75, "{old_output:?}");
-        assert_eq!(new_output.status, 0, "{new_output:?}");
-
-        let version = crate::targets::ProcessExecutor
-            .execute(&CommandSpec::new(
-                cache_binary_path(&cache).to_string_lossy().into_owned(),
-                ["--version"],
-            ))
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&version.stdout).trim(),
-            "mbx 1.23.0"
-        );
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
-    )]
-    fn absent_or_unrecognized_native_mbx_leaves_the_existing_cache_copy() {
-        struct ProbeAnswer {
-            status: i32,
-            stdout: Vec<u8>,
-        }
-
-        impl CommandExecutor for ProbeAnswer {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                self.cancellation_requested()
-            }
-
-            fn execute_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-
-            fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-                Ok(CommandOutput {
-                    status: self.status,
-                    stdout: self.stdout.clone(),
-                    stderr: Vec::new(),
-                })
-            }
-        }
-
-        let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("cache");
-        let copy = cache_binary_path(&cache);
-        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
-        std::fs::write(&copy, b"previous compatible copy").unwrap();
-
-        for answer in [
-            ProbeAnswer {
-                status: 1,
-                stdout: Vec::new(),
-            },
-            ProbeAnswer {
-                status: 0,
-                stdout: "/opt/old/mbx\nmbx unknown".into(),
-            },
-        ] {
-            let result = sync_current_mbx_binary(&CacheHost::Local, &cache, &answer).unwrap();
-            assert!(matches!(result, CachedMbxSync::Unavailable(_)));
-            assert_eq!(std::fs::read(&copy).unwrap(), b"previous compatible copy");
-        }
     }
 
     #[test]

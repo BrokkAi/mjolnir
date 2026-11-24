@@ -1,7 +1,7 @@
 //! Projects, containers and the target templates a session runs on.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use bytesize::ByteSize;
@@ -441,11 +441,6 @@ pub fn build_cache_size_gigabytes(value: &str) -> Option<u64> {
 #[must_use]
 pub fn build_cache_size_from_gigabytes(gigabytes: u64) -> String {
     format!("{gigabytes}GB")
-}
-
-/// Shared machine policy, reachable through the cache mount in every container.
-pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
-    directory.join(".mjolnir/config/mbx")
 }
 
 /// The image a container target runs when its table names none: the

@@ -9,7 +9,7 @@ use mj_core::guardian::{
 mod reviewer;
 mod reviewer_profile;
 
-pub(super) use mj_core::guardian::{ask_person_preface, denial_notice};
+pub(super) use mj_core::guardian::{ask_person_preface, denied_escalation_preface};
 pub(super) use reviewer::Guardian;
 
 /// Sent in the same reviewer session when a reply carried no verdict.
@@ -130,8 +130,8 @@ pub(super) fn allow_once_response(
 
 /// Refuse this one call: the request's one-time rejection, never a
 /// rejection the harness would remember as a rule, or a cancelled request
-/// when it offers none. Both the guardian's denials and every request the
-/// reviewer itself raises are answered this way.
+/// when it offers none. Used to refuse every permission request the
+/// read-only ACP guardian reviewer itself raises.
 pub(super) fn rejection_response(request: &RequestPermissionRequest) -> RequestPermissionResponse {
     request
         .options

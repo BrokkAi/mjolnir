@@ -682,10 +682,12 @@ instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
 `KIMI_CODE_HOME`, `GROK_HOME`, DSH's
 `DSH_ACP_DATA_DIR`, and `XDG_CONFIG_HOME` for Muse and OpenCode. Muse and
 OpenCode also reserve `XDG_DATA_HOME`; their homes must end in `/muse` and `/opencode`,
-respectively. A DSH profile also cannot set `DSH_ACP_SYSTEM_PROMPT`
-(put instructions in `AGENTS.md` in the profile home) or
-`DSH_ACP_PERMISSION_MODE` (the target's permission mode decides it); a profile
-that sets either fails to load. Other dsh-acp settings may go in
+respectively. A DSH profile also cannot set `DSH_ACP_DSH_HOME` (native DSH
+state lives under the profile home), `DSH_ACP_SYSTEM_PROMPT` (put instructions
+in `AGENTS.md` in the profile home), or `DSH_ACP_PERMISSION_MODE` (the target's
+permission mode decides it); a profile that sets any of them fails to load.
+Other
+dsh-acp settings may go in
 `environment`: `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`),
 `DEEPSEEK_MODEL` (default `deepseek-flash`), and `DSH_ACP_MODELS` (default
 `deepseek-flash,deepseek-v4-pro`).
@@ -693,7 +695,7 @@ that sets either fails to load. Other dsh-acp settings may go in
 Profiles do not select target-side executables. All bare workers, including
 localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
 cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
-only when it is 0.4.0 or newer, otherwise the pinned npm package. Containers
+only when it is 0.8.0 or newer, otherwise the pinned npm package. Containers
 use their image-provided runtime or the documented installer fallback. The
 `mj login` command invokes the harness's canonical controller-side command from
 `PATH`.
@@ -962,10 +964,11 @@ configuration. In C/C++ projects, private `cmake`, `make`, `gmake` and `ninja`
 launchers use `mbx exec`, including the CMake configuration step.
 For Autoconf projects, run `mbx exec ./configure` so configuration records the
 cached compiler launchers before running `make`.
-The host executable is atomically refreshed at `<cache>/.mjolnir/bin/mbx` inside
-the read-write shared cache mount. Mjolnir checks that copy in the container
-before adding its marked Cargo and `mbx` launchers; periodic reconciliation
-refreshes it after host upgrades without interrupting running processes.
+Each session copies the host executable to `mbx` under its own worker directory
+and the container takes a snapshot of the host's mbx configuration in its own
+control directory; the shared cache mount holds neither. Mjolnir checks the copy in the container before adding its
+marked Cargo and `mbx` launchers. Both are refreshed when the session's worker is
+launched, upgraded or restored, without interrupting running processes.
 In Settings, open **Machines → [machine] → Build caches**, or search for
 **mbx**, **cache**, or **build cache**. The machine row shows its configured
 state and total budget; opening it resolves the host's actual defaults and

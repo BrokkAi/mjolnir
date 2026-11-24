@@ -145,11 +145,14 @@ setting enabled, a profile may still opt out with `mjolnir_guardian = false`.
 `local_classifier = false` skips the local first stage and proceeds to utility
 or ACP review. `use_gpu` takes effect when the background server next starts.
 
-Under configured approvals, the Mjolnir guardian reviews tool permission
-requests that any supported harness forwards over ACP. The harness keeps its
-native approval mode and any native reviewer. Literal `gh` and identifiable
-Mjolnir-owned tools that are already approved, along with plan approvals that
-need your consent, follow their existing paths.
+Under configured approvals, permission review escalates from any optional
+native harness reviewer, to the Mjolnir guardian, to you. The harness keeps its
+native approval mode and any native reviewer; denials handled internally by a
+native reviewer (such as Claude Code's `auto` mode, Codex's `agent` mode, or
+Muse's `auto_review`) never cross ACP and remain final. Every tool permission
+request that a harness forwards over ACP reaches the Mjolnir guardian. Literal
+`gh` and identifiable Mjolnir-owned tools that are already approved, along with
+plan approvals that need your consent, follow their existing paths.
 
 The daemon first scores eligible actions locally with Wolf Defender Jev. This
 approve-only stage can allow an action when the model scores it as strongly
@@ -182,25 +185,39 @@ The utility and ACP reviewers see:
 
 The utility or ACP reviewer answers with a risk level, how clearly you
 authorized the action, and allow or deny. Mjolnir enforces Codex's thresholds on that answer: a
-`critical` action is always denied, and a `high`-risk one unless you
+`critical` action is always flagged, and a `high`-risk one unless you
 authorized it at least in substance. If you write to the session while a
 review runs, its verdict is set aside and the action reviewed again on what you
-now say, within the same deadline. An allowed action runs once, never as a remembered rule; a denied one
-is refused once, and the transcript shows a notice that starts `Mjolnir
-guardian denied`, names the tool and command, and gives the reviewer's reason.
-Kimi Code and DSH report the refusal to the agent, which carries on; OpenCode
-ends the agent's turn on a refusal. To let the agent proceed, tell it so in the
-conversation: a later review sees your message.
+now say, within the same deadline. An allowed action runs once, never as a
+remembered rule.
+
+When the guardian does not allow a request, it escalates to you instead of
+refusing the call outright. The standard permission approval form opens with
+the guardian's risk level and rationale on the first line and fires Mjolnir's
+existing notifications (the TUI Notifications pane, bell and terminal title,
+desktop notifications, the Web Inbox, and Web Push). On a guardian-flagged
+form, standing "allow always" options are hidden whenever the harness offers a
+one-time allow so later matching calls still pass through the guardian.
+Approving runs the call once and records your approval as trusted input for
+later reviews; declining or skipping refuses the call once when the harness
+offers a one-time rejection, and cancels the request when it does not.
+
+A request the guardian flags now waits for a person on every session kind,
+including sub-agents, before-push reviewers, oracle sessions, and goal turns.
+With Operator Away on (manual or automatic), each distinct flagged request is
+skipped once and an identical retry waits for the person. Two setups stay quiet
+while waiting: a session created with `--ignore-notifications`, and `mj wait`
+invoked without `--return-on-input` or `--timeout`.
 
 If a review fails or reaches its 90-second deadline, the ordinary permission
 form opens and explains why the guardian could not decide. The relay review's
 deadline includes collecting project instructions. The ACP reviewer can make
 up to three attempts within its review deadline.
 
-When the guardian denies three actions in a row, or ten of its last fifty
-in the current turn, the rest of that turn's requests open the ordinary
-permission form with the reason. When you are away, Mjolnir's away handling
-answers the form with Skip, which refuses the call.
+When three flagged requests in a row, or ten of the last fifty in the current
+turn, are declined (by you or by Operator Away), the rest of that turn's
+requests open the ordinary permission form directly without calling the
+guardian again.
 Cancelling the turn withdraws a review in flight, as it withdraws an open form,
 and a request that arrives later in the cancelled turn is refused. `/clear`
 waits while a review runs and says so.
