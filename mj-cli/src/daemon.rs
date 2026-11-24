@@ -70,18 +70,30 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         argv.extend(["--instance".into(), instance]);
     }
     argv.extend_from_slice(args);
-    let mut command = std::process::Command::new("ssh");
-    if interactive {
-        command.arg("-t");
-    }
-    command
-        .args(&placement.ssh_args)
-        .arg(host)
-        .arg(mj_core::targets::daemon_login_command(&argv));
-    let status =
-        mj_core::runtime::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+    #[cfg(windows)]
+    let status = {
+        use std::io::{self, IsTerminal, Write};
+
+        if !interactive && (!io::stdout().is_terminal() || !io::stderr().is_terminal()) {
+            let output = mj_client::daemon::ssh::run_remote_captured(&placement, host, &argv)
+                .await
+                .context("run SSH command")?;
+            mj_core::runtime::spawn_blocking(move || -> std::io::Result<_> {
+                io::stdout().write_all(&output.stdout)?;
+                io::stdout().flush()?;
+                io::stderr().write_all(&output.stderr)?;
+                io::stderr().flush()?;
+                Ok(output.status)
+            })
             .await
-            .context("SSH command task panicked")??;
+            .context("SSH output task panicked")?
+            .context("write SSH output")?
+        } else {
+            run_remote_inherited(&placement, host, &argv, interactive).await?
+        }
+    };
+    #[cfg(not(windows))]
+    let status = run_remote_inherited(&placement, host, &argv, interactive).await?;
     if status.code() == Some(127) {
         eprintln!(
             "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release)",
@@ -92,6 +104,25 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(true)
+}
+
+async fn run_remote_inherited(
+    placement: &mj_core::config::DaemonConfig,
+    host: &str,
+    argv: &[String],
+    interactive: bool,
+) -> Result<std::process::ExitStatus> {
+    let mut command = std::process::Command::new("ssh");
+    if interactive {
+        command.arg("-t");
+    }
+    command
+        .args(&placement.ssh_args)
+        .arg(host)
+        .arg(mj_core::targets::daemon_login_command(argv));
+    mj_core::runtime::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+        .await
+        .context("SSH command task panicked")?
 }
 
 pub(crate) mod choice;

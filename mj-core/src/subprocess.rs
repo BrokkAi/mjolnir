@@ -433,6 +433,54 @@ pub async fn capture(command: &mut tokio::process::Command) -> Result<Output> {
     })
 }
 
+/// Capture stdout in an unnamed file. Inbox Win32 OpenSSH 9.5p2 can hang at
+/// channel EOF in `chan_shutdown_write` while closing a piped stdout handle
+/// (PowerShell/Win32-OpenSSH#1748 and #2305). A regular file avoids
+/// `FILE_TYPE_PIPE` and leaves no file behind.
+pub async fn capture_with_stdout_file(command: &mut tokio::process::Command) -> Result<Output> {
+    use std::io::{Read, Seek};
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout_file = tempfile::tempfile().context("create subprocess stdout file")?;
+    let stdout_writer = stdout_file
+        .try_clone()
+        .context("clone subprocess stdout file")?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_writer))
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    let child = spawn_async_child(command);
+    // The command retains its copy of the handle after spawning.
+    command.stdout(Stdio::piped());
+    let mut child = child.context("start captured subprocess")?;
+    #[cfg(windows)]
+    let _job = ChildJob::attach(&child)?;
+    let _group = ProcessGroupGuard::new(child.id());
+    let mut stderr = child.stderr.take().context("missing captured stderr")?;
+    let mut err = Vec::new();
+    let (status, _) = tokio::try_join!(child.wait(), stderr.read_to_end(&mut err))
+        .context("capture subprocess stderr and exit status")?;
+    let out = crate::runtime::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        stdout_file.rewind()?;
+        let mut out = Vec::new();
+        stdout_file.read_to_end(&mut out)?;
+        Ok(out)
+    })
+    .await
+    .context("subprocess stdout read task failed")?
+    .context("read subprocess stdout file")?;
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
 /// Stream combined output straight to a log without a deadline or pipe buffers.
 /// Dropping the future kills the process group, including package-manager children.
 pub async fn run_to_file_async(
@@ -1471,6 +1519,32 @@ mod tests {
         ]);
         let output = super::capture(&mut command).await.unwrap();
         assert!(output.status.success());
+        assert_eq!(output.stdout, vec![b'o'; 262144]);
+        assert_eq!(output.stderr, vec![b'e'; 262144]);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn capture_with_stdout_file_reads_large_output_and_exit_status() {
+        #[cfg(unix)]
+        let mut command = tokio::process::Command::new("python3");
+        #[cfg(unix)]
+        command.args([
+            "-c",
+            "import os, sys; os.write(1, b'o'*262144); os.write(2, b'e'*262144); sys.exit(23)",
+        ]);
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("powershell.exe");
+        #[cfg(windows)]
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::OpenStandardOutput().Write([Text.Encoding]::ASCII.GetBytes('o' * 262144), 0, 262144); \
+             [Console]::OpenStandardError().Write([Text.Encoding]::ASCII.GetBytes('e' * 262144), 0, 262144); exit 23",
+        ]);
+        let output = super::capture_with_stdout_file(&mut command).await.unwrap();
+        assert_eq!(output.status.code(), Some(23));
         assert_eq!(output.stdout, vec![b'o'; 262144]);
         assert_eq!(output.stderr, vec![b'e'; 262144]);
     }

@@ -90,6 +90,51 @@ async fn diagnostics(stderr: &[u8], client_log: Option<&tempfile::TempPath>) -> 
     )
 }
 
+/// Run a remote daemon command with captured output.
+pub async fn run_remote_captured(
+    placement: &DaemonConfig,
+    host: &str,
+    argv: &[String],
+) -> Result<std::process::Output> {
+    capture_remote(placement, host, argv, false).await
+}
+
+async fn capture_remote(
+    placement: &DaemonConfig,
+    host: &str,
+    argv: &[String],
+    batch_mode: bool,
+) -> Result<std::process::Output> {
+    ensure!(
+        !host.starts_with('-'),
+        "[daemon] host cannot be an SSH option"
+    );
+    let mut command = tokio::process::Command::new("ssh");
+    #[cfg(windows)]
+    let client_log = redirect_client_log(&mut command, &placement.ssh_args)?;
+    if batch_mode {
+        command.args(["-o", "BatchMode=yes"]);
+    }
+    command
+        .args(&placement.ssh_args)
+        .arg(host)
+        .arg(daemon_login_command(argv));
+    #[cfg(not(windows))]
+    {
+        mj_core::subprocess::capture(&mut command).await
+    }
+    #[cfg(windows)]
+    {
+        let mut output = mj_core::subprocess::capture_with_stdout_file(&mut command).await?;
+        let mut merged = diagnostics(&output.stderr, client_log.as_ref()).await;
+        if !merged.is_empty() {
+            merged.push('\n');
+        }
+        output.stderr = merged.into_bytes();
+        Ok(output)
+    }
+}
+
 /// Discover process-private remote credentials. No client-side daemon or store
 /// is consulted. Dropping this future cancels the SSH process group.
 pub async fn discover(
@@ -101,10 +146,6 @@ pub async fn discover(
         .host
         .as_deref()
         .context("[daemon] host is required for SSH placement")?;
-    ensure!(
-        !host.starts_with('-'),
-        "[daemon] host cannot be an SSH option"
-    );
     let mut args = vec![placement.remote_command().to_owned()];
     if let Some(instance) = remote_instance {
         args.extend(["--instance".into(), instance.into()]);
@@ -113,22 +154,11 @@ pub async fn discover(
     if matches!(intent, DiscoveryIntent::Existing) {
         args.push("--existing".into());
     }
-    let mut command = tokio::process::Command::new("ssh");
-    #[cfg(windows)]
-    let client_log = redirect_client_log(&mut command, &placement.ssh_args)?;
-    command
-        .args(["-o", "BatchMode=yes"])
-        .args(&placement.ssh_args)
-        .arg(host)
-        .arg(daemon_login_command(&args));
-    let output = mj_core::subprocess::capture(&mut command)
+    let output = capture_remote(placement, host, &args, true)
         .await
         .context("discover SSH daemon")?;
     if !output.status.success() {
-        #[cfg(not(windows))]
         let stderr = String::from_utf8_lossy(&output.stderr);
-        #[cfg(windows)]
-        let stderr = diagnostics(&output.stderr, client_log.as_ref()).await;
         if output.status.code() == Some(127) {
             bail!(
                 "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release). SSH: {}",

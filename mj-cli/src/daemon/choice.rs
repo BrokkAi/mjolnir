@@ -23,6 +23,38 @@ enum Remote {
     Cancelled,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PlacementOption {
+    Local,
+    Ssh,
+}
+
+fn parse_placement_answer(answer: &str, prefer_ssh: bool) -> Option<PlacementOption> {
+    match answer {
+        "1" => Some(PlacementOption::Local),
+        "2" => Some(PlacementOption::Ssh),
+        "" if prefer_ssh => Some(PlacementOption::Ssh),
+        "" => Some(PlacementOption::Local),
+        _ => None,
+    }
+}
+
+fn placement_prompt(prefer_ssh: bool) -> (&'static str, &'static str, &'static str) {
+    if prefer_ssh {
+        (
+            "  1) Start a daemon on this computer (experimental on Windows)",
+            "  2) Connect to a daemon on another computer over SSH (recommended)",
+            "Choose 1 or 2 [2]: ",
+        )
+    } else {
+        (
+            "  1) Start a daemon on this computer",
+            "  2) Connect to a daemon on another computer over SSH",
+            "Choose 1 or 2 [1]: ",
+        )
+    }
+}
+
 /// Whether no daemon has ever run on this computer: no `[daemon]` table
 /// is set, and there is neither a store nor an endpoint. Either means a
 /// local daemon already ran, so a computer that stopped its daemon is not
@@ -47,23 +79,23 @@ pub(crate) async fn ask_where_daemon_runs() -> Result<PlacementChoice> {
     if !first {
         return Ok(PlacementChoice::Continue);
     }
+    let prefer_ssh = cfg!(windows);
+    let (local_option, ssh_option, prompt) = placement_prompt(prefer_ssh);
     loop {
         println!("No Mjolnir daemon has run on this computer. Where should it run?");
-        println!("  1) Start a daemon on this computer");
-        println!("  2) Connect to a daemon on another computer over SSH");
-        // Leaving, not the default: the default would start a daemon and a
-        // store, which ends this prompt for good.
-        let Answer::Text(answer) = ask("Choose 1 or 2 [1]: ").await? else {
+        println!("{local_option}");
+        println!("{ssh_option}");
+        let Answer::Text(answer) = ask(prompt).await? else {
             return Ok(PlacementChoice::Cancelled);
         };
-        match answer.as_str() {
-            "" | "1" => return Ok(PlacementChoice::Continue),
-            "2" => match connect_remote().await? {
+        match parse_placement_answer(&answer, prefer_ssh) {
+            Some(PlacementOption::Local) => return Ok(PlacementChoice::Continue),
+            Some(PlacementOption::Ssh) => match connect_remote().await? {
                 Remote::Saved => return Ok(PlacementChoice::Continue),
                 Remote::Back => {}
                 Remote::Cancelled => return Ok(PlacementChoice::Cancelled),
             },
-            _ => println!("Enter 1 or 2."),
+            None => println!("Enter 1 or 2."),
         }
     }
 }
@@ -183,4 +215,28 @@ async fn try_connect(placement: &DaemonConfig) -> Result<()> {
     )
     .await?;
     lease.terminate().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlacementOption, parse_placement_answer};
+
+    #[test]
+    fn placement_preference_changes_only_the_empty_answer() {
+        for (prefer_ssh, default) in [
+            (false, PlacementOption::Local),
+            (true, PlacementOption::Ssh),
+        ] {
+            assert_eq!(parse_placement_answer("", prefer_ssh), Some(default));
+            assert_eq!(
+                parse_placement_answer("1", prefer_ssh),
+                Some(PlacementOption::Local)
+            );
+            assert_eq!(
+                parse_placement_answer("2", prefer_ssh),
+                Some(PlacementOption::Ssh)
+            );
+            assert_eq!(parse_placement_answer("3", prefer_ssh), None);
+        }
+    }
 }
