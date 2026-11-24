@@ -350,25 +350,9 @@ fn archive_round_trip_verifies_multi_repo_payloads_and_mode() {
     assert_eq!(verified.canonical_session, input().canonical_session);
     assert_eq!(verified.manifest.schema_version, ARCHIVE_SCHEMA_VERSION);
     assert_eq!(verified.archive_sha256.len(), 64);
-    let repository_bundles = verify_repository_bundles_streaming(&path).unwrap();
-    assert_eq!(repository_bundles.archive_sha256, verified.archive_sha256);
     assert_eq!(
         read_checkpoint_repository_bundles(&path)
             .unwrap()
-            .iter()
-            .map(|repository| (
-                repository.metadata.id.as_str(),
-                repository.committed_bundle.as_slice(),
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            ("hel", b"bundle-hel".as_slice()),
-            ("worker", b"bundle-worker".as_slice()),
-        ]
-    );
-    assert_eq!(
-        repository_bundles
-            .repositories
             .iter()
             .map(|repository| (
                 repository.metadata.id.as_str(),

@@ -1185,12 +1185,6 @@ mod tests {
                 )
             })
         }
-        fn checkpoint_now(
-            &self,
-            _: String,
-        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-            Box::pin(async { anyhow::bail!("a park does not checkpoint") })
-        }
         fn park_subagent(self: Arc<Self>, _: String) -> BoxFuture<'static, Result<ParkOutcome>> {
             Box::pin(async move {
                 Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -1636,12 +1630,6 @@ mod tests {
                 )
             })
         }
-        fn checkpoint_now(
-            &self,
-            _: String,
-        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-            Box::pin(async { anyhow::bail!("a park does not checkpoint") })
-        }
         fn park_subagent(self: Arc<Self>, _: String) -> BoxFuture<'static, Result<ParkOutcome>> {
             Box::pin(async { Ok(ParkOutcome::Parked) })
         }
@@ -1788,12 +1776,6 @@ mod tests {
                     },
                 )
             })
-        }
-        fn checkpoint_now(
-            &self,
-            _: String,
-        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-            Box::pin(async { anyhow::bail!("a park does not checkpoint") })
         }
         fn park_subagent(self: Arc<Self>, _: String) -> BoxFuture<'static, Result<ParkOutcome>> {
             Box::pin(async move {
