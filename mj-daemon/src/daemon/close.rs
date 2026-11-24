@@ -58,9 +58,24 @@ impl RuntimeState {
         dry_run: bool,
         without_checkpoint: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        blocking(move || {
-            let controller = Controller::load()?;
-            controller.suspend_preflight(&session_id, dry_run, without_checkpoint, &ProcessExecutor)
+        let runtime = Arc::clone(self);
+        super::terminal_operations::process_probe(None, move |executor| {
+            let mut preflight = Controller::load()?.suspend_preflight(
+                &session_id,
+                dry_run,
+                without_checkpoint,
+                executor,
+            )?;
+            // Git inventory can take time. Read current work from the same
+            // verdicts the dashboard uses when the preflight is ready.
+            let current = runtime.runtime_publication()?;
+            preflight.interrupting = current
+                .verdicts
+                .get(&session_id)
+                .is_some_and(|verdict| verdict.active_work);
+            preflight.children_not_handed_back =
+                super::verdicts::unfinished_suspend_children(&current, &session_id);
+            Ok(preflight)
         })
         .await
     }

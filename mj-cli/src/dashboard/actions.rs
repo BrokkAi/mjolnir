@@ -1653,7 +1653,10 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
-        DashboardAction::SuspendPreflight { session_id } => {
+        DashboardAction::SuspendPreflight {
+            session_id,
+            request_id,
+        } => {
             let updates = context.dashboard_io_tx.clone();
             mj_core::runtime::spawn(async move {
                 let result = async {
@@ -1667,7 +1670,11 @@ pub(crate) async fn apply_dashboard_action(
                 report(
                     "checking workspace before suspend",
                     &updates,
-                    DashboardIoUpdate::SuspendPreflight { session_id, result },
+                    DashboardIoUpdate::SuspendPreflight {
+                        session_id,
+                        request_id,
+                        result,
+                    },
                 );
             });
         }

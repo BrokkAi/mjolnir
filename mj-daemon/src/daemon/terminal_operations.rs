@@ -281,18 +281,8 @@ impl TerminalOperations for RuntimeState {
         request: SuspendPreflightRequest,
     ) -> BoxFuture<'static, Result<SuspendPreflight>> {
         Box::pin(async move {
-            let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
-            let _cancel = executor.cancel_on_drop();
-            mj_core::runtime::spawn_blocking(move || {
-                Controller::load()?.suspend_preflight(
-                    &session_id,
-                    request.dry_run,
-                    request.without_checkpoint,
-                    &executor,
-                )
-            })
-            .await
-            .context("suspend preflight task panicked")?
+            self.suspend_preflight(session_id, request.dry_run, request.without_checkpoint)
+                .await
         })
     }
 
