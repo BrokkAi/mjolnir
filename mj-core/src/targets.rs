@@ -1351,7 +1351,11 @@ fn gzip_ssh_line(line: &str, stdin: bool, stdout: bool) -> String {
 ) 3>&- 4>&-; printf '%s' "$?" >&4; }} | gzip -c >&3 4>&-; }} 4>&1) || _mj_gz=$?; exec 3>&-; [ "${{_mj_rc:-1}}" -eq 0 ] || exit "${{_mj_rc:-1}}"; [ "$_mj_gz" -eq 0 ] || exit "$_mj_gz""#
         );
     }
-    line
+    if stdin || stdout {
+        format!("sh -c {}", posix_quote(&line))
+    } else {
+        line
+    }
 }
 
 fn decode_ssh_output(command: &CommandSpec, mut output: CommandOutput) -> Result<CommandOutput> {
@@ -5011,6 +5015,12 @@ mod executor_tests {
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
         let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
         let command = fake.command(&["cat"]).gzip_ssh_stdin().gzip_ssh_stdout();
+        let session = command
+            .open_ssh_session(&ProcessExecutor, &mut SshWalk::default())
+            .unwrap();
+        let remote = session.command().args.last().unwrap();
+        assert!(remote.starts_with(&with_start_marker("sh -c ")), "{remote}");
+        drop(session);
         let bytes = vec![b'x'; 300 * 1024];
         let mut input = std::io::Cursor::new(bytes.clone());
         let output = ProcessExecutor

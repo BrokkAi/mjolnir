@@ -208,10 +208,12 @@ fn inline_collection() -> String {
         r#"collect_worker_store() (
 store=$1; keep=${{2-}}
 set -- "$store"/*/hel
-if [ -n "$keep" ]; then
-    [ "$#" -gt 1 ] || exit 0
-else
-    [ -e "$1" ] || exit 0
+if {{ [ -n "$keep" ] && [ "$#" -le 1 ]; }} || {{ [ -z "$keep" ] && [ ! -e "$1" ]; }}; then
+    found=0
+    for p in "$store"/.upload-* "$store"/.transport-* "$store"/.gc-*; do
+        [ -e "$p" ] && found=1 && break
+    done
+    [ "$found" = 1 ] || exit 0
 fi
 if [ -e "$store/.collected" ] && [ -z "$(find "$store/.collected" -mmin +60 -print)" ]; then exit 0; fi
 set -- "$store" "$keep"
@@ -334,6 +336,7 @@ pub fn install_worker_binary(
 const LINK_MISSING: i32 = 75;
 const LINK_NO_HARD_LINKS: i32 = 76;
 const LINK_DIGEST_MISMATCH: i32 = 77;
+const LINK_NO_ROOM: i32 = 78;
 
 pub fn install_worker_binary_at(
     executor: &impl CommandExecutor,
@@ -403,13 +406,16 @@ fn install_binary_at(
         |root| format!("{root}/{name}"),
     );
     let Some(source) = source else {
+        let collect_gate = store_gate(locator, &store);
+        let _collect_guard = collect_gate.try_lock(session_id, "collect unused worker binaries");
+        let allow_collect = if _collect_guard.is_some() { "1" } else { "0" };
         execute_checked(
             executor,
             script(
                 SshTrafficClass::Control,
                 locator,
-                "set -eu; mkdir -p -- \"${2%/*}\"; ln -sfn -- \"$1\" \"$2.next\"; mv -f -- \"$2.next\" \"$2\"; case \"$2\" in */hel) rm -f -- \"${2%/*}\"/hel-control*;; esac; collect_worker_store \"$3\" || echo 'worker binary store collection failed' >&2",
-                &[IMAGE_WORKER, destination, &store],
+                "set -eu; mkdir -p -- \"${2%/*}\"; ln -sfn -- \"$1\" \"$2.next\"; mv -f -- \"$2.next\" \"$2\"; case \"$2\" in */hel) rm -f -- \"${2%/*}\"/hel-control*;; esac; if [ \"$4\" = 1 ]; then collect_worker_store \"$3\" || echo 'worker binary store collection failed' >&2; fi",
+                &[IMAGE_WORKER, destination, &store, allow_collect],
                 "link image worker and collect store",
             ),
         )?;
@@ -448,6 +454,9 @@ fn install_binary_at(
         if publish {
             ensure_published(executor, locator, session_id, source, &store, &digest)?;
         }
+        let collect_gate = store_gate(locator, &store);
+        let _collect_guard = collect_gate.try_lock(session_id, "collect unused worker binaries");
+        let allow_collect = if _collect_guard.is_some() { "1" } else { "0" };
         let command = |mode| {
             script(
                 if mode == "link" {
@@ -457,6 +466,7 @@ fn install_binary_at(
                 },
                 locator,
                 r#"set -eu
+allow_collect=$1; shift
 source=$1; temporary=$2; destination=$3
 trap 'rm -f -- "$temporary"' EXIT
 if [ "$5" = link ]; then
@@ -485,9 +495,16 @@ promote_worker_binary "$temporary" "$destination"
 # This build serves every control subcommand, so a staged control worker has
 # nothing left to do; its link would only pin a store entry.
 case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
-collect_worker_store "${source%/*/*}" "$4" || echo 'worker binary store collection failed' >&2
+if [ "$allow_collect" = 1 ]; then collect_worker_store "${source%/*/*}" "$4" || echo 'worker binary store collection failed' >&2; fi
 "#,
-                &[&cached, &temporary, destination, &digest, mode],
+                &[
+                    allow_collect,
+                    &cached,
+                    &temporary,
+                    destination,
+                    &digest,
+                    mode,
+                ],
                 "link shared Mjolnir worker into session",
             )
         };
@@ -545,12 +562,13 @@ fn install_ssh_container(
     );
     let gate = store_gate(locator, store);
     let _guard = lock_gate(executor, &gate, session_id, "install container worker")?;
-    crate::target_storage::ensure_room_for(
+    let room = crate::target_storage::ensure_room_for(
         locator,
         [upload.as_str()],
         || super::upgrade::file_size(source),
         "stage container worker",
-    )?;
+    );
+    let can_upload = if room.is_ok() { "1" } else { "0" };
     let inner = r#"set -eu
 store=$1; digest=$2; temporary=$3; destination=$4; upload=$5; mode=$6
 trap 'rm -f -- "$temporary"; rm -rf -- "$upload"' EXIT
@@ -647,6 +665,7 @@ rc=0
 {exec} hit || rc=$?
 [ "$rc" -ne 0 ] || exit 0
 case $rc in 75|77) ;; *) exit "$rc";; esac
+[ "$4" = 1 ] || exit 78
 [ -f "$1/$2/hel" ] || exit 75
 transport=$3
 need_upload_cleanup=0
@@ -673,18 +692,26 @@ need_upload_cleanup=1
 {ownership}
 {exec} publish
 need_upload_cleanup=0
-collect_worker_store "$1" "$2" || echo 'worker binary store collection failed' >&2
+if [ "$5" = 1 ]; then collect_worker_store "$1" "$2" || echo 'worker binary store collection failed' >&2; fi
 "#
     );
-    let command = script(
-        SshTrafficClass::Control,
-        &host,
-        &body,
-        &[&host_store, digest, &transport],
-        "install shared container worker",
-    );
     for _ in 0..3 {
+        let collect_gate = store_gate(&host, &host_store);
+        let collect_guard = collect_gate.try_lock(session_id, "collect unused worker binaries");
+        let allow_collect = if collect_guard.is_some() { "1" } else { "0" };
+        let command = script(
+            SshTrafficClass::Control,
+            &host,
+            &body,
+            &[&host_store, digest, &transport, can_upload, allow_collect],
+            "install shared container worker",
+        );
         let output = executor.execute(&command)?;
+        drop(collect_guard);
+        if output.status == LINK_NO_ROOM {
+            room?;
+            bail!("container worker upload refused despite available space");
+        }
         if matches!(output.status, LINK_MISSING | LINK_DIGEST_MISMATCH) {
             ensure_published(executor, &host, session_id, source, &host_store, digest)?;
         } else {

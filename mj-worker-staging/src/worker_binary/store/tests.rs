@@ -1244,6 +1244,19 @@ fn concurrent_publication_after_initial_link_miss_hard_links_instead_of_copying(
 
 #[test]
 fn ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_copies() {
+    use crate::test_isolation::{IsolatedTest, test_name};
+    if std::env::var_os("MJ_SSH_CONTAINER_STORE_CHILD").is_none() {
+        let temp = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_copies",
+        ))
+        .isolated_store(temp.path())
+        .env("MJ_SSH_CONTAINER_STORE_CHILD", "1")
+        .run();
+        return;
+    }
+
     use std::os::unix::fs::PermissionsExt;
     struct ShellHost {
         root: PathBuf,
@@ -1361,7 +1374,42 @@ fn ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_
             expected
         );
     }
+    // The cold copy's active upload can trigger collection. A clean warm
+    // one-build store must skip it once that staging directory is gone.
+    let _ = std::fs::remove_file(Path::new(&store).join(".collected"));
+    install_ssh_container(
+        &executor,
+        &locator,
+        id,
+        &binary,
+        &destination,
+        &temporary,
+        &store,
+        &digest,
+    )
+    .unwrap();
     assert!(!Path::new(&store).join(".collected").exists());
+    let abandoned = Path::new(&store).join(".upload-abandoned");
+    std::fs::create_dir(&abandoned).unwrap();
+    std::fs::write(abandoned.join("hel"), vec![0; 256 * 1024]).unwrap();
+    execute_checked(
+        &targets::ProcessExecutor,
+        CommandSpec::new("touch", ["-t", "200001010000", abandoned.to_str().unwrap()]),
+    )
+    .unwrap();
+    install_ssh_container(
+        &executor,
+        &locator,
+        id,
+        &binary,
+        &destination,
+        &temporary,
+        &store,
+        &digest,
+    )
+    .unwrap();
+    assert!(!abandoned.exists());
+    std::fs::remove_file(Path::new(&store).join(".collected")).unwrap();
     let stale = Path::new(&store).join("d".repeat(64)).join("hel");
     std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
     std::fs::write(&stale, b"unused").unwrap();
@@ -1430,6 +1478,43 @@ fn ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_
             .to_string_lossy()
             .starts_with(".upload-")
     }));
+    std::fs::remove_file(root.join("fail-cp")).unwrap();
+    std::fs::hard_link(&destination, format!("{store}/{digest}/hel")).unwrap();
+    let mut sample = crate::target_storage::test_storage_sample(
+        &crate::target_storage::storage_host(&locator),
+        0,
+        0,
+    );
+    sample.filesystems.truncate(1);
+    sample.filesystems[0].paths = vec![targets::storage::normalize_target_path(
+        targets::storage::ContainerStorage::Podman.path(),
+        sample.home.as_deref(),
+    )];
+    crate::target_storage::record_samples(&[sample], 1);
+    install_ssh_container(
+        &executor,
+        &locator,
+        id,
+        &binary,
+        &destination,
+        &temporary,
+        &store,
+        &digest,
+    )
+    .unwrap();
+    std::fs::remove_file(format!("{store}/{digest}/hel")).unwrap();
+    let error = install_ssh_container(
+        &executor,
+        &locator,
+        id,
+        &binary,
+        &destination,
+        &temporary,
+        &store,
+        &digest,
+    )
+    .unwrap_err();
+    assert!(crate::target_storage::is_storage_full(&error), "{error:#}");
 }
 
 #[test]
