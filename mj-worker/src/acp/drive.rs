@@ -2134,7 +2134,7 @@ pub(super) fn drain_requests_from_the_previous_bridge(
                 ("StopBackgroundTask", None)
             }
             CommandRequest::ReloadLaunchConfig { resolved, .. } => {
-                let _ = resolved.send(Err(
+                let _ = resolved.send(ReloadResolution::refused(
                     "ACP bridge restarted before applying launch configuration".into(),
                 ));
                 ("ReloadLaunchConfig", None)

@@ -10699,7 +10699,7 @@ async fn file_attachment_protocol_90_transfers_binary_and_dispatches_file_only_p
         ));
     }
     let [present, install, read, submit] = requests;
-    let protocol = RELAY_FILE_ATTACHMENT_PROTOCOL;
+    let protocol = mj_core::relay::RELAY_PROTOCOL_VERSION;
     assert!(matches!(
         exchange(protocol, present.clone()).await,
         RelayResponseBody::Ok {

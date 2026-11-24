@@ -907,6 +907,7 @@ impl ReloadFixture {
     async fn reload(&self, harness: HarnessKind, home: &Path) {
         let endpoint = Ok(credential_endpoint(harness, home));
         let (reload, applied) = HarnessReload::new(HarnessReloadTransition {
+            commit: None,
             harness,
             claude_login_path: None,
             mailbox_delivery_mode: None,
@@ -1185,6 +1186,7 @@ fn antigravity_in_place_reload_drains_old_stop_before_retiring_its_work() {
                 &relay,
                 &mut monitors,
                 HarnessReloadTransition {
+                    commit: None,
                     harness: HarnessKind::Antigravity,
                     claude_login_path: None,
                     boundary_mailbox_hook_available: false,

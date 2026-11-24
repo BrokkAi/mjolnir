@@ -712,6 +712,16 @@ fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner
     if let Some(root) = exit_root {
         record_startup_step(root, mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT);
     }
+    let Command::Worker(args) = &cli.command;
+    if let WorkerCommand::Run { root, .. } = &args.command {
+        mj_worker::worker_runtime::reload_commit::roll_forward_pending_reload_if_any(root)
+            .map_err(|error| {
+                anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                    kind: None,
+                    message: format!("recover committed harness reload: {error:#}"),
+                })
+            })?;
+    }
     bootstrap_login_environment(&cli, owner).context("initialize worker environment")?;
     if let Some(root) = exit_root {
         record_startup_step(root, "runtime");

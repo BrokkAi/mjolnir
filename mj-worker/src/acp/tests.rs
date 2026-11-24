@@ -9684,7 +9684,9 @@ for line in sys.stdin:
     let outcome = resolution
         .await
         .expect("reload reply channel should carry the startup failure");
-    let err = outcome.expect_err("replacement bridge startup failure must not ack Ok");
+    let ReloadResolution::RefusedBeforeCommit(err) = outcome else {
+        panic!("replacement bridge startup failure must not ack Started")
+    };
     assert!(
         err.contains("does not exist") || err.contains("nonexistent-reload-cwd"),
         "unexpected error: {err}"
@@ -9769,6 +9771,7 @@ for line in sys.stdin:
             supervisor_spec: Some(Box::new((supervisor_path.clone(), next_supervisor))),
             leases: None,
             on_restart: Some(Box::new(HarnessReloadTransition {
+                commit: None,
                 harness: HarnessKind::Claude,
                 claude_login_path: None,
                 boundary_mailbox_hook_available: false,
@@ -9809,12 +9812,14 @@ for line in sys.stdin:
         !spawned.exists(),
         "replacement process started before the barrier"
     );
-    applied.send(Ok(())).unwrap();
+    applied.send(Ok(None)).unwrap();
 
-    resolution
-        .await
-        .expect("reload reply channel should resolve")
-        .expect("replacement bridge should open cleanly");
+    assert!(matches!(
+        resolution
+            .await
+            .expect("reload reply channel should resolve"),
+        ReloadResolution::Started
+    ));
 
     let written_spec = std::fs::read_to_string(&supervisor_path).unwrap();
     assert!(
@@ -9921,11 +9926,13 @@ for line in sys.stdin:
                 })
                 .await
                 .unwrap();
-            tokio::time::timeout(crate::test_support::IO_TIMEOUT, resolution)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            assert!(matches!(
+                tokio::time::timeout(crate::test_support::IO_TIMEOUT, resolution)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                ReloadResolution::Started
+            ));
         }
         loop {
             let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())

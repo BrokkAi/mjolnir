@@ -698,6 +698,31 @@ impl DurableRelay {
                 None,
             )));
         }
+        use mj_core::relay::InPlaceReloadPhase;
+        match &hold.reload_phase {
+            Some(InPlaceReloadPhase::Started) => {
+                return Ok(InPlaceHarnessRestartDecision::AlreadyRestarted);
+            }
+            Some(InPlaceReloadPhase::Committed) => {
+                return Err(Box::new(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "in-place harness reload already committed and is starting",
+                    true,
+                    None,
+                )));
+            }
+            Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                return Err(Box::new(relay_protocol_error(
+                    RelayErrorCode::Internal,
+                    message.clone(),
+                    false,
+                    Some(RelayErrorDetail::ReloadFailedAfterCommit {
+                        operation_id: operation_id.to_owned(),
+                    }),
+                )));
+            }
+            None => (),
+        }
         if self.in_place_harness_restart_in_flight.is_some() {
             return Err(Box::new(relay_protocol_error(
                 RelayErrorCode::InvalidState,
@@ -752,9 +777,89 @@ impl DurableRelay {
             hold.operation_id
         );
         hold.harness_restarted = true;
+        hold.reload_phase = Some(mj_core::relay::InPlaceReloadPhase::Started);
         self.persist_snapshot()?;
         self.in_place_harness_restart_in_flight = None;
         Ok(())
+    }
+
+    pub(crate) fn finish_committed_reload(&mut self) -> Result<()> {
+        if let Some((operation, store)) = self.committed_reload_operation() {
+            self.set_reload_phase(
+                &operation,
+                &store,
+                mj_core::relay::InPlaceReloadPhase::Started,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn committed_reload_operation(&self) -> Option<(String, String)> {
+        let hold = self.snapshot.in_place_move_hold.as_ref()?;
+        matches!(
+            hold.reload_phase,
+            Some(
+                mj_core::relay::InPlaceReloadPhase::Committed
+                    | mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { .. }
+            )
+        )
+        .then(|| {
+            (
+                hold.operation_id.clone(),
+                self.snapshot.store_id.clone().expect("held store"),
+            )
+        })
+    }
+
+    pub(crate) fn mark_in_place_harness_committed(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<()> {
+        self.set_reload_phase(
+            operation_id,
+            expected_store_id,
+            mj_core::relay::InPlaceReloadPhase::Committed,
+        )
+    }
+
+    pub(crate) fn mark_in_place_harness_failed_after_commit(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        message: String,
+    ) -> Result<()> {
+        self.set_reload_phase(
+            operation_id,
+            expected_store_id,
+            mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { message },
+        )
+    }
+
+    fn set_reload_phase(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        phase: mj_core::relay::InPlaceReloadPhase,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.snapshot.store_id.as_deref() == Some(expected_store_id),
+            "reload store identity changed"
+        );
+        let hold = self
+            .snapshot
+            .in_place_move_hold
+            .as_mut()
+            .context("reload hold disappeared")?;
+        anyhow::ensure!(
+            hold.operation_id == operation_id,
+            "reload hold owner changed"
+        );
+        if matches!(phase, mj_core::relay::InPlaceReloadPhase::Started) {
+            hold.harness_restarted = true;
+        }
+        hold.reload_phase = Some(phase);
+        self.persist_snapshot()
     }
 
     fn submit_command_inner(
