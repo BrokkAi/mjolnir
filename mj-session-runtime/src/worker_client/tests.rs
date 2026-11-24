@@ -5976,7 +5976,11 @@ for line in sys.stdin:
         payload = {"type":"attachment_installed"}
     elif method == "submit":
         payload = {"type":"accepted","data":{"command_id":params["command_id"],"ordinal":1}}
+    elif method in ("read_attachment", "read_file_attachment"):
+        data = b"\x89PNG\r\n\x1a\nrecovered" if method == "read_attachment" else b"recovered-file"
+        payload = {"type":"attachment_data","data":{"data":base64.b64encode(data).decode()}}
     elif method == "begin_live_baseline":
+        print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"ok","payload":{"type":"live_baseline_waiting","data":{"blockers":["held-turn"]}}}), flush=True)
         snapshot = b" " * 70000 + b"invalid-json"
         payload = {"type":"live_baseline_started","data":{"total_bytes":len(snapshot)}}
     elif method == "read_live_baseline_page":
@@ -6039,13 +6043,53 @@ for line in sys.stdin:
                 .submit(
                     "batch",
                     RelayCommand::Prompt {
-                        prompt: vec![reference.content_block(), file.content_block()],
+                        prompt: vec![
+                            reference.content_block(),
+                            file.content_block(),
+                            reference.content_block(),
+                            file.content_block(),
+                        ],
                     },
                 )
                 .await
                 .unwrap();
 
+            let recovered_image = mj_core::attachment::AttachmentRef::new(
+                b"\x89PNG\r\n\x1a\nrecovered",
+                "image/png".into(),
+                1,
+                1,
+            )
+            .unwrap();
+            let recovered_file = mj_core::attachment::FileAttachmentRef::new(
+                b"recovered-file",
+                "recovered.txt",
+                "text/plain".into(),
+            )
+            .unwrap();
+            client
+                .cache_attachments(
+                    &[
+                        recovered_image.clone(),
+                        reference.clone(),
+                        recovered_image.clone(),
+                    ],
+                    &[recovered_file.clone(), file.clone(), recovered_file.clone()],
+                )
+                .await
+                .unwrap();
+            let store = mj_core::attachment::AttachmentStore::controller(SESSION_ID).unwrap();
+            assert!(store.contains(&recovered_image).unwrap());
+            assert!(store.contains_file(&recovered_file).unwrap());
+            // A second pass with everything cached must not open another proxy.
+            client
+                .cache_attachments(&[recovered_image], &[recovered_file])
+                .await
+                .unwrap();
+            let (progress, observed) = tokio::sync::watch::channel(None);
+            client.set_adoption_wait_progress(Some(progress));
             let error = client.live_session_baseline().await.unwrap_err();
+            assert_eq!(*observed.borrow(), Some(vec!["held-turn".to_string()]));
             assert!(
                 format!("{error:#}").contains("decode live recovery baseline"),
                 "{error:#}"
@@ -6096,6 +6140,30 @@ for line in sys.stdin:
         upload_pids[1], upload_pids[2],
         "one Bulk connection for the prompt"
     );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(_, method)| *method == "attachment_present")
+            .count(),
+        2
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(_, method)| *method == "file_attachment_present")
+            .count(),
+        1
+    );
+    let downloads: Vec<_> = entries
+        .iter()
+        .filter(|(_, method)| matches!(*method, "read_attachment" | "read_file_attachment"))
+        .collect();
+    assert_eq!(downloads.len(), 2);
+    assert_eq!(
+        downloads[0].0, downloads[1].0,
+        "one Bulk connection for recovery"
+    );
+    assert_ne!(downloads[0].0, control_pid);
     let snapshot_pids: std::collections::BTreeSet<_> = entries
         .iter()
         .filter(|(_, method)| matches!(*method, "begin_live_baseline" | "read_live_baseline_page"))

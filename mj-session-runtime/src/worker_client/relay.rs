@@ -83,6 +83,7 @@ impl RelayClient {
             RELAY_HANDSHAKE_TIMEOUT,
         )
         .await?;
+        bulk.set_adoption_wait_progress(self.adoption_wait_progress.clone());
         let result = operation(&mut bulk).await;
         if let Err(error) = bulk.detach().await {
             tracing::warn!(session_id = %self.session_id, %error, "detach bulk relay");
@@ -901,8 +902,20 @@ impl RelayClient {
         {
             return Ok(());
         }
+        let reference = reference.clone();
+        self.with_bulk(move |bulk| {
+            Box::pin(async move { bulk.download_attachment(&reference).await })
+        })
+        .await
+    }
+
+    async fn download_attachment(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<()> {
+        let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let RelayResponsePayload::AttachmentData { data } = self
-            .call_bulk(RelayRequest::ReadAttachment {
+            .call(RelayRequest::ReadAttachment {
                 reference: reference.clone(),
             })
             .await?
@@ -988,8 +1001,20 @@ impl RelayClient {
         {
             return Ok(());
         }
+        let reference = reference.clone();
+        self.with_bulk(move |bulk| {
+            Box::pin(async move { bulk.download_file_attachment(&reference).await })
+        })
+        .await
+    }
+
+    async fn download_file_attachment(
+        &mut self,
+        reference: &mj_core::attachment::FileAttachmentRef,
+    ) -> Result<()> {
+        let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let RelayResponsePayload::AttachmentData { data } = self
-            .call_bulk(RelayRequest::ReadFileAttachment {
+            .call(RelayRequest::ReadFileAttachment {
                 reference: reference.clone(),
             })
             .await?
@@ -1006,6 +1031,79 @@ impl RelayClient {
         })
         .await
         .context("file caching task failed")?
+    }
+
+    /// Recover all missing prompt blobs on one Bulk connection. Per-blob
+    /// failures are reported without preventing recovery of the other blobs.
+    pub async fn cache_attachments(
+        &mut self,
+        images: &[mj_core::attachment::AttachmentRef],
+        files: &[mj_core::attachment::FileAttachmentRef],
+    ) -> Result<()> {
+        let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
+        let images = images.to_vec();
+        let files = files.to_vec();
+        let session_id = self.session_id.clone();
+        let (images, mut files) = mj_core::runtime::spawn_blocking(move || {
+            let mut seen = BTreeSet::new();
+            let images = images.into_iter().filter(|reference| {
+                if !seen.insert(reference.sha256.clone()) { return false; }
+                match store.contains(reference) {
+                    Ok(present) => !present,
+                    Err(error) => {
+                        tracing::warn!(%session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
+                        false
+                    }
+                }
+            }).collect::<Vec<_>>();
+            seen.clear();
+            let files = files.into_iter().filter(|reference| {
+                if !seen.insert(reference.sha256.clone()) { return false; }
+                match store.contains_file(reference) {
+                    Ok(present) => !present,
+                    Err(error) => {
+                        tracing::warn!(%session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
+                        false
+                    }
+                }
+            }).collect::<Vec<_>>();
+            (images, files)
+        }).await.context("attachment lookup task failed")?;
+        if !files.is_empty()
+            && let Err(error) = self.require_file_attachment_protocol()
+        {
+            for reference in &files {
+                tracing::warn!(session_id = %self.session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
+            }
+            files.clear();
+        }
+        if images.is_empty() && files.is_empty() {
+            return Ok(());
+        }
+        let pending_images = images.clone();
+        let pending_files = files.clone();
+        let result = self.with_bulk(move |bulk| Box::pin(async move {
+            for reference in images {
+                if let Err(error) = bulk.download_attachment(&reference).await {
+                    tracing::warn!(session_id = %bulk.session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
+                }
+            }
+            for reference in files {
+                if let Err(error) = bulk.download_file_attachment(&reference).await {
+                    tracing::warn!(session_id = %bulk.session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
+                }
+            }
+            Ok(())
+        })).await;
+        if let Err(error) = result {
+            for reference in pending_images {
+                tracing::warn!(session_id = %self.session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
+            }
+            for reference in pending_files {
+                tracing::warn!(session_id = %self.session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
+            }
+        }
+        Ok(())
     }
 
     fn require_file_attachment_protocol(&self) -> Result<()> {
@@ -1029,15 +1127,21 @@ impl RelayClient {
             if !files.is_empty() {
                 self.require_file_attachment_protocol()?;
             }
+            let mut seen_images = BTreeSet::new();
+            let mut seen_files = BTreeSet::new();
             let mut missing_images = Vec::new();
             let mut missing_files = Vec::new();
             for reference in mj_core::attachment::references(prompt)? {
-                if !self.attachment_present(&reference).await? {
+                if seen_images.insert(reference.sha256.clone())
+                    && !self.attachment_present(&reference).await?
+                {
                     missing_images.push(reference);
                 }
             }
             for reference in files {
-                if !self.file_attachment_present(&reference).await? {
+                if seen_files.insert(reference.sha256.clone())
+                    && !self.file_attachment_present(&reference).await?
+                {
                     missing_files.push(reference);
                 }
             }

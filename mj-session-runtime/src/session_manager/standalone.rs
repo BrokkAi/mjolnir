@@ -221,43 +221,31 @@ impl StandaloneSession {
         client: &mut RelayClient,
         baseline: &mj_core::relay::LiveSessionBaseline,
     ) -> Result<()> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
         for queued in baseline
             .queue
             .iter()
             .chain(&baseline.delivered_initial_prompts)
         {
             if let Some(prompt) = queued.command.prompt_blocks() {
-                Self::cache_prompt_attachments_with(client, &baseline.state.session_id, &prompt)
-                    .await?;
+                images.extend(mj_core::attachment::references(&prompt)?);
+                files.extend(mj_core::attachment::file_references(&prompt)?);
             }
         }
-        Ok(())
+        client.cache_attachments(&images, &files).await
     }
 
     async fn cache_prompt_attachments(
         &mut self,
         prompt: &[agent_client_protocol::v1::schema::ContentBlock],
     ) -> Result<()> {
-        Self::cache_prompt_attachments_with(&mut self.client, &self.materialized.session_id, prompt)
+        self.client
+            .cache_attachments(
+                &mj_core::attachment::references(prompt)?,
+                &mj_core::attachment::file_references(prompt)?,
+            )
             .await
-    }
-
-    async fn cache_prompt_attachments_with(
-        client: &mut RelayClient,
-        session_id: &str,
-        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
-    ) -> Result<()> {
-        for reference in mj_core::attachment::references(prompt)? {
-            if let Err(error) = client.cache_attachment(&reference).await {
-                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
-            }
-        }
-        for reference in mj_core::attachment::file_references(prompt)? {
-            if let Err(error) = client.cache_file_attachment(&reference).await {
-                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
-            }
-        }
-        Ok(())
     }
 
     async fn cache_event_attachments(
