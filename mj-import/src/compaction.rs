@@ -710,30 +710,9 @@ fn pack_reduction_groups(summaries: &[String], page_bytes: usize) -> Result<Vec<
     Ok(groups)
 }
 
-async fn reduce_group_adaptively<B: CompactionBackend>(
-    group: Vec<String>,
-    requests: Requests<'_, B>,
-) -> Result<Vec<String>> {
-    let mut pending = std::collections::VecDeque::from([group]);
-    let mut summaries = Vec::new();
-    while let Some(mut group) = pending.pop_front() {
-        if group.len() == 1 {
-            summaries.append(&mut group);
-            continue;
-        }
-        match requests.run(reduction_prompt(&group)).await? {
-            RequestOutcome::Summary(summary) => summaries.push(summary),
-            RequestOutcome::Splittable(error) => {
-                if group.len() <= 2 {
-                    return Err(error);
-                }
-                let right = group.split_off(group.len() / 2);
-                pending.push_front(right);
-                pending.push_front(group);
-            }
-        }
-    }
-    Ok(summaries)
+enum ReductionOutcome {
+    Summary(String),
+    Split(Vec<String>, Vec<String>),
 }
 
 async fn reduce_summaries<B: CompactionBackend>(
@@ -742,14 +721,53 @@ async fn reduce_summaries<B: CompactionBackend>(
     requests: Requests<'_, B>,
 ) -> Result<String> {
     while summaries.len() > 1 {
-        let groups = pack_reduction_groups(&summaries, page_bytes)?;
+        let mut groups = pack_reduction_groups(&summaries, page_bytes)?;
+        // Every group of one passes through untouched, so a round that groups
+        // nothing would repeat forever.
+        ensure!(
+            groups.len() < summaries.len(),
+            "compaction cannot merge these snapshots within the page byte budget"
+        );
         let previous_len = summaries.len();
-        summaries =
-            map_concurrent_ordered(groups, |group| reduce_group_adaptively(group, requests))
-                .await?
+        summaries = loop {
+            let outcomes = map_concurrent_ordered(groups, |mut group| async move {
+                if group.len() == 1 {
+                    return Ok(ReductionOutcome::Summary(
+                        group.pop().expect("a group is never empty"),
+                    ));
+                }
+                match requests.run(reduction_prompt(&group)).await? {
+                    RequestOutcome::Summary(summary) => Ok(ReductionOutcome::Summary(summary)),
+                    RequestOutcome::Splittable(error) => {
+                        if group.len() <= 2 {
+                            return Err(error);
+                        }
+                        let right = group.split_off(group.len() / 2);
+                        Ok(ReductionOutcome::Split(group, right))
+                    }
+                }
+            })
+            .await?;
+            if outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, ReductionOutcome::Summary(_)))
+            {
+                break outcomes
+                    .into_iter()
+                    .map(|outcome| match outcome {
+                        ReductionOutcome::Summary(summary) => summary,
+                        ReductionOutcome::Split(_, _) => unreachable!(),
+                    })
+                    .collect();
+            }
+            groups = outcomes
                 .into_iter()
-                .flatten()
+                .flat_map(|outcome| match outcome {
+                    ReductionOutcome::Summary(summary) => vec![vec![summary]],
+                    ReductionOutcome::Split(left, right) => vec![left, right],
+                })
                 .collect();
+        };
         ensure!(
             summaries.len() < previous_len,
             "compaction cannot merge these snapshots within the page byte budget"

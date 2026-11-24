@@ -927,8 +927,10 @@ async fn stalled_first_page_does_not_block_refill_or_reorder_reduction() {
 
 #[tokio::test]
 async fn oversize_reduction_splits_into_ordered_pairs_then_merges() {
-    #[derive(Default)]
-    struct PairBackend(Mutex<Vec<String>>);
+    struct PairBackend {
+        split_barrier: tokio::sync::Barrier,
+        prompts: Mutex<Vec<String>>,
+    }
 
     impl CompactionBackend for PairBackend {
         fn compact<'a>(
@@ -945,35 +947,50 @@ async fn oversize_reduction_splits_into_ordered_pairs_then_merges() {
                     Err(anyhow::anyhow!("maximum context length exceeded"))
                 } else {
                     assert_eq!(parts.len(), 2);
+                    if parts.iter().all(|part| !part.contains('+')) {
+                        // Proves the split halves run concurrently rather than
+                        // serially inside one worker future.
+                        self.split_barrier.wait().await;
+                    }
                     Ok(parts.join("+"))
                 };
-                self.0.lock().unwrap().push(prompt);
+                self.prompts.lock().unwrap().push(prompt);
                 result
             })
         }
     }
 
-    let backend = PairBackend::default();
+    let backend = PairBackend {
+        split_barrier: tokio::sync::Barrier::new(2),
+        prompts: Mutex::new(Vec::new()),
+    };
     let summaries = ["a", "b", "c", "d"].map(str::to_owned);
     let full = reduction_prompt(&summaries);
     assert!(full.len() < MIN_CONTEXT_BYTES);
-    let merged = reduce_summaries(
-        summaries.to_vec(),
-        MIN_CONTEXT_BYTES,
-        Requests::new(&backend),
+    let merged = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reduce_summaries(
+            summaries.to_vec(),
+            MIN_CONTEXT_BYTES,
+            Requests::new(&backend),
+        ),
     )
     .await
+    .expect("split reduction halves must run concurrently")
     .unwrap();
     assert_eq!(merged, "a+b+c+d");
-    assert_eq!(
-        backend.0.into_inner().unwrap(),
-        [
-            full,
-            reduction_prompt(&summaries[..2]),
-            reduction_prompt(&summaries[2..]),
-            reduction_prompt(&["a+b".into(), "c+d".into()]),
-        ]
-    );
+    let prompts = backend.prompts.into_inner().unwrap();
+    assert_eq!(prompts.len(), 4);
+    assert_eq!(prompts[0], full);
+    assert_eq!(prompts[3], reduction_prompt(&["a+b".into(), "c+d".into()]));
+    let mut split_prompts = prompts[1..3].to_vec();
+    split_prompts.sort();
+    let mut expected_splits = vec![
+        reduction_prompt(&summaries[..2]),
+        reduction_prompt(&summaries[2..]),
+    ];
+    expected_splits.sort();
+    assert_eq!(split_prompts, expected_splits);
 }
 
 /// Merging two summaries at a time cost one request per pair and a round
