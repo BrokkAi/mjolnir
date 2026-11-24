@@ -63,6 +63,7 @@ pub(super) fn queued(id: &str, text: &str) -> QueuedPrompt {
         text: text.into(),
         kind: QueuedCommandKind::Prompt,
         images: Vec::new(),
+        files: Vec::new(),
         attachments_unsupported: false,
     }
 }

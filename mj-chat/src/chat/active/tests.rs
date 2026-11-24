@@ -2551,7 +2551,9 @@ async fn clipboard_completion_requires_image_support_and_preserves_plain_text() 
     chat.apply_attachment_result(AttachmentResult {
         sequence,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(image.clone()),
+        result: Ok(super::super::composer::ReadyAttachment::Image(
+            image.clone(),
+        )),
     });
     assert_eq!(chat.state.input_images[0].image, image);
     assert_eq!(
@@ -2591,12 +2593,16 @@ async fn pasted_image_paths_attach_and_a_failed_one_returns_as_pasted_text() {
     chat.apply_attachment_result(AttachmentResult {
         sequence: second,
         fallback: AttachmentFallback::Text(pasted.split('\n').nth(1).unwrap().into()),
-        result: Ok(image.clone()),
+        result: Ok(super::super::composer::ReadyAttachment::Image(
+            image.clone(),
+        )),
     });
     chat.apply_attachment_result(AttachmentResult {
         sequence: first,
         fallback: AttachmentFallback::Text(pasted.split('\n').next().unwrap().into()),
-        result: Err("no such file".into()),
+        result: Err(super::super::attachments::AttachmentFailure::error(
+            "no such file",
+        )),
     });
     let first_line = pasted.split('\n').next().unwrap();
     assert_eq!(chat.state.input, format!("{first_line}\n[image 2] look"));
@@ -2718,7 +2724,9 @@ async fn capability_loss_during_attachment_processing_keeps_draft_but_blocks_sen
     chat.apply_attachment_result(AttachmentResult {
         sequence,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(image.clone()),
+        result: Ok(super::super::composer::ReadyAttachment::Image(
+            image.clone(),
+        )),
     });
     let draft = chat.state.draft_payload();
     assert_eq!(chat.state.submit_input(), ChatAction::None);
@@ -2801,8 +2809,12 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
     let mut chat = clipboard_test_chat();
     chat.state.set_prompt_images_supported(true);
     for result in [
-        Ok(super::super::tests::test_image()),
-        Err("invalid image encoding".into()),
+        Ok(super::super::composer::ReadyAttachment::Image(
+            super::super::tests::test_image(),
+        )),
+        Err(super::super::attachments::AttachmentFailure::error(
+            "invalid image encoding",
+        )),
     ] {
         assert!(chat.state.reserve_attachment(1));
         chat.state.clear_input();
@@ -2818,7 +2830,9 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
     chat.apply_attachment_result(AttachmentResult {
         sequence: 2,
         fallback: AttachmentFallback::FailedMarker,
-        result: Err("invalid image encoding".into()),
+        result: Err(super::super::attachments::AttachmentFailure::error(
+            "invalid image encoding",
+        )),
     });
     assert!(
         chat.state
@@ -3645,7 +3659,9 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(image.clone()),
+            result: Ok(super::super::composer::ReadyAttachment::Image(
+                image.clone(),
+            )),
         }))
         .unwrap();
     attached.state.drain_composer();
@@ -3689,7 +3705,9 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 17,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_reference_image()),
+            result: Ok(super::super::composer::ReadyAttachment::Image(
+                super::super::tests::test_reference_image(),
+            )),
         }))
         .unwrap();
     assert_eq!(
@@ -3713,7 +3731,9 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 18,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_reference_image()),
+            result: Ok(super::super::composer::ReadyAttachment::Image(
+                super::super::tests::test_reference_image(),
+            )),
         }))
         .unwrap();
     attached.state.drain_composer();
@@ -3738,13 +3758,17 @@ async fn refused_startup_images_merge_without_retiring_newer_pending_attachment_
     assert_eq!(chat.state.input_images.len(), 2);
     assert_eq!(
         chat.state.pending_attachment_markers.get(&12),
-        Some(&current_number)
+        Some(&super::super::composer::PendingMarker::Image(
+            current_number
+        ))
     );
     let image = super::super::tests::test_image();
     chat.apply_attachment_result(AttachmentResult {
         sequence: 12,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(image.clone()),
+        result: Ok(super::super::composer::ReadyAttachment::Image(
+            image.clone(),
+        )),
     });
     assert_eq!(chat.state.input_images[0].image, image);
     assert!(!chat.state.input_images[0].image.is_pending());
@@ -3773,6 +3797,7 @@ async fn late_prompt_refusal_from_a_parked_worker_view_reaches_the_live_composer
         command_id: "parked-command".into(),
         text: "old prompt".into(),
         images: Vec::new(),
+        files: Vec::new(),
         result: Err("worker refused before move".into()),
     });
     standby.drain_composer();
@@ -4015,6 +4040,7 @@ async fn native_acknowledgements_survive_dropping_the_view_that_submitted_them()
                         command_id: command_id.into(),
                         text: payload.text.clone(),
                         images: payload.images.clone(),
+                        files: Vec::new(),
                     })
                     .await
                     .unwrap();
@@ -4099,7 +4125,9 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     attached.apply_attachment_result(AttachmentResult {
         sequence: 1,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(super::super::tests::test_reference_image()),
+        result: Ok(super::super::composer::ReadyAttachment::Image(
+            super::super::tests::test_reference_image(),
+        )),
     });
     attached.drain().await;
     let prompt = attached.take_prepared_startup_prompts().pop().unwrap();
@@ -4344,6 +4372,7 @@ async fn delivered_submission_disappears_when_composer_arrives_after_snapshot() 
                     command_id: "delivered-before-attach".into(),
                     text: "already delivered".into(),
                     images: Vec::new(),
+                    files: Vec::new(),
                     result: Ok(1),
                 }
             });

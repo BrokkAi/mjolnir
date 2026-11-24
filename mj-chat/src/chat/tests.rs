@@ -179,6 +179,7 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
             command_id: "test-submit".into(),
             text: original.text.clone(),
             images: original.images.clone(),
+            files: Vec::new(),
             result: Err("offline".into()),
         },
     );
@@ -815,7 +816,7 @@ fn editing_queued_images_preserves_payload_and_recovers_failed_removal() {
         accepted_ordinal: None,
         command_id: "queued-image".into(),
         kind: QueuedCommandKind::Prompt,
-        content: prompt_content_blocks(&payload.text, &payload.images),
+        content: prompt_content_blocks(&payload.text, &payload.images, &payload.files),
         queued_at_ms: 10,
     });
     let mut chat = ChatState::from_materialized(&session, &[], &[]);
@@ -1318,18 +1319,142 @@ fn saved_image_drafts_require_current_capability_without_losing_content() {
     assert_eq!(reopened.take_submitting_images(), payload.images);
 }
 
-// Hard-won: 6a66a7d0: A refused slash command remained in the draft and contaminated later input.
+#[tokio::test]
+async fn pasted_nonfiles_restore_exact_text_silently_and_explicit_attach_reports_errors() {
+    use super::composer::{AttachmentResult, prepare_composer_attachment};
+    let dir = tempfile::tempdir().unwrap();
+    let oversized = dir.path().join("oversized.log");
+    std::fs::File::create(&oversized)
+        .unwrap()
+        .set_len(mj_core::attachment::MAX_FILE_BYTES as u64 + 1)
+        .unwrap();
+    let nonexistent = if cfg!(windows) {
+        r"C:\api\v1\sessions"
+    } else {
+        "/api/v1/sessions"
+    };
+    for (path, reason, silent_on_paste) in [
+        (nonexistent.to_owned(), "inspect", true),
+        (dir.path().display().to_string(), "not a regular file", true),
+        (oversized.display().to_string(), "5 MiB", false),
+    ] {
+        for command in [false, true] {
+            let path = format!("\"{path}\"");
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            let original = if command {
+                format!("/attach {path}")
+            } else {
+                path
+            };
+            if command {
+                chat.set_input(original.clone());
+                let action = chat.submit_input();
+                assert!(matches!(action, ChatAction::Attach { .. }));
+                chat.dispatch_composer_action(action);
+            } else {
+                chat.handle_composer_paste(&original);
+            }
+            let (sequence, source, fallback) =
+                chat.composer_runtime.attachment_queue.pop_front().unwrap();
+            if !command {
+                chat.paste_plain(" rest");
+            }
+            let result = prepare_composer_attachment("unbound", source).await;
+            chat.apply_attachment_result(AttachmentResult {
+                sequence,
+                result,
+                fallback,
+            });
+            let expected = if command {
+                original.clone()
+            } else {
+                format!("{original} rest")
+            };
+            assert_eq!(chat.input, expected);
+            assert_eq!(chat.input_cursor, expected.len());
+            assert!(chat.input_files.is_empty());
+            if !command && silent_on_paste {
+                assert!(chat.notice().is_none());
+            } else {
+                let notice = chat.notice().unwrap();
+                assert!(
+                    notice.starts_with("Attachment failed:") && notice.contains(reason),
+                    "{notice}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
-fn attach_requires_capability_and_clears_the_command_on_refusal() {
+fn png_paths_fall_back_to_files_without_image_capability() {
+    let path = if cfg!(windows) {
+        r"C:\tmp\picture.png"
+    } else {
+        "/tmp/picture.png"
+    };
+    for command in [false, true] {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        if command {
+            chat.set_input(format!("/attach {path}"));
+            let action = chat.submit_input();
+            chat.dispatch_composer_action(action);
+        } else {
+            chat.handle_composer_paste(path);
+        }
+        let (sequence, source, fallback) =
+            chat.composer_runtime.attachment_queue.pop_front().unwrap();
+        assert!(matches!(source, composer::AttachmentSource::FilePath(_)));
+        assert_eq!(chat.input, "[file 1: picture.png]");
+        assert!(chat.input_files[0].file.is_pending());
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        let reference = mj_core::attachment::FileAttachmentRef::new(
+            b"png data",
+            "renamed.png",
+            "image/png".into(),
+        )
+        .unwrap();
+        chat.apply_attachment_result(composer::AttachmentResult {
+            sequence,
+            fallback,
+            result: Ok(composer::ReadyAttachment::File(
+                AttachedFile::from_reference(reference.clone()).unwrap(),
+            )),
+        });
+        assert_eq!(chat.input, "[file 1: renamed.png]");
+        assert_eq!(chat.input_cursor, chat.input.len());
+        assert_eq!(
+            chat.draft_payload().content_blocks(),
+            vec![reference.content_block()]
+        );
+        assert!(matches!(chat.submit_input(), ChatAction::Prompt(_)));
+        assert_eq!(
+            chat.submitting_files[0].file.reference.as_ref(),
+            Some(&reference)
+        );
+    }
+}
+
+#[test]
+fn mixed_path_paste_keeps_the_file_limit_notice_when_a_later_image_fits() {
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("/attach picture.png".into());
-    assert_eq!(chat.submit_input(), ChatAction::None);
-    assert!(chat.input.is_empty());
-    let notice = chat.notice().unwrap();
-    assert_eq!(notice, super::input_state::ATTACH_UNSUPPORTED_NOTICE);
-    assert!(!notice.contains("marker"));
-    assert!(!chat.reserve_attachment(1));
-    assert!(chat.input_images.is_empty());
+    chat.set_prompt_images_supported(true);
+    let paths = if cfg!(windows) {
+        (r"C:\tmp\notes.txt", r"C:\tmp\picture.png")
+    } else {
+        ("/tmp/notes.txt", "/tmp/picture.png")
+    };
+    let limit = mj_core::attachment::MAX_FILES;
+    let pasted = format!("{}{}", format!("{} ", paths.0).repeat(limit + 1), paths.1);
+    chat.handle_composer_paste(&pasted);
+    assert_eq!(chat.input_files.len(), limit);
+    assert_eq!(chat.input_images.len(), 1);
+    assert!(chat.input.ends_with(&format!("{} [image 1]", paths.0)));
+    assert!(
+        chat.notice()
+            .unwrap()
+            .contains(&format!("at most {limit} files"))
+    );
 }
 
 mod golden_cases {
@@ -1685,28 +1810,21 @@ mod golden_cases {
             |chat| details(&[&format!("markers: {}", chat.input_images.len())]),
         );
 
-        let dir = tempfile::tempdir().expect("temporary directory");
-        let path = dir.path().join("notes.txt");
-        std::fs::write(&path, "plain text").expect("write text file");
-        let error = super::attachments::install_path("attach-text", &path).unwrap_err();
-        let message = format!("{error:#}");
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.handle_paste("/attach notes.txt");
         let action = chat.handle_key(key(KeyCode::Enter));
+        chat.dispatch_composer_action(action.clone());
         state(
             &mut output,
-            "text file attachment feedback",
+            "file attachment on a session without image capability",
             &mut chat,
             WIDTH,
             HEIGHT,
             Some(action),
-            |_| {
+            |chat| {
                 details(&[
-                    &format!(
-                        "installer feedback includes image-only explanation: {}",
-                        message.contains("only image files can be attached")
-                    ),
-                    &format!("installer mentions marker: {}", message.contains("marker")),
+                    &format!("pending files: {}", chat.input_files.len()),
+                    &format!("pending images: {}", chat.input_images.len()),
                 ])
             },
         );

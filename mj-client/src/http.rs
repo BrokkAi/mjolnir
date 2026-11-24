@@ -56,8 +56,12 @@ fn encode_segment(segment: &str) -> Result<String> {
         !matches!(segment, "" | "." | ".."),
         "invalid API path segment"
     );
-    let encoded: String = url::form_urlencoded::byte_serialize(segment.as_bytes()).collect();
-    Ok(encoded.replace('+', "%20"))
+    Ok(percent_encode(segment))
+}
+
+fn percent_encode(value: &str) -> String {
+    let encoded: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+    encoded.replace('+', "%20")
 }
 
 fn proof_mac(token: &str, nonce: &str) -> Hmac<Sha256> {
@@ -1190,6 +1194,39 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    #[tokio::test]
+    async fn upload_file_attachment_encodes_filename_and_decodes_reference() {
+        use mj_core::attachment::FileAttachmentRef;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "endpoint-secret",
+        )
+        .unwrap();
+        let bytes = vec![b'x'; 128 * 1024];
+        let filename = "café +.txt";
+        let expected = FileAttachmentRef::new(&bytes, filename, "text/plain".to_owned()).unwrap();
+        let server = async {
+            let (stream, first_line, headers, body) = read_request(&listener).await;
+            assert_eq!(
+                first_line,
+                "POST /api/v1/sessions/session-1/attachments?mode=file HTTP/1.1"
+            );
+            assert_eq!(headers["x-mjolnir-filename"], "caf%C3%A9%20%2B.txt");
+            assert_eq!(headers[CONTENT_TYPE], "text/plain");
+            assert_eq!(body, bytes);
+            respond(stream, "200 OK", &json!({"file": expected}).to_string()).await;
+        };
+        let request =
+            client.upload_file_attachment("session-1", filename, bytes.clone(), "text/plain");
+        let (_, uploaded) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(server, request)
+        })
+        .await
+        .unwrap();
+        assert_eq!(uploaded.unwrap(), expected);
     }
 }
 
