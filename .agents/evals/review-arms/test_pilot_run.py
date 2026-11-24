@@ -1282,7 +1282,7 @@ if not (attempt / "recover").exists():
         disagree = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
         self.assertFalse(disagree["passed"])
         self.assertTrue(any("disagree" in hit["snippet"] for hit in disagree["hits"]))
-        # An in_progress Codex MCP card left open when the turn ended has no item_completed entry.
+        # An in_progress Codex MCP card left open when the turn ended requires positive host-log corroboration.
         in_progress_pages = [{
             "cwd": f"/workspace/{own}/mjolnir",
             "items": [{
@@ -1300,11 +1300,16 @@ if not (attempt / "recover").exists():
         }]
         pilot.driver.save(transcript, in_progress_pages)
         rollout_file.write_text("")
+        # Without host queries-<sid>.jsonl corroboration, an empty rollout must reject the unfinished card.
+        bg_no_host = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_no_host["passed"])
+        queries_log = self.root / f"queries-{own}.jsonl"
+        queries_log.write_text(json.dumps({"session": own, "query": "(function)", "page": 1, "status": "ok"}) + "\n")
         bg_ok = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
         self.assertTrue(bg_ok["passed"], bg_ok["hits"])
         bg_denied = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=False)
         self.assertFalse(bg_denied["passed"])
-        # A contradictory rollout McpToolCall (or conflicting duplicate) rejects an in_progress card.
+        # A contradictory rollout McpToolCall rejects the in_progress card even when host log has the query.
         rollout_file.write_text(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
             "type": "McpToolCall", "id": "exec-rql-bg", "server": "mj-memory", "tool": "search_sessions",
         }}}) + "\n")
@@ -1314,6 +1319,30 @@ if not (attempt / "recover").exists():
         rollout_file.write_text("{not valid json\n")
         bg_corrupt = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
         self.assertFalse(bg_corrupt["passed"])
+        # A completed RQL call consumes its host-log entry so a duplicate forged in_progress card fails.
+        rollout_file.write_text(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "McpToolCall", "id": "exec-rql-done", "server": "rql", "tool": "rql_query",
+        }}}) + "\n")
+        replay_pages = [{
+            "cwd": f"/workspace/{own}/mjolnir",
+            "items": [
+                {
+                    "seq": 1,
+                    "role": "tool",
+                    "body": {"call": {
+                        "toolCallId": "exec-rql-done",
+                        "title": "mcp.rql.rql_query",
+                        "kind": "execute",
+                        "status": "completed",
+                        "rawInput": {"server": "rql", "tool": "rql_query", "arguments": {"query": "(function)"}},
+                    }},
+                },
+                in_progress_pages[0]["items"][0],
+            ],
+        }]
+        pilot.driver.save(transcript, replay_pages)
+        bg_replay = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_replay["passed"])
 
 
 if __name__ == "__main__":

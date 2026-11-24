@@ -182,7 +182,36 @@ def rollout_file_changes(paths):
     return {identifier: record for identifier, record in edits.items() if identifier not in conflicts}
 
 
-def is_rql_mcp_call(call, rollout_mcp=None, rollout=None):
+def host_rql_queries(path, own_workspace):
+    """Count host-logged (query, page) RQL deliveries for this session."""
+    counts = Counter()
+    if not path.is_file():
+        return counts
+    try:
+        with path.open(encoding="utf-8") as rows:
+            for line in rows:
+                entry = json.loads(line)
+                if not isinstance(entry, dict) or entry.get("session") != own_workspace:
+                    continue
+                query, page = entry.get("query"), entry.get("page")
+                if isinstance(query, str) and type(page) is int and page >= 1:
+                    counts[(query, page)] += 1
+    except (OSError, ValueError, AttributeError, TypeError):
+        return Counter()
+    return counts
+
+
+def rql_call_key(raw):
+    arguments = raw.get("arguments")
+    if not isinstance(arguments, dict) or set(arguments) - {"query", "page"}:
+        return None
+    query, page = arguments.get("query"), arguments.get("page", 1)
+    if not isinstance(query, str) or type(page) is not int or page < 1:
+        return None
+    return query, page
+
+
+def is_rql_mcp_call(call, rollout_mcp=None, rollout=None, unfinished_host_queries=None):
     title, kind, raw = call.get("title"), call.get("kind"), call.get("rawInput")
     if title in ("rql_query", "mcp__rql__rql_query") and kind != "execute":
         return True
@@ -198,12 +227,19 @@ def is_rql_mcp_call(call, rollout_mcp=None, rollout=None):
             if identifier in rollout_mcp:
                 return rollout_mcp[identifier] == ("rql", "rql_query")
             # A background Codex JS-exec MCP call still in_progress when the turn finishes
-            # has no item_completed McpToolCall in rollout-*.jsonl.
+            # has no item_completed McpToolCall in rollout-*.jsonl; require an unmatched
+            # host-side delivery record in queries-<session>.jsonl.
             meta = call.get("_meta")
-            return (isinstance(identifier, str) and bool(identifier)
+            key = rql_call_key(raw)
+            if (isinstance(identifier, str) and bool(identifier)
                     and call.get("status") == "in_progress"
                     and isinstance(meta, dict) and meta.get("is_mcp_tool_call") is True
-                    and call.get("rawOutput") is None and not (call.get("content") or []))
+                    and call.get("rawOutput") is None and not (call.get("content") or [])
+                    and key is not None and unfinished_host_queries
+                    and unfinished_host_queries[key] > 0):
+                unfinished_host_queries[key] -= 1
+                return True
+            return False
         return True
     return False
 
@@ -238,9 +274,9 @@ def tool_succeeded(call, body, rollout_exit):
 
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, rollout_mcp=None, rollout_files=None, allow_in_place_edits=False, tracked_symlinks=None,
-         tracked_paths=None, engine=False, antigravity=False, tracked_head=None, tracked_symlink_targets=None,
-         claude_code_version=None):
+         rollout=None, rollout_mcp=None, rollout_files=None, host_queries=None, allow_in_place_edits=False,
+         tracked_symlinks=None, tracked_paths=None, engine=False, antigravity=False, tracked_head=None,
+         tracked_symlink_targets=None, claude_code_version=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
@@ -249,6 +285,22 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
     hits, calls = [], 0
     audited_engine_calls = {}
     scripts, written = ScriptEvidence(checkout, tracked_paths, tracked_symlinks), set()
+    unfinished_host_queries = Counter(host_queries) if host_queries else Counter()
+    if allow_rql and rollout_mcp is not None and ROLLOUT_UNREADABLE not in rollout_mcp and unfinished_host_queries:
+        for page in pages:
+            for item in page["items"]:
+                if item.get("role") != "tool":
+                    continue
+                call = (item.get("body") or {}).get("call") or {}
+                raw = call.get("rawInput")
+                if (call.get("title") == "mcp.rql.rql_query" and call.get("kind") == "execute"
+                        and call.get("name") is None and isinstance(raw, dict)
+                        and raw.get("server") == "rql" and raw.get("tool") == "rql_query"
+                        and set(raw) <= {"server", "tool", "arguments"}
+                        and (rollout is None or call.get("toolCallId") not in rollout)
+                        and rollout_mcp.get(call.get("toolCallId")) == ("rql", "rql_query")
+                        and (key := rql_call_key(raw)) is not None and unfinished_host_queries[key] > 0):
+                    unfinished_host_queries[key] -= 1
     # Older transcript pages lack harness metadata. Use native card evidence
     # from any page so an opaque card cannot bypass the session's catalogue.
     antigravity = antigravity or any(
@@ -290,7 +342,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 if not findings and engine_calls is not None and isinstance(identifier, str):
                     engine_calls.setdefault(identifier, seq)
                 continue
-            if not antigravity and allow_rql and is_rql_mcp_call(call, rollout_mcp, rollout):
+            if not antigravity and allow_rql and is_rql_mcp_call(call, rollout_mcp, rollout, unfinished_host_queries):
                 continue
             if commits is not None:
                 match = None
@@ -2820,7 +2872,9 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(rollout_paths),
                       rollout_mcp=rollout_mcp_calls(rollout_paths),
-                      rollout_files=rollout_file_changes(rollout_paths))
+                      rollout_files=rollout_file_changes(rollout_paths),
+                      host_queries=host_rql_queries(transcript_path.with_name(f"queries-{own_workspace}.jsonl"),
+                                                    own_workspace))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
     return dict(result, passed=all(hit["kind"] in PASSING_HIT_KINDS for hit in result["hits"]))
