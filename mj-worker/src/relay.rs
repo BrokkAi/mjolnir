@@ -1692,7 +1692,7 @@ impl DurableRelay {
         true
     }
 
-    pub(crate) fn persist_activity_transition(&mut self) -> Result<()> {
+    fn persist_activity_transition(&mut self) -> Result<()> {
         // The one place background work gains members: every change to it
         // ends here, journaled or not.
         self.note_background_work()?;

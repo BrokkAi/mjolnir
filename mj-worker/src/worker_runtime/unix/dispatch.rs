@@ -1007,6 +1007,9 @@ pub(super) async fn apply_harness_reload_transition(
         credentials,
         shared_credentials,
     } = transition;
+    // Stop holds the endpoint read guard until it applies its SQLite sample.
+    // Drain those hooks before retiring state they may have just written.
+    shared_credentials.set(credentials.clone()).await;
     {
         let mut state = relay.lock().expect("relay state lock poisoned");
         state.set_turn_verdict_harness(harness);
@@ -1015,9 +1018,8 @@ pub(super) async fn apply_harness_reload_transition(
         state.update_mailbox_delivery_mode(mailbox_delivery_mode);
         state.set_harness_turn_policy(harness_turn_policy_for(harness));
         state.set_background_work_policy(background_work_policy_for(harness));
-        state.persist_activity_transition()?;
+        state.retire_harness_process_state()?;
     }
-    shared_credentials.set(credentials.clone()).await;
     *task_monitors = TaskMonitors::new(harness, &credentials);
     Ok(())
 }

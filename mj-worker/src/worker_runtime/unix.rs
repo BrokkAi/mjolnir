@@ -822,15 +822,6 @@ impl SharedCredentials {
         *self.0.write().await = updated;
     }
 
-    async fn antigravity_home(&self) -> Option<PathBuf> {
-        self.read()
-            .await
-            .as_ref()
-            .ok()
-            .filter(|endpoint| endpoint.harness == HarnessKind::Antigravity)
-            .map(|endpoint| endpoint.home.clone())
-    }
-
     #[cfg(test)]
     pub(super) async fn snapshot(&self) -> std::result::Result<CredentialEndpoint, String> {
         self.read().await.clone()
@@ -4070,8 +4061,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                 .as_ref()
                 .and_then(|receiver| receiver.borrow().state.clone());
             let result = if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
-                let antigravity_home = credentials.antigravity_home().await;
-                Ok(handle_antigravity_stop(&relay, envelope, antigravity_home.as_deref()).await)
+                Ok(handle_antigravity_stop(&relay, envelope, &credentials).await)
             } else {
                 handle_request(&relay, envelope, attach_preparation).await
             };

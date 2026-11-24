@@ -1131,3 +1131,99 @@ async fn antigravity_stop_samples_live_home_on_existing_connection() {
     drop(client);
     task.await.unwrap().unwrap();
 }
+
+#[test]
+fn antigravity_in_place_reload_drains_old_stop_before_retiring_its_work() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let old_home = temp.path().join("old");
+            let new_home = temp.path().join("new");
+            let _old_db = Databases::create(&old_home);
+            let _new_db = Databases::create(&new_home);
+            let relay = antigravity_relay(&temp.path().join("relay"));
+            attach_monitor(&old_home, &relay).await;
+            let credentials = SharedCredentials::new(Ok(credential_endpoint(
+                HarnessKind::Antigravity,
+                &old_home,
+            )));
+            let new_endpoint = credential_endpoint(HarnessKind::Antigravity, &new_home);
+
+            // Occupy the blocking pool so the real Stop pauses at its SQLite read.
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let blocker = mj_core::runtime::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.blocking_recv();
+            });
+            started_rx.await.unwrap();
+
+            let stop = handle_antigravity_stop(
+                &relay,
+                RelayRequestEnvelope {
+                    request_id: "old-stop".into(),
+                    protocol_version: RELAY_PROTOCOL_VERSION,
+                    request: RelayRequest::AntigravityStop {
+                        conversation_id: Some(NATIVE.into()),
+                        fully_idle: Some(false),
+                        termination_reason: Some("NO_TOOL_CALL".into()),
+                    },
+                },
+                &credentials,
+            );
+            let mut monitors = TaskMonitors::default();
+            let reload = apply_harness_reload_transition(
+                &relay,
+                &mut monitors,
+                HarnessReloadTransition {
+                    harness: HarnessKind::Antigravity,
+                    claude_login_path: None,
+                    boundary_mailbox_hook_available: false,
+                    mailbox_delivery_mode: None,
+                    credentials: Ok(new_endpoint.clone()),
+                    shared_credentials: credentials.clone(),
+                },
+            );
+            let (mut stop, mut reload) = (std::pin::pin!(stop), std::pin::pin!(reload));
+            poll_fn(|cx| {
+                assert!(stop.as_mut().poll(cx).is_pending());
+                assert!(
+                    reload.as_mut().poll(cx).is_pending(),
+                    "reload overtook the old Stop"
+                );
+                Poll::Ready(())
+            })
+            .await;
+
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            assert!(matches!(
+                stop.await.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AntigravityStopObserved,
+                }
+            ));
+            assert_eq!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .background_commands[0]
+                    .id,
+                "antigravity:pending"
+            );
+
+            reload.await.unwrap();
+            assert_eq!(credentials.snapshot().await, Ok(new_endpoint));
+            let state = relay.lock().unwrap().operational_state();
+            assert!(state.background_commands.is_empty());
+            assert_eq!(state.background_work_known, Some(false));
+        });
+}
