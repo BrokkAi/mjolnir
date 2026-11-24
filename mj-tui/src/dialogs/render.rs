@@ -42,15 +42,15 @@ pub(crate) fn confirmation_buttons(
         Confirmation::CloseFailed { .. } => {
             borrowed(&["Cancel", "Retry suspension", "Suspend without checkpoint…"])
         }
-        Confirmation::SuspendSession { checking: true, .. } => borrowed(&["Cancel"]),
+        Confirmation::SuspendSession {
+            preflight: None, ..
+        } => borrowed(&["Cancel"]),
         Confirmation::SuspendSession {
             preflight: Some(preflight),
             ..
         } if preflight.has_blockers() => borrowed(&["Cancel"]),
         Confirmation::SuspendSession {
             preflight: Some(preflight),
-            children_not_handed_back,
-            interrupting,
             ..
         } => {
             let untracked = preflight.untracked_count();
@@ -62,16 +62,12 @@ pub(crate) fn confirmation_buttons(
                         if untracked == 1 { "file" } else { "files" }
                     )),
                 ]
-            } else if preflight.has_warnings()
-                || *interrupting
-                || !children_not_handed_back.is_empty()
-            {
+            } else if preflight.has_warnings() {
                 borrowed(&["Cancel", "Continue anyway"])
             } else {
                 borrowed(&["Cancel", "Suspend session"])
             }
         }
-        Confirmation::SuspendSession { .. } => borrowed(&["Cancel", "Suspend session"]),
         Confirmation::InterruptWork { restart: false, .. } => borrowed(&["Cancel", "Suspend now"]),
         Confirmation::InterruptWork { restart: true, .. } => borrowed(&["Cancel", "Restart now"]),
         Confirmation::RestartAgent { .. } => borrowed(&["Cancel", "Restart agent"]),
@@ -1588,16 +1584,12 @@ pub(crate) fn confirmation_body(
         }
         Confirmation::SuspendSession {
             session_id,
-            children_not_handed_back,
-            interrupting,
+            child_warning_titles,
             preflight,
-            checking,
             viewing_all_untracked,
         } => {
             let mut lines = vec![session_line(session_id, session_name, width)];
-            if *checking {
-                lines.push(Line::raw("Checking workspace…"));
-            } else if let Some(preflight) = preflight {
+            if let Some(preflight) = preflight {
                 if preflight.has_blockers() {
                     lines.push(Line::styled(
                         "Cannot suspend until these blockers are resolved:",
@@ -1671,32 +1663,27 @@ pub(crate) fn confirmation_body(
                         )));
                     }
                 }
-            } else {
-                lines.push(Line::raw(
-                    "Save a recovery copy and release the environment.",
-                ));
-                lines.push(Line::raw("You can resume this session later."));
-            }
-            if let Some(warning) = preflight.as_ref().and_then(|preflight| {
-                mj_core::suspend_consent::owning_children_suspend_warning(
+                if let Some(warning) = mj_core::suspend_consent::owning_children_suspend_warning(
                     preflight.owning_children_to_suspend,
-                )
-            }) {
-                lines.push(Line::styled(
-                    warning,
-                    Style::default().fg(theme::palette().warning),
-                ));
-            }
-            if *interrupting {
-                lines.push(Line::raw("The current turn will be interrupted."));
-            }
-            if let Some(warning) =
-                mj_core::subagent::suspend_warning_naming(children_not_handed_back)
-            {
-                lines.push(Line::styled(
-                    format!("{warning}."),
-                    Style::default().fg(theme::palette().warning),
-                ));
+                ) {
+                    lines.push(Line::styled(
+                        warning,
+                        Style::default().fg(theme::palette().warning),
+                    ));
+                }
+                if preflight.interrupting {
+                    lines.push(Line::raw("The current turn will be interrupted."));
+                }
+                if let Some(warning) =
+                    mj_core::subagent::suspend_warning_naming(child_warning_titles)
+                {
+                    lines.push(Line::styled(
+                        format!("{warning}."),
+                        Style::default().fg(theme::palette().warning),
+                    ));
+                }
+            } else {
+                lines.push(Line::raw("Checking workspace…"));
             }
             (" Suspend session? ", lines)
         }

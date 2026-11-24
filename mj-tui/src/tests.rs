@@ -3742,12 +3742,17 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     session.project_directory = Some("/srv/project".into());
     let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
+    // The dashboard still sees work that the backend has already seen finish.
+    set_working(&mut dashboard, "session-1");
     assert_eq!(
         dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::SuspendPreflight {
             session_id: "session-1".into()
         }
     );
+    let checking = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(checking.contains("Checking workspace…"), "{checking}");
+    assert!(!checking.contains("Continue anyway"), "{checking}");
     assert_eq!(
         dashboard.apply_suspend_preflight(mj_core::suspend_consent::SuspendPreflight {
             session_id: "session-1".into(),
@@ -3760,7 +3765,6 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
     // Working suspension also explains that it interrupts the turn.
-    set_working(&mut dashboard, "session-1");
     assert_eq!(
         dashboard.attention_level("session-1"),
         AttentionLevel::Working
@@ -3774,6 +3778,7 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     assert_eq!(
         dashboard.apply_suspend_preflight(mj_core::suspend_consent::SuspendPreflight {
             session_id: "session-1".into(),
+            interrupting: true,
             ..Default::default()
         }),
         DashboardAction::None
@@ -3836,6 +3841,7 @@ fn idle_managed_clone_suspension_preflights_untracked_inventory() {
     );
     let mut preflight = mj_core::suspend_consent::SuspendPreflight {
         session_id: "session-1".into(),
+        interrupting: true,
         ..Default::default()
     };
     preflight
@@ -3853,6 +3859,12 @@ fn idle_managed_clone_suspension_preflights_untracked_inventory() {
     );
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(lines.iter().any(|line| line.contains("notes.txt")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("The current turn will be interrupted.")),
+        "{lines:#?}"
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('d'))),
         DashboardAction::Suspend {
@@ -4688,24 +4700,17 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
     assert_eq!(
         dashboard.apply_suspend_preflight(mj_core::suspend_consent::SuspendPreflight {
             session_id: parent.clone(),
+            children_not_handed_back: vec!["child-session".into()],
             ..Default::default()
         }),
         DashboardAction::None
     );
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::Confirm(dialog) if matches!(
-            dialog.confirmation,
-            crate::dialogs::Confirmation::SuspendSession {
-                interrupting: false,
-                ..
-            }
-        )
-    ));
-    let dialog = drawn(&mut dashboard, 120, 40).join(
-        "
-",
+    let dialog = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(
+        !dialog.contains("The current turn will be interrupted."),
+        "{dialog}"
     );
+    assert!(dialog.contains("a Continue anyway"), "{dialog}");
     assert!(
         dialog.contains("Sub-agent \"sleep-100\" has not handed back; suspending stops it."),
         "{dialog}"
@@ -4809,6 +4814,7 @@ fn working_session_suspension_confirms_and_cancel_is_safe() {
     assert_eq!(
         dashboard.apply_suspend_preflight(mj_core::suspend_consent::SuspendPreflight {
             session_id: "session-1".into(),
+            interrupting: true,
             ..Default::default()
         }),
         DashboardAction::None
@@ -4830,6 +4836,7 @@ fn working_session_suspension_confirms_and_cancel_is_safe() {
     );
     dashboard.apply_suspend_preflight(mj_core::suspend_consent::SuspendPreflight {
         session_id: "session-1".into(),
+        interrupting: true,
         ..Default::default()
     });
     dashboard.handle_key(key(KeyCode::Right));
@@ -5099,6 +5106,7 @@ fn the_suspend_confirmation_names_three_working_sub_agents_and_counts_the_rest()
     );
     dashboard.apply_suspend_preflight(mj_core::suspend_consent::SuspendPreflight {
         session_id: parent.clone(),
+        children_not_handed_back: (0..5).map(|position| format!("child-{position}")).collect(),
         ..Default::default()
     });
     let dialog = drawn(&mut dashboard, 160, 40).join(" ");

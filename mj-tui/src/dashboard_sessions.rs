@@ -796,35 +796,6 @@ impl DashboardState {
         self.session_facts().attention_level(session_id)
     }
 
-    /// The listed titles of this parent's Mjolnir sub-agents that are still
-    /// working or waiting on a question, oldest first. That is what the
-    /// dashboard can see of a child that has not handed back its report; a
-    /// child that finished its turn is taken to have handed it back.
-    pub(crate) fn subagents_not_handed_back(&self, parent_id: &str) -> Vec<String> {
-        let mut children = self
-            .managed_active_child_ids(parent_id)
-            .into_iter()
-            .filter(|id| self.state.owns_environment(id) != Some(true))
-            .chain(
-                self.native_by_parent
-                    .get(parent_id)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            )
-            .filter(|id| self.verdict(id).unfinished)
-            .filter_map(|id| self.state.sessions.get(&id))
-            .collect::<Vec<_>>();
-        children.sort_by(|left, right| {
-            (left.created_at.as_str(), left.id.as_str())
-                .cmp(&(right.created_at.as_str(), right.id.as_str()))
-        });
-        children
-            .into_iter()
-            .map(|child| child.listed_title().to_owned())
-            .collect()
-    }
-
     pub fn interrupt_all_finished(&mut self, requested: usize, failures: Vec<(String, String)>) {
         let Some((id, error)) = failures.first() else {
             self.set_notice(if requested == 0 {
@@ -1572,42 +1543,42 @@ impl DashboardState {
         &mut self,
         preflight: mj_core::suspend_consent::SuspendPreflight,
     ) -> DashboardAction {
-        let should_quick_suspend = match &mut self.mode {
-            Mode::Confirm(dialog) => {
-                let (matched, quick) = match &mut dialog.confirmation {
-                    Confirmation::SuspendSession {
-                        session_id,
-                        children_not_handed_back,
-                        interrupting,
-                        preflight: slot,
-                        checking,
-                        ..
-                    } if *session_id == preflight.session_id => {
-                        let quick = !preflight.has_blockers()
-                            && !preflight.has_warnings()
-                            && !*interrupting
-                            && children_not_handed_back.is_empty();
-                        *slot = Some(preflight.clone());
-                        *checking = false;
-                        (true, quick)
-                    }
-                    _ => (false, false),
-                };
-                if matched && !quick {
-                    dialog.refresh_form();
-                }
-                quick
-            }
-            _ => false,
+        let Mode::Confirm(dialog) = &mut self.mode else {
+            return DashboardAction::None;
         };
-        if should_quick_suspend {
-            let session_id = preflight.session_id;
+        let Confirmation::SuspendSession {
+            session_id,
+            child_warning_titles,
+            preflight: slot @ None,
+            ..
+        } = &mut dialog.confirmation
+        else {
+            return DashboardAction::None;
+        };
+        if *session_id != preflight.session_id {
+            return DashboardAction::None;
+        }
+        if !preflight.has_blockers() && !preflight.has_warnings() {
             self.cancel_modal();
             return DashboardAction::Suspend {
-                session_id,
+                session_id: preflight.session_id,
                 consent: mj_core::suspend_consent::SuspendConsent::default(),
             };
         }
+
+        *child_warning_titles = preflight
+            .children_not_handed_back
+            .iter()
+            .map(|id| {
+                self.state
+                    .sessions
+                    .get(id)
+                    .map_or(id.as_str(), |session| session.listed_title())
+                    .to_owned()
+            })
+            .collect();
+        *slot = Some(preflight);
+        dialog.refresh_form();
         DashboardAction::None
     }
 
@@ -1621,7 +1592,7 @@ impl DashboardState {
                     &dialog.confirmation,
                     Confirmation::SuspendSession {
                         session_id: current,
-                        checking: true,
+                        preflight: None,
                         ..
                     } if current == session_id
                 )

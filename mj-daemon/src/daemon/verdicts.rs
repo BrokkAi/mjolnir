@@ -28,6 +28,48 @@ fn children(runtime: &RuntimeProjection) -> Children<'_> {
     children
 }
 
+pub(super) fn unfinished_suspend_children(
+    runtime: &RuntimeProjection,
+    parent: &str,
+) -> Vec<String> {
+    let unfinished = |id: &str| {
+        runtime
+            .verdicts
+            .get(id)
+            .is_some_and(|verdict| verdict.unfinished)
+    };
+    let mut borrowed: Vec<_> = runtime
+        .subagents
+        .iter()
+        .filter(|(id, child)| {
+            child.parent_session_id == parent
+                && runtime
+                    .environment_owners
+                    .get(*id)
+                    .is_some_and(|owner| owner != *id)
+                && unfinished(id)
+        })
+        .filter_map(|(id, _)| runtime.records.get(id))
+        .filter(|record| !record.archived)
+        .collect();
+    borrowed.sort_unstable_by(|left, right| {
+        (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
+    });
+
+    let prefix = mj_core::native_agent::owner_view_id_prefix(parent);
+    let native = runtime
+        .native_agents
+        .keys_with_prefix(&prefix)
+        .filter(|id| {
+            runtime.native_agents[*id].agent.parent_session_id.is_none() && unfinished(id)
+        });
+    borrowed
+        .into_iter()
+        .map(|child| child.id.clone())
+        .chain(native.cloned())
+        .collect()
+}
+
 fn interrupt_targets<'a>(
     root: &'a str,
     runtime: &RuntimeProjection,
@@ -976,6 +1018,10 @@ mod tests {
         }
         project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
+        assert_eq!(
+            unfinished_suspend_children(&capture, "parent"),
+            [mj_core::native_agent::view_id("parent", "active")]
+        );
 
         let before = capture.clone();
         capture.records.get_mut("parent").unwrap().last_profile = "destination-profile".into();
@@ -984,6 +1030,7 @@ mod tests {
         capture.native_agents.insert(id.clone(), retained);
         project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 0);
+        assert!(unfinished_suspend_children(&capture, "parent").is_empty());
 
         let before = capture.clone();
         let active = capture.native_agents.get_mut(&id).unwrap();

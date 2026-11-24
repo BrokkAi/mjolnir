@@ -2044,15 +2044,11 @@ impl DashboardState {
             CommandId::SuspendSession => {
                 if let Some(session) = self.selected_session() {
                     let session_id = session.id.clone();
-                    let children_not_handed_back = self.subagents_not_handed_back(&session_id);
-                    let interrupting = self.has_active_work(&session_id);
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::SuspendSession {
                             session_id: session_id.clone(),
-                            children_not_handed_back,
-                            interrupting,
+                            child_warning_titles: Vec::new(),
                             preflight: None,
-                            checking: true,
                             viewing_all_untracked: false,
                         })
                         .naming_session(crate::render::session_name(session)),
