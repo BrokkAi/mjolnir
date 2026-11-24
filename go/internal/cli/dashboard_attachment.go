@@ -10,10 +10,12 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/tui"
 )
 
@@ -383,6 +385,11 @@ func (a *sessionAttachment) accepts(generation uint64, selection *string) bool {
 // sessionAttachmentSpawn is SessionAttachment::spawn, a package function
 // because Go methods take no type parameters. work's error is the failure
 // text Rust carries as `Err(String)`.
+//
+// work runs under a context that ends when the attachment is cancelled or
+// the timeout passes, which is how Rust's AbortOnDropHandle drops the
+// future. A cancelled attachment reports nothing; a timed-out or panicking
+// one reports its failure, so the spinner never runs forever.
 func sessionAttachmentSpawn[T any](
 	a *sessionAttachment,
 	session string,
@@ -390,7 +397,44 @@ func sessionAttachmentSpawn[T any](
 	work func(ctx context.Context) (T, error),
 	report func(generation uint64, value T, err error),
 ) {
-	panic("unported: mj-cli/src/dashboard/attachment.rs SessionAttachment::spawn")
+	a.cancel()
+	a.selectSession(session)
+	generation := a.generation
+	a.task = spawnDashboardTask(func(ctx context.Context) {
+		workCtx, cancelWork := context.WithTimeout(ctx, timeout)
+		defer cancelWork()
+		type outcome struct {
+			value T
+			err   error
+		}
+		worker := core.Spawn(func() outcome {
+			value, err := work(workCtx)
+			return outcome{value: value, err: err}
+		})
+		var (
+			value T
+			err   error
+		)
+		select {
+		case <-worker.Done():
+			finished, joinErr := worker.Join(context.Background())
+			if joinErr != nil {
+				err = fmt.Errorf("session opening task failed: %w", joinErr)
+			} else {
+				value, err = finished.value, finished.err
+			}
+		case <-workCtx.Done():
+			if ctx.Err() != nil {
+				// Aborted: the attachment moved on and wants no answer.
+				return
+			}
+			err = fmt.Errorf("Session opening did not respond within %d seconds", int64(timeout/time.Second))
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		report(generation, value, err)
+	})
 }
 
 // drop is Rust's `Drop for SessionAttachment`: it cancels the attachment.

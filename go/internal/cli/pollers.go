@@ -1,26 +1,24 @@
-// Port of mj-cli/src/pollers.rs (the part that does not need mj-daemon,
-// mj-controller or the dashboard).
+// Port of mj-cli/src/pollers.rs.
 //
-// Terminal-specific adapters for controller background feeds.
-//
-// Not declared yet, because what they take is in crates or modules the Go
-// build does not have: DashboardLifecycleUpdate (mj-daemon's pollers
-// LifecycleSuccess), apply_worker_poll_update (mj-daemon's
-// WorkerPollUpdate and the dashboard's MaterializedProjection), and
-// spawn_worker_diagnosis (mj-controller's Controller and the dashboard's
-// DashboardIoUpdate and CriticalOperationTracker). Rust's re-export of
-// `mj_daemon::pollers::*` waits for the same port.
+// Terminal-specific adapters for controller background feeds. Rust's
+// re-export of `mj_daemon::pollers::*` is the go/internal/daemon package,
+// used under its own name.
 
 package cli
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
+	"github.com/BrokkAi/mjolnir/go/internal/controller"
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/daemon"
+	"github.com/BrokkAi/mjolnir/go/internal/tui"
 )
 
 // dashboardLifecycleUpdate is one lifecycle operation's result. Completion
@@ -77,3 +75,70 @@ func (f dashboardLifecycleFailure) Error() string {
 }
 
 const workerDiagnosisTimeout = 15 * time.Second
+
+// applyWorkerPollUpdate applies one worker poll's reachability to the
+// dashboard. The daemon owns durable missing-target findings and publishes
+// their notice. Returns the poll's projection, moved out of the update
+// rather than copied, when it carried one; nil otherwise.
+func applyWorkerPollUpdate(dashboard *tui.DashboardState, update daemon.WorkerPollUpdate) *materializedProjection {
+	switch failure := update.View.Error; {
+	case failure != nil && failure.Kind == client.ViewErrorKindUnreachable:
+		dashboard.MarkTranscriptUnavailable(update.SessionID)
+		slog.Warn(fmt.Sprintf("relay unreachable: %s", failure.Message), "session_id", update.SessionID)
+		dashboard.ReportSessionUnreachable(update.SessionID)
+	case failure != nil && failure.Kind == client.ViewErrorKindTargetMissing:
+		dashboard.MarkTranscriptUnavailable(update.SessionID)
+		dashboard.ClearSessionUnreachable(update.SessionID)
+	case failure != nil && failure.Kind == client.ViewErrorKindProjectionIntegrity:
+		// Deterministic failure: no worker diagnostics. Like an unreachable
+		// relay, it is a live poll fact and is never persisted as a session
+		// last_error.
+		dashboard.MarkTranscriptUnavailable(update.SessionID)
+		dashboard.ClearSessionUnreachable(update.SessionID)
+		dashboard.SetNotice(fmt.Sprintf(
+			"Session %s: transcript projection failed: %s",
+			update.SessionID[:min(len(update.SessionID), 8)],
+			failure.Message,
+		))
+	case failure == nil:
+		dashboard.ReportSessionReachable(update.SessionID)
+	}
+	if update.View.Snapshot == nil {
+		return nil
+	}
+	projection := materializedProjectionFromSnapshot(*update.View.Snapshot)
+	return &projection
+}
+
+// spawnWorkerDiagnosis probes an unreachable session's worker off the loop
+// and reports what it found for episodeID. The probe holds quit, which
+// cancels it.
+func spawnWorkerDiagnosis(
+	ctrl *controller.Controller,
+	sessionID string,
+	episodeID uint64,
+	updates *core.Unbounded[dashboardIoUpdate],
+	tracker client.CriticalOperationTracker,
+) {
+	cancelled := new(atomic.Bool)
+	guard := tracker.BeginCancellable(fmt.Sprintf("diagnosing session %s", core.ShortID(sessionID)), cancelled)
+	diagnostic := controllerSnapshot(ctrl)
+	core.Spawn(func() struct{} {
+		defer guard.Release()
+		joined := core.SpawnBlocking(func() *string {
+			executor := core.NewCancellableProcessExecutor(cancelled).WithDeadline(workerDiagnosisTimeout)
+			return diagnostic.DiagnoseWorkerControlled(sessionID, executor)
+		})
+		diagnosis, err := joined.Join(context.Background())
+		if err != nil {
+			err = fmt.Errorf("worker diagnosis task failed: %w", err)
+		}
+		report[dashboardIoUpdate]("diagnosing a worker", updates, dashboardIoUpdateWorkerDiagnosis{
+			sessionID: sessionID,
+			episodeID: episodeID,
+			diagnosis: diagnosis,
+			err:       err,
+		})
+		return struct{}{}
+	})
+}

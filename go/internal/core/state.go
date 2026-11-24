@@ -1685,6 +1685,10 @@ func statePathEqual(a, b string) bool {
 	return slices.Equal(statePathComponents(a), statePathComponents(b))
 }
 
+// PathBufEqual is PathBuf equality, by components, for packages that
+// compare paths Rust holds as PathBufs.
+func PathBufEqual(a, b string) bool { return statePathEqual(a, b) }
+
 func targetLocatorSameResource(l, other TargetLocator) bool {
 	switch left := l.(type) {
 	case TargetLocatorLocalBare:
