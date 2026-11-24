@@ -1,0 +1,16 @@
+Inspect or control the persistent per-user daemon
+
+Usage: mj daemon [OPTIONS] <COMMAND>
+
+Commands:
+  endpoint  Print the local authenticated control endpoint for an SSH client
+  afk       Set or show whether the operator is away
+  status    Show daemon PID, version, start time, and client count
+  stop      Stop the daemon. A graceful stop leaves detached workers running unless `--suspend-sessions` suspends them first
+  restart   Gracefully replace the daemon with this Mjolnir build
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+  -h, --help             Print help

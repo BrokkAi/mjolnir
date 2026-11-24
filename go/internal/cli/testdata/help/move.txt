@@ -1,0 +1,55 @@
+Move a session to another configured profile and/or target
+
+Usage: mj move [OPTIONS] --session <SESSION> <--target <TARGET>|--profile <PROFILE>|--cpus <CPUS>>
+
+Options:
+  -i, --instance <NAME>
+          Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --subagents <SUBAGENTS>
+          Destination delegation policy: native, mjolnir, or none (no delegation tools). Omit to retain the session's policy, or the recorded policy when retrying a sealed Move
+      --no-splash
+          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --oracle <ORACLE>
+          Oracle availability for this session [possible values: enabled, disabled]
+      --orchestrators
+          Enable orchestrators (requires Mjolnir delegation)
+      --subagent-straightforward <SUBAGENT_STRAIGHTFORWARD>
+          Override the configured model for straightforward Mjolnir sub-agents
+      --subagent-straightforward-effort <SUBAGENT_STRAIGHTFORWARD_EFFORT>
+          Override straightforward sub-agent effort (requires --subagent-straightforward)
+      --subagent-subtle <SUBAGENT_SUBTLE>
+          Override the configured model for subtle Mjolnir sub-agents
+      --subagent-subtle-effort <SUBAGENT_SUBTLE_EFFORT>
+          Override subtle sub-agent effort (requires --subagent-subtle)
+      --subagent-oracle <SUBAGENT_ORACLE>
+          Override the oracle model for this session
+      --subagent-oracle-effort <SUBAGENT_ORACLE_EFFORT>
+          Oracle effort; requires --subagent-oracle
+      --discard-untracked
+          Discard untracked files, nested repositories, and untracked stashes on cross-target Move
+      --abort-operation
+          Abort any in-progress Git operation before moving
+      --dry-run
+          Inspect what would be moved and what would be lost without changing anything
+      --skip <SKIP_KEEP_PATHS>
+          Skip a relative path under `.mj/keep/<session-id>/` during cross-target Move (repeatable). Skipped paths are deleted when a managed source is retired, or kept on a raw checkout
+      --session <SESSION>
+          Session to move. The session identity is retained by the operation
+      --target <TARGET>
+          Destination target template. Omit to retain the current target
+      --profile <PROFILE>
+          Destination profile. Omit to retain the current profile
+      --cpus <CPUS>
+          Container CPU limit for the destination, with --memory-gib. Omit both to keep the source size, or to take the destination host's remembered size (else 4 CPUs) when the source has none. Given alone, they resize the container on the target the session already names
+      --memory-gib <GIB>
+          Container memory limit in GiB for the destination, with --cpus
+      --queue <QUEUE>
+          What to do with prompts/configuration commands already queued [possible values: discard, start]
+      --yes
+          Confirm interruption and run without an interactive prompt
+      --json
+          Print exactly one structured outcome to stdout
+      --clear-resources
+          Remove inherited container sizing: use a fixed host's resources, or the destination's default size for a container
+  -h, --help
+          Print help

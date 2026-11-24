@@ -1,0 +1,16 @@
+Resume a stopped session from its checkpoint
+
+Usage: mj resume [OPTIONS] <--session <SESSION>|--wiki <WIKI>>
+
+Options:
+  -i, --instance <NAME>              Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>            Suspended, lost, or failed session to resume. It keeps its identity, transcript, and work
+      --no-splash                    Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --wiki <WIKI>                  SessionWiki id of a session to continue, whoever ran it: a Mjolnir session is resumed or restored, another tool's session is imported and then resumed
+      --profile <PROFILE>            Profile to resume on. Defaults to the one the session last ran
+      --target <TARGET>              Target template to provision. Defaults to the session's own
+      --workspace-id <WORKSPACE_ID>  Workspace to resume into. Defaults to the session's own
+      --queue <QUEUE>                What to do with prompts queued when the session was suspended [possible values: start, discard]
+      --json                         Print the response as JSON instead of text
+      --workspace <NAME>             Workspace to work in, by name. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it, and need it when the instance has more than one workspace
+  -h, --help                         Print help

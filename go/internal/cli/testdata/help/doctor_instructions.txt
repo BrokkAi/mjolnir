@@ -1,0 +1,9 @@
+Print coding-agent instructions for preparing a host
+
+Usage: mj doctor instructions [OPTIONS] --platform <PLATFORM>
+
+Options:
+  -i, --instance <NAME>      Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --platform <PLATFORM>  Platform to prepare [possible values: linux, macos]
+      --no-splash            Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+  -h, --help                 Print help

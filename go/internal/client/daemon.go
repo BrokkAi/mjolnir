@@ -103,6 +103,10 @@ func UnmarshalStartupPromptOutcomeJSON(data []byte) (StartupPromptOutcome, error
 	return nil, daemonUnknownVariant(name, []string{"accepted", "withdrawn", "refused"})
 }
 
+// ExitStatusDisplay is Rust's ExitStatus Display on this platform ("exit
+// status: 1", "signal: 9 (SIGKILL)" on Unix; "exit code: 1" on Windows).
+func ExitStatusDisplay(state *os.ProcessState) string { return daemonExitStatus(state) }
+
 // MetadataPath is where a running daemon publishes its endpoint.
 func MetadataPath() string {
 	return filepath.Join(core.DataDir(), "daemon.json")

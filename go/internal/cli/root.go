@@ -1,14 +1,14 @@
 // The mj command tree. Port of the cli and command types in
-// mj-cli/src/main.rs; each command's behaviour lives beside it as it is ported
-// (main.go holds the rest of main.rs).
+// mj-cli/src/main.rs; each command's arguments are declared by its bind
+// method beside the command (main.go holds the rest of main.rs).
 
 package cli
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/spf13/cobra"
@@ -278,142 +278,457 @@ func (commandSetConfig) isCommand()        {}
 func (commandClose) isCommand()            {}
 func (commandCancelTurn) isCommand()       {}
 
-// topLevelCommands lists the visible commands in the order mj --help shows them.
-var topLevelCommands = []struct{ name, about string }{
-	{"image", "Build and inspect project session images from mise recipes"},
-	{"go", "Work in a folder using remembered account and target settings"},
-	{"simple", "Open a minimal local session with direct Ctrl-key commands"},
-	{"workspaces", "Open the workspace selector even when Mjolnir could auto-attach, or list and create workspaces without a terminal"},
-	{"daemon", "Inspect or control the persistent per-user daemon"},
-	{"acp", "Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon"},
-	{"doctor", "Diagnose platform and configuration prerequisites"},
-	{"ec2", "Create, list, or destroy persistent EC2 hosts with rootless Podman"},
-	{"setup", "Rerun agent and repository discovery, preserving existing configuration"},
-	{"import", "Adopt a native coding-agent session as a stopped Mjolnir session"},
-	{"recover", "Find, adopt, or explicitly destroy managed workers missing from state"},
-	{"move", "Move a session to another configured profile and/or target"},
-	{"upgrade-container", "Preview or explicitly queue a storage-preserving container upgrade"},
-	{"move-sources", "Inspect stopped sources retained by Move, or explicitly remove one"},
-	{"login", "Sign in a profile, installing its pinned harness when needed. Live sessions pick up fresh credentials"},
-	{"new", "Create a session through the API and print its id"},
-	{"prompt", "Send a prompt as the user and wait for its turn to end"},
-	{"clear-queue", "Cancel queued prompts while preserving the session and its current turn"},
-	{"event", "Queue an external event in a session's durable mailbox"},
-	{"message", "Send a message and return: from your shell, a prompt; inside a session, a message to another session or one of your sub-agents"},
-	{"wait", "Block until a turn ends and print how it ended"},
-	{"transcript", "Page through a session's transcript"},
-	{"usage", "Read recorded token usage and coverage"},
-	{"events", "Follow durable session events as line-delimited JSON"},
-	{"put-file", "Atomically upload a file to an idle session workspace"},
-	{"fetch", "Copy a file, or a directory as a zip archive, from a session's target into this machine's temporary directory and print where it landed"},
-	{"elicitations", "List structured input requests from a session"},
-	{"respond", "Respond to a structured input request"},
-	{"diff", "Print a unified diff of a session's work"},
-	{"export", "Get a session's work out as a patch, a pushed branch, or a git bundle"},
-	{"sessions", "List the sessions the daemon holds"},
-	{"suspend", "Save a recovery copy and release the environment for later Resume"},
-	{"purge-untracked", "Remove legacy untracked checkpoint payloads from stopped sessions"},
-	{"destroy", "Permanently destroy a session, its environment, and recovery archive"},
-	{"notices", "Read recent cleanup notices, including after a session was destroyed"},
-	{"resume", "Resume a stopped session from its checkpoint"},
-	{"interrupt-turn", "Cancel the turn a session is running"},
-	{"review", "Review a session's committed work, or show the review it has open"},
-	{"stop-task", "Stop a session's background task, or all tasks the worker can stop"},
-	{"api-info", "Print the API base URL"},
-	{"api-token", "Print only the API bearer token for external HTTP clients"},
-	{"github-token", "Print a valid GitHub App token for an owner or repository"},
-	{"ui", "Change what the person's dashboard shows: pane sizes, which session is open, or Settings with changes staged for them to save"},
-	{"models", "Discover available models and efforts for a profile"},
-	{"quota", "Show each profile's remaining quota as the daemon last read it"},
-	{"hosts", "Show each host's CPU, RAM and disk space as the daemon last read it"},
-	{"set-config", "Apply a session configuration setting"},
-}
-
-// removedCommands are accepted only so the old name says what replaced it.
-var removedCommands = map[string]string{
-	"checkpoint":  "`mj checkpoint` was removed; `mj suspend` saves the session",
-	"close":       "`mj close` was replaced by `mj suspend` and `mj destroy`",
-	"cancel-turn": "`mj cancel-turn` was replaced by `mj interrupt-turn`",
-}
-
 // errNotPorted marks a command whose Rust behaviour the Go build does not
 // have yet. It fails visibly instead of pretending to work.
 var errNotPorted = errors.New("this command is not yet ported to the Go build of mj")
 
-// NewRoot builds the mj command tree.
-func NewRoot(args []string) *cobra.Command {
+// leaf makes cmd run run once clap's checks pass.
+func leaf(cmd *cobra.Command, run func() error) {
+	cmd.Args = cobra.ArbitraryArgs
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		if err := clapOf(c).finish(args); err != nil {
+			return err
+		}
+		return run()
+	}
+}
+
+// group makes cmd a command whose positional arguments are subcommands.
+// Without one, run runs when the subcommand is optional; a required one
+// prints the help, as clap does.
+func group(cmd *cobra.Command, subcommandRequired bool, run func() error) {
+	meta := clapOf(cmd)
+	meta.subcommandRequired = subcommandRequired
+	cmd.Args = unrecognizedSubcommand
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		if subcommandRequired {
+			return &helpRequested{command: c}
+		}
+		if err := clapOf(c).finish(nil); err != nil {
+			return err
+		}
+		return run()
+	}
+}
+
+// subcommand is a new command for one subcommand variant.
+func subcommand(name, about string) *cobra.Command {
+	return &cobra.Command{Use: name, Short: about}
+}
+
+// notPortedCommand is a command whose arguments arrive with its own file:
+// until then it accepts any arguments, and running it says it is not
+// ported.
+func notPortedCommand(name, about string, run func() error) *cobra.Command {
+	cmd := subcommand(name, about)
+	cmd.DisableFlagParsing = true
+	cmd.RunE = func(*cobra.Command, []string) error { return run() }
+	return cmd
+}
+
+// newCommandTree builds the mj command tree. onParsed receives what the
+// command line asked for once clap's checks have passed.
+func newCommandTree(onParsed func(cli) error) *cobra.Command {
 	// clap lists commands in declaration order.
 	cobra.EnableCommandSorting = false
 	var parsed cli
-	// The flags bind to text; cli keeps clap's Option, so absent stays nil.
-	var instance, workspace string
-	root := &cobra.Command{
-		Use:     "mj",
-		Short:   "ACP session control plane",
-		Version: Version,
-		Args:    unrecognizedSubcommand,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if cmd.Flags().Changed("instance") {
-				parsed.instance = &instance
-			}
-			if cmd.Flags().Changed("workspace") {
-				parsed.workspace = &workspace
-			}
-			return core.ApplyInstanceFlag(parsed.instance)
-		},
-		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("the dashboard: %w", errNotPorted)
-		},
-	}
-	installClapStyle(root, args)
+	root := &cobra.Command{Use: "mj", Short: "ACP session control plane", Version: Version}
+	installClapStyle(root)
+	rootClap := clapOf(root)
+	rootClap.option("instance",
+		"Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence",
+		storeOptional(&parsed.instance), withShort("i"), global(), withEnv(core.InstanceEnv), withValueName("NAME"))
+	rootClap.flag(&parsed.noSplash, "no_splash",
+		"Start the dashboard without the animated startup splash, for example over a slow remote connection",
+		global(), withEnv("MJ_NO_SPLASH"))
+	rootClap.option("workspace",
+		"Open the dashboard in this workspace, by name. Given before a command, it applies to that command when the command works in a workspace",
+		storeOptional(&parsed.workspace), withValueName("NAME"))
+	root.Flags().BoolP("version", "V", false, "Print version")
 	root.SetHelpCommand(&cobra.Command{Use: "help", Hidden: true, Run: func(cmd *cobra.Command, args []string) {
 		target, _, err := root.Find(args)
 		if err != nil || target == nil {
 			target = root
 		}
-		writeHelp(cmd.OutOrStdout(), target, true)
+		writeHelp(cmd.OutOrStdout(), target)
 	}})
-	persistent := root.PersistentFlags()
-	stringFlag(persistent, &instance, flagSpec{Name: "instance", Short: "i", ValueName: "NAME", Env: core.InstanceEnv, Order: 0,
-		Help: "Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence"})
-	boolFlag(persistent, &parsed.noSplash, flagSpec{Name: "no-splash", Env: "MJ_NO_SPLASH", Order: 1,
-		Help: "Start the dashboard without the animated startup splash, for example over a slow remote connection"})
-	stringFlag(root.Flags(), &workspace, flagSpec{Name: "workspace", ValueName: "NAME", Order: 2,
-		Help: "Open the dashboard in this workspace, by name. Given before a command, it applies to that command when the command works in a workspace"})
+	group(root, false, func() error { return onParsed(parsed) })
 	if value, ok := os.LookupEnv("MJ_NO_SPLASH"); ok && value != "" && value != "false" && value != "0" {
 		parsed.noSplash = true
 	}
+	// done records the command and hands the command line on.
+	done := func(command command) func() error {
+		return func() error {
+			parsed.command = command
+			return onParsed(parsed)
+		}
+	}
+	add := func(cmd *cobra.Command) { rootClap.subcommand(cmd) }
 
-	for _, entry := range topLevelCommands {
-		root.AddCommand(&cobra.Command{
-			Use:   entry.name,
-			Short: entry.about,
-			RunE: func(*cobra.Command, []string) error {
-				return fmt.Errorf("mj %s: %w", entry.name, errNotPorted)
-			},
-		})
-	}
-	for name, replacement := range removedCommands {
-		root.AddCommand(&cobra.Command{
-			Use:                name,
-			Hidden:             true,
-			DisableFlagParsing: true,
-			RunE: func(*cobra.Command, []string) error {
-				return errors.New(replacement)
-			},
-		})
-	}
+	add(notPortedCommand("image", "Build and inspect project session images from mise recipes", done(commandImage{})))
+	add(notPortedCommand("go", "Work in a folder using remembered account and target settings", done(commandGo{})))
+	add(notPortedCommand("simple", "Open a minimal local session with direct Ctrl-key commands", done(commandSimple{})))
+
+	var workspaces workspacesArgs
+	workspacesCmd := subcommand("workspaces", "Open the workspace selector even when Mjolnir could auto-attach, or list and create workspaces without a terminal")
+	add(workspacesCmd)
+	workspaces.bind(workspacesCmd, func() error { return done(commandWorkspaces{workspaces})() })
+
+	var daemon daemonArgs
+	daemonCmd := subcommand("daemon", "Inspect or control the persistent per-user daemon")
+	add(daemonCmd)
+	daemon.bind(daemonCmd, func() error { return done(commandDaemon{daemon})() })
+
+	daemonRun := subcommand("daemon-run", "Internal persistent controller process")
+	daemonRun.Hidden = true
+	add(daemonRun)
+	leaf(daemonRun, func() error { return done(commandDaemonRun{})() })
+
+	var waitExit daemonWaitExitArgs
+	waitExitCmd := subcommand("daemon-wait-exit", "")
+	waitExitCmd.Hidden = true
+	add(waitExitCmd)
+	bindDaemonWaitExit(&waitExit, waitExitCmd, func() error { return done(commandDaemonWaitExit{waitExit})() })
+
+	add(notPortedCommand("acp", "Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon", done(commandAcp{})))
+
+	var doctor doctorArgs
+	doctorCmd := subcommand("doctor", "Diagnose platform and configuration prerequisites")
+	add(doctorCmd)
+	doctor.bind(doctorCmd, func() error { return done(commandDoctor{doctor})() })
+
+	add(notPortedCommand("ec2", "Create, list, or destroy persistent EC2 hosts with rootless Podman", done(commandEc2{})))
+
+	var setup setupArgs
+	setupCmd := subcommand("setup", "Former spelling of `mj doctor instructions`")
+	setupCmd.Hidden = true
+	add(setupCmd)
+	setup.bind(setupCmd, func() error { return done(commandSetup{setup})() })
+
+	add(notPortedCommand("import", "Adopt a native coding-agent session as a stopped Mjolnir session", done(commandImport{})))
+
+	var recover recoverArgs
+	recoverCmd := subcommand("recover", "Find, adopt, or explicitly destroy managed workers missing from state")
+	add(recoverCmd)
+	recover.bind(recoverCmd, func() error { return done(commandRecover{recover})() })
+
+	var checkpoint removedCommandArgs
+	checkpointCmd := subcommand("checkpoint", "Removed; suspend saves the session")
+	checkpointCmd.Hidden = true
+	add(checkpointCmd)
+	checkpoint.bind(checkpointCmd, func() error { return done(commandCheckpoint{checkpoint})() })
+
+	var move moveArgs
+	moveCmd := subcommand("move", "Move a session to another configured profile and/or target")
+	add(moveCmd)
+	move.bind(moveCmd, func() error { return done(commandMove{move})() })
+
+	var upgrade commandUpgradeContainer
+	upgradeCmd := subcommand("upgrade-container", "Preview or explicitly queue a storage-preserving container upgrade")
+	add(upgradeCmd)
+	upgradeClap := clapOf(upgradeCmd)
+	upgradeClap.option("session", "Session whose existing container should be inspected or upgraded", storeString(&upgrade.session), required())
+	upgradeClap.flag(&upgrade.acknowledgeWritableLayerLoss, "acknowledge_writable_layer_loss", "Accept loss of writable-layer state after reviewing the image preview", conflictsWith("cancel"))
+	upgradeClap.flag(&upgrade.cancel, "cancel", "Cancel a pending upgrade before replacement starts")
+	leaf(upgradeCmd, func() error { return done(upgrade)() })
+
+	var sources commandMoveSources
+	sourcesCmd := subcommand("move-sources", "Inspect stopped sources retained by Move, or explicitly remove one")
+	add(sourcesCmd)
+	sourcesClap := clapOf(sourcesCmd)
+	sourcesClap.option("session", "Session whose retained Move sources should be listed or cleaned up", storeString(&sources.session), required())
+	sourcesClap.option("cleanup", "Operation ID of the retained source to delete", storeOptional(&sources.cleanup))
+	sourcesClap.flag(&sources.yes, "yes", "Confirm deletion of the retained source and its excluded files")
+	leaf(sourcesCmd, func() error { return done(sources)() })
+
+	var loginArguments loginArgs
+	loginCmd := subcommand("login", "Sign in a profile, installing its pinned harness when needed. Live sessions pick up fresh credentials")
+	add(loginCmd)
+	loginArguments.bind(loginCmd, func() error { return done(commandLogin{loginArguments})() })
+
+	var newArguments newArgs
+	newCmd := subcommand("new", "Create a session through the API and print its id")
+	add(newCmd)
+	newArguments.bind(newCmd, func() error { return done(commandNew{newArguments})() })
+
+	var promptArguments promptArgs
+	promptCmd := subcommand("prompt", "Send a prompt as the user and wait for its turn to end")
+	add(promptCmd)
+	promptArguments.bind(promptCmd, func() error { return done(commandPrompt{promptArguments})() })
+
+	var clearQueueArguments clearQueueArgs
+	clearQueueCmd := subcommand("clear-queue", "Cancel queued prompts while preserving the session and its current turn")
+	add(clearQueueCmd)
+	clearQueueArguments.bind(clearQueueCmd, func() error { return done(commandClearQueue{clearQueueArguments})() })
+
+	var eventArguments eventArgs
+	eventCmd := subcommand("event", "Queue an external event in a session's durable mailbox")
+	add(eventCmd)
+	eventArguments.bind(eventCmd, func() error { return done(commandEvent{eventArguments})() })
+
+	var messageArguments messageArgs
+	messageCmd := subcommand("message", "Send a message and return: from your shell, a prompt; inside a session, a message to another session or one of your sub-agents")
+	add(messageCmd)
+	messageArguments.bind(messageCmd, func() error { return done(commandMessage{messageArguments})() })
+
+	var waitArguments waitArgs
+	waitCmd := subcommand("wait", "Block until a turn ends and print how it ended")
+	add(waitCmd)
+	waitArguments.bind(waitCmd, func() error { return done(commandWait{waitArguments})() })
+
+	var transcriptArguments transcriptArgs
+	transcriptCmd := subcommand("transcript", "Page through a session's transcript")
+	add(transcriptCmd)
+	transcriptArguments.bind(transcriptCmd, func() error { return done(commandTranscript{transcriptArguments})() })
+
+	var usageArguments usageArgs
+	usageCmd := subcommand("usage", "Read recorded token usage and coverage")
+	add(usageCmd)
+	usageArguments.bind(usageCmd, func() error { return done(commandUsage{usageArguments})() })
+
+	var eventsArguments eventsArgs
+	eventsCmd := subcommand("events", "Follow durable session events as line-delimited JSON")
+	add(eventsCmd)
+	eventsArguments.bind(eventsCmd, func() error { return done(commandEvents{eventsArguments})() })
+
+	var putFileArguments putFileArgs
+	putFileCmd := subcommand("put-file", "Atomically upload a file to an idle session workspace")
+	add(putFileCmd)
+	putFileArguments.bind(putFileCmd, func() error { return done(commandPutFile{putFileArguments})() })
+
+	var fetchArguments fetchArgs
+	fetchCmd := subcommand("fetch", "Copy a file, or a directory as a zip archive, from a session's target into this machine's temporary directory and print where it landed")
+	add(fetchCmd)
+	fetchArguments.bind(fetchCmd, func() error { return done(commandFetch{fetchArguments})() })
+
+	var elicitationsArguments elicitationsArgs
+	elicitationsCmd := subcommand("elicitations", "List structured input requests from a session")
+	add(elicitationsCmd)
+	elicitationsArguments.bind(elicitationsCmd, func() error { return done(commandElicitations{elicitationsArguments})() })
+
+	var respondArguments respondArgs
+	respondCmd := subcommand("respond", "Respond to a structured input request")
+	add(respondCmd)
+	respondArguments.bind(respondCmd, func() error { return done(commandRespond{respondArguments})() })
+
+	var diffArguments diffArgs
+	diffCmd := subcommand("diff", "Print a unified diff of a session's work")
+	add(diffCmd)
+	diffArguments.bind(diffCmd, func() error { return done(commandDiff{diffArguments})() })
+
+	var exportArguments exportArgs
+	exportCmd := subcommand("export", "Get a session's work out as a patch, a pushed branch, or a git bundle")
+	add(exportCmd)
+	exportArguments.bind(exportCmd, func() error { return done(commandExport{exportArguments})() })
+
+	var sessionsArguments sessionsArgs
+	sessionsCmd := subcommand("sessions", "List the sessions the daemon holds")
+	add(sessionsCmd)
+	sessionsArguments.bind(sessionsCmd, func() error { return done(commandSessions{sessionsArguments})() })
+
+	var suspendArguments suspendArgs
+	suspendCmd := subcommand("suspend", "Save a recovery copy and release the environment for later Resume")
+	add(suspendCmd)
+	suspendArguments.bind(suspendCmd, func() error { return done(commandSuspend{suspendArguments})() })
+
+	var purgeArguments purgeUntrackedArgs
+	purgeCmd := subcommand("purge-untracked", "Remove legacy untracked checkpoint payloads from stopped sessions")
+	add(purgeCmd)
+	purgeArguments.bind(purgeCmd, func() error { return done(commandPurgeUntracked{purgeArguments})() })
+
+	var destroyArguments destroyArgs
+	destroyCmd := subcommand("destroy", "Permanently destroy a session, its environment, and recovery archive")
+	add(destroyCmd)
+	destroyArguments.bind(destroyCmd, func() error { return done(commandDestroy{destroyArguments})() })
+
+	var noticesArguments noticesArgs
+	noticesCmd := subcommand("notices", "Read recent cleanup notices, including after a session was destroyed")
+	add(noticesCmd)
+	noticesArguments.bind(noticesCmd, func() error { return done(commandNotices{noticesArguments})() })
+
+	var resumeArguments resumeArgs
+	resumeCmd := subcommand("resume", "Resume a stopped session from its checkpoint")
+	add(resumeCmd)
+	resumeArguments.bind(resumeCmd, func() error { return done(commandResume{resumeArguments})() })
+
+	var restartArguments sessionArgs
+	restartCmd := subcommand("restart", "Restart a running session's agent (replaces pre-release workers in place)")
+	add(restartCmd)
+	restartArguments.bind(restartCmd, func() error { return done(commandRestart{restartArguments})() })
+
+	var interruptArguments sessionArgs
+	interruptCmd := subcommand("interrupt-turn", "Cancel the turn a session is running")
+	add(interruptCmd)
+	interruptArguments.bind(interruptCmd, func() error { return done(commandInterruptTurn{interruptArguments})() })
+
+	var reviewArguments reviewArgs
+	reviewCmd := subcommand("review", "Review a session's committed work, or show the review it has open")
+	add(reviewCmd)
+	reviewArguments.bind(reviewCmd, func() error { return done(commandReview{reviewArguments})() })
+
+	var stopTaskArguments stopTaskArgs
+	stopTaskCmd := subcommand("stop-task", "Stop a session's background task, or all tasks the worker can stop")
+	add(stopTaskCmd)
+	stopTaskArguments.bind(stopTaskCmd, func() error { return done(commandStopTask{stopTaskArguments})() })
+
+	var apiInfoArguments apiInfoArgs
+	apiInfoCmd := subcommand("api-info", "Print the API base URL")
+	add(apiInfoCmd)
+	apiInfoArguments.bind(apiInfoCmd, func() error { return done(commandApiInfo{apiInfoArguments})() })
+
+	apiTokenCmd := subcommand("api-token", "Print only the API bearer token for external HTTP clients")
+	add(apiTokenCmd)
+	leaf(apiTokenCmd, func() error { return done(commandApiToken{})() })
+
+	var githubTokenArguments githubTokenArgs
+	githubTokenCmd := subcommand("github-token", "Print a valid GitHub App token for an owner or repository")
+	add(githubTokenCmd)
+	githubTokenArguments.bind(githubTokenCmd, func() error { return done(commandGithubToken{githubTokenArguments})() })
+
+	var uiArguments uiArgs
+	uiCmd := subcommand("ui", "Change what the person's dashboard shows: pane sizes, which session is open, or Settings with changes staged for them to save")
+	add(uiCmd)
+	uiArguments.bind(uiCmd, func() error { return done(commandUi{uiArguments})() })
+
+	var modelsArguments modelsArgs
+	modelsCmd := subcommand("models", "Discover available models and efforts for a profile")
+	add(modelsCmd)
+	modelsArguments.bind(modelsCmd, func() error { return done(commandModels{modelsArguments})() })
+
+	var quotaArguments quotaArgs
+	quotaCmd := subcommand("quota", "Show each profile's remaining quota as the daemon last read it")
+	add(quotaCmd)
+	quotaArguments.bind(quotaCmd, func() error { return done(commandQuota{quotaArguments})() })
+
+	var hostsArguments hostsArgs
+	hostsCmd := subcommand("hosts", "Show each host's CPU, RAM and disk space as the daemon last read it")
+	add(hostsCmd)
+	hostsArguments.bind(hostsCmd, func() error { return done(commandHosts{hostsArguments})() })
+
+	var setConfigArguments setConfigArgs
+	setConfigCmd := subcommand("set-config", "Apply a session configuration setting")
+	add(setConfigCmd)
+	setConfigArguments.bind(setConfigCmd, func() error { return done(commandSetConfig{setConfigArguments})() })
+
+	var closeArguments removedCommandArgs
+	closeCmd := subcommand("close", "Removed; kept so the old name says what replaced it")
+	closeCmd.Hidden = true
+	add(closeCmd)
+	closeArguments.bind(closeCmd, func() error { return done(commandClose{closeArguments})() })
+
+	var cancelArguments removedCommandArgs
+	cancelCmd := subcommand("cancel-turn", "Removed; kept so the old name says what replaced it")
+	cancelCmd.Hidden = true
+	add(cancelCmd)
+	cancelArguments.bind(cancelCmd, func() error { return done(commandCancelTurn{cancelArguments})() })
+
+	addHelpSubcommandsBelow(root)
+	propagateGlobalArgs(root, nil)
 	return root
+}
+
+// addHelpSubcommandsBelow gives every command below root that has
+// subcommands clap's `help` subcommand; the root has cobra's.
+func addHelpSubcommandsBelow(root *cobra.Command) {
+	for _, child := range root.Commands() {
+		if len(child.Commands()) > 0 {
+			addHelpSubcommandsBelow(child)
+			addHelpSubcommand(child)
+		}
+	}
+}
+
+// bindDaemonWaitExit declares `mj daemon-wait-exit --exit-dir <EXIT_DIR>
+// <COMMAND>...`. The command is trailing and may begin with hyphens, so
+// everything from its first word on is the command (clap's
+// trailing_var_arg and allow_hyphen_values); the arguments are read here
+// rather than by pflag.
+func bindDaemonWaitExit(args *daemonWaitExitArgs, cmd *cobra.Command, run func() error) {
+	cmd.DisableFlagParsing = true
+	cmd.RunE = func(c *cobra.Command, raw []string) error {
+		exitDir, seen := "", false
+		for index := 0; index < len(raw); index++ {
+			argument := raw[index]
+			switch {
+			case argument == "--exit-dir":
+				if index+1 >= len(raw) {
+					return &UsageError{Message: "a value is required for '--exit-dir <EXIT_DIR>' but none was supplied", Command: c, noUsage: true}
+				}
+				index++
+				exitDir, seen = raw[index], true
+			case strings.HasPrefix(argument, "--exit-dir="):
+				exitDir, seen = strings.TrimPrefix(argument, "--exit-dir="), true
+			case argument == "--":
+				args.command = append(args.command, raw[index+1:]...)
+				index = len(raw)
+			default:
+				args.command = append(args.command, raw[index:]...)
+				index = len(raw)
+			}
+		}
+		var missing []string
+		if !seen {
+			missing = append(missing, "--exit-dir <EXIT_DIR>")
+		}
+		if len(args.command) == 0 {
+			missing = append(missing, "<COMMAND>...")
+		}
+		if len(missing) > 0 {
+			return &UsageError{Message: "the following required arguments were not provided:\n  " + strings.Join(missing, "\n  "), Command: c}
+		}
+		args.exitDir = exitDir
+		return run()
+	}
+}
+
+// parseCommandLine is clap's try_parse_from: what args (without the
+// program name) ask for, or the usage error, without running anything.
+func parseCommandLine(args []string) (cli, error) {
+	var result cli
+	var ran bool
+	root := newCommandTree(func(parsed cli) error {
+		result, ran = parsed, true
+		return nil
+	})
+	root.SetArgs(args)
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	if _, err := root.ExecuteC(); err != nil {
+		return cli{}, asUsageError(root, err)
+	}
+	if !ran {
+		// --help or --version answered instead of a command.
+		return cli{}, &UsageError{Message: "the command line asked for help or the version", Command: root, noUsage: true}
+	}
+	// A removed command is refused with its replacement; the error names a
+	// command that does not run, so a parse that reached it is still a parse.
+	return result, nil
+}
+
+// asUsageError reports an error from cobra's own parsing (a flag before the
+// subcommand, which cobra parses while it finds the subcommand) in clap's
+// words.
+func asUsageError(root *cobra.Command, err error) error {
+	var usage *UsageError
+	var help *helpRequested
+	if errors.As(err, &usage) || errors.As(err, &help) || errors.Is(err, errNotPorted) {
+		return err
+	}
+	if strings.HasPrefix(err.Error(), "unknown flag: ") || strings.HasPrefix(err.Error(), "unknown shorthand flag: ") ||
+		strings.HasPrefix(err.Error(), "flag needs an argument: ") {
+		return clapFlagError(root, err)
+	}
+	return err
 }
 
 // Main runs mj with the process arguments and returns its exit code.
 func Main(args []string, stdout, stderr io.Writer) int {
-	root := NewRoot(args)
+	root := newCommandTree(runMain)
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	if err := root.Execute(); err != nil {
-		return reportError(stderr, err)
+	if _, err := root.ExecuteC(); err != nil {
+		return reportError(stderr, asUsageError(root, err))
 	}
 	return 0
 }
