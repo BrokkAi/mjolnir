@@ -25,7 +25,7 @@ You will be able to verify the change by running targeted integration and tricky
 - [x] (2026-11-24 21:57Z) Milestone 1: Reliability and identity fixes across existing history tools (`resolve()` native UUIDs + `child_not_indexed`, SQLite progress-handler deadline + permit-outside-timeout, non-fatal `is_child`, shared `i`/offset helper, legacy `search_session` `context`/`limit` fix; 63/63 `brokk-mj-sessionwiki` tests + clippy clean).
 - [x] (2026-11-24 22:15Z) Milestone 2: Shared standard `porter unicode61` query parser/compiler (explicit `*` only), `trigram`-only supervised `porter unicode61` migration in `WikiIndexer`, and UI/TUI/web FTS + `highlight()` alignment (65/65 `brokk-mj-sessionwiki` tests, `brokk-mj-daemon wiki_search`, and clippy clean).
 - [x] (2026-11-24 22:27Z) Milestone 3: Unified `search_history` engine in `mj-sessionwiki` (single read transaction, in-memory `files` map, FTS-outer `CROSS JOIN`, scoped `rowid` bounds, breadth-first global allocation with session-boundary cursor, `hits_in_session`, follow-up coordinates, two-pass context budgeting, caller-excluded capped `term_counts` + `prefix_hits`, and Milestone 1's `resolve_lookup()` combined native-prefix fix; 71/71 `brokk-mj-sessionwiki` tests + clippy clean).
-- [ ] Milestone 4: Relay protocol bump (next available number at merge time), `HistoryQuery::SearchHistory` + `session_id` alias union, controller-bound caller ID, older-daemon worker guard, 6-tool MCP surface + compact `HISTORY_GUIDANCE` + goldens, and validation.
+- [x] (2026-11-24 22:47Z) Milestone 4: Relay protocol bump (`RELAY_SEARCH_HISTORY_PROTOCOL = 92`), `HistoryQuery::SearchHistory` + `session_id` alias union, controller-bound caller ID + expired-request abort in `StandaloneSession::sync_history`, older-daemon worker guard (`requests_for_protocol`), 6-tool MCP surface with explicit FTS5/follow-up tool docs + compact `HISTORY_GUIDANCE` + `TZ=UTC` goldens, and isolated `MJ_DATA_DIR`/`MJ_CONFIG_DIR`/`SESSIONWIKI_DATA` smoke test.
 
 ## Surprises & Discoveries
 
@@ -92,7 +92,15 @@ You will be able to verify the change by running targeted integration and tricky
 
 ## Outcomes & Retrospective
 
-Not yet implemented. Update after each milestone and after post-release call-log re-extraction (comparing calls per episode, zero-hit rate, two-hop rate, and the 34% raw-file fallback rate against the pre-change baseline).
+All four milestones are implemented and validated across `brokk-mj-core`, `brokk-mj-worker-mcp`, `brokk-mj-worker-runtime`, `brokk-mj-sessionwiki`, `brokk-mj-session-runtime`, and `brokk-mj-daemon` with zero `brokk-sessionwiki` schema changes (`0.34.28` pin preserved).
+
+Key implementation refinements beyond the initial draft:
+- Merged `origin/master` before Milestone 4 (`RELAY_PROTOCOL_VERSION` had advanced to 91) and assigned `RELAY_SEARCH_HISTORY_PROTOCOL = 92`.
+- Addressed both Milestone 1 review findings before final push: combined ownership-map native UUID prefixes with `index::resolve` candidates in `resolve_lookup()` so dashed prefixes cannot shadow directly indexed native sessions, and tracked active `StandaloneSession` history tasks by `AbortHandle` so worker-expired requests cancel immediately instead of holding or waiting for permits.
+- Used two-pass character budgeting in `search_history` (all anchors first with rollover, then fair division of remaining budget across neighbor context slots) so one large neighbor message never starves subsequent hits' context while strictly preserving `<= max_chars`.
+- Verified an isolated daemon smoke run (`MJ_DATA_DIR`, `MJ_CONFIG_DIR`, `SESSIONWIKI_DATA` in `/tmp`, `--instance search-history-smoke`) without touching `~/.local/share/sessionwiki/index.db`.
+
+Next follow-up after release: re-extract live `mj-memory` call logs to measure calls per episode, zero-hit rate, two-hop rate, and raw-file fallback rate against the pre-change baseline, and retire `SearchSessions`, `SearchSession`, and `transcript_grep::grep_session` once `MINIMUM_WORKER_PROTOCOL >= RELAY_SEARCH_HISTORY_PROTOCOL`.
 
 ## Context and Orientation
 

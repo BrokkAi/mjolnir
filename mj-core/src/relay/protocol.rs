@@ -761,6 +761,9 @@ impl RelayRequest {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
+            Self::HistoryQuery {
+                query: crate::history::HistoryQuery::SearchHistory { .. },
+            } => super::RELAY_SEARCH_HISTORY_PROTOCOL,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
             | Self::CompleteHistoryRequest { .. } => 16,

@@ -4174,7 +4174,7 @@ pub(super) async fn serve_client_with_shared_credentials(
             if matches!(&envelope.request, RelayRequest::HistoryQuery { .. } | RelayRequest::HistoryRequests | RelayRequest::CompleteHistoryRequest { .. }) {
                 let operation = envelope.request.method_name();
                 let result: Result<RelayResponsePayload> = match envelope.request {
-                    RelayRequest::HistoryRequests => Ok(RelayResponsePayload::HistoryRequests { requests: project_memory.history.requests() }),
+                    RelayRequest::HistoryRequests => Ok(RelayResponsePayload::HistoryRequests { requests: project_memory.history.requests_for_protocol(envelope.protocol_version) }),
                     RelayRequest::CompleteHistoryRequest { result } => {
                         project_memory.history.complete(result);
                         Ok(RelayResponsePayload::HistoryRequestCompleted)

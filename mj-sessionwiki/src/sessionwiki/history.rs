@@ -16,14 +16,16 @@ use super::top_level::QueryVisibility;
 const BACKSTOP: Duration = Duration::from_secs(5);
 const TIMED_OUT: &str = "history query timed out; retry or narrow the query";
 
-pub async fn execute(request: HistoryRequest) -> HistoryResult {
+/// Run one history request. `caller_session_id` is the Mjolnir session that
+/// owns the worker asking; the controller supplies it, never the request.
+pub async fn execute(request: HistoryRequest, caller_session_id: Option<String>) -> HistoryResult {
     static PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     let id = request.request_id.clone();
     let permits = PERMITS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
         .clone();
     let outcome = run_bounded(&permits, mj_core::history::QUERY_TIMEOUT, move |budget| {
-        query(&request, &budget)
+        query(&request, &budget, caller_session_id.as_deref())
     })
     .await;
     match outcome {
@@ -330,7 +332,11 @@ fn budget(value: usize) -> usize {
     value.clamp(1, 64_000)
 }
 
-fn query(request: &HistoryRequest, budget: &QueryBudget) -> Result<Value> {
+fn query(
+    request: &HistoryRequest,
+    budget: &QueryBudget,
+    caller_session_id: Option<&str>,
+) -> Result<Value> {
     request.query.validate()?;
     let mut connection = super::readable_index()?.with_context(super::unreadable_reason)?;
     connection.busy_timeout(Duration::from_secs(2))?;
@@ -338,7 +344,12 @@ fn query(request: &HistoryRequest, budget: &QueryBudget) -> Result<Value> {
     budget.install(&mut connection)?;
     let ownership = super::top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
-    let value = query_in_with(&connection, request, &ownership, &cache)?;
+    let value = query_in_for(&connection, request, &ownership, &cache, caller_session_id)?;
+    // The constant source and coverage prose lives in the `search_history` tool
+    // description, so its responses omit it.
+    if matches!(request.query, HistoryQuery::SearchHistory { .. }) {
+        return Ok(json!({"data": value, "index_state": super::index_state()}));
+    }
     Ok(json!({
         "data": value,
         "index_state": super::index_state(),
@@ -357,14 +368,25 @@ fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Resu
     )
 }
 
+#[cfg(test)]
 pub(super) fn query_in_with(
     connection: &rusqlite::Connection,
     request: &HistoryRequest,
     ownership: &super::top_level::Snapshot,
     cache: &crate::import::NativeScanCache,
 ) -> Result<Value> {
+    query_in_for(connection, request, ownership, cache, None)
+}
+
+fn query_in_for(
+    connection: &rusqlite::Connection,
+    request: &HistoryRequest,
+    ownership: &super::top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
+    caller_session_id: Option<&str>,
+) -> Result<Value> {
     let mut visibility = QueryVisibility::new(ownership, cache);
-    let mut value = run_query(connection, request, &mut visibility)?;
+    let mut value = run_query(connection, request, &mut visibility, caller_session_id)?;
     let notices = visibility.take_notices();
     if !notices.is_empty() {
         value["notices"] = json!(notices);
@@ -376,9 +398,38 @@ fn run_query(
     connection: &rusqlite::Connection,
     request: &HistoryRequest,
     visibility: &mut QueryVisibility<'_>,
+    caller_session_id: Option<&str>,
 ) -> Result<Value> {
     use HistoryQuery::*;
     match &request.query {
+        SearchHistory {
+            query,
+            session_ids,
+            session_id,
+            role,
+            order,
+            limit,
+            context_messages,
+            max_chars,
+            cursor,
+        } => super::search_history::execute(
+            connection,
+            &super::search_history::SearchHistoryParams {
+                query: query.clone(),
+                session_ids: mj_core::history::merged_search_history_session_ids(
+                    session_ids.as_deref(),
+                    session_id.as_deref(),
+                ),
+                role: role.clone(),
+                order: order.clone(),
+                limit: *limit,
+                context_messages: *context_messages,
+                max_chars: *max_chars,
+                cursor: cursor.clone(),
+            },
+            caller_session_id,
+            visibility,
+        ),
         SearchSessions {
             query,
             limit: count,

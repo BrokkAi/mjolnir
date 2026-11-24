@@ -11,8 +11,6 @@ use sessionwiki::index::SessionRow;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-// The relay entry point is added in Milestone 4.
-#[allow(dead_code)]
 pub(super) struct SearchHistoryParams {
     pub query: String,
     pub session_ids: Vec<String>,
@@ -160,7 +158,6 @@ fn excerpt_value(
     }
     value
 }
-#[allow(dead_code)]
 pub(super) fn execute(
     connection: &rusqlite::Connection,
     params: &SearchHistoryParams,
