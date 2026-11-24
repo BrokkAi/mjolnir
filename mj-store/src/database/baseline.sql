@@ -363,6 +363,8 @@ CREATE TABLE ec2_move_grants (
     absent_checks INTEGER NOT NULL DEFAULT 0,
     attempt_id INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
+    region TEXT,
+    aws_profile TEXT,
     PRIMARY KEY (security_group_id, cidr_ip, port)
 );
 

@@ -70,6 +70,19 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    /// Fetch `path` of `session` into `parent` entirely on one remote SSH host,
+    /// when both sessions run there. `Ok(None)` means they do not, so the caller
+    /// moves the payload through the daemon. On success: the destination
+    /// worker's `store-fetch` output.
+    fn try_fetch_same_host(
+        &self,
+        _parent: String,
+        _session: String,
+        _path: PathBuf,
+    ) -> BoxFuture<'_, std::result::Result<Option<Vec<u8>>, ExportError>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn dashboard_backend(self: Arc<Self>) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
         None
     }
@@ -449,6 +462,17 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn try_fetch_same_host(
+        &self,
+        parent: String,
+        session: String,
+        path: PathBuf,
+    ) -> BoxFuture<'_, std::result::Result<Option<Vec<u8>>, ExportError>> {
+        Box::pin(fetch_transfer::try_transfer_same_ssh_host(
+            parent, session, path,
+        ))
+    }
+
     fn dashboard_backend(self: Arc<Self>) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
         Some(self)
     }
@@ -1596,6 +1620,26 @@ impl ApiBackend {
                 } else {
                     FetchMode::Content
                 };
+                if !*ls {
+                    // Both sessions on one remote host: the payload stays there.
+                    self.require_live_target(session_id).map_err(fetch_error)?;
+                    self.require_live_target(parent_session_id)
+                        .map_err(fetch_error)?;
+                    if let Some(output) = self
+                        .exports
+                        .try_fetch_same_host(
+                            parent_session_id.to_owned(),
+                            session_id.clone(),
+                            path.clone(),
+                        )
+                        .await
+                        .map_err(fetch_error)?
+                    {
+                        let saved: mj_checkpoint::archive::SavedFetch =
+                            serde_json::from_slice(&output).context("decode the saved fetch")?;
+                        return Ok(serde_json::to_value(saved)?);
+                    }
+                }
                 let fetched = self
                     .read_file(session_id.clone(), path.clone(), mode)
                     .await
