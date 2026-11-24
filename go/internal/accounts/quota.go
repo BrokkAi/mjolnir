@@ -992,11 +992,11 @@ func refreshCodexChatGPT(ctx context.Context, codexClient **CodexUsageClient, pr
 		launcher = codexLauncherProgram(filepath.Join(core.ManagedHarnessInstallDir(*cacheRoot, core.HarnessKindCodex), core.CodexCLIEntrypoint))
 	}
 	// Installation touches no credentials; finish it before reserving the
-	// login slot used by credential synchronization. A program borrowed
-	// from the cached client belongs to that client; one prepared here is
-	// released unless a client this poll starts takes it.
+	// login slot used by credential synchronization. prepared is one holder
+	// of the program (Rust: an `Arc`), whether retained from the cached
+	// client or prepared here; it is released at the end unless a client
+	// this poll starts takes it.
 	var prepared *quotaProgram
-	owned := false
 	if *codexClient != nil {
 		prepared = (*codexClient).preparedProgram(launcher)
 	}
@@ -1005,12 +1005,10 @@ func refreshCodexChatGPT(ctx context.Context, codexClient **CodexUsageClient, pr
 		if err != nil {
 			return CodexUsageReport{}, err
 		}
-		prepared, owned = program, true
+		prepared = program
 	}
 	defer func() {
-		if owned && prepared != nil {
-			prepared.release()
-		}
+		prepared.release()
 	}()
 	// Serialize the expiry decision and every app-server request with other
 	// daemons and credential syncs using this login slot. Waiting for
@@ -1048,17 +1046,15 @@ func refreshCodexChatGPT(ctx context.Context, codexClient **CodexUsageClient, pr
 					// The failed cached process has stopped. Drop its lease
 					// and login admission before preparing a replacement,
 					// which may need a fresh install.
-					if owned && prepared != nil {
-						prepared.release()
-					}
-					prepared, owned = nil, false
+					prepared.release()
+					prepared = nil
 					credentialGuard.Release()
 					credentialGuard = nil
 					program, err := launcher.prepare(ctx, environment)
 					if err != nil {
 						return CodexUsageReport{}, err
 					}
-					prepared, owned = program, true
+					prepared = program
 					credentialGuard, err = core.CredentialWriteGuardAcquire(ctx, core.HarnessKindCodex, credentialPath)
 					if err != nil {
 						return CodexUsageReport{}, err

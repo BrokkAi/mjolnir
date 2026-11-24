@@ -163,21 +163,6 @@ func TestBedrockClaudeReportsUsagePricingWithoutAnOauthLogin(t *testing.T) {
 	}
 }
 
-// quotaAssertGolden compares rendered output with the checked-in
-// testdata/golden/<name>.txt, which is a copy of the Rust crate's
-// tests/golden file.
-func quotaAssertGolden(t *testing.T, name, actual string) {
-	t.Helper()
-	path := filepath.Join("testdata", "golden", name+".txt")
-	expected, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("could not read golden %s: %v", path, err)
-	}
-	if want, got := strings.TrimSuffix(string(expected), "\n"), strings.TrimSuffix(actual, "\n"); want != got {
-		t.Fatalf("golden output differs at %s\nexpected:\n%s\nactual:\n%s", path, want, got)
-	}
-}
-
 func quotaU8(value uint8) *uint8    { return &value }
 func quotaI64(value int64) *int64   { return &value }
 func quotaStr(value string) *string { return &value }
@@ -272,7 +257,7 @@ func TestGoldenQuotaCompactRow(t *testing.T) {
 			*sample.RemainingPercent, ProjectsExhaustion(&sample, 0), compact.Compact())
 	}
 
-	quotaAssertGolden(t, "quota-compact-row", out.String())
+	core.AssertGolden(t, "testdata", "quota-compact-row", out.String())
 }
 
 func TestACodexRefreshMarginIsAnHourOrATenthOfTheTokenLife(t *testing.T) {

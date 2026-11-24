@@ -74,7 +74,7 @@ func codexShutdown(t *testing.T, client **CodexUsageClient) {
 	*client = nil
 }
 
-func codexRequestLog(t *testing.T, log string) []any {
+func codexUsageRequestLog(t *testing.T, log string) []any {
 	t.Helper()
 	requests, err := os.ReadFile(log)
 	if err != nil {
@@ -196,7 +196,7 @@ printf '%s\n' '{"id":9,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
 		}
 	}
 
-	messages := codexRequestLog(t, log)
+	messages := codexUsageRequestLog(t, log)
 	if len(messages) != 10 {
 		t.Fatalf("%d requests", len(messages))
 	}
@@ -240,7 +240,7 @@ printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 		t.Fatalf("proactive refresh: %v", failure)
 	}
 
-	messages := codexRequestLog(t, log)
+	messages := codexUsageRequestLog(t, log)
 	if len(messages) != 3 {
 		t.Fatalf("%d requests", len(messages))
 	}
@@ -340,7 +340,7 @@ fi
 IFS= read -r line
 `
 
-func codexStarts(log string) int {
+func codexUsageStarts(log string) int {
 	text, err := os.ReadFile(log + ".starts")
 	if err != nil {
 		return 0
@@ -366,7 +366,7 @@ func TestRefreshLoginReportsAMissingAccountAsAFailedRefresh(t *testing.T) {
 	if codex != nil {
 		t.Fatal("the signed-out app-server is replaced")
 	}
-	if starts := codexStarts(log); starts != 1 {
+	if starts := codexUsageStarts(log); starts != 1 {
 		t.Fatalf("%d starts", starts)
 	}
 }
@@ -392,7 +392,7 @@ func TestRefreshRecoversAfterACachedAuthenticationFailure(t *testing.T) {
 	if !ok || available.Report.Primary == nil || available.Report.Primary.RemainingPercent != 71 {
 		t.Fatalf("%#v", second)
 	}
-	if starts := codexStarts(log); starts != 2 {
+	if starts := codexUsageStarts(log); starts != 2 {
 		t.Fatalf("%d starts", starts)
 	}
 
@@ -422,7 +422,7 @@ IFS= read -r line
 		if codex != nil {
 			t.Fatalf("poll %d: the client was kept", poll)
 		}
-		if starts := codexStarts(log); starts != poll {
+		if starts := codexUsageStarts(log); starts != poll {
 			t.Fatalf("poll %d: %d starts", poll, starts)
 		}
 	}
