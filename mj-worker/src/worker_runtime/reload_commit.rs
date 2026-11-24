@@ -93,6 +93,7 @@ pub(super) fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)?;
+        mj_core::config::sync_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
@@ -180,6 +181,14 @@ pub fn apply_committed_reload(
         std::env::current_dir()?.join(home)
     };
     let home = home.as_path();
+    if std::fs::symlink_metadata(home).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        std::fs::remove_file(home).with_context(|| {
+            format!(
+                "unlink earlier session profile home link {}",
+                home.display()
+            )
+        })?;
+    }
     directory(home)?;
     for clear in &manifest.clear_paths {
         let relative = relative(clear)?;
@@ -245,6 +254,7 @@ pub fn apply_committed_reload(
         mj_core::credentials::remove_github_token(&root.join("github-token"))?;
     }
     std::fs::remove_file(root.join(PENDING_RELOAD_FILE))?;
+    mj_core::config::sync_directory(root)?;
     std::fs::remove_dir_all(candidate)?;
     Ok(manifest)
 }
@@ -320,6 +330,47 @@ mod tests {
             candidate_id: "candidate".into(),
             git_setup_name: Some("harness-git-candidate".into()),
         }
+    }
+
+    #[test]
+    fn reload_commit_replaces_legacy_home_link_without_mutating_external_profile() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pending = fixture(root);
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("config.toml"), "user profile").unwrap();
+        std::fs::write(external.path().join("history.jsonl"), "user history").unwrap();
+        std::fs::remove_dir_all(root.join("home")).unwrap();
+        symlink(external.path(), root.join("home")).unwrap();
+        commit_pending_reload(root, &pending).unwrap();
+        apply_committed_reload(root, &pending).unwrap();
+        assert!(
+            !std::fs::symlink_metadata(root.join("home"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("home"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::read(root.join("home/config.toml")).unwrap(),
+            b"destination"
+        );
+        assert_eq!(
+            std::fs::read(external.path().join("config.toml")).unwrap(),
+            b"user profile"
+        );
+        assert_eq!(
+            std::fs::read(external.path().join("history.jsonl")).unwrap(),
+            b"user history"
+        );
     }
 
     #[test]

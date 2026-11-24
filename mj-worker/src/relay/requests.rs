@@ -202,9 +202,14 @@ impl DurableRelay {
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted,
                 operation_id,
                 expected_store_id,
-            } => match self.release_in_place_move_dispatch(operation_id, expected_store_id)? {
+            } => match self.release_in_place_move_dispatch(
+                operation_id,
+                expected_store_id,
+                *expected_harness_restarted,
+            )? {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },

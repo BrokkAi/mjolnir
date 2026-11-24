@@ -659,6 +659,7 @@ impl WorkerLaunchConfig {
             file.write_all(&body)?;
             file.sync_all()?;
             std::fs::rename(&temporary, path)?;
+            crate::config::sync_directory(parent)?;
             Ok(())
         })();
         if result.is_err() && created {

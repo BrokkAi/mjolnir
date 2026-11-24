@@ -2783,7 +2783,8 @@ impl Controller {
                             Some(InPlaceReloadPhase::Committed) => bail!("in-place Move cancellation is waiting for the committed harness reload to start or fail"),
                             _ => (),
                         }
-                        let started = hold.is_some_and(|hold| hold.harness_restarted || matches!(hold.reload_phase, Some(InPlaceReloadPhase::Started)));
+                        let started = hold.as_ref().is_some_and(|hold| hold.harness_restarted || matches!(hold.reload_phase, Some(InPlaceReloadPhase::Started)))
+                            || (hold.is_none() && self.committed_in_place_launch(&operation, executor)?.is_some());
                         let reopen_admission = self.source_has_request_queue(&id);
                         if started {
                             let destination_id = operation.selection.profile_id.as_ref().unwrap_or(&operation.source_profile_id).clone();
@@ -2807,7 +2808,7 @@ impl Controller {
                         }
                         // Cancellation preserves existing queued work. No new
                         // continuation is admitted and no queued prompt is discarded.
-                        conn.client.release_in_place_move_dispatch(&operation.operation_id, &expected_store_id).await?;
+                        conn.client.release_in_place_move_dispatch_checked(&operation.operation_id, &expected_store_id, Some(started)).await?;
                         if reopen_admission { conn.set_subagent_admission(true).await?; }
                         operation.in_place_expected_store_id = None;
                         operation.in_place_held_command_ids.clear();
@@ -3899,7 +3900,13 @@ impl Controller {
                                 }
                             }
                         }
-                        let hold_released = match conn.client.release_in_place_move_dispatch(&operation.operation_id, &expected_store_id).await {
+                        let expected_restarted = match reload_progress {
+                            InPlaceReloadProgress::BeforeCommit => Some(false),
+                            InPlaceReloadProgress::Started => Some(true),
+                            InPlaceReloadProgress::FailedAfterCommit => None,
+                            InPlaceReloadProgress::Unknown => unreachable!(),
+                        };
+                        let hold_released = match conn.client.release_in_place_move_dispatch_checked(&operation.operation_id, &expected_store_id, expected_restarted).await {
                             Ok(()) => true,
                             Err(error) => {
                                 tracing::warn!(session_id = %id, %error, "could not release in-place Move hold after settlement");

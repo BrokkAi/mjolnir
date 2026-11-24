@@ -59,6 +59,12 @@ A user or test can observe this working in four ways: rejecting an in-place Move
 - Observation: Calling `install_build_cache_shim` during `StageCandidate` mutates live `mbx` config/shims and on transient `mbx` errors calls `disable_mbx_cache_shims` to remove the live source session's shims before acceptance.
   Evidence: Pre-push review round 1 caught this live mutation. Removed `install_build_cache_shim` from `StageCandidate`; in-place Move reuses the running environment's already-staged `mbx` binary/config/shims and Phase B (`link_build_cache_configuration`) links the destination harness's `XDG_CONFIG_HOME/mbx/config.toml` after commit.
 
+- Observation: Reading `status().in_place_move_hold` and subsequently calling an unconditional `ReleaseInPlaceMoveDispatch` creates a TOCTOU race if an earlier reload finishes between `status()` and release (both on cancellation recovery and on a retry that fails before issuing its own restart RPC).
+  Evidence: Pre-push review round 2 caught both paths. Added backward-compatible `expected_harness_restarted: Option<bool>` to `RelayRequest::ReleaseInPlaceMoveDispatch` and enforced `Committed`/`FailedAfterCommit`/restart-state matching under the single serialized relay lock, so pre-commit callers (`Some(false)`) can never release a hold whose harness committed or started behind their back.
+
+- Observation: Syncing only the temporary file before `rename` does not make the directory entry durable across power loss, and removing `pending-reload.json` without syncing `<worker_root>` before deleting the candidate directory allows power loss to leave `pending-reload.json` pointing at a deleted candidate; additionally, retained local sessions from earlier releases can have a legacy symlink at `target_profile_home`.
+  Evidence: Pre-push review round 2 caught both. Added `sync_dir` after atomic rename and between removing `pending-reload.json` and removing the candidate directory, and matched `install_worker_profile_files` by unlinking a top-level symlink at `target_profile_home` before creating the isolated `0700` directory.
+
 
 ## Decision Log
 
@@ -291,6 +297,13 @@ In `mj-core/src/relay.rs`:
     pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL;
 
 In `mj-core/src/relay/protocol.rs`:
+
+    RelayRequest::ReleaseInPlaceMoveDispatch {
+        operation_id: String,
+        expected_store_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_harness_restarted: Option<bool>,
+    }
 
     RelayRequest::RestartHarnessInPlace {
         operation_id: String,

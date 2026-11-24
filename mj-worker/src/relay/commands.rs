@@ -639,6 +639,7 @@ impl DurableRelay {
         &mut self,
         operation_id: &str,
         expected_store_id: &str,
+        expected_harness_restarted: Option<bool>,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
         if let Some(error) = self.verify_expected_store_id(expected_store_id) {
             return Ok(Err(error));
@@ -648,11 +649,49 @@ impl DurableRelay {
                 RelayErrorCode::InvalidState,
                 "cannot release in-place move dispatch hold while an in-place harness restart is in progress",
                 true,
-                None,
+                Some(RelayErrorDetail::ReloadInProgress {
+                    operation_id: operation_id.to_owned(),
+                }),
             )));
         }
         match &self.snapshot.in_place_move_hold {
             Some(hold) if hold.operation_id == operation_id => {
+                use mj_core::relay::InPlaceReloadPhase;
+                if matches!(hold.reload_phase, Some(InPlaceReloadPhase::Committed)) {
+                    return Ok(Err(relay_protocol_error(
+                        RelayErrorCode::InvalidState,
+                        "cannot release in-place move dispatch hold while a committed harness reload is starting",
+                        true,
+                        Some(RelayErrorDetail::ReloadInProgress {
+                            operation_id: operation_id.to_owned(),
+                        }),
+                    )));
+                }
+                if let Some(expected) = expected_harness_restarted {
+                    if !expected
+                        && let Some(InPlaceReloadPhase::FailedAfterCommit { message }) =
+                            &hold.reload_phase
+                    {
+                        return Ok(Err(relay_protocol_error(
+                            RelayErrorCode::Internal,
+                            message.clone(),
+                            false,
+                            Some(RelayErrorDetail::ReloadFailedAfterCommit {
+                                operation_id: operation_id.to_owned(),
+                            }),
+                        )));
+                    }
+                    let actual_restarted = hold.harness_restarted
+                        || matches!(hold.reload_phase, Some(InPlaceReloadPhase::Started));
+                    if actual_restarted != expected {
+                        return Ok(Err(relay_protocol_error(
+                            RelayErrorCode::InvalidState,
+                            "in-place move harness reload state changed before releasing dispatch hold",
+                            true,
+                            None,
+                        )));
+                    }
+                }
                 self.snapshot.in_place_move_hold = None;
                 self.persist_snapshot()?;
                 self.promote_next_queued_command()?;

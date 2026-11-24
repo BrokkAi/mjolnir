@@ -806,17 +806,18 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
 }
 
 #[test]
-fn in_place_move_releases_dispatch_after_post_hold_error() {
-    if !isolate_in_place_move_dispatch_test("in_place_move_releases_dispatch_after_post_hold_error")
-    {
+fn in_place_move_keeps_dispatch_hold_when_cleanup_restart_state_disagrees() {
+    if !isolate_in_place_move_dispatch_test(
+        "in_place_move_keeps_dispatch_hold_when_cleanup_restart_state_disagrees",
+    ) {
         return;
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
     let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
     let source_relay = seed_source_relay(&fixture.worker_root);
     let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
-    // An incomplete quota Move record reaches the queue step after taking
-    // the hold. Its missing continuation action makes that step fail.
+    // An inconsistent retry believes the harness restarted, while the worker
+    // still holds pre-commit. Cleanup must preserve the hold and store fence.
     operation.in_place_harness_restarted = true;
     operation.quota_stop_reason = Some("weekly quota exhausted".into());
     operation.queue = ResumeQueueDisposition::Start;
@@ -845,6 +846,12 @@ fn in_place_move_releases_dispatch_after_post_hold_error() {
                 format!("{error:#}").contains("quota Move has no saved continuation action"),
                 "{error:#}"
             );
+            assert!(operation.in_place_expected_store_id.is_some());
+            let outcome = fixture
+                .controller
+                .finish_move_result(&mut operation, Err(error), &recording_executor())
+                .unwrap();
+            assert_eq!(outcome.outcome, "interrupted");
             channels.shutdown.shutdown().await.unwrap();
         });
     assert_eq!(
@@ -852,7 +859,7 @@ fn in_place_move_releases_dispatch_after_post_hold_error() {
         "hold_in_place_move_dispatch\nrelease_in_place_move_dispatch\n"
     );
     let relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
-    assert!(relay.operational_state().in_place_move_hold.is_none());
+    assert!(relay.operational_state().in_place_move_hold.is_some());
 }
 
 #[test]

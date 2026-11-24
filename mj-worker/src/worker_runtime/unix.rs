@@ -5571,6 +5571,7 @@ mod preparation_tests {
             &mut writer,
             "release",
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted: None,
                 operation_id: "move".into(),
                 expected_store_id: store_id,
             },
@@ -5668,6 +5669,7 @@ mod preparation_tests {
             &mut writer,
             "release",
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted: None,
                 operation_id: "move-cred".into(),
                 expected_store_id: store_id,
             },

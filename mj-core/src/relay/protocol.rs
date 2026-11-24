@@ -318,6 +318,8 @@ pub enum RelayRequest {
     /// Idempotently release an in-place Move dispatch hold for `operation_id`
     /// on `expected_store_id` and resume queue promotion. Protocol 81.
     ReleaseInPlaceMoveDispatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_harness_restarted: Option<bool>,
         operation_id: String,
         expected_store_id: String,
     },
