@@ -128,7 +128,8 @@ struct Flight {
 enum FlightState {
     Running,
     Done(Answer),
-    /// The inspection ended without an answer, by panic. Waiters ask again.
+    /// The inspection left no answer for these waiters (it panicked, its caller
+    /// was cancelled, or a fresher answer replaced it). Waiters ask again.
     Abandoned,
 }
 
@@ -140,8 +141,9 @@ impl Flight {
 }
 
 /// Held by the caller that owns an [`Resolution::InFlight`] slot. Dropping it
-/// without [`Self::finish`] (a panic in the inspection) frees the slot and
-/// wakes the waiters, so a pending slot cannot outlive its owner.
+/// without [`Self::finish`] (a panic in the inspection, or a cancelled owner)
+/// frees the slot and wakes the waiters, so a pending slot cannot outlive its
+/// owner.
 struct FlightOwner<'a> {
     key: &'a str,
     flight: Arc<Flight>,
@@ -149,22 +151,29 @@ struct FlightOwner<'a> {
 }
 
 impl FlightOwner<'_> {
-    /// Publish `result` to the waiters, and to later callers unless a fresher
-    /// answer already replaced this slot.
+    /// Publish `result` to the waiters and to later callers. If a fresher
+    /// answer replaced this slot meanwhile, publish nothing: the waiters are
+    /// told to ask again, and find the fresher answer in the map instead of
+    /// this older one.
     fn finish(mut self, result: Answer) {
         self.finished = true;
         let mut resolutions = lock_resolutions();
-        if matches!(
+        let current = matches!(
             resolutions.get(self.key),
             Some(Resolution::InFlight(flight)) if Arc::ptr_eq(flight, &self.flight)
-        ) {
+        );
+        if current {
             resolutions.insert(
                 self.key.to_owned(),
                 Resolution::Ready(Instant::now(), result.clone()),
             );
         }
         drop(resolutions);
-        self.flight.settle(FlightState::Done(result));
+        self.flight.settle(if current {
+            FlightState::Done(result)
+        } else {
+            FlightState::Abandoned
+        });
     }
 }
 
@@ -221,10 +230,13 @@ fn inspect(
     let key = format!("{}|{settings:?}", host.key());
     if freshness == Freshness::Fresh {
         let inspection = inspect_host(host, settings, executor);
-        lock_resolutions().insert(
-            key,
-            Resolution::Ready(Instant::now(), recorded(&inspection)),
-        );
+        // A cancelled caller's failure says nothing about the host.
+        if inspection.is_ok() || !executor.cancellation_requested() {
+            lock_resolutions().insert(
+                key,
+                Resolution::Ready(Instant::now(), recorded(&inspection)),
+            );
+        }
         return inspection;
     }
     loop {
@@ -248,14 +260,22 @@ fn inspect(
                         finished: false,
                     };
                     let inspection = inspect_host(host, settings, executor);
-                    owner.finish(recorded(&inspection));
+                    // A cancelled caller's failure says nothing about the
+                    // host: abandon the flight so waiters ask it themselves,
+                    // and never remember that error.
+                    if inspection.is_err() && executor.cancellation_requested() {
+                        drop(owner);
+                    } else {
+                        owner.finish(recorded(&inspection));
+                    }
                     return inspection;
                 }
             }
         };
         match await_flight(&flight, executor)? {
             Some(answer) => return answered(answer),
-            // The owner panicked: ask again, as a new owner or a new waiter.
+            // The owner left no answer: ask again, as a new owner or a new
+            // waiter, and see any fresher answer that replaced its slot.
             None => continue,
         }
     }
@@ -2652,6 +2672,15 @@ mod tests {
         inner: &'a ProbeExecutor,
         cancelled: bool,
         panic_after_gate: bool,
+        /// Cancelled once the gate opens: the caller is cancelled while its
+        /// inspection is running, and the discovery command then fails.
+        cancel_after_gate: bool,
+    }
+
+    impl GatedExecutor<'_> {
+        fn is_cancelled(&self) -> bool {
+            self.cancelled || (self.cancel_after_gate && *self.gate.open.lock().unwrap())
+        }
     }
 
     impl CommandExecutor for GatedExecutor<'_> {
@@ -2660,11 +2689,11 @@ mod tests {
         }
 
         fn cancellation_requested_without_deadline(&self) -> bool {
-            self.cancelled
+            self.is_cancelled()
         }
 
         fn cancellation_requested(&self) -> bool {
-            self.cancelled
+            self.is_cancelled()
         }
 
         fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -2690,6 +2719,9 @@ mod tests {
                 }
                 drop(open);
                 assert!(!self.panic_after_gate, "the host inspection panicked");
+                if self.cancel_after_gate {
+                    anyhow::bail!("cancelled while inspecting the host");
+                }
             }
             self.inner.execute(command)
         }
@@ -2719,6 +2751,7 @@ mod tests {
             inner: &probe,
             cancelled: false,
             panic_after_gate: false,
+            cancel_after_gate: false,
         };
         let waiter = owner_ref(&gate, &probe);
         let cancelled = GatedExecutor {
@@ -2760,6 +2793,7 @@ mod tests {
             inner,
             cancelled: false,
             panic_after_gate: false,
+            cancel_after_gate: false,
         }
     }
 
@@ -2827,9 +2861,13 @@ mod tests {
         let open_gate = Gate::new();
         open_gate.open();
         let slow = owner_ref(&gate, &stale);
+        let joined = owner_ref(&gate, &stale);
         std::thread::scope(|scope| {
             let memoized = scope.spawn(|| inspected_directory(&slow));
             gate.wait_until_started(1);
+            // A session that joined the slow inspection while it ran.
+            let waiter = scope.spawn(|| inspected_directory(&joined));
+            std::thread::sleep(Duration::from_millis(300));
             // The settings screen reads the host while the session's
             // inspection is still running, and its answer wins.
             let screen = inspect(
@@ -2849,11 +2887,73 @@ mod tests {
                 memoized.join().unwrap().unwrap(),
                 Some(PathBuf::from("/mnt/fast/mbx-cache"))
             );
+            // The one that joined it is not handed that older answer: it
+            // looks again and finds the fresher one.
+            assert_eq!(
+                waiter.join().unwrap().unwrap(),
+                Some(PathBuf::from("/mnt/repaired"))
+            );
         });
+        assert_eq!(gate.started(), 1, "the waiter did not ask the host itself");
         assert_eq!(
             inspected_directory(&fresh).unwrap(),
             Some(PathBuf::from("/mnt/repaired")),
             "the slow inspection did not overwrite the fresher answer"
         );
+    }
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
+    fn a_cancelled_inspection_is_never_remembered_and_its_waiters_ask_the_host_themselves() {
+        let _isolated = isolated();
+        let probe = ProbeExecutor::new(&native_host());
+        let gate = Gate::new();
+        let healthy = owner_ref(&gate, &probe);
+        let cancelled_owner = GatedExecutor {
+            cancel_after_gate: true,
+            ..owner_ref(&gate, &probe)
+        };
+        std::thread::scope(|scope| {
+            let owner = scope.spawn(|| inspected_directory(&cancelled_owner));
+            gate.wait_until_started(1);
+            let waiter = scope.spawn(|| inspected_directory(&healthy));
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!waiter.is_finished(), "the waiter waits for the owner");
+            gate.open();
+            let error = owner.join().unwrap().unwrap_err();
+            assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+            // The waiter was not handed the owner's cancellation: it asked
+            // the healthy host itself.
+            assert_eq!(
+                waiter.join().unwrap().unwrap(),
+                Some(PathBuf::from("/mnt/fast/mbx-cache"))
+            );
+        });
+        assert_eq!(gate.started(), 2);
+
+        // With nobody waiting, the cancellation is not cached for later
+        // callers either, on the memoized path or the fresh one.
+        for freshness in [Freshness::Memoized, Freshness::Fresh] {
+            lock_resolutions().clear();
+            assert!(
+                inspect(
+                    &ssh_host(),
+                    &TargetBuildCache::default(),
+                    freshness,
+                    &cancelled_owner
+                )
+                .is_err()
+            );
+            assert!(
+                lock_resolutions().is_empty(),
+                "{freshness:?} remembered a cancelled caller's failure"
+            );
+            assert_eq!(
+                inspected_directory(&healthy).unwrap(),
+                Some(PathBuf::from("/mnt/fast/mbx-cache"))
+            );
+        }
     }
 }
