@@ -12,6 +12,7 @@ import tarfile
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 
 import pilot_run as pilot
 import audit
@@ -1078,6 +1079,95 @@ if not (attempt / "recover").exists():
         exposed = pilot_cache_probe.attest(checkout, pin, pin, cache)
         self.assertFalse(exposed["passed"])
         self.assertEqual(exposed["snapshots"]["later.bundle"]["outside_pin"], [later])
+
+    def test_concurrent_matrix_orders_reviewers_after_writers_and_drains_on_halt(self):
+        import threading
+
+        groups = pilot.select_jobs(self.manifest, diff="mjolnir/first", arms=["N", "G", "R"])
+        started = []
+        done = set()
+        lock = threading.Lock()
+        active_count = 0
+        max_active = 0
+        writer_barrier = threading.Barrier(2, timeout=5)
+        reviewer_order_ok = True
+
+        def complete(job):
+            with lock:
+                return job["job"] in done
+
+        def execute(job):
+            nonlocal active_count, max_active, reviewer_order_ok
+            key = job["job"]
+            with lock:
+                active_count += 1
+                max_active = max(max_active, active_count)
+                started.append(key)
+                if job["kind"] == "reviewer" and job["arm"] != "N":
+                    writer_key = f"{job['diff']}/{job['arm']}/r{job['replicate']}/writer"
+                    if writer_key not in done:
+                        reviewer_order_ok = False
+            try:
+                if job["kind"] == "writer":
+                    writer_barrier.wait()
+                with lock:
+                    done.add(key)
+                return "done"
+            finally:
+                with lock:
+                    active_count -= 1
+
+        with redirect_stdout(StringIO()):
+            rc = pilot.run_matrix(self.root, groups, "codex", complete, execute, FakeQuota("90"), concurrency=4)
+        self.assertEqual(rc, 0)
+        self.assertTrue(reviewer_order_ok)
+        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(len(done), len(groups["mjolnir/first"]))
+
+        # Verify halt drains already-running peers cleanly without launching dependents.
+        done.clear()
+        started.clear()
+        release_peer = threading.Event()
+        peer_finished = threading.Event()
+        both_started = threading.Barrier(2, timeout=5)
+
+        def execute_halt(job):
+            key = job["job"]
+            with lock:
+                started.append(key)
+            if key == "mjolnir/first/G/r1/writer":
+                both_started.wait()
+                return "interrupted: test"
+            if key == "mjolnir/first/R/r1/writer":
+                both_started.wait()
+                release_peer.wait(timeout=5)
+                with lock:
+                    done.add(key)
+                peer_finished.set()
+                return "done"
+            with lock:
+                done.add(key)
+            return "done"
+
+        def trigger_release():
+            both_started_check = 0
+            while both_started_check < 100 and not peer_finished.is_set():
+                if "mjolnir/first/G/r1/writer" in started and "mjolnir/first/R/r1/writer" in started:
+                    release_peer.set()
+                    return
+                both_started_check += 1
+                threading.Event().wait(0.01)
+
+        releaser = threading.Thread(target=trigger_release, daemon=True)
+        releaser.start()
+        with redirect_stdout(StringIO()):
+            rc = pilot.run_matrix(self.root, groups, "codex", complete, execute_halt, FakeQuota("90"), concurrency=2)
+        releaser.join(timeout=5)
+        self.assertEqual(rc, 1)
+        self.assertTrue(peer_finished.is_set())
+        self.assertIn("mjolnir/first/R/r1/writer", done)
+        self.assertNotIn("mjolnir/first/G/r1/reviewer-1", started)
+        self.assertTrue((self.root / "active-diff.json").exists())
 
 
 if __name__ == "__main__":

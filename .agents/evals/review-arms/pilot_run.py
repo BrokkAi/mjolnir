@@ -1,5 +1,7 @@
 """Run a frozen RQL census pilot matrix, one admitted diff at a time."""
 import argparse
+import concurrent.futures
+from contextlib import nullcontext
 import fcntl
 import hashlib
 import json
@@ -93,8 +95,10 @@ def retained_attempts(root, job):
     return receipts
 
 
-def run_matrix(root, diff_jobs, profile, complete, execute, quota=driver.quota_hold):
+def run_matrix(root, diff_jobs, profile, complete, execute, quota=driver.quota_hold, *, concurrency=1):
     """A persisted admission owns the next slot until all its selected jobs validate."""
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
     active = root / "active-diff.json"
     if active.exists():
         previous = read_json(active)
@@ -111,24 +115,82 @@ def run_matrix(root, diff_jobs, profile, complete, execute, quota=driver.quota_h
                 print(json.dumps({"diff": key, "state": "held", "reason": hold}), flush=True)
                 return 1
             driver.save(active, {"diff": key, "jobs": [job["job"] for job in jobs]})
-            for job in sorted(jobs, key=lambda job: job["kind"] != "writer"):
-                if complete(job):
-                    continue
-                state = execute(job)
-                print(json.dumps({"job": job["job"], "state": state}), flush=True)
-                if state == "retained-failure":
-                    remaining = [member for member in jobs if not complete(member)]
-                    if hold := admission(profile, remaining, quota):
-                        print(json.dumps({"diff": key, "state": "held", "reason": hold,
-                                          "retained_attempts": retained_attempts(root, job)}), flush=True)
-                        return 1
-                    state = execute(job)
-                    print(json.dumps({"job": job["job"], "state": state}), flush=True)
-                    print(json.dumps({"job": job["job"], "retained_attempts": retained_attempts(root, job)}), flush=True)
-                if state != "done":
-                    return 1
-                if not complete(job):
-                    raise RuntimeError(f"{job['job']} completed without valid artifacts")
+            ordered = sorted(jobs, key=lambda job: job["kind"] != "writer")
+            jobs_by_id = {job["job"]: job for job in jobs}
+            retry_queue = []
+            retried = set()
+            in_flight = {}
+            halted = False
+            error = None
+
+            def ready(job):
+                if job["kind"] == "writer" or job["arm"] == "N":
+                    return True
+                writer = jobs_by_id.get(f"{job['diff']}/{job['arm']}/r{job['replicate']}/writer")
+                return writer is None or bool(complete(writer))
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                while True:
+                    if not halted:
+                        while len(in_flight) < concurrency:
+                            active_ids = {member["job"] for member in in_flight.values()}
+                            next_job = None
+                            while retry_queue:
+                                candidate = retry_queue.pop(0)
+                                if candidate["job"] not in active_ids and not complete(candidate):
+                                    next_job = candidate
+                                    break
+                            if next_job is None:
+                                for candidate in ordered:
+                                    if (candidate["job"] not in active_ids
+                                            and not complete(candidate)
+                                            and ready(candidate)):
+                                        next_job = candidate
+                                        break
+                            if next_job is None:
+                                break
+                            in_flight[pool.submit(execute, next_job)] = next_job
+                    if not in_flight:
+                        break
+                    done_futures, _ = concurrent.futures.wait(
+                        in_flight, return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for future in done_futures:
+                        job = in_flight.pop(future)
+                        try:
+                            state = future.result()
+                        except Exception as exc:
+                            halted = True
+                            if error is None:
+                                error = exc
+                            continue
+                        print(json.dumps({"job": job["job"], "state": state}), flush=True)
+                        if job["job"] in retried:
+                            print(json.dumps({"job": job["job"], "retained_attempts": retained_attempts(root, job)}),
+                                  flush=True)
+                        if state == "retained-failure" and job["job"] not in retried:
+                            if halted:
+                                continue
+                            remaining = [member for member in jobs if not complete(member)]
+                            if hold := admission(profile, remaining, quota):
+                                print(json.dumps({"diff": key, "state": "held", "reason": hold,
+                                                  "retained_attempts": retained_attempts(root, job)}), flush=True)
+                                halted = True
+                                continue
+                            retried.add(job["job"])
+                            retry_queue.insert(0, job)
+                            continue
+                        if state != "done":
+                            halted = True
+                            continue
+                        if not complete(job):
+                            halted = True
+                            if error is None:
+                                error = RuntimeError(f"{job['job']} completed without valid artifacts")
+            if error is not None:
+                raise error
+            if halted:
+                return 1
         active.unlink(missing_ok=True)
     return 0
 
@@ -313,48 +375,53 @@ class Pilot:
         self.gold = (driver.SCRIPTS / "brief/rql-census/menu-steps-cases.md").read_text().strip()
         self.bug_ids = {row["id"].casefold() for row in manifest["diffs"]}
         self.gate = threading.Semaphore(1)
+        self._lock = threading.RLock()
         self.messages = {}
         self.captures = {}
         self.attested = set()
 
+    def _state_lock(self):
+        return self._lock if hasattr(self, "_lock") else nullcontext()
+
     def render(self, job):
-        row = self.diffs[job["diff"]]
-        repository(self.config, row, self.args)
-        bug = {"id": row["id"], "intro_commit": row["intro"], "base_commit": row["base"]}
-        params = {"path": job_path(self.args.run_root, job), "bug": bug, "profile": self.args.profile}
-        inputs = dict(self.common, rql_tools=expected_tools(tool_arm(job)))
-        if tool_arm(job) != "none":
-            if not self.engine_identity:
-                raise ValueError("an RQL writer requires an admitted engine identity")
-            inputs.update(self.engine_identity)
-        if job["kind"] == "writer":
-            if row["key"] not in self.messages:
-                self.messages[row["key"]] = driver.commit_message(bug)
-            # Replacing both placeholders in one pass leaves source text and
-            # RQL reference examples untouched.
-            replacements = {"base": row["base"], "message": self.messages[row["key"]]}
-            prompt = re.sub(r"\{(base|message)\}", lambda m: replacements[m[1]], self.prompts[job["arm"]])
-        else:
-            brief = None
-            if job["arm"] != "N":
-                writer = dict(job, kind="writer", job=f"{job['diff']}/{job['arm']}/r{job['replicate']}/writer")
-                accepted = self.complete(writer)
-                if not accepted:
-                    return None
-                brief = (job_path(self.args.run_root, writer) / "brief.md").read_text()
-                inputs.update(brief_sha256=accepted["brief_sha256"], writer_session_id=accepted["session_id"])
-            if row["key"] not in self.captures:
-                self.captures[row["key"]] = pilot_review.capture(bug)
-            task = driver.context_text(bug)
-            prompt = pilot_review.prompt_with_rubric(self.rubric, self.captures[row["key"]], task, brief)
-            inputs.update(review_rubric_sha256=digest(self.rubric),
-                          review_template_sha256=digest(pilot_review.TEMPLATE.encode()))
-        if self.gold and self.gold in prompt:
-            raise ValueError(f"{job['job']}: prompt contains the private menu-step cases")
-        if any(bug_id in prompt.casefold() for bug_id in self.bug_ids):
-            raise ValueError(f"{job['job']}: prompt contains a pilot bug id")
-        inputs["prompt_sha256"] = digest(prompt.encode())
-        return dict(params, inputs=inputs, prompt=prompt)
+        with self._state_lock():
+            row = self.diffs[job["diff"]]
+            repository(self.config, row, self.args)
+            bug = {"id": row["id"], "intro_commit": row["intro"], "base_commit": row["base"]}
+            params = {"path": job_path(self.args.run_root, job), "bug": bug, "profile": self.args.profile}
+            inputs = dict(self.common, rql_tools=expected_tools(tool_arm(job)))
+            if tool_arm(job) != "none":
+                if not self.engine_identity:
+                    raise ValueError("an RQL writer requires an admitted engine identity")
+                inputs.update(self.engine_identity)
+            if job["kind"] == "writer":
+                if row["key"] not in self.messages:
+                    self.messages[row["key"]] = driver.commit_message(bug)
+                # Replacing both placeholders in one pass leaves source text and
+                # RQL reference examples untouched.
+                replacements = {"base": row["base"], "message": self.messages[row["key"]]}
+                prompt = re.sub(r"\{(base|message)\}", lambda m: replacements[m[1]], self.prompts[job["arm"]])
+            else:
+                brief = None
+                if job["arm"] != "N":
+                    writer = dict(job, kind="writer", job=f"{job['diff']}/{job['arm']}/r{job['replicate']}/writer")
+                    accepted = self.complete(writer)
+                    if not accepted:
+                        return None
+                    brief = (job_path(self.args.run_root, writer) / "brief.md").read_text()
+                    inputs.update(brief_sha256=accepted["brief_sha256"], writer_session_id=accepted["session_id"])
+                if row["key"] not in self.captures:
+                    self.captures[row["key"]] = pilot_review.capture(bug)
+                task = driver.context_text(bug)
+                prompt = pilot_review.prompt_with_rubric(self.rubric, self.captures[row["key"]], task, brief)
+                inputs.update(review_rubric_sha256=digest(self.rubric),
+                              review_template_sha256=digest(pilot_review.TEMPLATE.encode()))
+            if self.gold and self.gold in prompt:
+                raise ValueError(f"{job['job']}: prompt contains the private menu-step cases")
+            if any(bug_id in prompt.casefold() for bug_id in self.bug_ids):
+                raise ValueError(f"{job['job']}: prompt contains a pilot bug id")
+            inputs["prompt_sha256"] = digest(prompt.encode())
+            return dict(params, inputs=inputs, prompt=prompt)
 
     def complete(self, job):
         path = job_path(self.args.run_root, job)
@@ -488,7 +555,8 @@ class Pilot:
             if interruption := brief_driver.interrupt_on_rql_quota(params, read_json(launch)["session_id"]):
                 state = interruption
         if params["attest_cache"] and (path / "cache-attestation.json").exists():
-            self.attested.add(job["kind"])
+            with self._state_lock():
+                self.attested.add(job["kind"])
         self.retry_pending_revoke(path / "pending-revoke.json")
         return state
 
@@ -510,7 +578,11 @@ def main():
                         help="accepted for compatibility; every writer and reviewer Git cache is attested")
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=Path("/mnt/optane/tmp/rust10/bifrost-src"))
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="max concurrent jobs within one admitted diff (default: 1)")
     args = parser.parse_args()
+    if args.concurrency < 1:
+        parser.error("--concurrency must be at least 1")
     config_dir = driver.use_named_instance(args.instance)
     args.manifest, args.run_root = args.manifest.resolve(), args.run_root.resolve()
     raw = args.manifest.read_bytes()
@@ -549,7 +621,8 @@ def main():
             runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
             try:
                 runner.retry_pending_revokes()
-                return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
+                return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute,
+                                  concurrency=args.concurrency)
             finally:
                 subprocess.run(driver.mj_invocation("daemon", "stop"), check=True)
 
