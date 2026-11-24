@@ -4244,50 +4244,48 @@ fn interrupted_local_suspend_fixture(
 }
 
 #[cfg(unix)]
+#[derive(Default)]
+struct CancelOnWorkerProbe(std::sync::atomic::AtomicBool);
+
+#[cfg(unix)]
+impl CommandExecutor for CancelOnWorkerProbe {
+    fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        if command.purpose == "probe Mjolnir worker daemon liveness" {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("cancelled during worker observation");
+        }
+        ProcessExecutor.execute(command)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin_without_deadline(command, input)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn pause_deadline(&self) -> targets::DeadlinePause {
+        targets::DeadlinePause::none()
+    }
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() {
     use mj_core::worker_suspend::{self as wire, SuspendReceipt};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[derive(Default)]
-    struct CancelCaptureStartup(AtomicBool);
-
-    impl CommandExecutor for CancelCaptureStartup {
-        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
-            if command.purpose == "probe Mjolnir worker daemon liveness" {
-                self.0.store(true, Ordering::SeqCst);
-                anyhow::bail!("cancelled during CheckpointOnly startup");
-            }
-            ProcessExecutor.execute(command)
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &CommandSpec,
-        ) -> Result<targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> Result<targets::CommandOutput> {
-            ProcessExecutor.execute_with_stdin_without_deadline(command, input)
-        }
-
-        fn cancellation_requested(&self) -> bool {
-            self.0.load(Ordering::SeqCst)
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            self.cancellation_requested()
-        }
-
-        fn pause_deadline(&self) -> targets::DeadlinePause {
-            targets::DeadlinePause::none()
-        }
-    }
 
     const NAME: &str = "interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel";
     const SESSION_ID: &str = "interrupted-parked-raw-suspend";
@@ -4325,7 +4323,7 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
 
     // A parked session has no relay for the old close-recovery path to lease.
     let manager = crate::session_manager::spawn_session_manager().unwrap();
-    let startup = CancelCaptureStartup::default();
+    let startup = CancelOnWorkerProbe::default();
     let admission = crate::controller::test_support::session_admission(SESSION_ID);
     let error = controller
         .recover_interrupted_close_managed(
@@ -4423,6 +4421,57 @@ async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
     persist_controller_fixture(&mut controller);
     let operation = "origin-delta-suspend-refused".to_owned();
     wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let consent = mj_core::suspend_consent::SuspendConsent::default();
+    crate::database::save_suspension_intent(
+        &controller.state.sessions[SESSION_ID],
+        None,
+        Some(&consent),
+    )
+    .unwrap();
+
+    // Cancellation during the initial live-worker check is before REQUEST.
+    // Only the controller can persist the cancellation in this phase.
+    let startup = CancelOnWorkerProbe::default();
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &startup,
+            &manager.control,
+            &consent,
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
+    assert_eq!(
+        reason,
+        Some(LifecycleFailureReason::SuspendPending),
+        "{error:#}"
+    );
+    assert!(startup.cancellation_requested());
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, operation);
+    assert_eq!(restart.error.as_deref(), Some("suspend was cancelled"));
+    assert!(!worker_root.join(wire::REQUEST).exists());
+    controller
+        .record_failed_close(SESSION_ID, "cancelled suspend is pending", reason)
+        .unwrap();
+    let retained = crate::database::read_durable_session_record(SESSION_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.state, SessionState::Closing);
+    assert_eq!(
+        crate::database::load_closing_consent(SESSION_ID).unwrap(),
+        Some(consent.clone())
+    );
+    std::fs::remove_file(worker_root.join(wire::RESTART)).unwrap();
+
     wire::write(
         &worker_root,
         wire::REQUEST,
@@ -4437,8 +4486,6 @@ async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
         },
     )
     .unwrap();
-    let manager = crate::session_manager::spawn_session_manager().unwrap();
-    let admission = crate::controller::test_support::session_admission(SESSION_ID);
     let cancelled = targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)));
     let error = controller
         .recover_interrupted_close_managed(

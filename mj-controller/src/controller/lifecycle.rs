@@ -1207,9 +1207,12 @@ impl Controller {
                         return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
                     }
                 }
-                if !attempt.already_quiescent()
-                    && attempt.live_worker_mode(executor)? == Some(WorkerRunMode::Harness)
-                {
+                let live_stop = async {
+                    if attempt.already_quiescent()
+                        || attempt.live_worker_mode(executor)? != Some(WorkerRunMode::Harness)
+                    {
+                        return Ok(());
+                    }
                     if mj_core::test_hooks::test_hooks_enabled() {
                         mj_core::runtime::off_async_worker(|| {
                             mj_core::test_hooks::reach_test_hook("origin_delta_before_live_stop")
@@ -1262,7 +1265,8 @@ impl Controller {
                     }.await;
                     match stopped {
                         Ok(()) => {},
-                        Err(error) if executor.shutdown_interrupted() => return Err(error),
+                        Err(error) if executor.shutdown_interrupted()
+                            || (owning_suspend && user_cancelled()) => return Err(error),
                         Err(error) => match attempt.live_worker_mode(executor) {
                             Ok(None | Some(WorkerRunMode::CheckpointOnly)) => {},
                             Ok(Some(WorkerRunMode::Harness)) => {
@@ -1281,6 +1285,18 @@ impl Controller {
                             ))),
                         },
                     };
+                    Ok(())
+                }.await;
+                if let Err(error) = live_stop {
+                    if !owning_suspend || !user_cancelled() {
+                        return Err(error);
+                    }
+                    restart = restart_reason(attempt)?;
+                    // A failed observation may leave the original worker
+                    // draining. Its next owner must reload REQUEST and wait.
+                    if error.downcast_ref::<LifecycleFailureReason>() == Some(&LifecycleFailureReason::SuspendPending) {
+                        return Err(error);
+                    }
                 }
             }
             if restart.is_none() {
