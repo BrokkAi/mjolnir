@@ -1044,8 +1044,10 @@ impl RelayClient {
         .context("file caching task failed")?
     }
 
-    /// Recover all missing prompt blobs on one Bulk connection. Per-blob
-    /// failures are reported without preventing recovery of the other blobs.
+    /// Best-effort recovery caching for editing and resubmitting externally
+    /// queued prompts. A Bulk failure must never block session adoption or event
+    /// projection while Control is healthy. Stop the batch on a dead proxy;
+    /// report permanent per-blob failures and continue with the remaining blobs.
     pub async fn cache_attachments(
         &mut self,
         images: &[mj_core::attachment::AttachmentRef],
@@ -1115,7 +1117,6 @@ impl RelayClient {
         })).await;
         if let Err(error) = result {
             tracing::warn!(session_id = %self.session_id, %error, "could not cache attachments during recovery");
-            return Err(error);
         }
         Ok(())
     }

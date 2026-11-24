@@ -461,7 +461,11 @@ fn install_binary_at(
         }
         let command = |mode| {
             script(
-                targets::SshTrafficClass::Control,
+                if mode == "link" {
+                    targets::SshTrafficClass::Control
+                } else {
+                    targets::SshTrafficClass::Bulk
+                },
                 locator,
                 r#"set -eu
 source=$1; temporary=$2; destination=$3

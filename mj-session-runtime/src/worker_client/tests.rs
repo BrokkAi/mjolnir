@@ -6137,13 +6137,31 @@ for line in sys.stdin:
                 "text/plain".into(),
             )
             .unwrap();
-            let error = client
-                .cache_attachments(&[], std::slice::from_ref(&disconnected))
+            let warnings_before = captured.at(tracing::Level::WARN).len();
+            let skipped = mj_core::attachment::FileAttachmentRef::new(
+                b"skip-after-disconnect",
+                "skip-after-disconnect",
+                "text/plain".into(),
+            )
+            .unwrap();
+            client
+                .cache_attachments(&[], &[disconnected.clone(), skipped])
                 .await
-                .unwrap_err();
-            assert!(!RelayTransportDead::marks(&error));
-            assert!(!RelayTransportDead::marks_failed_handshake(&error));
-            assert!(format!("{error:#}").contains("bulk relay connection failed"));
+                .unwrap();
+            let warnings = captured.at(tracing::Level::WARN);
+            assert_eq!(warnings.len(), warnings_before + 1);
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("could not cache attachments during recovery")
+            );
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("bulk relay connection failed")
+            );
             assert!(client.abandoned.is_none());
             client.skills_state().await.unwrap();
             client.bulk_spec = Some(CommandSpec::new(
@@ -6154,13 +6172,25 @@ for line in sys.stdin:
             assert!(!RelayTransportDead::marks(&error));
             assert!(!RelayTransportDead::marks_failed_handshake(&error));
             assert!(format!("{error:#}").contains("bulk-handshake-diagnostic"));
-            let error = client
+            let warnings_before = captured.at(tracing::Level::WARN).len();
+            client
                 .cache_attachments(&[], &[disconnected])
                 .await
-                .unwrap_err();
-            assert!(!RelayTransportDead::marks(&error));
-            assert!(!RelayTransportDead::marks_failed_handshake(&error));
-            assert!(format!("{error:#}").contains("bulk-handshake-diagnostic"));
+                .unwrap();
+            let warnings = captured.at(tracing::Level::WARN);
+            assert_eq!(warnings.len(), warnings_before + 1);
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("could not cache attachments during recovery")
+            );
+            assert!(
+                warnings
+                    .last()
+                    .unwrap()
+                    .contains("bulk-handshake-diagnostic")
+            );
             assert!(client.abandoned.is_none());
             client.skills_state().await.unwrap();
             client.detach().await.unwrap();
