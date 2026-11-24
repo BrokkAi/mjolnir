@@ -30,6 +30,25 @@ use super::staging::upload_checkpoint_spec;
 /// snapshot cache directory.
 pub(super) const SNAPSHOT_CACHE_TEMP_PREFIX: &str = ".tmp-";
 
+/// Prefix of the placeholder `sha256` that records a retained suspend staging
+/// file on an SSH host. It is not 64 hex digits, so no lookup by a real digest
+/// returns it, while Destroy and the expiry sweep still find and remove it.
+const HOST_STAGING_SHA256_PREFIX: &str = "staging:";
+
+/// Portable remote SHA-256: reads the file named by `$p` and leaves its
+/// lowercase digest in `$actual`, exiting 45 when neither `sha256sum` nor
+/// `shasum` exists. Shared by cache verification and suspend promotion so the
+/// two never disagree on how a host hashes a file.
+const PORTABLE_SHA256_SNIPPET: &str = "\
+if command -v sha256sum >/dev/null 2>&1; then \
+    actual=$(sha256sum -- \"$p\" | awk '{print $1}'); \
+elif command -v shasum >/dev/null 2>&1; then \
+    actual=$(shasum -a 256 -- \"$p\" | awk '{print $1}'); \
+else \
+    exit 45; \
+fi; \
+actual=$(printf '%s' \"$actual\" | tr 'A-F' 'a-f'); ";
+
 /// Normalized host identity for `host_snapshot_cache.host`.
 ///
 /// Local targets share `"local"`; SSH targets serialize their `SshTarget`
@@ -146,8 +165,9 @@ fn create_private_file(path: &Path) -> Result<File> {
         .with_context(|| format!("create private temp snapshot cache file {}", path.display()))
 }
 
-/// Best-effort atomic publish of a verified suspend archive into the target
-/// host's snapshot cache.
+/// Best-effort atomic publish of a verified suspend archive from the daemon
+/// into the local host's snapshot cache. An SSH host already holds the archive
+/// and uses [`promote_host_snapshot_cache`] instead.
 ///
 /// Records the `host_snapshot_cache` row BEFORE writing the file, writes to a
 /// temporary file in the same directory, and renames to `<sha256>.hel.zip`.
@@ -159,11 +179,8 @@ pub fn publish_host_snapshot_cache_best_effort(
     locator: &TargetLocator,
     verified_archive: &Path,
     sha256: &str,
-    executor: &impl CommandExecutor,
 ) {
-    if let Err(error) =
-        publish_host_snapshot_cache(session_id, locator, verified_archive, sha256, executor)
-    {
+    if let Err(error) = publish_host_snapshot_cache(session_id, locator, verified_archive, sha256) {
         tracing::warn!(
             session_id,
             sha256,
@@ -174,7 +191,7 @@ pub fn publish_host_snapshot_cache_best_effort(
     }
 }
 
-/// Atomically publish `verified_archive` into `locator`'s host snapshot cache.
+/// Atomically publish `verified_archive` into the local host snapshot cache.
 ///
 /// Each row gets its own exclusive `<copy_id>/<sha256>.hel.zip` path so
 /// expiring an older row or destroying one session can never delete a file
@@ -184,7 +201,6 @@ pub fn publish_host_snapshot_cache(
     locator: &TargetLocator,
     verified_archive: &Path,
     sha256: &str,
-    executor: &impl CommandExecutor,
 ) -> Result<PathBuf> {
     let host_key = host_cache_key(locator);
     let written_at = Utc::now().to_rfc3339();
@@ -244,82 +260,245 @@ pub fn publish_host_snapshot_cache(
             notify_host_snapshot_cache_updated();
             Ok(final_path)
         }
-        HostCacheTarget::Ssh(ssh) => {
-            let remote_home = resolve_ssh_home(&ssh, executor)?;
-            let remote_root = format!("{remote_home}/.cache/mjolnir/snapshot-cache");
-            let remote_copy_dir = format!("{remote_root}/{copy_id}");
-            let final_path = format!("{remote_copy_dir}/{}", cache_filename(sha256));
-            let row_id = record_host_snapshot_cache_entry(
-                session_id,
-                &host_key,
-                sha256,
-                &final_path,
-                &written_at,
-            )?;
-            let nonce = new_command_id("snap")?;
-            let temp_path =
-                format!("{remote_copy_dir}/{SNAPSHOT_CACHE_TEMP_PREFIX}{sha256}-{nonce}");
-            let mut archive_file = File::open(verified_archive).with_context(|| {
-                format!(
-                    "open verified archive {} for remote host cache",
-                    verified_archive.display()
-                )
-            })?;
-            let script = "set -eu; umask 077; root=$1; dir=$2; tmp=$3; final=$4; \
-                          mkdir -p -- \"$root\" \"$dir\"; \
-                          chmod 0700 \"$root\" \"$dir\"; \
-                          trap 'rm -f -- \"$tmp\"; rmdir -- \"$dir\" 2>/dev/null || true' EXIT; \
-                          cat > \"$tmp\"; \
-                          chmod 0600 \"$tmp\"; \
-                          mv -f -- \"$tmp\" \"$final\"; \
-                          trap - EXIT";
-            let command = mj_core::targets::ssh_command_owned(
-                SshTrafficClass::Bulk,
-                &ssh,
-                vec![
-                    "sh".to_owned(),
-                    "-c".to_owned(),
-                    script.to_owned(),
-                    "hel-snapshot-cache-publish".to_owned(),
-                    remote_root,
-                    remote_copy_dir,
-                    temp_path,
-                    final_path.clone(),
-                ],
-            )
-            .purpose("publish host snapshot cache archive");
-            let output = executor.execute_with_stdin(&command, &mut archive_file);
-            match output {
-                Ok(out) if out.status == 0 => {
-                    notify_host_snapshot_cache_updated();
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if matches!(remote_file_exists(&ssh, &final_path, executor), Ok(false)) {
-                        let _ = delete_host_snapshot_cache_entry(row_id);
-                    } else {
-                        // Row stays recorded because the file may exist on the
-                        // remote host; wake the expiry sweep so it is reclaimed.
-                        notify_host_snapshot_cache_updated();
-                    }
-                    bail!(
-                        "remote snapshot cache publish failed with status {}: {}",
-                        out.status,
-                        stderr.trim()
-                    );
-                }
-                Err(error) => {
-                    if matches!(remote_file_exists(&ssh, &final_path, executor), Ok(false)) {
-                        let _ = delete_host_snapshot_cache_entry(row_id);
-                    } else {
-                        notify_host_snapshot_cache_updated();
-                    }
-                    return Err(error);
-                }
-            }
-            Ok(PathBuf::from(final_path))
+        HostCacheTarget::Ssh(_) => bail!(
+            "an SSH host promotes the archive it already holds with \
+             promote_host_snapshot_cache; uploading it again is not supported"
+        ),
+    }
+}
+
+/// Record, before it is created, the retained host staging file of a suspend
+/// on an SSH container host, so Destroy and the expiry sweep remove it if the
+/// daemon stops before the suspend releases or promotes it. The row carries a
+/// placeholder digest that no lookup by a real digest matches.
+pub fn record_host_staging_entry(
+    session_id: &str,
+    locator: &TargetLocator,
+    operation_id: &str,
+    staging_path: &str,
+) -> Result<i64> {
+    let row_id = record_host_snapshot_cache_entry(
+        session_id,
+        &host_cache_key(locator),
+        &format!("{HOST_STAGING_SHA256_PREFIX}{operation_id}"),
+        staging_path,
+        &Utc::now().to_rfc3339(),
+    )?;
+    // Wake the expiry task now: this suspend can be cancelled before it
+    // promotes or releases the file, and the task may be sleeping on an
+    // empty table.
+    notify_host_snapshot_cache_updated();
+    Ok(row_id)
+}
+
+/// Forget a retained staging row whose file is gone or became a cache copy.
+pub fn retire_host_staging_entry(row_id: i64) {
+    if let Err(error) = delete_host_snapshot_cache_entry(row_id) {
+        tracing::warn!(
+            row_id,
+            error = %format!("{error:#}"),
+            "could not delete retained host staging row"
+        );
+    }
+}
+
+/// Remove a retained host staging file and retire its row once the file is
+/// confirmed gone. If the host cannot be reached the row stays, and the
+/// expiry sweep is woken so it reclaims the file.
+pub fn release_host_staging(
+    locator: &TargetLocator,
+    staging_path: &str,
+    staging_row_id: i64,
+    executor: &impl CommandExecutor,
+) {
+    match crate::checkpoint_transfer::cleanup_host_staging(locator, staging_path, executor) {
+        Ok(()) => retire_host_staging_entry(staging_row_id),
+        Err(error) => {
+            tracing::warn!(
+                row_id = staging_row_id,
+                staging_path,
+                error = %format!("{error:#}"),
+                "could not remove retained host staging; keeping its row for Destroy and expiry"
+            );
+            notify_host_snapshot_cache_updated();
         }
     }
+}
+
+/// A verified archive that already sits on the cache host.
+pub struct HostCachePromotion<'a> {
+    pub session_id: &'a str,
+    pub locator: &'a TargetLocator,
+    /// The archive's path on the SSH host.
+    pub source_host_path: &'a str,
+    /// Remove the source once it is cached (a retained staging copy), rather
+    /// than leave it for its owner (a bare target's checkpoint archive).
+    pub remove_source: bool,
+    /// The host's `$HOME` if the transfer already learned it.
+    pub known_remote_home: Option<&'a str>,
+    pub sha256: &'a str,
+    /// The durable row that owns `source_host_path` when `remove_source`.
+    pub staging_row_id: Option<i64>,
+}
+
+/// [`promote_host_snapshot_cache`] for a suspend: the archive is already
+/// verified and durable on the daemon, so a failure only costs the resume a
+/// daemon upload. Errors are logged at WARN.
+pub fn promote_host_snapshot_cache_best_effort(
+    promotion: &HostCachePromotion<'_>,
+    executor: &impl CommandExecutor,
+) {
+    if let Err(error) = promote_host_snapshot_cache(promotion, executor) {
+        tracing::warn!(
+            session_id = promotion.session_id,
+            sha256 = promotion.sha256,
+            host = %host_cache_key(promotion.locator),
+            error = %format!("{error:#}"),
+            "could not promote host archive into snapshot cache after suspend"
+        );
+    }
+}
+
+/// Install an archive that already sits on the cache host into its snapshot
+/// cache, in one SSH command and without sending any archive bytes: the host
+/// re-hashes the file, stages it inside the cache copy directory (a hard link,
+/// or a copy when the staging and cache directories are on different
+/// filesystems), and renames it into `<copy_id>/<sha256>.hel.zip`.
+///
+/// A failure is reported, never answered by uploading the archive again. When
+/// `remove_source` is set, the staging file is removed on every outcome.
+pub fn promote_host_snapshot_cache(
+    promotion: &HostCachePromotion<'_>,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    let result = promote_into_host_cache(promotion, executor);
+    match (&result, promotion.remove_source, promotion.staging_row_id) {
+        (Ok(_), _, Some(row_id)) => {
+            // The script moved the file into the cache and removed the source.
+            retire_host_staging_entry(row_id);
+        }
+        (Err(_), true, Some(row_id)) => {
+            release_host_staging(
+                promotion.locator,
+                promotion.source_host_path,
+                row_id,
+                executor,
+            );
+        }
+        (Err(_), true, None) => {
+            if let Err(error) = crate::checkpoint_transfer::cleanup_host_staging(
+                promotion.locator,
+                promotion.source_host_path,
+                executor,
+            ) {
+                tracing::warn!(
+                    path = promotion.source_host_path,
+                    error = %format!("{error:#}"),
+                    "could not remove host archive after failed snapshot cache promotion"
+                );
+            }
+        }
+        _ => {}
+    }
+    result
+}
+
+fn promote_into_host_cache(
+    promotion: &HostCachePromotion<'_>,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    let host_key = host_cache_key(promotion.locator);
+    let HostCacheTarget::Ssh(ssh) = parse_host_cache_key(&host_key)? else {
+        bail!("only an SSH host can promote an archive it already holds into its snapshot cache");
+    };
+    let sha256 = promotion.sha256;
+    let remote_home = match promotion
+        .known_remote_home
+        .map(str::trim)
+        .filter(|home| home.starts_with('/'))
+    {
+        Some(home) => home.to_owned(),
+        None => resolve_ssh_home(&ssh, executor)?,
+    };
+    let copy_id = new_command_id("copy")?;
+    let remote_root = format!("{remote_home}/.cache/mjolnir/snapshot-cache");
+    let remote_copy_dir = format!("{remote_root}/{copy_id}");
+    let final_path = format!("{remote_copy_dir}/{}", cache_filename(sha256));
+    let nonce = new_command_id("snap")?;
+    let temp_path = format!("{remote_copy_dir}/{SNAPSHOT_CACHE_TEMP_PREFIX}{sha256}-{nonce}");
+    let row_id = record_host_snapshot_cache_entry(
+        promotion.session_id,
+        &host_key,
+        sha256,
+        &final_path,
+        &Utc::now().to_rfc3339(),
+    )?;
+    // The temporary file is created inside the copy directory so the final
+    // rename is atomic whatever filesystem the source is on.
+    let script = format!(
+        "set -eu; umask 077; root=$1; dir=$2; tmp=$3; final=$4; source=$5; remove_source=$6; \
+         expected=$7; [ -f \"$source\" ] || exit 44; p=$source; {PORTABLE_SHA256_SNIPPET}\
+         [ \"$actual\" = \"$expected\" ] || exit 46; \
+         trap 'rm -f -- \"$tmp\"; rmdir -- \"$dir\" 2>/dev/null || true' EXIT; \
+         trap 'exit 1' HUP INT TERM; \
+         mkdir -p -- \"$root\" \"$dir\"; chmod 0700 \"$root\" \"$dir\"; \
+         if ! ln -- \"$source\" \"$tmp\" 2>/dev/null; then cp -- \"$source\" \"$tmp\"; fi; \
+         chmod 0600 \"$tmp\"; \
+         mv -f -- \"$tmp\" \"$final\"; \
+         trap - EXIT; \
+         if [ \"$remove_source\" = 1 ]; then rm -f -- \"$source\"; fi"
+    );
+    let command = mj_core::targets::ssh_command_owned(
+        SshTrafficClass::Control,
+        &ssh,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            script,
+            "hel-snapshot-cache-promote".to_owned(),
+            remote_root,
+            remote_copy_dir,
+            temp_path,
+            final_path.clone(),
+            promotion.source_host_path.to_owned(),
+            if promotion.remove_source { "1" } else { "0" }.to_owned(),
+            sha256.to_ascii_lowercase(),
+        ],
+    )
+    .purpose("promote host archive into snapshot cache");
+    let (failure, nothing_written) = match executor.execute(&command) {
+        Ok(out) if out.status == 0 => {
+            notify_host_snapshot_cache_updated();
+            return Ok(PathBuf::from(final_path));
+        }
+        Ok(out) => {
+            // The script exits 44, 45 and 46 before it creates anything.
+            // Any other status may come after `mv` or `rm`, and 255 is a
+            // dropped SSH session, so the file's fate is unknown.
+            let reason = match out.status {
+                44 => "the host archive is missing".to_owned(),
+                45 => "the host has neither sha256sum nor shasum".to_owned(),
+                46 => "the host archive's SHA-256 differs from the verified archive".to_owned(),
+                _ => String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            };
+            (
+                anyhow::anyhow!(
+                    "host snapshot cache promotion failed with status {}: {reason}",
+                    out.status
+                ),
+                matches!(out.status, 44..=46),
+            )
+        }
+        Err(error) => (error, false),
+    };
+    if nothing_written {
+        let _ = delete_host_snapshot_cache_entry(row_id);
+    } else {
+        // The file may exist on the host: keep the row so Destroy and expiry
+        // reclaim it.
+        notify_host_snapshot_cache_updated();
+    }
+    Err(failure)
 }
 
 /// Check `host_snapshot_cache` for `(host_cache_key(locator), expected_sha256)`.
@@ -441,21 +620,16 @@ fn verify_host_cache_entry(
             }
         }
         HostCacheTarget::Ssh(ssh) => {
-            let script = "set -eu; p=$1; [ -f \"$p\" ] || exit 44; \
-                          if command -v sha256sum >/dev/null 2>&1; then \
-                              sha256sum -- \"$p\" | awk '{print $1}'; \
-                          elif command -v shasum >/dev/null 2>&1; then \
-                              shasum -a 256 -- \"$p\" | awk '{print $1}'; \
-                          else \
-                              exit 45; \
-                          fi";
+            let script = format!(
+                "set -eu; p=$1; [ -f \"$p\" ] || exit 44; {PORTABLE_SHA256_SNIPPET}printf '%s\\n' \"$actual\""
+            );
             let command = mj_core::targets::ssh_command_owned(
                 SshTrafficClass::Control,
                 ssh,
                 vec![
                     "sh".to_owned(),
                     "-c".to_owned(),
-                    script.to_owned(),
+                    script,
                     "hel-snapshot-cache-verify".to_owned(),
                     path.to_owned(),
                 ],
@@ -641,13 +815,19 @@ pub(crate) fn remove_host_cache_file(
             remove_result
         }
         HostCacheTarget::Ssh(ssh) => {
+            // Only a per-copy directory of the snapshot cache is ever swept
+            // or removed. A retained suspend staging file lives in the shared
+            // `.local/share/hel/transfers` directory, which stays.
             let script = "set -eu; p=$1; dir=$(dirname -- \"$p\"); \
                           rm -f -- \"$p\"; \
-                          for tmp in \"$dir\"/.tmp-*; do \
-                              [ -e \"$tmp\" ] || continue; \
-                              rm -f -- \"$tmp\"; \
-                          done; \
-                          rmdir -- \"$dir\" 2>/dev/null || true";
+                          case \"$dir\" in \
+                              */.cache/mjolnir/snapshot-cache/*|.cache/mjolnir/snapshot-cache/*) \
+                                  for tmp in \"$dir\"/.tmp-*; do \
+                                      [ -e \"$tmp\" ] || continue; \
+                                      rm -f -- \"$tmp\"; \
+                                  done; \
+                                  rmdir -- \"$dir\" 2>/dev/null || true ;; \
+                          esac";
             let command = mj_core::targets::ssh_command_owned(
                 SshTrafficClass::Control,
                 ssh,
@@ -934,27 +1114,6 @@ fn resolve_ssh_home(ssh: &SshTarget, executor: &impl CommandExecutor) -> Result<
     Ok(home)
 }
 
-fn remote_file_exists(
-    ssh: &SshTarget,
-    path: &str,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    let command = mj_core::targets::ssh_command_owned(
-        SshTrafficClass::Control,
-        ssh,
-        vec![
-            "sh".to_owned(),
-            "-c".to_owned(),
-            "test -f \"$1\"".to_owned(),
-            "hel-snapshot-cache-exists".to_owned(),
-            path.to_owned(),
-        ],
-    )
-    .purpose("check whether remote snapshot cache archive exists");
-    let output = executor.execute(&command)?;
-    Ok(output.status == 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -990,101 +1149,499 @@ mod tests {
         }
     }
 
+    /// Runs each `ssh` command as a local shell in a fake remote `$HOME`, the
+    /// way the SSH server would, and records what crossed the "wire".
+    #[cfg(unix)]
+    struct LocalSsh {
+        home: PathBuf,
+        /// Purposes of commands that fail as an unreachable host would.
+        unreachable: Vec<&'static str>,
+        purposes: std::sync::Mutex<Vec<String>>,
+        stdin_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl LocalSsh {
+        fn new(home: &Path) -> Self {
+            Self {
+                home: home.to_path_buf(),
+                unreachable: Vec::new(),
+                purposes: Default::default(),
+                stdin_calls: Default::default(),
+            }
+        }
+
+        fn count(&self, purpose: &str) -> usize {
+            self.purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| seen.as_str() == purpose)
+                .count()
+        }
+
+        fn shell_command(&self, command: &CommandSpec) -> CommandSpec {
+            assert_eq!(command.program, "ssh");
+            let line = command.args.last().expect("missing remote command");
+            // A login starts in `$HOME`; the shims directory comes first on PATH.
+            let mut shell = CommandSpec::new("sh", ["-c", &format!("cd \"$HOME\" && {line}")]);
+            shell
+                .env
+                .insert("HOME".into(), self.home.display().to_string());
+            shell.env.insert(
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", self.home.join("shims").display()),
+            );
+            shell
+        }
+    }
+
+    #[cfg(unix)]
+    impl CommandExecutor for LocalSsh {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            if self.unreachable.contains(&command.purpose.as_str()) {
+                bail!("ssh: connect to host fixture port 22: Connection refused");
+            }
+            ProcessExecutor.execute(&self.shell_command(command))
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> Result<CommandOutput> {
+            self.stdin_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ProcessExecutor.execute_with_stdin(&self.shell_command(command), input)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+    }
+
+    #[cfg(unix)]
+    fn fixture_ssh() -> SshTarget {
+        SshTarget {
+            destination: "fixture".into(),
+            ssh_args: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn container_locator() -> TargetLocator {
+        TargetLocator::SshPodman {
+            borrowed_from: None,
+            ssh: fixture_ssh(),
+            container_id: "session-container".into(),
+            workspace_storage: Default::default(),
+        }
+    }
+
+    /// Write a >64 KiB staged archive where a suspend leaves it on the host.
+    #[cfg(unix)]
+    fn stage_on_host(home: &Path, session: &str, operation: &str) -> (String, Vec<u8>, String) {
+        let relative = format!(".local/share/hel/transfers/{session}-{operation}.hel.zip");
+        let bytes: Vec<u8> = (0..160 * 1024).map(|index| (index % 251) as u8).collect();
+        let path = home.join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let sha = checkpoint_sha256(&path).unwrap();
+        (relative, bytes, sha)
+    }
+
+    #[cfg(unix)]
+    fn write_shim(home: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = home.join("shims");
+        fs::create_dir_all(&directory).unwrap();
+        let shim = directory.join(name);
+        fs::write(&shim, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// Re-run `test` alone in a child with its own store; true in the child.
+    fn in_isolated_store(test: &str, marker: &str) -> bool {
+        if std::env::var_os(marker).is_some() {
+            return true;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(format!("controller::checkpoint::host_cache::tests::{test}"))
+            .env(marker, "1")
+            .isolated_store(directory.path())
+            .run();
+        false
+    }
+
     #[cfg(unix)]
     // Hard-won: ddd712e31: syncing a disposable cache copy wedged suspend.
     #[test]
-    fn ssh_cache_publishes_when_sync_is_unavailable() {
+    fn promoting_retained_staging_sends_no_archive_bytes_and_reuses_the_known_home() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct LocalSsh {
-            home: PathBuf,
-        }
-
-        impl LocalSsh {
-            fn shell_command(&self, command: &CommandSpec) -> CommandSpec {
-                assert_eq!(command.program, "ssh");
-                let script = command.args.last().expect("missing remote command");
-                let mut shell = CommandSpec::new("sh", ["-c", script]);
-                shell
-                    .env
-                    .insert("HOME".into(), self.home.display().to_string());
-                shell.env.insert(
-                    "PATH".into(),
-                    format!("{}:/usr/bin:/bin", self.home.display()),
-                );
-                shell
-            }
-        }
-
-        impl CommandExecutor for LocalSsh {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                false
-            }
-
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                ProcessExecutor.execute(&self.shell_command(command))
-            }
-
-            fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin(
-                &self,
-                command: &CommandSpec,
-                input: &mut (dyn Read + Send),
-            ) -> Result<CommandOutput> {
-                ProcessExecutor.execute_with_stdin(&self.shell_command(command), input)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &CommandSpec,
-                input: &mut (dyn Read + Send),
-            ) -> Result<CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-        }
-
-        const CHILD: &str = "MJ_HOST_CACHE_NO_SYNC_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let directory = tempfile::tempdir().unwrap();
-            IsolatedTest::new(
-                "controller::checkpoint::host_cache::tests::ssh_cache_publishes_when_sync_is_unavailable",
-            )
-            .env(CHILD, "1")
-            .isolated_store(directory.path())
-            .run();
+        if !in_isolated_store(
+            "promoting_retained_staging_sends_no_archive_bytes_and_reuses_the_known_home",
+            "MJ_HOST_CACHE_PROMOTE_CHILD",
+        ) {
             return;
         }
-
         let temp = tempfile::tempdir().unwrap();
-        let sync = temp.path().join("sync");
-        fs::write(&sync, "#!/bin/sh\ntouch \"$HOME/sync-called\"\nexit 1\n").unwrap();
-        fs::set_permissions(&sync, fs::Permissions::from_mode(0o700)).unwrap();
-        let archive = temp.path().join("verified.hel.zip");
-        let contents = vec![42; 128 * 1024];
-        fs::write(&archive, &contents).unwrap();
-        let sha = checkpoint_sha256(&archive).unwrap();
-        let locator = TargetLocator::SshBare {
-            ssh: SshTarget {
-                destination: "fixture".into(),
-                ssh_args: Vec::new(),
+        let home = temp.path();
+        write_shim(home, "sync", "touch \"$HOME/sync-called\"\nexit 1");
+        let (staging, bytes, sha) = stage_on_host(home, "sess-1", "op-1");
+        let locator = container_locator();
+        let executor = LocalSsh::new(home);
+        let row_id = record_host_staging_entry("sess-1", &locator, "op-1", &staging).unwrap();
+        let rows = list_host_snapshot_cache_entries_for_session("sess-1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sha256, "staging:op-1");
+
+        let cached = promote_host_snapshot_cache(
+            &HostCachePromotion {
+                session_id: "sess-1",
+                locator: &locator,
+                source_host_path: &staging,
+                remove_source: true,
+                known_remote_home: Some(&home.display().to_string()),
+                sha256: &sha,
+                staging_row_id: Some(row_id),
             },
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&cached).unwrap(), bytes);
+        assert_eq!(
+            cached.file_name().unwrap().to_str().unwrap(),
+            format!("{sha}.hel.zip")
+        );
+        assert_eq!(
+            fs::metadata(&cached).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!home.join(&staging).exists(), "staging must be consumed");
+        assert!(
+            home.join(".local/share/hel/transfers").is_dir(),
+            "the shared staging directory must stay"
+        );
+        assert!(!home.join("sync-called").exists());
+        assert_eq!(
+            executor
+                .stdin_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            executor.count("resolve remote host HOME for snapshot cache"),
+            0
+        );
+        assert_eq!(
+            executor.count("promote host archive into snapshot cache"),
+            1
+        );
+        let rows = list_host_snapshot_cache_entries_for_session("sess-1").unwrap();
+        assert_eq!(rows.len(), 1, "only the cache row remains: {rows:?}");
+        assert_eq!(rows[0].sha256, sha);
+        assert_eq!(rows[0].path, cached.to_string_lossy());
+
+        // Resume reads the promoted copy through the shared verification.
+        let bare = TargetLocator::SshBare {
+            ssh: fixture_ssh(),
             workspace: "/srv/app".into(),
             worker_id: Some("sess-1".into()),
         };
-        let executor = LocalSsh {
-            home: temp.path().to_path_buf(),
-        };
-        let cached =
-            publish_host_snapshot_cache("sess-1", &locator, &archive, &sha, &executor).unwrap();
-        assert!(!temp.path().join("sync-called").exists());
-        assert_eq!(fs::read(cached).unwrap(), contents);
+        let restored = home.join("restored/archive.hel.zip");
+        assert!(
+            try_stage_host_snapshot_cache(
+                &executor,
+                &bare,
+                "sess-1",
+                &sha,
+                &restored.to_string_lossy(),
+            )
+            .unwrap()
+        );
+        assert_eq!(fs::read(&restored).unwrap(), bytes);
+
+        // A bare target's own archive is cached without being consumed, and
+        // the home is looked up once when the transfer did not learn it.
+        let own = home.join("worker/checkpoint.hel.zip");
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, &bytes).unwrap();
+        let second = promote_host_snapshot_cache(
+            &HostCachePromotion {
+                session_id: "sess-2",
+                locator: &bare,
+                source_host_path: &own.to_string_lossy(),
+                remove_source: false,
+                known_remote_home: None,
+                sha256: &sha,
+                staging_row_id: None,
+            },
+            &executor,
+        )
+        .unwrap();
+        assert_ne!(second, cached);
+        assert_eq!(fs::read(&second).unwrap(), bytes);
+        assert!(own.exists(), "the owner removes its own archive");
+        assert_eq!(
+            executor.count("resolve remote host HOME for snapshot cache"),
+            1
+        );
+        assert_eq!(
+            executor
+                .stdin_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promotion_copies_then_renames_when_staging_is_on_another_filesystem() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !in_isolated_store(
+            "promotion_copies_then_renames_when_staging_is_on_another_filesystem",
+            "MJ_HOST_CACHE_EXDEV_CHILD",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        // `ln` across filesystems fails with EXDEV; the shim fails the same way.
+        write_shim(
+            home,
+            "ln",
+            "echo 'ln: Invalid cross-device link' >&2\nexit 1",
+        );
+        let (staging, bytes, sha) = stage_on_host(home, "sess-x", "op-x");
+        let locator = container_locator();
+        let executor = LocalSsh::new(home);
+        let row_id = record_host_staging_entry("sess-x", &locator, "op-x", &staging).unwrap();
+        fn promotion<'a>(
+            locator: &'a TargetLocator,
+            home: &'a Path,
+            sha: &'a str,
+            source: &'a str,
+            row_id: i64,
+        ) -> HostCachePromotion<'a> {
+            HostCachePromotion {
+                session_id: "sess-x",
+                locator,
+                source_host_path: source,
+                remove_source: true,
+                known_remote_home: home.to_str(),
+                sha256: sha,
+                staging_row_id: Some(row_id),
+            }
+        }
+
+        let cached = promote_host_snapshot_cache(
+            &promotion(&locator, home, &sha, &staging, row_id),
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&cached).unwrap(), bytes);
+        assert_eq!(
+            fs::metadata(&cached).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let copy_dir = cached.parent().unwrap();
+        assert_eq!(
+            fs::read_dir(copy_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>(),
+            vec![format!("{sha}.hel.zip")],
+            "no temporary file may remain beside the published archive"
+        );
+        assert!(!home.join(&staging).exists());
+
+        // A copy that fails midway leaves no temporary file or empty copy
+        // directory, and the staging file is still removed.
+        write_shim(home, "cp", "head -c 1024 \"$2\" > \"$3\"\nexit 1");
+        let (staging, _, _) = stage_on_host(home, "sess-x", "op-y");
+        let row_id = record_host_staging_entry("sess-x", &locator, "op-y", &staging).unwrap();
+        let before = fs::read_dir(copy_dir.parent().unwrap()).unwrap().count();
+        let error = promote_host_snapshot_cache(
+            &promotion(&locator, home, &sha, &staging, row_id),
+            &executor,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("status"), "{error:#}");
+        assert_eq!(
+            fs::read_dir(copy_dir.parent().unwrap()).unwrap().count(),
+            before,
+            "the failed copy must not leave a copy directory"
+        );
+        assert!(!home.join(&staging).exists());
+        let rows = list_host_snapshot_cache_entries_for_session("sess-x").unwrap();
+        // The failed copy's outcome was not confirmed, so its row stays for
+        // expiry to reclaim; no file exists at its path.
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(!Path::new(&rows[1].path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promotion_of_tampered_staging_fails_visibly_without_uploading_or_caching() {
+        if !in_isolated_store(
+            "promotion_of_tampered_staging_fails_visibly_without_uploading_or_caching",
+            "MJ_HOST_CACHE_TAMPER_CHILD",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let (staging, mut bytes, sha) = stage_on_host(home, "sess-t", "op-t");
+        let locator = container_locator();
+        let executor = LocalSsh::new(home);
+        let row_id = record_host_staging_entry("sess-t", &locator, "op-t", &staging).unwrap();
+        bytes[100 * 1024] ^= 0xff;
+        fs::write(home.join(&staging), &bytes).unwrap();
+
+        let error = promote_host_snapshot_cache(
+            &HostCachePromotion {
+                session_id: "sess-t",
+                locator: &locator,
+                source_host_path: &staging,
+                remove_source: true,
+                known_remote_home: Some(home.to_str().unwrap()),
+                sha256: &sha,
+                staging_row_id: Some(row_id),
+            },
+            &executor,
+        )
+        .unwrap_err();
+
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("status 46") && text.contains("differs"),
+            "{text}"
+        );
+        assert!(!home.join(".cache").exists(), "nothing may be cached");
+        assert!(
+            !home.join(&staging).exists(),
+            "tampered staging must be removed"
+        );
+        assert!(
+            list_host_snapshot_cache_entries_for_session("sess-t")
+                .unwrap()
+                .is_empty(),
+            "neither the cache row nor the staging row may remain"
+        );
+        assert_eq!(
+            executor
+                .stdin_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_promotion_leaves_a_staging_row_that_destroy_and_expiry_reap() {
+        if !in_isolated_store(
+            "interrupted_promotion_leaves_a_staging_row_that_destroy_and_expiry_reap",
+            "MJ_HOST_CACHE_CRASH_CHILD",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let (staging, _, sha) = stage_on_host(home, "sess-c", "op-c");
+        let locator = container_locator();
+        let mut down = LocalSsh::new(home);
+        down.unreachable = vec![
+            "promote host archive into snapshot cache",
+            "remove remote checkpoint staging",
+        ];
+        let healthy = LocalSsh::new(home);
+        let row_id = record_host_staging_entry("sess-c", &locator, "op-c", &staging).unwrap();
+
+        promote_host_snapshot_cache(
+            &HostCachePromotion {
+                session_id: "sess-c",
+                locator: &locator,
+                source_host_path: &staging,
+                remove_source: true,
+                known_remote_home: Some(home.to_str().unwrap()),
+                sha256: &sha,
+                staging_row_id: Some(row_id),
+            },
+            &down,
+        )
+        .unwrap_err();
+
+        assert!(
+            home.join(&staging).exists(),
+            "an unreachable host keeps the file"
+        );
+        let rows = list_host_snapshot_cache_entries_for_session("sess-c").unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "staging row and possible cache row: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.id == row_id && row.path == staging)
+        );
+        // Resume lookups by a real digest never see the staging row.
+        let found = lookup_host_snapshot_cache_entries(&host_cache_key(&locator), &sha).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_ne!(found[0].path, staging);
+        assert!(
+            !try_stage_host_snapshot_cache(&healthy, &locator, "sess-c", &sha, "/unused.hel.zip")
+                .unwrap(),
+            "no cache copy exists, and the staging file is not one"
+        );
+
+        // Destroy reaps the file and both rows, and keeps the shared directory.
+        let warnings = cleanup_session_host_snapshot_cache("sess-c", &healthy).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!home.join(&staging).exists());
+        assert!(home.join(".local/share/hel/transfers").is_dir());
+        assert!(
+            list_host_snapshot_cache_entries_for_session("sess-c")
+                .unwrap()
+                .is_empty()
+        );
+
+        // So does the expiry sweep, when nothing destroys the session.
+        let (staging, _, _) = stage_on_host(home, "sess-e", "op-e");
+        record_host_staging_entry("sess-e", &locator, "op-e", &staging).unwrap();
+        let swept = super::super::leftovers::sweep_expired_host_snapshot_cache(
+            &healthy,
+            Utc::now() + chrono::Duration::hours(49),
+            &|| false,
+        );
+        assert_eq!(swept.count, 1);
+        assert!(!home.join(&staging).exists());
+        assert!(home.join(".local/share/hel/transfers").is_dir());
+        assert!(
+            list_host_snapshot_cache_entries_for_session("sess-e")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1109,9 +1666,7 @@ mod tests {
             worker_root: temp.path().join("worker").to_string_lossy().into_owned(),
         };
 
-        let cached =
-            publish_host_snapshot_cache("sess-1", &locator, &archive, &sha, &ProcessExecutor)
-                .unwrap();
+        let cached = publish_host_snapshot_cache("sess-1", &locator, &archive, &sha).unwrap();
         assert!(cached.exists(), "published cache file must exist");
         #[cfg(unix)]
         {
@@ -1188,22 +1743,10 @@ mod tests {
         let locator = TargetLocator::LocalBare {
             worker_root: temp.path().join("worker").to_string_lossy().into_owned(),
         };
-        let path1 = publish_host_snapshot_cache(
-            "sess-destroy",
-            &locator,
-            &archive1,
-            &sha1,
-            &ProcessExecutor,
-        )
-        .unwrap();
-        let path2 = publish_host_snapshot_cache(
-            "sess-destroy",
-            &locator,
-            &archive2,
-            &sha2,
-            &ProcessExecutor,
-        )
-        .unwrap();
+        let path1 =
+            publish_host_snapshot_cache("sess-destroy", &locator, &archive1, &sha1).unwrap();
+        let path2 =
+            publish_host_snapshot_cache("sess-destroy", &locator, &archive2, &sha2).unwrap();
 
         // Also record a remote SSH copy for the same session on an unreachable host.
         let unreachable_ssh = SshTarget {
@@ -1346,12 +1889,8 @@ mod tests {
         let locator = TargetLocator::LocalBare {
             worker_root: temp.path().join("worker").to_string_lossy().into_owned(),
         };
-        let path_a =
-            publish_host_snapshot_cache("sess-a", &locator, &archive, &sha, &ProcessExecutor)
-                .unwrap();
-        let path_b =
-            publish_host_snapshot_cache("sess-b", &locator, &archive, &sha, &ProcessExecutor)
-                .unwrap();
+        let path_a = publish_host_snapshot_cache("sess-a", &locator, &archive, &sha).unwrap();
+        let path_b = publish_host_snapshot_cache("sess-b", &locator, &archive, &sha).unwrap();
         assert_ne!(
             path_a, path_b,
             "each host_snapshot_cache row must own an exclusive path"
@@ -1377,5 +1916,81 @@ mod tests {
             .unwrap(),
             "sess-b must still be able to reuse its verified cached copy"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_a_staging_row_wakes_the_expiry_task_and_ambiguous_failures_keep_cache_rows() {
+        if !in_isolated_store(
+            "recording_a_staging_row_wakes_the_expiry_task_and_ambiguous_failures_keep_cache_rows",
+            "MJ_HOST_CACHE_WAKE_CHILD",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let locator = container_locator();
+
+        // Recording wakes a task that is sleeping on an empty table.
+        let wakeup = host_snapshot_cache_wakeup();
+        let (staging, _, sha) = stage_on_host(home, "sess-w", "op-w");
+        let row_id = record_host_staging_entry("sess-w", &locator, "op-w", &staging).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), wakeup.notified())
+                .await
+                .expect("recording a staging row must wake the expiry task");
+        });
+
+        // A promotion that dies with an unknown outcome (status 255, as a
+        // dropped SSH session reports) keeps the cache row even though no
+        // probe can confirm the file; a status the script exits with before
+        // writing anything (46) removes it.
+        let promote = |executor: &LocalSsh| {
+            promote_host_snapshot_cache(
+                &HostCachePromotion {
+                    session_id: "sess-w",
+                    locator: &locator,
+                    source_host_path: &staging,
+                    remove_source: false,
+                    known_remote_home: home.to_str(),
+                    sha256: &sha,
+                    staging_row_id: None,
+                },
+                executor,
+            )
+        };
+        write_shim(home, "mv", "exit 255");
+        let executor = LocalSsh::new(home);
+        let error = promote(&executor).unwrap_err();
+        assert!(format!("{error:#}").contains("status 255"), "{error:#}");
+        let cache_rows = |session: &str| {
+            list_host_snapshot_cache_entries_for_session(session)
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.sha256 == sha)
+                .count()
+        };
+        assert_eq!(
+            cache_rows("sess-w"),
+            1,
+            "unknown outcome keeps the cache row"
+        );
+        // The script's trap removed its temporary file and empty directory.
+        assert_eq!(
+            fs::read_dir(home.join(".cache/mjolnir/snapshot-cache"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        fs::write(home.join(&staging), b"tampered").unwrap();
+        let before = cache_rows("sess-w");
+        promote(&executor).unwrap_err();
+        assert_eq!(cache_rows("sess-w"), before, "status 46 drops its own row");
+        retire_host_staging_entry(row_id);
     }
 }

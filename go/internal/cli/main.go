@@ -38,6 +38,7 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/sessionruntime"
 	"github.com/BrokkAi/mjolnir/go/internal/store"
+	"github.com/BrokkAi/mjolnir/go/internal/tui"
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
@@ -706,10 +707,13 @@ func run(parsed cli) error {
 	return result
 }
 
-// detach_notice (what a detaching terminal says it leaves behind: the
+// detachNotice is what a detaching terminal says it leaves behind: the
 // daemon, how many sessions it is still running, and the command that stops
-// them all) takes the dashboard's DetachedSessions and is declared with
-// dashboard.rs.
+// them all. run prints it once the dashboard returns dashboardExitDetached,
+// which runCommand does not pass up yet.
+func detachNotice(sessions detachedSessions) string {
+	panic("unported: mj-cli/src/main.rs detach_notice")
+}
 
 // mjCommand is an `mj` command line for this instance, for a message to
 // suggest.
@@ -2009,13 +2013,28 @@ func printMoveHuman(outcome *core.MoveOutcome) {
 	}
 }
 
-// run_workspace_dashboard, DashboardStartup (what the dashboard needs before
-// it can draw: the daemon client, the go mode, and the store as the
-// dashboard first shows it) and start_dashboard (connect to the daemon,
-// choose the workspace, and load the store, as its own task so the splash
-// can animate meanwhile) hold the dashboard's LoadedDashboard, DashboardExit
-// and UpgradeResume and mj-controller's StartupUpdateNotice; they are
-// declared with dashboard.rs.
+// runWorkspaceDashboard opens the dashboard on the requested workspace (or
+// the one a resumed upgrade handoff names), playing the splash while it
+// starts, keeps this client attached to the daemon while it runs, and
+// detaches when it returns.
+func runWorkspaceDashboard(ctx context.Context, requestedWorkspace *string, openWorkspaceManager bool, goStart *dashboardGo, updateNotice controller.StartupUpdateNotice, noSplash bool) (dashboardExit, error) {
+	panic("unported: mj-cli/src/main.rs run_workspace_dashboard")
+}
+
+// dashboardStartup is what the dashboard needs before it can draw.
+type dashboardStartup struct {
+	daemon *client.DaemonClient
+	goMode *tui.GoMode
+	// loaded is the store as the dashboard first shows it; nil without a
+	// terminal.
+	loaded *loadedDashboard
+}
+
+// startDashboard connects to the daemon, chooses the workspace, and loads
+// the store. It runs as its own task so the splash can animate meanwhile.
+func startDashboard(ctx context.Context, resumedWorkspace, requestedWorkspace *string, goMode *tui.GoMode, clientID string, interactive bool) (dashboardStartup, error) {
+	panic("unported: mj-cli/src/main.rs start_dashboard")
+}
 
 // resolveStoreWorkspace is the id of the workspace requested by name, or of
 // the only workspace when none is named.

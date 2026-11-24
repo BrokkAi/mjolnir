@@ -32,7 +32,7 @@ pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
 
 const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 0);
 
-mod preflight;
+pub mod preflight;
 pub use preflight::*;
 mod platform;
 pub use platform::*;

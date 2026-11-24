@@ -4,7 +4,7 @@ use super::*;
 mod profile_transfer;
 use crate::targets::CommandOutput;
 use mj_core::targets::SshTrafficClass;
-pub use profile_transfer::ProfileContentManifest;
+pub use profile_transfer::{ProfileContentManifest, profile_upload_generation};
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
 pub fn append_hel_target_environment(
@@ -559,6 +559,22 @@ fn mbx_container(
     })
 }
 
+/// The bodies of the marked `cargo` and `mbx` launchers for `mbx_binary`.
+fn mbx_shim_bodies(mbx_binary: &Path) -> (String, String) {
+    let quoted_binary = targets::posix_quote(&mbx_binary.to_string_lossy());
+    // mbx refuses a mise shim as the real Cargo, and a mise project image
+    // (mj-dev and every `mj image build` image) has Cargo only behind mise's
+    // shims. Under mise, take mise's environment for the build's own
+    // directory first: it puts the real toolchain on PATH and pins
+    // RUSTUP_TOOLCHAIN the way the shim would, per repository, including
+    // tools that finished installing after the session started.
+    let cargo_body = format!(
+        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nif command -v mise >/dev/null 2>&1; then\n    eval \"$(mise env -s bash 2>/dev/null)\" || true\nfi\nexec {quoted_binary} \"$@\""
+    );
+    let mbx_body = format!("exec {quoted_binary} \"$@\"");
+    (cargo_body, mbx_body)
+}
+
 /// Install marked Cargo and mbx launchers pointing at the staged binary.
 pub fn install_mbx_shims(
     executor: &impl CommandExecutor,
@@ -573,17 +589,7 @@ pub fn install_mbx_shims(
     );
     let bin = format!("{worker_root}/bin");
     let (engine, container_id, ssh) = mbx_container(locator)?;
-    let quoted_binary = targets::posix_quote(&mbx_binary.to_string_lossy());
-    // mbx refuses a mise shim as the real Cargo, and a mise project image
-    // (mj-dev and every `mj image build` image) has Cargo only behind mise's
-    // shims. Under mise, take mise's environment for the build's own
-    // directory first: it puts the real toolchain on PATH and pins
-    // RUSTUP_TOOLCHAIN the way the shim would, per repository, including
-    // tools that finished installing after the session started.
-    let cargo_body = format!(
-        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nif command -v mise >/dev/null 2>&1; then\n    eval \"$(mise env -s bash 2>/dev/null)\" || true\nfi\nexec {quoted_binary} \"$@\""
-    );
-    let mbx_body = format!("exec {quoted_binary} \"$@\"");
+    let (cargo_body, mbx_body) = mbx_shim_bodies(mbx_binary);
     let args = vec![
         engine.to_owned(),
         "exec".to_owned(),
@@ -727,9 +733,9 @@ pub fn stage_mbx_configuration(
     Ok(directory)
 }
 
-/// The commands that copy `host_binary` from the container's own host into
-/// `staged` inside the container. On an SSH target they run as one script on
-/// that host, so the bytes never pass through the daemon.
+/// The commands that copy `host_binary` from this machine into `staged`
+/// inside a local container. An SSH container host stages in one command
+/// instead (see [`stage_ssh_container_mbx`]).
 fn mbx_binary_stage_commands(
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -740,6 +746,10 @@ fn mbx_binary_stage_commands(
     ensure!(
         engine != targets::MICROVM_ENGINE,
         "Nitro sessions install their own pinned mbx"
+    );
+    ensure!(
+        ssh.is_none(),
+        "SSH container hosts stage the mbx with stage_ssh_container_mbx"
     );
     let commands = vec![
         CommandSpec::new(
@@ -759,27 +769,10 @@ fn mbx_binary_stage_commands(
         CommandSpec::new(engine, ["exec", container_id, "chmod", "755", staged])
             .purpose("make the staged mbx executable"),
     ];
-    Ok(match ssh {
-        None => commands
-            .into_iter()
-            .map(|command| command.stage(ProvisionStage::Syncing))
-            .collect(),
-        Some(ssh) => {
-            let steps = commands.into_iter().map(|command| {
-                targets::CommandStep::new(
-                    command.purpose,
-                    std::iter::once(command.program)
-                        .chain(command.args)
-                        .collect::<Vec<_>>(),
-                )
-            });
-            vec![
-                targets::ssh_command_owned(SshTrafficClass::Bulk, ssh, targets::step_script(steps))
-                    .purpose("stage the host mbx in the session container")
-                    .stage(ProvisionStage::Syncing),
-            ]
-        }
-    })
+    Ok(commands
+        .into_iter()
+        .map(|command| command.stage(ProvisionStage::Syncing))
+        .collect())
 }
 
 fn mbx_container_command(
@@ -917,6 +910,252 @@ pub fn link_legacy_mbx_configuration(
     }
 }
 
+/// The container host's own mbx, as an SSH container session stages it.
+#[derive(Debug, Clone, Copy)]
+pub struct HostMbx<'a> {
+    pub program: &'a Path,
+    pub version: &'a str,
+}
+
+/// How [`stage_ssh_container_mbx`] left the session's mbx.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SshContainerMbx {
+    /// An older private mbx keeps its executable; it now has the policy.
+    Legacy,
+    /// The container host has no mbx to stage, and no private one is there.
+    HostMbxUnavailable,
+    /// The host's mbx was staged and verified; its launchers are installed.
+    Installed(PathBuf),
+}
+
+const SSH_RESULT_PREFIX: &str = "mj-mbx-result: ";
+
+/// The purposes of the steps [`ssh_container_mbx_script`] runs, which a failed
+/// step reports by index. They are the purposes the separate commands had.
+const SSH_MBX_STEP_PURPOSES: [&str; 8] = [
+    "stage the session mbx configuration",
+    "inspect legacy mbx and relink its shared configuration",
+    "copy the host mbx into the session container",
+    "match the staged mbx to the worker directory owner",
+    "make the staged mbx executable",
+    "verify the staged mbx inside the session container",
+    "publish the staged mbx",
+    "install the session mbx shims",
+];
+const REMOVE_FAILED_MBX_PURPOSE: &str = "remove the failed mbx staging file";
+
+/// Stage the session's mbx policy snapshot and executable, and install its
+/// launchers, in one command on the container's SSH host: the work of
+/// [`stage_mbx_configuration`], [`link_legacy_mbx_configuration`],
+/// [`stage_container_mbx`] and [`install_mbx_shims`], in that order, which an
+/// SSH host used to take a round trip each for. `configuration` travels on the
+/// command's stdin, never in its arguments.
+///
+/// A legacy private mbx ends the work after its policy link, as it does there;
+/// so does a host with no `host_mbx`, once the legacy check has had its say.
+pub fn stage_ssh_container_mbx(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    configuration: &str,
+    config_roots: &[PathBuf],
+    host_mbx: Option<HostMbx<'_>>,
+) -> Result<SshContainerMbx> {
+    let (engine, container_id, ssh) = mbx_container(locator)?;
+    let ssh = match (ssh, engine) {
+        (Some(ssh), "podman" | "docker") => ssh,
+        _ => bail!("the build cache is staged in one command only on SSH Podman and Docker hosts"),
+    };
+    if let Some(host_mbx) = host_mbx {
+        ensure!(
+            mj_core::target_path::is_absolute_on_host_or_target(host_mbx.program),
+            "host mbx path is not absolute: {}",
+            host_mbx.program.display()
+        );
+    }
+    let staged = mj_core::target_path::text(&mj_core::target_path::join(
+        Path::new(worker_root),
+        Path::new(&format!(
+            ".mbx.mj-{}",
+            mj_core::relay::new_command_id("mbx")?
+        )),
+    ));
+    let destination = session_mbx_path(worker_root);
+    let script = ssh_container_mbx_script(
+        engine,
+        container_id,
+        worker_root,
+        config_roots,
+        host_mbx.map(|host_mbx| (host_mbx, staged.as_str(), destination.as_path())),
+    );
+    let command = crate::targets::ssh_command_owned(
+        SshTrafficClass::Bulk,
+        ssh,
+        vec!["sh".into(), "-c".into(), script, "mj-mbx-stage".into()],
+    )
+    .with_sensitive_stdin(configuration.as_bytes().to_vec())
+    .purpose("stage the session mbx in the container")
+    .stage(ProvisionStage::Syncing);
+    let output = executor.execute(&command)?;
+    // Cleanup of the staging file is best effort; its failure is worth a line
+    // in the log even when everything else worked.
+    mj_core::targets::log_command_warnings(&command, &output);
+    let output = mj_targets::command_checks::check_output(&command, output)?;
+    let reported = String::from_utf8_lossy(&output.stdout);
+    match reported
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(SSH_RESULT_PREFIX))
+    {
+        Some("legacy") => Ok(SshContainerMbx::Legacy),
+        Some("unavailable") => Ok(SshContainerMbx::HostMbxUnavailable),
+        Some("staged") => Ok(SshContainerMbx::Installed(destination)),
+        other => bail!(
+            "staging the session mbx reported an unexpected result: {}",
+            other.unwrap_or_else(|| reported.trim())
+        ),
+    }
+}
+
+/// The host-side script behind [`stage_ssh_container_mbx`]. Every value is
+/// quoted into it; the policy snapshot arrives on its stdin.
+///
+/// A failed step prints the marker [`targets::step_script_error`] decodes,
+/// naming the step's purpose, then the script exits with its status. A file
+/// staged in the container is removed on every exit before it is published, so
+/// no path leaves one behind; the host's own mbx is only ever read.
+fn ssh_container_mbx_script(
+    engine: &str,
+    container_id: &str,
+    worker_root: &str,
+    config_roots: &[PathBuf],
+    host_mbx: Option<(HostMbx<'_>, &str, &Path)>,
+) -> String {
+    use targets::posix_quote as quote;
+
+    let purpose = |index: usize| {
+        quote(&serde_json::to_string(SSH_MBX_STEP_PURPOSES[index]).expect("serialize purpose"))
+    };
+    let roots = config_roots
+        .iter()
+        .map(|root| quote(&root.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let configuration_directory = CONTAINER_MBX_CONFIG_DIRECTORY;
+    let mut script = format!(
+        r#"mj_engine() {{
+    {engine_words} "$@"
+}}
+mj_failed() {{
+    printf '\nMJ_STEP_FAILED %s %s %s\n' "$1" "$2" "$3" >&2
+}}
+mj_step() {{
+    mj_index=$1 mj_label=$2
+    shift 2
+    "$@"
+    mj_code=$?
+    if [ "$mj_code" -ne 0 ]; then
+        mj_failed "$mj_index" "$mj_code" "$mj_label"
+        exit "$mj_code"
+    fi
+}}
+container={container}
+mj_staged=
+mj_cleanup() {{
+    mj_original=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$mj_staged" ]; then
+        mj_engine exec "$container" rm -f -- "$mj_staged" || printf '\nMJ_STEP_WARNING 8 %s %s\n' "$?" {remove_purpose} >&2
+    fi
+    exit "$mj_original"
+}}
+trap mj_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mj_step 0 {configure} mj_engine exec -i "$container" sh -c {config_script} mj-mbx-config {configuration_directory} {roots}
+mj_scheme=$(mj_engine exec "$container" sh -c {legacy_script} sh {bin} {configuration_directory} {roots})
+mj_code=$?
+if [ "$mj_code" -ne 0 ]; then
+    mj_failed 1 "$mj_code" {legacy}
+    exit "$mj_code"
+fi
+case "$mj_scheme" in
+    legacy) printf '{prefix}legacy\n'; exit 0 ;;
+    new) ;;
+    *)
+        printf 'container mbx scheme inspection returned unexpected output: %s\n' "$mj_scheme" >&2
+        mj_failed 1 1 {legacy}
+        exit 1
+        ;;
+esac
+"#,
+        engine_words = targets::engine_shell_words(engine),
+        container = quote(container_id),
+        remove_purpose =
+            quote(&serde_json::to_string(REMOVE_FAILED_MBX_PURPOSE).expect("serialize purpose")),
+        configure = purpose(0),
+        config_script = quote(MBX_CONFIG_SCRIPT),
+        configuration_directory = quote(configuration_directory),
+        legacy_script = quote(CHECK_LEGACY_MBX_AND_LINK_CONFIG_SCRIPT),
+        legacy = purpose(1),
+        bin = quote(&format!("{worker_root}/bin")),
+        prefix = SSH_RESULT_PREFIX,
+    );
+    let Some((host_mbx, staged, destination)) = host_mbx else {
+        script.push_str(&format!("printf '{SSH_RESULT_PREFIX}unavailable\\n'\n"));
+        return script;
+    };
+    let ownership = container_upload_ownership_args(engine, container_id, worker_root, &[staged])
+        .iter()
+        .map(|arg| quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (cargo_body, mbx_body) = mbx_shim_bodies(destination);
+    script.push_str(&format!(
+        r#"mj_staged={staged}
+mj_step 2 {copy} mj_engine cp {host_program} "$container:$mj_staged"
+mj_step 3 {owner} mj_engine {ownership}
+mj_step 4 {executable} mj_engine exec "$container" chmod 755 "$mj_staged"
+mj_reported=$(mj_engine exec "$container" "$mj_staged" --version)
+mj_code=$?
+if [ "$mj_code" -ne 0 ]; then
+    mj_failed 5 "$mj_code" {verify}
+    exit "$mj_code"
+fi
+mj_found=
+set -f
+for mj_word in $mj_reported; do mj_found=$mj_word; done
+set +f
+if [ "$mj_found" != {version} ]; then
+    printf 'the container reports mbx %s, but the staged binary is mbx %s\n' "$mj_found" {version} >&2
+    mj_failed 5 1 {verify}
+    exit 1
+fi
+mj_step 6 {publish} mj_engine exec "$container" mv -f -- "$mj_staged" {destination}
+mj_staged=
+mj_step 7 {shims} mj_engine exec "$container" sh -c {shims_script} sh {shim_bin} {cargo_body} {mbx_body}
+printf '{prefix}staged\n'
+"#,
+        staged = quote(staged),
+        copy = purpose(2),
+        host_program = quote(&host_mbx.program.to_string_lossy()),
+        owner = purpose(3),
+        executable = purpose(4),
+        verify = purpose(5),
+        version = quote(host_mbx.version),
+        publish = purpose(6),
+        destination = quote(&destination.to_string_lossy()),
+        shims = purpose(7),
+        shims_script = quote(INSTALL_MBX_SHIMS_SCRIPT),
+        shim_bin = quote(&format!("{worker_root}/bin")),
+        cargo_body = quote(&cargo_body),
+        mbx_body = quote(&mbx_body),
+        prefix = SSH_RESULT_PREFIX,
+    ));
+    script
+}
+
 pub struct StagedWorkerProfile<'a> {
     pub launch: &'a Path,
     pub ownership: &'a Path,
@@ -1039,23 +1278,8 @@ pub fn install_worker_profile_files(
     } = endpoint;
     let upload = ssh.map(|_| format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING));
     if let (Some(ssh), Some(upload)) = (ssh, &upload) {
-        execute_checked(
-            executor,
-            crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["mkdir", "-p", upload])
-                .purpose("create remote upload staging"),
-        )?;
-        for (source, name) in [
-            (launch_config, "launch.json"),
-            (ownership, "ownership.json"),
-        ] {
-            upload_worker_file(
-                executor,
-                ssh,
-                source,
-                &format!("{upload}/{name}"),
-                "upload remote container worker file",
-            )?;
-        }
+        // The profile upload creates `{upload}` (under umask 077); the two
+        // worker files travel with the install script below.
         let staged_profile = format!("{upload}/profile");
         match engine {
             // A Nitro guest does not share its profile objects with the
@@ -1140,9 +1364,25 @@ pub fn install_worker_profile_files(
         .purpose("restrict harness profile permissions"),
     ];
     if let (Some(ssh), Some(upload)) = (ssh, upload) {
+        // The worker files arrive on the script's stdin, so they cost no SSH
+        // command of their own and stay out of argv. The first step unpacks
+        // them into the staging the profile upload created.
+        let worker_files = worker_files_archive(&[
+            ("launch.json", launch_config),
+            ("ownership.json", ownership),
+        ])?;
+        let stage_files = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                "umask 077; mkdir -p -- \"$1\"; exec tar -xf - --no-same-owner --no-same-permissions -C \"$1\"",
+                "mj-stage-worker-files",
+                &upload,
+            ],
+        );
         // Remove the staging only after all install steps succeed.
-        let steps = commands
-            .into_iter()
+        let steps = std::iter::once(stage_files)
+            .chain(commands)
             .chain([CommandSpec::new("rm", ["-rf", "--", &upload])])
             .map(|command| {
                 targets::CommandStep::new(
@@ -1157,7 +1397,8 @@ pub fn install_worker_profile_files(
         execute_checked(
             executor,
             targets::ssh_command_owned(SshTrafficClass::Bulk, ssh, targets::step_script(steps))
-                .purpose("install remote container worker"),
+                .purpose("install remote container worker")
+                .with_sensitive_stdin(worker_files),
         )?;
     } else {
         for command in commands {
@@ -1165,6 +1406,20 @@ pub fn install_worker_profile_files(
         }
     }
     Ok(())
+}
+
+/// An uncompressed tar of small private files, each mode 0600.
+fn worker_files_archive(files: &[(&str, &Path)]) -> Result<Vec<u8>> {
+    let mut archive = tar::Builder::new(Vec::new());
+    for (name, source) in files {
+        let bytes = std::fs::read(source)
+            .with_context(|| format!("read worker upload {}", source.display()))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o600);
+        archive.append_data(&mut header, name, bytes.as_slice())?;
+    }
+    Ok(archive.into_inner()?)
 }
 
 /// Refresh configuration without removing native history or skills the harness
@@ -1592,6 +1847,7 @@ while IFS= read -r key; do
     [ -f "$pins/$key" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
 done < "$work/.mj-keys"
 trap 'rm -rf -- "$work" "$pins"' EXIT
+case "$destination" in */*) mkdir -p -- "${destination%/*}";; esac
 cp -RL -- "$work/profile" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }
 mj_profile_quiescent"#;
 

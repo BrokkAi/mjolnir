@@ -748,8 +748,18 @@ pub enum DeploymentCapacityKind {
     AwsFleet,
 }
 
+/// Stable host probe inputs excluding live per-session storage paths.
+/// The poller uses this identity for immediate probes and in-flight validity,
+/// while executing every live path on periodic, manual and disk-full samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCapacityIdentity {
+    pub connections: Vec<(SshTarget, bool, Vec<String>)>,
+    pub local_template_paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentCapacityTarget {
+    pub stable_identity: Option<HostCapacityIdentity>,
     pub id: String,
     pub host: String,
     pub target_ids: Vec<String>,
@@ -765,6 +775,24 @@ pub struct DeploymentCapacityTarget {
     pub storage_warning: Option<String>,
     /// Prevents a partial AWS fleet sample when one live instance cannot be probed yet.
     pub probe_error: Option<String>,
+}
+
+impl DeploymentCapacityTarget {
+    pub fn same_schedule_identity(&self, other: &Self) -> bool {
+        match (&self.stable_identity, &other.stable_identity) {
+            (Some(left), Some(right)) => {
+                self.id == other.id
+                    && self.host == other.host
+                    && self.target_ids == other.target_ids
+                    && self.kind == other.kind
+                    && self.local == other.local
+                    && self.storage_warning == other.storage_warning
+                    && self.probe_error == other.probe_error
+                    && left == right
+            }
+            _ => self == other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

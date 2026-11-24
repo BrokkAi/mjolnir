@@ -1024,6 +1024,42 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn the_shared_preflight_probe_helper_frames_large_noisy_output_from_a_real_shell() {
+    // Both streams exceed a pipe buffer, so a helper that wrote all of one
+    // before reading the other would deadlock here.
+    let script = format!(
+        "{}probe big sh -c 'i=0; while [ $i -lt 4000 ]; do echo \"line $i of stdout padding padding\"; echo \"line $i of stderr padding padding\" >&2; i=$((i+1)); done; exit 7'\nprobe after true\nexit 0\n",
+        PROBE_HELPER_SH
+    );
+    let output = ProcessExecutor
+        .execute(&CommandSpec::new("sh", ["-c", &script]))
+        .unwrap();
+    assert_eq!(output.status, 0);
+    assert!(output.stdout.len() > 64 * 1024, "{}", output.stdout.len());
+
+    let probes = parse_framed_probes(&output.stdout, DEFAULT_PROBE_FRAMES);
+
+    let big = &probes["big"];
+    assert_eq!(big.status, 7);
+    let stdout = String::from_utf8_lossy(&big.stdout);
+    let stderr = String::from_utf8_lossy(&big.stderr);
+    assert_eq!(stdout.lines().count(), 4000);
+    assert_eq!(stderr.lines().count(), 4000);
+    assert_eq!(
+        stdout.lines().last(),
+        Some("line 3999 of stdout padding padding")
+    );
+    assert_eq!(
+        stderr.lines().last(),
+        Some("line 3999 of stderr padding padding")
+    );
+    assert_eq!(probes["after"].status, 0);
+    // The Podman preflight is this helper plus its own probes.
+    assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.starts_with(&format!("\n{PROBE_HELPER_SH}")));
+}
+
 #[test]
 fn managed_resource_identity_args_build_container_labels() {
     let instance = mj_core::config::instance_identity();

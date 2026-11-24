@@ -555,6 +555,52 @@ pub fn install_build_cache_shim(
     // The build cache is optional: whatever keeps the host's policy or
     // executable from reaching the container turns the cache off for this
     // session, with a notice, instead of blocking the session from starting.
+    if matches!(
+        backend,
+        targets::TargetLocator::SshPodman { .. } | targets::TargetLocator::SshDocker { .. }
+    ) {
+        // Over SSH, every command is a round trip: read the host's policy and
+        // mbx in one, and stage everything in the container with one more.
+        let staged = (|| -> Result<()> {
+            let (configuration, native) =
+                mj_build_cache::mbx::native_mbx_and_config_for_container(backend, cache, executor)
+                    .context("read the container host's mbx configuration")?;
+            let host_mbx = match &native {
+                mj_build_cache::mbx::NativeMbxLookup::Ready(native) => Some(HostMbx {
+                    program: &native.program,
+                    version: &native.version,
+                }),
+                mj_build_cache::mbx::NativeMbxLookup::Unavailable(_) => None,
+            };
+            match stage_ssh_container_mbx(
+                executor,
+                backend,
+                &worker_root,
+                &configuration,
+                &config_roots,
+                host_mbx,
+            )? {
+                // An older private mbx keeps its executable and now has its policy.
+                SshContainerMbx::Legacy | SshContainerMbx::Installed(_) => Ok(()),
+                SshContainerMbx::HostMbxUnavailable => match native {
+                    mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => bail!("{reason}"),
+                    mj_build_cache::mbx::NativeMbxLookup::Ready(_) => {
+                        bail!("staging found no host mbx although one was supplied")
+                    }
+                },
+            }
+        })();
+        if let Err(error) = staged {
+            disable_mbx_cache_shims(
+                &session.id,
+                backend,
+                &worker_root,
+                executor,
+                &format!("{error:#}"),
+            );
+        }
+        return Ok(());
+    }
     let staged = (|| -> Result<Option<PathBuf>> {
         // The policy snapshot goes first: an older private mbx, which keeps its
         // own executable, is linked to it below.
