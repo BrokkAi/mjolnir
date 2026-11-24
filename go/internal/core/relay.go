@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"os"
@@ -615,27 +616,56 @@ func NewCommandID(prefix string) (string, error) {
 
 // --- serde enum encoding shared by the relay modules ---
 
-// relayMarshalJSON encodes v as serde_json does: without Go's HTML escaping
-// of <, > and &, with collections as SerdeCollections writes them, and
-// without a trailing newline. Relay digests hash these bytes, so they must
-// match the Rust encoding. (Go still escapes U+2028 and U+2029, which
-// serde_json writes raw.)
+// relayMarshalJSON encodes v as serde_json does (SerdeJSON). Relay digests
+// hash these bytes, and the Rust side recomputes them from serde's encoding,
+// so they must match it byte for byte.
 func relayMarshalJSON(v any) ([]byte, error) {
+	return SerdeJSON(v)
+}
+
+// SerdeJSON encodes v as serde_json::to_vec does, for every format a Rust
+// build reads or hashes: no trailing newline, collections as
+// SerdeCollections writes them, and strings with serde_json's minimal
+// escaping. encoding/json escapes U+2028 and U+2029 in every string, and a
+// type whose MarshalJSON calls json.Marshal escapes <, > and &; serde_json
+// escapes only the quote, the backslash and control characters. Format
+// rewrites each string that way and leaves numbers, member order and
+// everything else as encoding/json wrote it.
+func SerdeJSON(v any) ([]byte, error) {
 	var b bytes.Buffer
 	encoder := json.NewEncoder(&b)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(SerdeCollections(v)); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+	encoded := jsontext.Value(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
+	// Only string escaping changes here: names serde would also repeat and
+	// text a harness sent stay as they were written.
+	if err := encoded.Format(jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+// SerdeJSONPretty encodes v as serde_json::to_vec_pretty does: SerdeJSON's
+// bytes indented by two spaces.
+func SerdeJSONPretty(v any) ([]byte, error) {
+	compact, err := SerdeJSON(v)
+	if err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	if err := json.Indent(&b, compact, "", "  "); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }
 
 // SerdeCollections is v with every nil slice and map that serde would write
 // as [] or {} made empty, at any depth, so encoding/json writes what serde
 // writes. serde always writes a Vec, set or map, and refuses null for one when
 // it reads; encoding/json writes a nil slice or map as null. A Rust Option of
-// a collection is a pointer here, or a field tagged `format:emitnull` (the
-// encoding/json/v2 spelling) where nil stands for None. A field tagged
+// a collection is a pointer here, so nil still writes null. A field tagged
 // omitempty or omitzero is one serde skips when empty, so it is left alone.
 // Byte slices, and values whose type encodes itself (json.Marshaler,
 // encoding.TextMarshaler), keep their own encoding: such a type's MarshalJSON
@@ -784,8 +814,7 @@ func serdeCollectionsStruct(value reflect.Value) (reflect.Value, bool) {
 		}
 		fieldValue := value.Field(i)
 		var replacement reflect.Value
-		if !serdeTagHasOption(options, "omitempty") && !serdeTagHasOption(options, "omitzero") &&
-			!serdeTagHasOption(options, "format:emitnull") {
+		if !serdeTagHasOption(options, "omitempty") && !serdeTagHasOption(options, "omitzero") {
 			replacement = serdeEmptyCollection(fieldValue)
 		}
 		if !replacement.IsValid() {

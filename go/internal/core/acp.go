@@ -1605,13 +1605,7 @@ func agentExternalJSON(name string, body any) ([]byte, error) {
 // agentMarshalJSON encodes v without escaping HTML characters, which serde
 // never escapes.
 func agentMarshalJSON(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(SerdeCollections(v)); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return SerdeJSON(v)
 }
 
 // agentTagOf reads the string member tagKey of a JSON object.

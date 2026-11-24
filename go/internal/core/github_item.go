@@ -402,25 +402,12 @@ func upstreamLen(evidence *GithubItemEvidence) (int, error) {
 // marshalSerdeJSON encodes as serde_json::to_vec does: `<`, `>` and `&`
 // stay literal and there is no trailing newline.
 func marshalSerdeJSON(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(SerdeCollections(v)); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return SerdeJSON(v)
 }
 
 // marshalSerdeJSONPretty encodes as serde_json::to_vec_pretty does.
 func marshalSerdeJSONPretty(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(SerdeCollections(v)); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return SerdeJSONPretty(v)
 }
 
 func utf8Prefix(text string, limit int) string {

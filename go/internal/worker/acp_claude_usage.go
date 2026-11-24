@@ -6,7 +6,6 @@
 package worker
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -322,11 +321,5 @@ func acpFeaturesJSONEqual(a, b any) bool {
 // acpFeaturesMarshalJSON encodes v without escaping HTML characters, which
 // serde never escapes.
 func acpFeaturesMarshalJSON(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(core.SerdeCollections(v)); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return core.SerdeJSON(v)
 }
