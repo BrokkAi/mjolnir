@@ -8,8 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
 // InferRole serializes snake_case.
@@ -19,6 +24,21 @@ const (
 	InferRoleSystem InferRole = "system"
 	InferRoleUser   InferRole = "user"
 )
+
+// UnmarshalJSON accepts only the two variants, as serde does: a request
+// message is never an assistant or tool message.
+func (r *InferRole) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	switch role := InferRole(text); role {
+	case InferRoleSystem, InferRoleUser:
+		*r = role
+		return nil
+	}
+	return fmt.Errorf("unknown variant `%s`, expected `system` or `user`", text)
+}
 
 // InferMessage denies unknown fields when decoded.
 type InferMessage struct {
@@ -153,5 +173,127 @@ func (e *InferError) Unwrap() error { return e.source }
 // request's schema, validating (and retrying invalid output up to
 // options.ValidationRetries times) locally. A failure is an *InferError.
 func InferStructured(ctx context.Context, backend LlmBackend, model string, request StructuredInferRequest, options InferOptions) (StructuredInferResponse, error) {
-	panic("unported: brokk-anvil-client/src/infer.rs infer_structured")
+	if strings.TrimSpace(model) == "" {
+		return StructuredInferResponse{}, newInferError(InferErrorKindInvalidRequest, errors.New("model must be non-empty"))
+	}
+	if len(request.Messages) == 0 {
+		return StructuredInferResponse{}, newInferError(InferErrorKindInvalidRequest, errors.New("messages must contain at least one system or user message"))
+	}
+	messages := make([]ChatMessage, 0, len(request.Messages)+1)
+	for index, message := range request.Messages {
+		if message.Content == "" {
+			return StructuredInferResponse{}, newInferError(InferErrorKindInvalidRequest, fmt.Errorf("messages[%d].content must be non-empty", index))
+		}
+		switch message.Role {
+		case InferRoleSystem:
+			messages = append(messages, ChatMessageSystem(message.Content))
+		case InferRoleUser:
+			messages = append(messages, ChatMessageUser(message.Content))
+		default:
+			return StructuredInferResponse{}, newInferError(InferErrorKindInvalidRequest,
+				fmt.Errorf("unknown variant `%s`, expected `system` or `user`", message.Role))
+		}
+	}
+	if _, isObject := request.Schema.(jsonvalue.Object); strings.TrimSpace(request.SchemaName) == "" || !isObject {
+		return StructuredInferResponse{}, newInferError(InferErrorKindInvalidRequest, errors.New("schema_name must be non-empty and schema must be an object"))
+	}
+	if _, err := compileSchema(request.Schema); err != nil {
+		return StructuredInferResponse{}, newInferError(InferErrorKindInvalidRequest, withContext(err, "compiling structured-output schema"))
+	}
+	structuredOutput := StructuredOutputRequest{
+		SchemaName: request.SchemaName,
+		Schema:     request.Schema,
+	}
+	// JSON-object fallbacks need an in-band schema, but dynamic schemas must
+	// follow the caller's stable prompt/article prefix rather than displace
+	// it.
+	if !SupportsNativeStructuredOutput(backend) {
+		messages = append(messages, ChatMessageUser(jsonSchemaInstruction(&structuredOutput)))
+	}
+	var totalUsage TokenUsage
+	validationAttempt := 0
+	var output any
+	for {
+		response, err := StreamChatNoVisibleOutputWithRetry(ctx, backend, "bare structured inference", func() StreamChatRequest {
+			structured := structuredOutput
+			var reasoningEffort, serviceTier *string
+			if options.ReasoningEffort != nil {
+				effort := *options.ReasoningEffort
+				reasoningEffort = &effort
+			}
+			if options.ServiceTier != nil {
+				tier := *options.ServiceTier
+				serviceTier = &tier
+			}
+			return StreamChatRequest{
+				Model:            model,
+				Messages:         slices.Clone(messages),
+				ReasoningEffort:  reasoningEffort,
+				ServiceTier:      serviceTier,
+				StructuredOutput: &structured,
+				OnToken:          func(string) {},
+				OnThought:        func(string) {},
+				IdleTimeouts:     options.IdleTimeouts,
+			}
+		})
+		if err != nil {
+			return StructuredInferResponse{}, classifyError(ctx, err)
+		}
+		var text string
+		var usage TokenUsage
+		switch response := response.(type) {
+		case LlmResponseText:
+			text, usage = response.Text, response.Usage
+		default:
+			return StructuredInferResponse{}, newInferError(InferErrorKindProvider,
+				errors.New("inference backend returned tool calls even though no tools were supplied"))
+		}
+		totalUsage.Add(usage)
+		success, failure := validateResponse(&structuredOutput, text)
+		if success != nil {
+			output = success.ValidatedOutput
+			break
+		}
+		if validationAttempt < options.ValidationRetries {
+			validationAttempt++
+			messages = append(messages, ChatMessageAssistant(text), ChatMessageUser(validationRetryPrompt(failure)))
+			continue
+		}
+		return StructuredInferResponse{}, newInferError(InferErrorKindStructuredOutput,
+			fmt.Errorf("structured output validation failed: %s", debugSchemaErrors(failure.Errors)))
+	}
+	return StructuredInferResponse{
+		Model:           model,
+		ReasoningEffort: options.ReasoningEffort,
+		ServiceTier:     options.ServiceTier,
+		Output:          output,
+		Usage:           InferUsageFromTokenUsage(totalUsage),
+	}, nil
+}
+
+func classifyError(ctx context.Context, err error) *InferError {
+	if ctx.Err() != nil {
+		return newInferError(InferErrorKindCancelled, err)
+	}
+	message := asciiLower(err.Error())
+	contains := func(markers ...string) bool {
+		for _, marker := range markers {
+			if strings.Contains(message, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	var retryable *RetryableLlmError
+	switch {
+	case contains("context length", "maximum context", "too many tokens", "request too large"):
+		return newInferError(InferErrorKindContextLength, err)
+	case contains("unauthorized", "http 401", "credentials", "login", "auth.json"):
+		return newInferError(InferErrorKindAuthentication, err)
+	case contains("rate limit", "http 429", "quota exhausted"):
+		return newInferError(InferErrorKindRateLimited, err)
+	case errors.As(err, &retryable):
+		return newInferError(InferErrorKindTransport, err)
+	}
+	return newInferError(InferErrorKindProvider, err)
 }
