@@ -433,6 +433,75 @@ pub async fn capture(command: &mut tokio::process::Command) -> Result<Output> {
     })
 }
 
+/// [`capture`] for a child that reads `input` on stdin. The input is written
+/// while stdout and stderr drain, so a child that answers before it has read
+/// everything cannot deadlock against a full pipe. Stdin is closed once the
+/// input is written (or the child stops reading it) so the child sees EOF.
+/// There is no deadline or size limit; dropping the future terminates the
+/// child's process group.
+pub async fn capture_with_input(
+    command: &mut tokio::process::Command,
+    input: &[u8],
+) -> Result<Output> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    let mut child = spawn_async_child(command).context("start captured subprocess")?;
+    #[cfg(windows)]
+    let _job = ChildJob::attach(&child)?;
+    let _group = ProcessGroupGuard::new(child.id());
+    let mut stdin = child.stdin.take().context("missing captured stdin")?;
+    let mut stdout = child.stdout.take().context("missing captured stdout")?;
+    let mut stderr = child.stderr.take().context("missing captured stderr")?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let (status, (), _, _) = tokio::try_join!(
+        async { child.wait().await.context("wait for captured subprocess") },
+        async move {
+            // A child that exits or closes stdin early is not a write failure.
+            let written = match stdin.write_all(input).await {
+                Ok(()) => Ok(()),
+                Err(error) => ignore_broken_pipe(error),
+            };
+            // Dropping the pipe is what sends EOF; `shutdown` does not close it.
+            drop(stdin);
+            written.context("write captured subprocess stdin")
+        },
+        async {
+            stdout
+                .read_to_end(&mut out)
+                .await
+                .context("read captured stdout")
+        },
+        async {
+            stderr
+                .read_to_end(&mut err)
+                .await
+                .context("read captured stderr")
+        }
+    )?;
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
+fn ignore_broken_pipe(error: std::io::Error) -> std::io::Result<()> {
+    if error.kind() == std::io::ErrorKind::BrokenPipe {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 /// Capture stdout in an unnamed file. Inbox Win32 OpenSSH 9.5p2 can hang at
 /// channel EOF in `chan_shutdown_write` while closing a piped stdout handle
 /// (PowerShell/Win32-OpenSSH#1748 and #2305). A regular file avoids
@@ -1605,6 +1674,87 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, vec![b'o'; 262144]);
         assert_eq!(output.stderr, vec![b'e'; 262144]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_with_input_feeds_stdin_while_both_outputs_fill_their_pipes() {
+        // The child fills stdout and stderr before it reads any input, so the
+        // parent can only finish by draining output while it writes.
+        let input = (0..512 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut command = tokio::process::Command::new("python3");
+        command.args([
+            "-c",
+            "import os, sys\n\
+             os.write(1, b'o'*262144); os.write(2, b'e'*262144)\n\
+             data = sys.stdin.buffer.read()\n\
+             os.write(1, data)",
+        ]);
+        let output = super::capture_with_input(&mut command, &input)
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stderr, vec![b'e'; 262144]);
+        assert_eq!(output.stdout.len(), 262144 + input.len());
+        assert_eq!(&output.stdout[..262144], vec![b'o'; 262144].as_slice());
+        assert_eq!(&output.stdout[262144..], input.as_slice());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_with_input_ignores_a_child_that_never_reads_stdin() {
+        let input = vec![b'x'; 512 * 1024];
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "echo done"]);
+        let output = super::capture_with_input(&mut command, &input)
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_with_input_cancellation_kills_its_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pids");
+        let child_pid_file = pid_file.clone();
+        let command = crate::runtime::spawn(async move {
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "sleep 60 & echo $$ $! > \"$1\"; cat >/dev/null; wait",
+                    "capture-input-fixture",
+                ])
+                .arg(child_pid_file);
+            super::capture_with_input(&mut command, &vec![b'x'; 1024]).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let pids: Vec<i32> = loop {
+                if let Ok(body) = std::fs::read_to_string(&pid_file) {
+                    let pids = body
+                        .split_whitespace()
+                        .filter_map(|pid| pid.parse().ok())
+                        .collect::<Vec<i32>>();
+                    if pids.len() == 2 {
+                        break pids;
+                    }
+                }
+                tokio::task::yield_now().await;
+            };
+            command.abort();
+            assert!(command.await.unwrap_err().is_cancelled());
+            for pid in pids {
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[cfg(unix)]
