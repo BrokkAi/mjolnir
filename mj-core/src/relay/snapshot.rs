@@ -742,6 +742,8 @@ pub struct RelayCursor {
 /// promoted or claimed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InPlaceMoveHold {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload_phase: Option<InPlaceReloadPhase>,
     pub operation_id: String,
     pub captured_pending_command_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2420,4 +2422,12 @@ mod native_continuity_encoding_tests {
                 .contains("replaced_unused_native_session_id")
         );
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum InPlaceReloadPhase {
+    Committed,
+    Started,
+    FailedAfterCommit { message: String },
 }

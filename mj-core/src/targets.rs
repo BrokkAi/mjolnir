@@ -2112,15 +2112,17 @@ impl CancellableProcessExecutor {
                     self,
                     Some(&|| self.is_cancelled()),
                     |command, gate| {
-                        stream_command_with_stdin(
-                            cancellable_command(command),
-                            command,
-                            &mut *input,
-                            &|| self.is_cancelled(),
-                            abort_stdin,
-                            gate,
-                            observer.clone(),
-                        )
+                        self.with_process(command, |process| {
+                            stream_command_with_stdin(
+                                process,
+                                command,
+                                &mut *input,
+                                &|| self.is_cancelled(),
+                                abort_stdin,
+                                gate,
+                                observer.clone(),
+                            )
+                        })
                     },
                 )
             }),
@@ -2584,19 +2586,43 @@ impl CancellableProcessExecutor {
         })
     }
 
-    fn run_once_output(
+    /// Keep terminal ownership through child cleanup on every execution path.
+    fn with_process(
         &self,
         command: &CommandSpec,
-        gate: Option<&Arc<StartGate>>,
-        output: Option<std::fs::File>,
+        run: impl FnOnce(Command) -> Result<CommandOutput>,
     ) -> Result<CommandOutput> {
+        #[cfg(unix)]
         let mut process = cancellable_command(command);
+        #[cfg(not(unix))]
+        let process = cancellable_command(command);
         #[cfg(unix)]
         let _foreground = if self.foreground_terminal {
             crate::subprocess::ForegroundGroup::prepare(&mut process)?
         } else {
             None
         };
+        run(process)
+    }
+
+    fn run_once_output(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Result<CommandOutput> {
+        self.with_process(command, |process| {
+            self.capture_process(process, command, gate, output)
+        })
+    }
+
+    fn capture_process(
+        &self,
+        mut process: Command,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Result<CommandOutput> {
         if command.sensitive_stdin.is_some() || command.keep_stdin_open {
             let mut input = std::io::Cursor::new(command.sensitive_stdin().unwrap_or_default());
             // Owned bytes, so each attempt gets its own reader.

@@ -1431,24 +1431,16 @@ pub fn clear_profile_configuration(
     home: &str,
     harness: HarnessKind,
 ) -> Result<()> {
-    let mut paths = profile_configuration_paths(harness);
-    paths.push(harness.credential_file_name());
-    paths.extend(mj_core::aws_credentials::FILES);
-    if harness == HarnessKind::Codex {
-        paths.push(STAGED_CATALOG_FILE);
-    }
-    paths.sort_unstable();
-    paths.dedup();
+    let (paths, protected_paths) = profile_clear_spec(harness);
     let mut script = String::from("set -eu\n");
     for relative in paths {
-        let path = mj_core::target_path::join(Path::new(home), Path::new(relative));
+        let path = mj_core::target_path::join(Path::new(home), Path::new(&relative));
         let quoted = targets::posix_quote(&mj_core::target_path::text(&path));
-        let protected = harness
-            .harness_owned_skill_paths()
+        let protected = protected_paths
             .iter()
             .filter_map(|owned| {
                 Path::new(owned)
-                    .strip_prefix(relative)
+                    .strip_prefix(&relative)
                     .ok()
                     .and_then(|tail| tail.components().next())
                     .map(|name| targets::posix_quote(&name.as_os_str().to_string_lossy()))
@@ -3287,4 +3279,92 @@ mod profile_archive_tests {
             "{error}"
         );
     }
+}
+
+/// Shared overlay clearing contract for live refresh and staged reload.
+pub fn profile_clear_spec(harness: HarnessKind) -> (Vec<String>, Vec<String>) {
+    let mut paths = profile_configuration_paths(harness);
+    paths.push(harness.credential_file_name());
+    paths.extend(mj_core::aws_credentials::FILES);
+    if harness == HarnessKind::Codex {
+        paths.push(STAGED_CATALOG_FILE);
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    (
+        paths.into_iter().map(str::to_owned).collect(),
+        harness
+            .harness_owned_skill_paths()
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn install_reload_candidate(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+    candidate_id: &str,
+    manifest: &Path,
+    staged: StagedWorkerProfile<'_>,
+) -> Result<()> {
+    use mj_core::worker_launch::{RELOAD_CANDIDATES_DIR, validate_candidate_id};
+    validate_candidate_id(candidate_id)?;
+    let root = format!("{worker_root}/{RELOAD_CANDIDATES_DIR}/{candidate_id}");
+    // Reuse the exact transfer paths, with no login links in the private overlay.
+    install_worker_profile_files(
+        executor,
+        locator,
+        session_id,
+        &root,
+        &format!("{root}/profile"),
+        StagedWorkerProfile {
+            launch: staged.launch,
+            ownership: staged.ownership,
+            profile: staged.profile,
+            shared_login: None,
+            shared_paths: staged.shared_paths,
+        },
+    )?;
+    let command = targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "umask 077; exec cat > \"$1\"".into(),
+            "mj-reload-manifest".into(),
+            format!("{root}/manifest.json"),
+        ],
+        "upload reload candidate manifest",
+    )?;
+    let mut input = std::fs::File::open(manifest)?;
+    let output = executor.execute_with_stdin(&command, &mut input)?;
+    targets::checked_command_output(&command, output)?;
+    Ok(())
+}
+
+pub fn remove_reload_candidate(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    candidate_id: &str,
+) -> Result<()> {
+    use mj_core::worker_launch::{RELOAD_CANDIDATES_DIR, validate_candidate_id};
+    validate_candidate_id(candidate_id)?;
+    let path = format!("{worker_root}/{RELOAD_CANDIDATES_DIR}/{candidate_id}");
+    execute_checked(
+        executor,
+        targets::locator_command(
+            SshTrafficClass::Control,
+            locator,
+            vec!["rm".into(), "-rf".into(), "--".into(), path],
+        )
+        .purpose("remove reload candidate"),
+    )?;
+    Ok(())
 }

@@ -258,13 +258,13 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
 
 #[test]
 fn in_place_protocol_gate_and_deferred_notice_contract() {
-    assert!(ensure_worker_supports_in_place_move("s1", 81, false).is_ok());
-    let manual = ensure_worker_supports_in_place_move("s1", 80, false)
+    assert!(ensure_worker_supports_in_place_move("s1", 91, false).is_ok());
+    let manual = ensure_worker_supports_in_place_move("s1", 90, false)
         .unwrap_err()
         .to_string();
     assert!(manual.contains("mj restart --session s1"), "{manual}");
     assert!(manual.contains("Restart agent"), "{manual}");
-    let quota = ensure_worker_supports_in_place_move("s1", 80, true)
+    let quota = ensure_worker_supports_in_place_move("s1", 90, true)
         .unwrap_err()
         .to_string();
     assert!(quota.contains("Waiting for quota reset"), "{quota}");
@@ -1160,4 +1160,521 @@ fn parent_move_reports_only_workers_in_its_environment() {
             && !refusal.contains("owned")
             && !refusal.contains("depth-two")
     );
+}
+
+#[cfg(unix)]
+mod staged_in_place_tests {
+    use super::*;
+    use crate::controller::checkpoint::stand_in::*;
+    use crate::controller::move_session::test_fixtures::*;
+    use mj_core::config::HarnessKind;
+    use mj_worker::stand_in_relay::seed_source_relay;
+    use std::fs;
+
+    fn executor() -> RecordingProcessExecutor {
+        RecordingProcessExecutor::new(WorkerCheckpoint {
+            restore: mj_worker::checkpoint::restore_from_spec_file,
+            export: |mut input| {
+                Ok(serde_json::to_vec(
+                    &mj_worker::checkpoint::export_from_spec_reader(&mut input)?,
+                )?)
+            },
+        })
+    }
+
+    fn isolated(name: &str) -> bool {
+        if std::env::var_os("MJ_TEST_STAGED_MOVE_CHILD").is_some() {
+            return true;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), name),
+        )
+        .env("MJ_TEST_STAGED_MOVE_CHILD", "1")
+        .env("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS", "1")
+        .env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_PROTOCOL_VERSION.to_string(),
+        )
+        .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+        .isolated_store(dir.path())
+        .run();
+        false
+    }
+
+    fn live_files(root: &std::path::Path) -> Vec<Vec<u8>> {
+        [
+            "launch.json",
+            "ownership.json",
+            "profile/settings.json",
+            "profile/source-only.txt",
+        ]
+        .map(|name| fs::read(root.join(name)).unwrap())
+        .into()
+    }
+
+    fn assert_candidates_empty(root: &std::path::Path) {
+        let path = root.join(mj_core::worker_launch::RELOAD_CANDIDATES_DIR);
+        if path.exists() {
+            assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn in_place_move_precommit_refusal_keeps_live_files_and_clears_fence() {
+        if isolated("in_place_move_precommit_refusal_keeps_live_files_and_clears_fence") {
+            run_case("refused");
+        }
+    }
+
+    #[test]
+    fn in_place_move_staged_success_promotes_destination_and_removes_candidate() {
+        if isolated("in_place_move_staged_success_promotes_destination_and_removes_candidate") {
+            run_case("success");
+        }
+    }
+
+    #[test]
+    fn in_place_move_lost_reply_retry_skips_staging_and_restart() {
+        if isolated("in_place_move_lost_reply_retry_skips_staging_and_restart") {
+            run_case("lost-reply");
+        }
+    }
+
+    #[test]
+    fn in_place_move_failed_committed_reload_and_dead_recovery_settle_destination_error() {
+        if isolated(
+            "in_place_move_failed_committed_reload_and_dead_recovery_settle_destination_error",
+        ) {
+            run_case("failed");
+        }
+    }
+
+    #[test]
+    fn in_place_move_database_failure_after_commit_keeps_fence_until_recovery() {
+        if !isolated("in_place_move_database_failure_after_commit_keeps_fence_until_recovery") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        fs::write(relay_root.join("fail-in-place-after-commit"), "test").unwrap();
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_destination_session BEFORE UPDATE ON sessions WHEN NEW.last_profile = 'claude-destination' BEGIN SELECT RAISE(ABORT, 'injected destination write failure'); END;").unwrap();
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = executor();
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let error = fixture
+                    .controller
+                    .execute_move(
+                        &admission,
+                        &mut operation,
+                        None,
+                        &executor,
+                        &channels.control,
+                        super::super::MoveSourceRelay::default(),
+                    )
+                    .await
+                    .unwrap_err();
+                channels.shutdown.shutdown().await.unwrap();
+                assert!(
+                    format!("{error:#}").contains("injected destination write failure"),
+                    "{error:#}"
+                );
+                assert!(operation.in_place_expected_store_id.is_some());
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_SOURCE_PROFILE
+                );
+                let receipt = mj_core::worker_launch::WorkerLaunchConfig::read(
+                    &fixture.worker_root.join("launch.json"),
+                )
+                .unwrap();
+                assert_eq!(
+                    receipt.accepted_reload_operation_id.as_deref(),
+                    Some(operation.operation_id.as_str())
+                );
+                let outcome = fixture
+                    .controller
+                    .finish_move_result(&mut operation, Err(error), &executor)
+                    .unwrap();
+                assert_eq!(outcome.outcome, "interrupted");
+                assert!(
+                    crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .in_place_expected_store_id
+                        .is_some()
+                );
+                connection
+                    .execute_batch("DROP TRIGGER reject_destination_session;")
+                    .unwrap();
+                fixture.controller.state = crate::database::load_state().unwrap();
+                let channels = start_source_relay_manager(&relay_root);
+                let outcome = fixture
+                    .controller
+                    .recover_move_managed_controlled(
+                        &admission,
+                        operation,
+                        &executor,
+                        &channels.control,
+                    )
+                    .await
+                    .unwrap();
+                channels.shutdown.shutdown().await.unwrap();
+                assert_eq!(outcome.outcome, "failed", "{outcome:?}");
+                let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                assert_eq!(session.state, SessionState::Error);
+                assert!(
+                    crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .in_place_expected_store_id
+                        .is_none()
+                );
+            });
+    }
+
+    #[test]
+    fn in_place_move_cancelled_after_started_settles_destination_and_installs_recent_handoff() {
+        if !isolated(
+            "in_place_move_cancelled_after_started_settles_destination_and_installs_recent_handoff",
+        ) {
+            return;
+        }
+        use mj_core::relay::{
+            RelayCommand, RelayCommandOutcome, RelayRequest, RelayRequestEnvelope,
+            RelayResponseBody, RelayResponsePayload,
+        };
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Codex);
+        let source = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        let envelope = |request| RelayRequestEnvelope {
+            request_id: "cancel-seed".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request,
+        };
+        let mut seed =
+            mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        let history =
+            "Keep the source conversation context when cancellation retains destination ownership.";
+        seed.handle(envelope(RelayRequest::Submit {
+            command_id: "cmd-cancel-history".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                    history,
+                )],
+            },
+        }));
+        assert_eq!(seed.claim_pending_commands(true).unwrap().len(), 1);
+        seed.handle(envelope(RelayRequest::Submit {
+            command_id: "cmd-existing-user".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                    "existing queued user work",
+                )],
+            },
+        }));
+        let store = seed.operational_state().store_id.unwrap();
+        let held = seed.handle(envelope(RelayRequest::HoldInPlaceMoveDispatch {
+            operation_id: operation.operation_id.clone(),
+            expected_store_id: store.clone(),
+        }));
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::InPlaceMoveDispatchHeld {
+                    captured_pending_command_ids,
+                },
+        } = held.body
+        else {
+            panic!("hold expected")
+        };
+        assert_eq!(captured_pending_command_ids, ["cmd-existing-user"]);
+        seed.record_command_completed(
+            "cmd-cancel-history",
+            RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+        drop(seed);
+        operation.in_place_expected_store_id = Some(store.clone());
+        operation.in_place_held_command_ids = captured_pending_command_ids;
+        crate::database::save_move_operation(&operation).unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let executor = executor();
+            let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+            let channels = start_source_relay_manager(&relay_root);
+            let mut relay = super::super::MoveSourceRelay::lease(&admission, &channels.control, LATCH_RELAY_SESSION).await.unwrap();
+            let owner = relay.owner().unwrap();
+            fixture.controller.apply_in_place_destination(&operation).unwrap();
+            let backend = mj_core::targets::TargetLocator::LocalBare { worker_root: fixture.worker_root.to_string_lossy().into_owned() };
+            let candidate = mj_core::relay::new_command_id("cancel-candidate").unwrap();
+            owner.scope_blocking(|| fixture.controller.prepare_worker_files_for(LATCH_RELAY_SESSION, &backend, fixture.worker_root.to_str().unwrap(), &executor, mj_worker_staging::worker_binary::WorkerFilePreparation::StageCandidate { operation_id: operation.operation_id.clone(), expected_store_id: store.clone(), candidate_id: candidate.clone() }, mj_worker_staging::worker_binary::LaunchHistory::Stored)).unwrap();
+            let launch = fixture.controller.current_worker_launch_config(LATCH_RELAY_SESSION, &backend).unwrap();
+            let conn = relay.0.as_mut().unwrap().connection_mut();
+            conn.client.restart_harness_in_place(&operation.operation_id, &store, Box::new(launch), Some(candidate)).await.unwrap();
+            let hold = conn.client.status().await.unwrap().in_place_move_hold.unwrap();
+            assert!(matches!(hold.reload_phase, Some(mj_core::relay::InPlaceReloadPhase::Started)));
+            // The reply was lost before the controller published destination B.
+            fixture.controller.state.sessions.insert(LATCH_RELAY_SESSION.into(), source);
+            assert_eq!(crate::database::load_session_record(LATCH_RELAY_SESSION).unwrap().unwrap().last_profile, IN_PLACE_SOURCE_PROFILE);
+            drop(relay);
+            channels.shutdown.shutdown().await.unwrap();
+            operation.cancellation_requested = true;
+            operation.queue = ResumeQueueDisposition::Start;
+            operation.quota_stop_reason = Some("quota exhausted".into());
+            operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+            operation.in_place_continuation_command_id = Some("cmd-must-not-continue".into());
+            crate::database::save_move_operation(&operation).unwrap();
+            let channels = start_source_relay_manager(&relay_root);
+            let outcome = fixture.controller.recover_move_managed_controlled(&admission, operation, &executor, &channels.control).await.unwrap();
+            channels.shutdown.shutdown().await.unwrap();
+            assert_eq!(outcome.outcome, "cancelled", "{outcome:?}");
+            assert!(outcome.error.as_deref().unwrap().contains("destination retained"));
+            let record = crate::database::load_session_record(LATCH_RELAY_SESSION).unwrap().unwrap();
+            assert_eq!(record.last_profile, IN_PLACE_DESTINATION_PROFILE);
+            assert_eq!(record.harness_kind, HarnessKind::Claude);
+            let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION).unwrap().unwrap();
+            assert!(operation.in_place_harness_restarted);
+            assert!(operation.in_place_expected_store_id.is_none());
+            assert!(operation.in_place_held_command_ids.is_empty());
+            let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(&fs::read(relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap()).unwrap();
+            assert!(snapshot.in_place_move_hold.is_none());
+            assert!(!snapshot.handled_commands.contains_key("cmd-must-not-continue"));
+            assert_eq!(snapshot.dispatches["cmd-existing-user"].state, mj_core::relay::RelayDispatchState::InFlight);
+            let context = snapshot.pending_prompt_context.unwrap();
+            assert!(context.text.contains(history), "{}", context.text);
+            assert_eq!(context.attached_command_id.as_deref(), Some("cmd-existing-user"));
+            let requests = fs::read_to_string(relay_root.join("in-place-move-requests.log")).unwrap();
+            assert!(!requests.contains("submit_front"));
+            assert!(!requests.contains("discard_held_move_commands"));
+        });
+    }
+
+    fn run_case(mode: &str) {
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let source_session = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        let before = live_files(&fixture.worker_root);
+        let marker = match mode {
+            "refused" => Some("reject-in-place-restart"),
+            "lost-reply" => Some("lose-in-place-restart-reply"),
+            "failed" => Some("fail-in-place-after-commit"),
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            fs::write(relay_root.join(marker), "test").unwrap();
+        }
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = executor();
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let result = fixture
+                    .controller
+                    .execute_move(
+                        &admission,
+                        &mut operation,
+                        None,
+                        &executor,
+                        &channels.control,
+                        super::super::MoveSourceRelay::default(),
+                    )
+                    .await;
+                channels.shutdown.shutdown().await.unwrap();
+                match mode {
+                    "refused" => {
+                        assert!(result.is_err());
+                        assert_eq!(live_files(&fixture.worker_root), before);
+                        assert_candidates_empty(&fixture.worker_root);
+                        assert!(operation.in_place_expected_store_id.is_none());
+                        assert!(operation.in_place_held_command_ids.is_empty());
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_SOURCE_PROFILE);
+                        assert_eq!(session.state, SessionState::Running);
+                        let relay = mj_worker::relay::DurableRelay::open(
+                            &relay_root,
+                            LATCH_RELAY_SESSION,
+                            "1.0.0",
+                        )
+                        .unwrap();
+                        assert!(relay.operational_state().in_place_move_hold.is_none());
+                    }
+                    "success" => {
+                        result.unwrap();
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                        assert_eq!(session.state, SessionState::Running);
+                        assert_candidates_empty(&fixture.worker_root);
+                        let launch = mj_core::worker_launch::WorkerLaunchConfig::read(
+                            &fixture.worker_root.join("launch.json"),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            launch.accepted_reload_operation_id.as_deref(),
+                            Some(operation.operation_id.as_str())
+                        );
+                        assert!(
+                            fs::read_to_string(fixture.worker_root.join("profile/settings.json"))
+                                .unwrap()
+                                .contains("destination")
+                        );
+                    }
+                    "lost-reply" => {
+                        assert!(result.is_err());
+                        assert!(operation.in_place_expected_store_id.is_some());
+                        assert_eq!(
+                            crate::database::load_session_record(LATCH_RELAY_SESSION)
+                                .unwrap()
+                                .unwrap()
+                                .last_profile,
+                            IN_PLACE_SOURCE_PROFILE
+                        );
+                        fs::write(
+                            fixture.worker_root.join("profile/settings.json"),
+                            "worker-configured destination",
+                        )
+                        .unwrap();
+                        fs::write(
+                            fixture.destination_home.join("settings.json"),
+                            "invalid canonical settings: staging must be skipped",
+                        )
+                        .unwrap();
+                        let channels = start_source_relay_manager(&relay_root);
+                        let outcome = fixture
+                            .controller
+                            .recover_move_managed_controlled(
+                                &admission,
+                                operation.clone(),
+                                &executor,
+                                &channels.control,
+                            )
+                            .await
+                            .unwrap();
+                        channels.shutdown.shutdown().await.unwrap();
+                        assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+                        assert_eq!(
+                            fs::read_to_string(fixture.worker_root.join("profile/settings.json"))
+                                .unwrap(),
+                            "worker-configured destination"
+                        );
+                        assert_eq!(
+                            crate::database::load_session_record(LATCH_RELAY_SESSION)
+                                .unwrap()
+                                .unwrap()
+                                .last_profile,
+                            IN_PLACE_DESTINATION_PROFILE
+                        );
+                        assert_eq!(
+                            fs::read_to_string(relay_root.join("in-place-move-requests.log"))
+                                .unwrap()
+                                .matches("restart_harness_in_place")
+                                .count(),
+                            1
+                        );
+                        assert_candidates_empty(&fixture.worker_root);
+                    }
+                    "failed" => {
+                        let error = result.unwrap_err();
+                        fixture
+                            .controller
+                            .finish_move_result(&mut operation, Err(error), &executor)
+                            .unwrap();
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                        assert_eq!(session.state, SessionState::Error);
+                        assert_eq!(
+                            session.last_error.as_deref(),
+                            Some("replacement harness failed after commit")
+                        );
+                        assert!(operation.in_place_expected_store_id.is_none());
+                        assert_eq!(operation.phase, MovePhase::Failed);
+                        let committed = live_files(&fixture.worker_root);
+                        // Recreate the daemon crash window: worker committed B and
+                        // wrote its exit failure, while the database still names A.
+                        crate::database::save_session(&source_session).unwrap();
+                        fixture
+                            .controller
+                            .state
+                            .sessions
+                            .insert(LATCH_RELAY_SESSION.into(), source_session);
+                        operation.phase = MovePhase::Capturing;
+                        operation.error = None;
+                        operation.in_place_expected_store_id =
+                            mj_worker::relay::DurableRelay::open(
+                                &relay_root,
+                                LATCH_RELAY_SESSION,
+                                "1.0.0",
+                            )
+                            .unwrap()
+                            .operational_state()
+                            .store_id;
+                        crate::database::save_move_operation(&operation).unwrap();
+                        let channels = start_source_relay_manager(&relay_root);
+                        let outcome = fixture
+                            .controller
+                            .recover_move_managed_controlled(
+                                &admission,
+                                operation.clone(),
+                                &executor,
+                                &channels.control,
+                            )
+                            .await
+                            .unwrap();
+                        channels.shutdown.shutdown().await.unwrap();
+                        assert_eq!(outcome.outcome, "failed", "{outcome:?}");
+                        let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(session.last_profile, IN_PLACE_DESTINATION_PROFILE);
+                        assert_eq!(session.state, SessionState::Error);
+                        assert_eq!(
+                            session.last_error.as_deref(),
+                            Some("replacement harness failed after commit")
+                        );
+                        assert!(
+                            crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                                .unwrap()
+                                .unwrap()
+                                .in_place_expected_store_id
+                                .is_none()
+                        );
+                        assert_eq!(live_files(&fixture.worker_root), committed);
+                    }
+                    _ => unreachable!(),
+                }
+            });
+    }
 }

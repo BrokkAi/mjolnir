@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use mj_core::config::HarnessKind;
 
+pub mod reload_commit;
 mod root_owner;
 pub use root_owner::WorkerRootOwner;
 

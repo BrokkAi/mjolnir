@@ -245,6 +245,105 @@ mod tests {
         })
     }
 
+    #[test]
+    fn reload_commit_overlay_switches_database_login_without_losing_sessions() {
+        use crate::worker_runtime::reload_commit::{apply_committed_reload, commit_pending_reload};
+        use mj_core::worker_launch::{PendingInPlaceReload, ReloadCandidateManifest};
+        let root = tempfile::tempdir().unwrap();
+        let first = serde_json::json!([login(
+            "account-a",
+            "openai",
+            true,
+            serde_json::json!({"type":"key","key":"a"})
+        )]);
+        let second = serde_json::json!([login(
+            "account-b",
+            "openai",
+            true,
+            serde_json::json!({"type":"key","key":"b"})
+        )]);
+        let environment = session_home(root.path(), &first);
+        let home = HarnessKind::OpenCode.home_from_environment(&environment["XDG_CONFIG_HOME"]);
+        let database = home.join(".data/opencode/opencode.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch("CREATE TABLE credential (id TEXT, integration_id TEXT, active BOOL, value TEXT); CREATE TABLE session (id TEXT, history TEXT); INSERT INTO session VALUES ('native-session', 'retained history');").unwrap();
+        for (id, active, value) in [("account-a", true, "a"), ("account-b", false, "b")] {
+            connection
+                .execute(
+                    "INSERT INTO credential VALUES (?1, 'openai', ?2, ?3)",
+                    rusqlite::params![
+                        id,
+                        active,
+                        serde_json::json!({"type":"key","key":value}).to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let candidate = root.path().join("reload-candidates/candidate");
+        std::fs::create_dir_all(
+            candidate
+                .join("profile")
+                .join(HarnessKind::OpenCode.credential_file_name())
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            candidate
+                .join("profile")
+                .join(HarnessKind::OpenCode.credential_file_name()),
+            serde_json::to_vec(&second).unwrap(),
+        )
+        .unwrap();
+        for name in ["launch.json", "ownership.json"] {
+            std::fs::write(candidate.join(name), "destination").unwrap();
+        }
+        let manifest = ReloadCandidateManifest {
+            operation_id: "move".into(),
+            expected_store_id: "store".into(),
+            candidate_id: "candidate".into(),
+            harness: HarnessKind::OpenCode,
+            target_profile_home: home.to_string_lossy().into_owned(),
+            clear_paths: vec![HarnessKind::OpenCode.credential_file_name().into()],
+            protected_paths: Vec::new(),
+            shared_login: None,
+            clear_github_token: false,
+        };
+        std::fs::write(
+            candidate.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let pending = PendingInPlaceReload {
+            operation_id: "move".into(),
+            expected_store_id: "store".into(),
+            candidate_id: "candidate".into(),
+            git_setup_name: None,
+        };
+        commit_pending_reload(root.path(), &pending).unwrap();
+        apply_committed_reload(root.path(), &pending).unwrap();
+        ImportedLogins::prepare(&environment).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let login: (String, bool) = connection
+            .query_row("SELECT id, active FROM credential", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(login, ("account-b".into(), true));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT history FROM session WHERE id = 'native-session'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "retained history"
+        );
+    }
+
     /// A reload brings the session's logins to the profile's through
     /// OpenCode's own import, without losing an OAuth refresh the session made:
     /// the refreshed login stays, a provider's newly selected login takes

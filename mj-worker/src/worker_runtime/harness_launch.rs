@@ -109,13 +109,34 @@ pub async fn prepare_harness_launch(
     harness: HarnessKind,
     policy: HarnessRuntimePolicy,
     execution_policy: ExecutionPolicy,
+    spec: AcpSupervisorSpec,
+) -> Result<PreparedHarnessLaunch> {
+    prepare_harness_launch_inner(harness, policy, execution_policy, spec, true).await
+}
+
+pub(super) async fn prepare_harness_private_launch(
+    harness: HarnessKind,
+    policy: HarnessRuntimePolicy,
+    execution_policy: ExecutionPolicy,
+    spec: AcpSupervisorSpec,
+) -> Result<PreparedHarnessLaunch> {
+    prepare_harness_launch_inner(harness, policy, execution_policy, spec, false).await
+}
+
+async fn prepare_harness_launch_inner(
+    harness: HarnessKind,
+    policy: HarnessRuntimePolicy,
+    execution_policy: ExecutionPolicy,
     mut spec: AcpSupervisorSpec,
+    link_cache: bool,
 ) -> Result<PreparedHarnessLaunch> {
     spec.environment
         .remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
     let mut environment =
         mj_harness_install::login_environment::with_overrides(&spec.environment).await?;
-    link_build_cache_configuration(&environment).await?;
+    if link_cache {
+        link_build_cache_configuration(&environment).await?;
+    }
     super::exclude_from_harness_environment(
         harness,
         &spec.excluded_environment,
@@ -338,7 +359,9 @@ pub(super) async fn needs_node_runtime(
 
 /// Reviewer homes can be created after provisioning. Link their mbx lookup to
 /// machine policy too, without changing XDG_CONFIG_HOME for any other program.
-async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) -> Result<()> {
+pub(super) async fn link_build_cache_configuration(
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
     let Some(source) = environment.get("MJ_MBX_CONFIG_DIR") else {
         return Ok(());
     };
