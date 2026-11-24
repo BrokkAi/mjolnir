@@ -5885,13 +5885,15 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     *fake.worker_alive.lock().unwrap() = true;
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);
-    for (worker_alive, command) in [
-        (true, READ_REQUEST),
-        (true, "read suspend record suspend-progress.json"),
-        (false, "probe Mjolnir worker daemon liveness"),
+    for (worker_alive, command, lose_stop_reply) in [
+        (false, "read suspend record suspend-operation.json", false),
+        (false, READ_REQUEST, false),
+        (true, READ_REQUEST, true),
+        (true, "read suspend record suspend-progress.json", false),
+        (false, "probe Mjolnir worker daemon liveness", false),
     ] {
         *fake.worker_alive.lock().unwrap() = worker_alive;
-        fake.lose_stop_reply = command == READ_REQUEST;
+        fake.lose_stop_reply = lose_stop_reply;
         fake.failed_stop_observation = Some(command);
         let before_close: BeforeClose = Box::pin(async { panic!("pending stop entered teardown") });
         let error = if fake.lose_stop_reply {
@@ -5959,10 +5961,22 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
             crate::database::load_closing_consent(session_id).unwrap(),
             Some(consent.clone())
         );
+        let files = fake.files.lock().unwrap();
         assert_eq!(
-            fake.files.lock().unwrap()[wire::REQUEST],
-            serde_json::to_vec(&request).unwrap()
+            files[wire::ACCEPTED],
+            serde_json::to_vec(&operation).unwrap()
         );
+        if let Some(recorded) = files.get(wire::REQUEST) {
+            assert_eq!(recorded, &serde_json::to_vec(&request).unwrap());
+        } else {
+            assert!(
+                matches!(
+                    command,
+                    "read suspend record suspend-operation.json" | READ_REQUEST
+                ) && !lose_stop_reply,
+                "the recorded stop disappeared during {command}"
+            );
+        }
     }
     fake.failed_stop_observation = None;
 

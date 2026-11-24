@@ -10403,6 +10403,7 @@ async fn suspend_recovery_preserves_a_clones_unpushed_work() {
 #[tokio::test]
 async fn sealed_suspend_retains_its_checkpoint_when_capture_contact_fails() {
     use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+    use mj_controller::controller::lifecycle::SuspendSettlement;
     use mj_controller::controller::test_support::{
         session_admission, write_checkpoint_gate_archive,
     };
@@ -10511,9 +10512,57 @@ async fn sealed_suspend_retains_its_checkpoint_when_capture_contact_fails() {
     assert!(clone.checkout.exists());
 
     std::fs::remove_file(fault).unwrap();
-    clone
-        .state
-        .recover_suspension(LATCH_RELAY_SESSION.into())
+    let consent = mj_core::suspend_consent::SuspendConsent::default();
+    let before_close = || -> mj_controller::controller::BeforeClose {
+        Box::pin(async { anyhow::bail!("sealed Suspend replayed its close callback") })
+    };
+    // A known seal still requires an installed archive before Destroying.
+    // Force that precondition failure, then restore metadata and finish the
+    // same close without polling its callback.
+    session.checkpoint = None;
+    mj_controller::database::save_checkpointed_session(&session).unwrap();
+    let mut controller = Controller::load().unwrap();
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            LATCH_RELAY_SESSION,
+            &ProcessExecutor,
+            &clone.channels.control,
+            &consent,
+            Some(before_close()),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("sealed relay has no verified checkpoint"));
+    let reason = error
+        .downcast_ref::<mj_controller::controller::LifecycleFailureReason>()
+        .copied();
+    assert_eq!(
+        reason,
+        Some(mj_controller::controller::LifecycleFailureReason::SuspendPending)
+    );
+    controller
+        .record_failed_close(LATCH_RELAY_SESSION, "sealed cleanup pending", reason)
+        .unwrap();
+    session = mj_controller::database::read_durable_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.state, SessionState::Closing);
+    assert!(clone.checkout.exists());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
+    mj_controller::database::save_checkpointed_session(&session).unwrap();
+    let mut controller = Controller::load().unwrap();
+    controller
+        .recover_interrupted_close_managed(
+            &admission,
+            LATCH_RELAY_SESSION,
+            &ProcessExecutor,
+            &clone.channels.control,
+            &consent,
+            Some(before_close()),
+            SuspendSettlement::Suspend,
+        )
         .await
         .unwrap();
     let stopped = mj_controller::database::read_durable_session_record(LATCH_RELAY_SESSION)
