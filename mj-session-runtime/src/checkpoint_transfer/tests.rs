@@ -271,9 +271,15 @@ impl CommandExecutor for SshDockerTransferExecutor {
                 stderr: b"staging cleanup unavailable".to_vec(),
             });
         }
+        // The staging command reports the host's `$HOME` on stdout.
+        let stdout = if command.purpose == "stage remote container checkpoint" {
+            b"MJ_REMOTE_HOME=/home/dev\n".to_vec()
+        } else {
+            Vec::new()
+        };
         Ok(CommandOutput {
             status: 0,
-            stdout: Vec::new(),
+            stdout,
             stderr: Vec::new(),
         })
     }
@@ -574,7 +580,6 @@ fn overlapping_remote_transfers_keep_their_own_bytes_and_cleanup() {
                         changed.notify_all();
                     }
                 }
-                "create remote checkpoint staging directory" => {}
                 purpose => bail!("unexpected transfer command: {purpose}"),
             }
             Ok(CommandOutput {
@@ -673,4 +678,168 @@ fn corrupt_or_truncated_transfer_preserves_previous_checkpoint_and_reports_evide
         );
         assert_eq!(fs::read(&source).unwrap(), original);
     }
+}
+
+#[test]
+fn retained_host_staging_is_one_staging_command_and_survives_only_until_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = vec![b'z'; 160 * 1024];
+    let source = temp.path().join("source.zip");
+    fs::write(&source, &archive).unwrap();
+    let digest = checkpoint_sha256(&source).unwrap();
+    let locator = ssh_docker_locator();
+    let frontier_digest = "a".repeat(64);
+    fn transfer<'a>(
+        locator: &'a TargetLocator,
+        frontier_digest: &'a str,
+        destination: &'a Path,
+        expected: &'a str,
+    ) -> CheckpointTransfer<'a> {
+        CheckpointTransfer {
+            locator,
+            session_id: SESSION,
+            operation_id: "retain-1",
+            remote_archive: "/var/lib/hel/workers/source.hel.zip",
+            destination,
+            expected_sha256: expected,
+            expected_event_frontier: 1,
+            expected_event_frontier_digest: frontier_digest,
+        }
+    }
+    let staging = format!(".local/share/hel/transfers/{SESSION}-retain-1.hel.zip");
+    let is_removal = |command: &CommandSpec| {
+        command.program == "ssh"
+            && command
+                .args
+                .last()
+                .is_some_and(|remote| remote.contains(&format!("'rm' '-f' '--' '{staging}'")))
+    };
+
+    // Success keeps the staging file, reports `$HOME`, and needs exactly one
+    // SSH session plus the download before verification.
+    let executor = SshDockerTransferExecutor::new(archive.clone());
+    let destination = temp.path().join("controller/kept.hel.zip");
+    let (verified, retained) = transfer(&locator, &frontier_digest, &destination, &digest)
+        .execute_retaining_host_staging(&executor)
+        .unwrap();
+    assert_eq!(verified.sha256(), digest);
+    assert_eq!(fs::read(&destination).unwrap(), archive);
+    assert_eq!(
+        retained,
+        Some(RetainedHostStaging {
+            staging_path: staging.clone(),
+            remote_home: Some("/home/dev".to_owned()),
+        })
+    );
+    assert_eq!(
+        transfer(&locator, &frontier_digest, &destination, &digest)
+            .host_staging_path()
+            .unwrap()
+            .unwrap(),
+        staging
+    );
+    let commands = executor.commands.borrow();
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command.purpose.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "stage remote container checkpoint",
+            "download remote container checkpoint over SSH"
+        ]
+    );
+    let stage = commands[0].args.last().unwrap();
+    assert!(
+        stage.contains("MJ_REMOTE_HOME=") && stage.contains("mkdir -p"),
+        "{stage}"
+    );
+    drop(commands);
+
+    // A checksum mismatch removes the retained file and leaves nothing behind.
+    let executor = SshDockerTransferExecutor::new(archive.clone());
+    let rejected = temp.path().join("controller/rejected.hel.zip");
+    let error = transfer(&locator, &frontier_digest, &rejected, &"0".repeat(64))
+        .execute_retaining_host_staging(&executor)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("checkpoint checksums differ"));
+    assert!(!host_staging_may_remain(&error));
+    assert!(!rejected.exists());
+    assert_eq!(
+        executor
+            .commands
+            .borrow()
+            .iter()
+            .filter(|c| is_removal(c))
+            .count(),
+        1
+    );
+
+    // When that removal fails too, the caller is told the file may remain.
+    let mut executor = SshDockerTransferExecutor::new(archive.clone());
+    executor.fail_staging_cleanup = true;
+    let error = transfer(&locator, &frontier_digest, &rejected, &"0".repeat(64))
+        .execute_retaining_host_staging(&executor)
+        .unwrap_err();
+    assert!(host_staging_may_remain(&error), "{error:#}");
+    assert!(format!("{error:#}").contains("checkpoint checksums differ"));
+
+    // The ordinary entry point still removes staging before it returns.
+    let executor = SshDockerTransferExecutor::new(archive);
+    let plain = temp.path().join("controller/plain.hel.zip");
+    transfer(&locator, &frontier_digest, &plain, &digest)
+        .execute(&executor)
+        .unwrap();
+    assert_eq!(
+        executor
+            .commands
+            .borrow()
+            .iter()
+            .filter(|c| is_removal(c))
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn staging_command_runs_in_a_real_shell_and_reports_the_remote_home() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let shims = temp.path().join("shims");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&shims).unwrap();
+    // A container engine whose `cp container:path destination` writes 128 KiB.
+    let engine = shims.join("docker");
+    fs::write(
+        &engine,
+        "#!/bin/sh\n[ \"$1\" = cp ] || exit 2\nhead -c 131072 /dev/zero > \"$3\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+    let staging = remote_staging_path(SESSION, "real-shell").unwrap();
+    let plan = transfer_plan(
+        &ssh_docker_locator(),
+        SESSION,
+        "/var/lib/hel/workers/source.hel.zip",
+        &temp.path().join("local.zip"),
+        &staging,
+    )
+    .unwrap();
+    assert_eq!(plan.commands.len(), 2);
+    let remote = plan.commands[0].args.last().unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", &format!("cd \"$HOME\" && {remote}")])
+        .env("HOME", &home)
+        .env("PATH", format!("{}:/usr/bin:/bin", shims.display()))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("MJ_REMOTE_HOME={}\n", home.display())
+    );
+    assert_eq!(fs::metadata(home.join(&staging)).unwrap().len(), 131072);
 }
