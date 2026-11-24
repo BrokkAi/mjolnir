@@ -30,7 +30,9 @@ func TestMbxLaunchersSurviveShellResetAndGitReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	bare := map[string]string{}
-	restoreMbxLauncher(root, bare)
+	if err := restoreMbxLauncher(root, nil, bare); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := bare["MJ_MBX_BIN"]; ok {
 		t.Fatal("injected bare launcher")
 	}
@@ -57,9 +59,55 @@ func TestMbxLaunchersSurviveShellResetAndGitReload(t *testing.T) {
 			t.Fatalf("got %q want %q", out, want)
 		}
 	}
+	for _, present := range []bool{false, true} {
+		env := map[string]string{"MJ_MBX_BIN": bin}
+		if present {
+			env["PATH"] = ""
+		}
+		if err := restoreMbxLauncher(root, nil, env); err != nil {
+			t.Fatal(err)
+		}
+		if env["PATH"] != bin {
+			t.Fatalf("restored empty PATH: %q", env["PATH"])
+		}
+		delete(env, "PATH")
+		if present {
+			env["PATH"] = ""
+		}
+		// sh may supply a default PATH when absent, so explicitly unset it in that case.
+		script := launcherPathShell() + `printf '%s' "$PATH"`
+		if !present {
+			script = "unset PATH\n" + script
+		}
+		cmd := exec.Command("/bin/sh", "-c", script)
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		out, err := cmd.Output()
+		if err != nil || string(out) != bin {
+			t.Fatalf("shell empty PATH: %q %v", out, err)
+		}
+	}
+	relative := ".local/share/mjolnir/workers/sess/bin"
+	relativeHome := "relative-home"
+	for _, home := range []*string{&root, nil, &relativeHome} {
+		env := map[string]string{"MJ_MBX_BIN": relative}
+		if err := restoreMbxLauncher(root, home, env); err != nil {
+			t.Fatal(err)
+		}
+		expected := bin
+		if home == &root {
+			expected = filepath.Join(root, relative)
+		}
+		if env["MJ_MBX_BIN"] != expected || env["PATH"] != expected {
+			t.Fatalf("relative launcher: %#v", env)
+		}
+	}
 	for _, generation := range []string{"harness-git-first", "harness-git-reload"} {
 		env["MJ_GITHUB_CLI_BIN"] = filepath.Join(root, generation, "bin")
-		restoreMbxLauncher(root, env)
+		if err := restoreMbxLauncher(root, nil, env); err != nil {
+			t.Fatal(err)
+		}
 		check(false)
 		if err := projectToolsApplyEnvironment(env, []string{root}, nil); err != nil {
 			t.Fatal(err)

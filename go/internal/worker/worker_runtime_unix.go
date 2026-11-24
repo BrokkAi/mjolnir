@@ -1979,7 +1979,9 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 	for _, name := range []string{core.SessionGitConfigIncludePath, core.SessionManagedSubagentEnv, core.SessionRawLaunchRecordEnv, core.SessionMessageMCPEnv, core.SessionProjectToolsRoots} {
 		delete(sessionEnvironment, name)
 	}
-	restoreMbxLauncher(root, sessionEnvironment)
+	if err := restoreMbxLauncher(root, workerHome, sessionEnvironment); err != nil {
+		return nil, err
+	}
 	noGithubCredentials := config.NoGithubCredentials
 	gitConfigInclude := setup.sessionGitConfigInclude
 	explicitEnvironment := maps.Clone(config.Environment)

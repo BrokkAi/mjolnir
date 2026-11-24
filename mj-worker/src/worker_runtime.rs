@@ -174,6 +174,7 @@ pub(crate) fn github_cli_login_shell_command(command: &str) -> String {
 #[cfg(unix)]
 fn restore_mbx_launcher(
     root: &std::path::Path,
+    home: Option<&std::path::Path>,
     environment: &mut std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     use mj_core::worker_launch::SESSION_MBX_BIN_ENV;
@@ -191,10 +192,23 @@ fn restore_mbx_launcher(
         .filter(|bin| !bin.is_empty())
     {
         let old = environment.get("PATH").cloned().unwrap_or_default();
-        let bin = std::path::PathBuf::from(bin);
-        let path = std::env::join_paths(
-            std::iter::once(bin.clone()).chain(std::env::split_paths(&old).filter(|p| p != &bin)),
-        )?;
+        let mut bin = std::path::PathBuf::from(bin);
+        if !bin.is_absolute() {
+            bin = home
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(&bin))
+                .unwrap_or_else(|| root.join("bin"));
+            bin = std::path::absolute(bin)?;
+        }
+        environment.insert(
+            SESSION_MBX_BIN_ENV.into(),
+            bin.to_string_lossy().into_owned(),
+        );
+        let mut entries = vec![bin.clone()];
+        if !old.is_empty() {
+            entries.extend(std::env::split_paths(&old).filter(|p| p != &bin));
+        }
+        let path = std::env::join_paths(entries)?;
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
     Ok(())

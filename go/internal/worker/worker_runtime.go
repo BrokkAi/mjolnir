@@ -193,16 +193,34 @@ func githubCLILoginShellCommand(command string) string {
 	return launcherPathShell() + "unset " + githubCLIBinEnv + " GH_TOKEN GITHUB_TOKEN; " + command
 }
 
-func restoreMbxLauncher(root string, environment map[string]string) {
+func restoreMbxLauncher(root string, home *string, environment map[string]string) error {
 	if _, present := environment[core.SessionMbxBinEnv]; !present {
 		if _, cached := environment["MBX_SHIMS_DIR"]; cached {
 			bin := filepath.Join(root, "bin")
 			if info, err := os.Stat(bin); err == nil && info.IsDir() {
+				absolute, err := filepath.Abs(bin)
+				if err != nil {
+					return fmt.Errorf("resolve mbx launcher directory: %w", err)
+				}
+				bin = absolute
 				environment[core.SessionMbxBinEnv] = bin
 			}
 		}
 	}
 	if bin := environment[core.SessionMbxBinEnv]; bin != "" {
+		if !filepath.IsAbs(bin) {
+			if home != nil && filepath.IsAbs(*home) {
+				bin = filepath.Join(*home, bin)
+			} else {
+				bin = filepath.Join(root, "bin")
+			}
+			absolute, err := filepath.Abs(bin)
+			if err != nil {
+				return fmt.Errorf("resolve mbx launcher directory: %w", err)
+			}
+			bin = absolute
+			environment[core.SessionMbxBinEnv] = bin
+		}
 		entries := []string{bin}
 		for _, entry := range filepath.SplitList(environment["PATH"]) {
 			if entry != bin {
@@ -211,6 +229,7 @@ func restoreMbxLauncher(root string, environment map[string]string) {
 		}
 		environment["PATH"] = strings.Join(entries, string(os.PathListSeparator))
 	}
+	return nil
 }
 
 // AcpSupervisorSpec is the launch description the ACP supervisor re-execs

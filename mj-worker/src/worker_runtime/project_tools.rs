@@ -623,14 +623,58 @@ mod tests {
             ),
         ]);
         let mut bare = BTreeMap::new();
-        super::super::restore_mbx_launcher(root, &mut bare).unwrap();
+        super::super::restore_mbx_launcher(root, None, &mut bare).unwrap();
         assert!(!bare.contains_key("MJ_MBX_BIN"));
+        for inherited_path in [None, Some("")] {
+            let mut env = BTreeMap::from([("MJ_MBX_BIN".into(), bin.display().to_string())]);
+            if let Some(path) = inherited_path {
+                env.insert("PATH".into(), path.into());
+            }
+            super::super::restore_mbx_launcher(root, None, &mut env).unwrap();
+            assert_eq!(env["PATH"], bin.display().to_string());
+            if let Some(path) = inherited_path {
+                env.insert("PATH".into(), path.into());
+            } else {
+                env.remove("PATH");
+            }
+            let output = std::process::Command::new("/bin/sh")
+                .env_clear()
+                .envs(&env)
+                .args([
+                    "-c",
+                    &(format!(
+                        "{}{}",
+                        if inherited_path.is_none() {
+                            "unset PATH\n"
+                        } else {
+                            ""
+                        },
+                        super::super::launcher_path_shell()
+                    ) + "printf '%s' \"$PATH\""),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, bin.to_str().unwrap().as_bytes());
+        }
+        let relative = ".local/share/mjolnir/workers/sess/bin";
+        for home in [Some(root), None, Some(Path::new("relative-home"))] {
+            let mut env = BTreeMap::from([("MJ_MBX_BIN".into(), relative.into())]);
+            super::super::restore_mbx_launcher(root, home, &mut env).unwrap();
+            let expected = if home == Some(root) {
+                root.join(relative)
+            } else {
+                bin.clone()
+            };
+            assert_eq!(env["MJ_MBX_BIN"], expected.to_str().unwrap());
+            assert_eq!(env["PATH"], expected.to_str().unwrap());
+        }
         for generation in ["harness-git-first", "harness-git-reload"] {
             environment.insert(
                 "MJ_GITHUB_CLI_BIN".into(),
                 root.join(generation).join("bin").display().to_string(),
             );
-            super::super::restore_mbx_launcher(root, &mut environment).unwrap();
+            super::super::restore_mbx_launcher(root, None, &mut environment).unwrap();
             let check = |env: &BTreeMap<String, String>, reset: bool| {
                 let script = "command -v cargo; command -v mbx";
                 let mut command = std::process::Command::new("/bin/bash");
