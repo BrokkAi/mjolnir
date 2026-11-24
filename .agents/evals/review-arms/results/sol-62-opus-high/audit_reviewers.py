@@ -121,6 +121,16 @@ def audit(root, canaries):
     return dict(coverage=coverage, peak_recorded_new_turns=peak, sessions=rows), frozen
 
 
+def freeze_new(root, paths, manifest):
+    lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}"
+             for path in sorted(paths)]
+    try:
+        with manifest.open("x") as out:
+            out.write("\n".join(lines) + "\n")
+    except FileExistsError:
+        assert collections.Counter(manifest.read_text().splitlines()) == collections.Counter(lines), manifest
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("root", type=pathlib.Path)
@@ -129,8 +139,5 @@ if __name__ == "__main__":
     args = p.parse_args()
     result, frozen = audit(args.root, args.canaries)
     if args.hash_file:
-        manifest = "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(args.root)}\n"
-                           for path in sorted(frozen))
-        with args.hash_file.open("x") as out:
-            out.write(manifest)
+        freeze_new(args.root, frozen, args.hash_file)
     print(json.dumps(result, indent=2))

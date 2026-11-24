@@ -39,7 +39,6 @@ job manifest, session manifest and checksums.
 PREFLIGHT="$C/preflight"
 (cd "$R" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" &&
   sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256")
-jq -s '.[0] + .[1]' "$PREFLIGHT/historical-and-op-ready-jobs.json" "$C/jobs.json" > "$C/ready-jobs.json"
 python3 -B "$S/audit_round.py" "$R" ready
 mkdir "$R/verify9"
 cp "$R/verify5/SPEC.md" "$R/verify9/SPEC.md"
@@ -53,10 +52,12 @@ The one-batch Opus verification uses batch 0 in the same round as the full
 driver. Verify the actual provider and effort before launching the remaining
 batches. The full driver reuses the attested batch 0 output.
 
-`bash "$S/run_verification.sh"` runs the complete sequence after the reviewer
-driver exits, including the pool, canary and full judge audits. It checks the
-frozen source and blinded batch hashes before scoring. The commands here show
-the individual steps managed by the script.
+Use either `bash "$S/run_verification.sh"` after the reviewer driver exits or
+the individual verification commands here. The wrapper prepares and validates
+the ready and reviewer hash manifests. It reuses exact matches already
+prepared, including by the manual flow. Once the verify9 directory exists,
+diagnose any interruption and continue with the corresponding stage commands.
+Keep the original private key and blinded batches.
 
 ```sh
 STORE=~/.local/share/mjolnir/mj.sqlite3

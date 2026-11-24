@@ -20,7 +20,11 @@ def raw_findings(path):
 
 
 def ready(root):
-    jobs = load(root / "sol-62-repeats/ready-jobs.json")
+    study = root / "sol-62-repeats"
+    historical = load(study / "preflight/historical-and-op-ready-jobs.json")
+    additions = load(study / "jobs.json")
+    assert len(historical) == 784 and len(additions) == 280
+    jobs = historical + additions
     slots = {(j["bug"], j["arm"]) for j in jobs}
     diffs = {bug for bug, _ in slots}
     arms = {arm for _, arm in slots}
@@ -29,6 +33,13 @@ def ready(root):
                 if p.parent.parent.name in diffs and p.parent.name in arms}
     assert slots == eligible, {"missing": sorted(slots - eligible), "extra": sorted(eligible - slots)}
     assert not (root / "verify9").exists() and not (root / "private/key-verify9.json").exists()
+    manifest = study / "ready-jobs.json"
+    try:
+        with manifest.open("x") as out:
+            out.write(json.dumps(jobs, indent=2) + "\n")
+    except FileExistsError:
+        existing = load(manifest)
+        assert len(existing) == len(slots) and {(j["bug"], j["arm"]) for j in existing} == slots, manifest
     return {"jobs": len(jobs), "diffs": len(diffs), "arms": sorted(arms)}
 
 

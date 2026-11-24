@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Run after the reviewer driver exits. A failed gate leaves its evidence for diagnosis.
+# The ready audit creates the combined manifest or validates the existing copy.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
