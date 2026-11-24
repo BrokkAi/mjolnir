@@ -70,8 +70,92 @@ const INHERITED_HOST_VARIABLES: &[&str] = &[
     "WINDIR",
 ];
 
-/// Host variables only a Bedrock profile reads, to find its AWS files.
-const BEDROCK_HOST_VARIABLES: &[&str] = &["HOME", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"];
+/// Host variables a request reads only for a cloud profile (see
+/// [`cloud_environment`]); an OAuth or API-key profile gets none of them.
+const CLOUD_HOST_VARIABLES: &[&str] = &[
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "CLOUDSDK_CONFIG",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUD_ML_REGION",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_EC2_METADATA_DISABLED",
+    "AWS_CA_BUNDLE",
+    "AWS_STS_REGIONAL_ENDPOINTS",
+    "AZURE_TENANT_ID",
+    "AZURE_CLIENT_ID",
+    "AZURE_CLIENT_SECRET",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_AUTHORITY_HOST",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_RESOURCE",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+];
+
+/// The AWS variables that decide who a request runs as. A profile that sets
+/// any of them keeps its own identity: the host's are not mixed in.
+const AWS_IDENTITY_VARIABLES: &[&str] = &[
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+];
+
+/// The other AWS settings a Bedrock request takes from the host unless the
+/// profile sets them.
+const AWS_SETTING_VARIABLES: &[&str] = &[
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_EC2_METADATA_DISABLED",
+    "AWS_CA_BUNDLE",
+    "AWS_STS_REGIONAL_ENDPOINTS",
+];
+
+/// Vertex and Foundry settings taken from the host unless the profile sets them.
+const EXTERNAL_PROVIDER_VARIABLES: &[&str] = &[
+    "CLOUD_ML_REGION",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "CLOUDSDK_CONFIG",
+    "AZURE_TENANT_ID",
+    "AZURE_CLIENT_ID",
+    "AZURE_CLIENT_SECRET",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_AUTHORITY_HOST",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_RESOURCE",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+];
+
+/// How long one request may run. This is the per-request progress timeout
+/// `UtilityCompactionBackend` already gets through `anvil-client`, so a
+/// stalled CLI fails over like a stalled API call does instead of holding a
+/// handoff.
+const REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(anvil_client::llm_client::DEFAULT_IDLE_CHUNK_TIMEOUT_SECS);
 
 /// How a candidate profile authenticates the CLI.
 #[derive(Clone)]
@@ -105,6 +189,7 @@ pub struct ClaudePrintCompactionBackend {
     candidates: Vec<ClaudeCandidate>,
     disabled: RwLock<BTreeSet<usize>>,
     cancel: CancellationToken,
+    request_timeout: std::time::Duration,
     // Holds the install lease until the compaction ends.
     _installation: Option<Installation>,
 }
@@ -221,9 +306,9 @@ async fn prepare_auth(
     stageable_login(&bytes, now_ms()).map(ClaudeAuth::StrippedLogin)
 }
 
-/// The variables a request inherits from `host`, with Bedrock's credential
-/// files named explicitly: the request runs with an empty `HOME`, which would
-/// hide `~/.aws`.
+/// The variables a request inherits from `host`: the allowlisted ones, and for
+/// a cloud profile the credentials its provider reads from the host, since the
+/// request runs with an empty `HOME` that would hide `~/.aws` and `~/.config`.
 fn inherited_environment(
     host: &BTreeMap<String, String>,
     profile_environment: &BTreeMap<String, String>,
@@ -233,28 +318,112 @@ fn inherited_environment(
         .filter(|(name, _)| INHERITED_HOST_VARIABLES.contains(&name.as_str()))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<BTreeMap<_, _>>();
-    if claude_environment_auth(profile_environment) == Some(ClaudeEnvironmentAuth::Bedrock) {
-        let aws_home = host
-            .get("HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| Path::new(home).join(".aws"));
-        for (name, file) in [
-            ("AWS_SHARED_CREDENTIALS_FILE", "credentials"),
-            ("AWS_CONFIG_FILE", "config"),
-        ] {
-            if profile_environment.contains_key(name) {
-                continue;
+    inherited.extend(cloud_environment(host, profile_environment));
+    inherited
+}
+
+fn host_file(host: &BTreeMap<String, String>, relative_to: &str, path: &str) -> Option<PathBuf> {
+    let base = host.get(relative_to).filter(|base| !base.is_empty())?;
+    Some(Path::new(base).join(path)).filter(|path| path.is_file())
+}
+
+/// What a Bedrock, Vertex, or Foundry profile needs from the host and does not
+/// set itself. Anything the profile sets wins, and a profile that names an AWS
+/// identity keeps it whole.
+fn cloud_environment(
+    host: &BTreeMap<String, String>,
+    profile: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut forwarded = BTreeMap::new();
+    let mut forward = |name: &str, value: String| {
+        if !profile.contains_key(name) {
+            forwarded.insert(name.to_owned(), value);
+        }
+    };
+    match claude_environment_auth(profile) {
+        Some(ClaudeEnvironmentAuth::Bedrock) => {
+            let own_identity = AWS_IDENTITY_VARIABLES
+                .iter()
+                .any(|name| profile.contains_key(*name));
+            let identity: &[&str] = if own_identity {
+                &[]
+            } else {
+                AWS_IDENTITY_VARIABLES
+            };
+            for name in identity.iter().chain(AWS_SETTING_VARIABLES) {
+                if let Some(value) = host.get(*name) {
+                    forward(name, value.clone());
+                }
             }
-            let path = host
-                .get(name)
-                .map(PathBuf::from)
-                .or_else(|| aws_home.as_ref().map(|dir| dir.join(file)));
-            if let Some(path) = path.filter(|path| path.is_file()) {
-                inherited.insert(name.to_owned(), path.to_string_lossy().into_owned());
+            for (name, file) in [
+                ("AWS_SHARED_CREDENTIALS_FILE", "credentials"),
+                ("AWS_CONFIG_FILE", "config"),
+            ] {
+                let path = host
+                    .get(name)
+                    .map(PathBuf::from)
+                    .or_else(|| host_file(host, "HOME", &format!(".aws/{file}")));
+                if let Some(path) = path.filter(|path| path.is_file()) {
+                    forward(name, path.to_string_lossy().into_owned());
+                }
             }
         }
+        Some(ClaudeEnvironmentAuth::ExternalProvider) => {
+            for name in EXTERNAL_PROVIDER_VARIABLES {
+                if let Some(value) = host.get(*name) {
+                    forward(name, value.clone());
+                }
+            }
+            let adc = host
+                .get("GOOGLE_APPLICATION_CREDENTIALS")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    host_file(
+                        host,
+                        "CLOUDSDK_CONFIG",
+                        "application_default_credentials.json",
+                    )
+                })
+                .or_else(|| {
+                    host_file(
+                        host,
+                        "XDG_CONFIG_HOME",
+                        "gcloud/application_default_credentials.json",
+                    )
+                })
+                .or_else(|| {
+                    host_file(
+                        host,
+                        "HOME",
+                        ".config/gcloud/application_default_credentials.json",
+                    )
+                });
+            if let Some(path) = adc.filter(|path| path.is_file()) {
+                forward(
+                    "GOOGLE_APPLICATION_CREDENTIALS",
+                    path.to_string_lossy().into_owned(),
+                );
+            }
+        }
+        _ => {}
     }
-    inherited
+    forwarded
+}
+
+/// The host's AWS SSO token cache, for a Bedrock profile. The request's empty
+/// `HOME` hides it otherwise.
+fn sso_cache_source(
+    host: &BTreeMap<String, String>,
+    profile: &BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    if claude_environment_auth(profile) != Some(ClaudeEnvironmentAuth::Bedrock) {
+        return None;
+    }
+    let cache = Path::new(host.get("HOME").filter(|home| !home.is_empty())?)
+        .join(".aws")
+        .join("sso")
+        .join("cache");
+    cache.is_dir().then_some(cache)
 }
 
 /// The pinned managed Claude Code CLI and the environment its installation
@@ -416,7 +585,7 @@ impl ClaudePrintCompactionBackend {
             .iter()
             .filter(|(name, _)| {
                 INHERITED_HOST_VARIABLES.contains(&name.as_str())
-                    || BEDROCK_HOST_VARIABLES.contains(&name.as_str())
+                    || CLOUD_HOST_VARIABLES.contains(&name.as_str())
             })
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
@@ -427,6 +596,7 @@ impl ClaudePrintCompactionBackend {
             candidates,
             disabled: RwLock::new(BTreeSet::new()),
             cancel,
+            request_timeout: REQUEST_TIMEOUT,
             _installation: installation,
         }
     }
@@ -478,11 +648,13 @@ impl ClaudePrintCompactionBackend {
     /// this request alone, so concurrent pages share nothing.
     async fn run(&self, candidate: &ClaudeCandidate, prompt: &str) -> Result<String> {
         let auth = candidate.auth.clone();
+        let sso_cache = sso_cache_source(&self.host, &candidate.environment);
         // The sandbox outlives the CLI: the process group ends with the
         // future below, and the directories go when this function returns.
-        let sandbox = mj_core::runtime::spawn_blocking(move || stage_sandbox(&auth))
-            .await
-            .context("prepare the Claude print-mode sandbox")??;
+        let sandbox =
+            mj_core::runtime::spawn_blocking(move || stage_sandbox(&auth, sso_cache.as_deref()))
+                .await
+                .context("prepare the Claude print-mode sandbox")??;
         let environment = self.invocation_environment(candidate, &sandbox.environment());
         let mut command = tokio::process::Command::new(&self.cli);
         command
@@ -511,14 +683,22 @@ impl ClaudePrintCompactionBackend {
         if candidate.choose_model {
             command.args(["--model", MODEL_ALIAS]);
         }
+        // Dropping the future on a timeout or cancellation kills the CLI's
+        // process group.
         let output = self
             .cancel
-            .run_until_cancelled(mj_core::subprocess::capture_with_input(
-                &mut command,
-                prompt.as_bytes(),
+            .run_until_cancelled(tokio::time::timeout(
+                self.request_timeout,
+                mj_core::subprocess::capture_with_input(&mut command, prompt.as_bytes()),
             ))
             .await
             .context("Claude print-mode compaction cancelled")?
+            .map_err(|_| {
+                anyhow!(
+                    "Claude Code did not finish within {:?}",
+                    self.request_timeout
+                )
+            })?
             .context("run Claude Code in print mode")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stdout = stdout.trim();
@@ -585,7 +765,7 @@ impl Sandbox {
     }
 }
 
-fn stage_sandbox(auth: &ClaudeAuth) -> Result<Sandbox> {
+fn stage_sandbox(auth: &ClaudeAuth, sso_cache: Option<&Path>) -> Result<Sandbox> {
     let root = tempfile::Builder::new()
         .prefix("mj-claude-compaction-")
         .tempdir()
@@ -601,7 +781,35 @@ fn stage_sandbox(auth: &ClaudeAuth) -> Result<Sandbox> {
             bytes,
         )?;
     }
+    if let Some(source) = sso_cache {
+        copy_sso_cache(source, &root.path().join("home/.aws/sso/cache"))
+            .context("stage the AWS SSO token cache")?;
+    }
     Ok(Sandbox { root })
+}
+
+/// Copy the regular files of the host's SSO token cache, so the AWS SDK finds
+/// them under the request's own `HOME`. The host's cache is neither exposed
+/// nor written; a token the SDK refreshes is refreshed in the copy.
+fn copy_sso_cache(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create {}", destination.display()))?;
+    for entry in std::fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        // A symlink could point anywhere; only the cache's own files are copied.
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        std::fs::copy(entry.path(), &target)
+            .with_context(|| format!("copy {}", entry.path().display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
 }
 
 impl CompactionBackend for ClaudePrintCompactionBackend {
@@ -825,6 +1033,156 @@ mod tests {
             token,
             BTreeMap::from([("PATH".to_owned(), "/bin".to_owned())])
         );
+    }
+
+    fn bedrock() -> BTreeMap<String, String> {
+        BTreeMap::from([("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned())])
+    }
+
+    fn map<const N: usize>(entries: [(&str, &str); N]) -> BTreeMap<String, String> {
+        entries
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn bedrock_takes_the_hosts_aws_identity_only_when_the_profile_names_none() {
+        let host = map([
+            ("AWS_PROFILE", "host-sso"),
+            ("AWS_DEFAULT_PROFILE", "host-default"),
+            ("AWS_ACCESS_KEY_ID", "host-key"),
+            ("AWS_SECRET_ACCESS_KEY", "host-secret"),
+            ("AWS_REGION", "us-west-2"),
+            ("AWS_CA_BUNDLE", "/host/ca.pem"),
+        ]);
+
+        let inherited = inherited_environment(&host, &bedrock());
+        for name in [
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_REGION",
+            "AWS_CA_BUNDLE",
+        ] {
+            assert_eq!(inherited[name], host[name], "{name}");
+        }
+
+        // A profile that picks its own named profile is not given the host's
+        // profile, default profile, or static keys.
+        let mut named = bedrock();
+        named.insert("AWS_DEFAULT_PROFILE".into(), "profile-default".into());
+        let inherited = inherited_environment(&host, &named);
+        for name in [
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        ] {
+            assert!(!inherited.contains_key(name), "{name} was mixed in");
+        }
+        assert_eq!(inherited["AWS_REGION"], "us-west-2");
+
+        // Static keys in the profile outrank the host's profile as well.
+        let mut keyed = bedrock();
+        keyed.insert("AWS_BEARER_TOKEN_BEDROCK".into(), "profile-token".into());
+        assert!(!inherited_environment(&host, &keyed).contains_key("AWS_PROFILE"));
+
+        // A profile that does not use Bedrock gets no AWS variable at all.
+        let api_key = map([("ANTHROPIC_API_KEY", "key")]);
+        assert!(inherited_environment(&host, &api_key).is_empty());
+    }
+
+    #[test]
+    fn vertex_finds_the_hosts_application_default_credentials_and_api_key_profiles_get_none() {
+        let home = tempfile::tempdir().unwrap();
+        let gcloud = home.path().join(".config/gcloud");
+        std::fs::create_dir_all(&gcloud).unwrap();
+        std::fs::write(gcloud.join("application_default_credentials.json"), "{}").unwrap();
+        let host = BTreeMap::from([
+            (
+                "HOME".to_owned(),
+                home.path().to_string_lossy().into_owned(),
+            ),
+            ("CLOUD_ML_REGION".to_owned(), "us-east5".to_owned()),
+            ("GOOGLE_CLOUD_PROJECT".to_owned(), "host-project".to_owned()),
+            ("AZURE_TENANT_ID".to_owned(), "tenant".to_owned()),
+        ]);
+        let vertex = map([
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("GOOGLE_CLOUD_PROJECT", "profile-project"),
+        ]);
+
+        let inherited = inherited_environment(&host, &vertex);
+
+        assert_eq!(
+            inherited["GOOGLE_APPLICATION_CREDENTIALS"],
+            gcloud
+                .join("application_default_credentials.json")
+                .to_string_lossy()
+        );
+        assert_eq!(inherited["CLOUD_ML_REGION"], "us-east5");
+        assert!(
+            !inherited.contains_key("GOOGLE_CLOUD_PROJECT"),
+            "the profile's own project wins"
+        );
+        assert!(!inherited.contains_key("HOME"));
+
+        // An explicit variable on the host names the file, whatever exists.
+        let mut explicit = host.clone();
+        explicit.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS".into(),
+            "/host/adc.json".into(),
+        );
+        // A file that does not exist is not forwarded.
+        assert!(
+            !inherited_environment(&explicit, &vertex)
+                .contains_key("GOOGLE_APPLICATION_CREDENTIALS")
+        );
+
+        assert!(inherited_environment(&host, &map([("ANTHROPIC_API_KEY", "key")])).is_empty());
+    }
+
+    #[test]
+    fn bedrock_sso_tokens_are_copied_into_the_sandbox_and_the_hosts_cache_is_left_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join(".aws/sso/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("token.json"), r#"{"accessToken":"sso"}"#).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", cache.join("link.json")).unwrap();
+        let host = BTreeMap::from([(
+            "HOME".to_owned(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+
+        assert_eq!(sso_cache_source(&host, &bedrock()), Some(cache.clone()));
+        assert_eq!(
+            sso_cache_source(&host, &map([("ANTHROPIC_API_KEY", "key")])),
+            None
+        );
+
+        let sandbox = stage_sandbox(&ClaudeAuth::Environment, Some(&cache)).unwrap();
+        let staged = sandbox.directory("home").join(".aws/sso/cache");
+        assert_eq!(
+            std::fs::read_to_string(staged.join("token.json")).unwrap(),
+            r#"{"accessToken":"sso"}"#
+        );
+        assert!(
+            !staged.join("link.json").exists(),
+            "symlinks are not followed"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(staged.join("token.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(cache.join("token.json").exists());
     }
 
     #[test]
@@ -1163,9 +1521,37 @@ esac
         .await
         .expect("cancellation must not wait for the CLI's sleep");
         result.expect_err("a cancelled handoff is an error, not the recent transcript");
-        for pid in pids {
+        wait_until_gone(&pids).await;
+    }
+
+    /// Whether a process is still running. An orphan in a PID namespace can
+    /// stay a zombie for a while; it is gone for this purpose.
+    #[cfg(unix)]
+    fn process_is_running(pid: i32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    // The comm field can contain spaces and parentheses; the
+                    // state is the first letter after the last ')'.
+                    let after_comm = stat.rsplit_once(')')?.1;
+                    after_comm.split_whitespace().next()?.chars().next()
+                })
+                .is_some_and(|state| state != 'Z')
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: signal 0 is an existence probe that sends no signal.
+            unsafe { libc::kill(pid, 0) == 0 }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_gone(pids: &[i32]) {
+        for &pid in pids {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while unsafe { libc::kill(pid, 0) } == 0 {
+            while process_is_running(pid) {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "process {pid} survived"
@@ -1173,6 +1559,49 @@ esac
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn recorded_pids(path: &Path) -> Vec<i32> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stalled_cli_is_killed_at_the_request_timeout_and_the_next_profile_answers() {
+        let fixture = stub_cli::Fixture::new();
+        let mut backend = fixture.backend(
+            vec![
+                fixture.candidate("stalled", "hang", ClaudeAuth::Environment),
+                fixture.candidate("next", "echo", ClaudeAuth::Environment),
+            ],
+            CancellationToken::new(),
+        );
+        // Long enough for the stub shell to start and record its pids.
+        backend.request_timeout = std::time::Duration::from_secs(2);
+
+        let summary = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            backend.compact("page".into()),
+        )
+        .await
+        .expect("the timeout must end the stalled request")
+        .unwrap();
+
+        assert_eq!(summary, "summary from next");
+        let pids = recorded_pids(&fixture.root.path().join("records/hang_pids"));
+        assert_eq!(pids.len(), 2);
+        wait_until_gone(&pids).await;
+        // The stalled profile is retired for the rest of the compaction.
+        assert_eq!(
+            backend.compact("again".into()).await.unwrap(),
+            "summary from next"
+        );
+        assert_eq!(fixture.record("stalled", "runs").lines().count(), 1);
     }
 
     #[cfg(unix)]

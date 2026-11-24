@@ -1748,7 +1748,10 @@ mod tests {
             command.abort();
             assert!(command.await.unwrap_err().is_cancelled());
             for pid in pids {
-                while unsafe { libc::kill(pid, 0) } == 0 {
+                // An orphan in a PID namespace can stay a zombie for a while;
+                // it is dead for this purpose.
+                while matches!(detached_test_process_state(pid as u32), Some(state) if state != 'Z')
+                {
                     tokio::task::yield_now().await;
                 }
             }
