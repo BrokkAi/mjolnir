@@ -297,6 +297,18 @@ enum WorkerCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Write the session's committed history as a Git bundle to standard
+    /// output.
+    Bundle {
+        #[arg(long)]
+        repository: PathBuf,
+        /// The commit the session started from, when the controller recorded one.
+        #[arg(long)]
+        base: Option<String>,
+        /// The session branch, whose reflog names the commit it was created at.
+        #[arg(long)]
+        branch: Option<String>,
+    },
     /// Write one file from the session workspace to standard output.
     ReadFile {
         #[arg(long)]
@@ -449,6 +461,7 @@ fn bootstrap_login_environment(
         WorkerCommand::PrepareHarness { .. }
         | WorkerCommand::DiscoverConfig { .. }
         | WorkerCommand::Diff { .. }
+        | WorkerCommand::Bundle { .. }
         | WorkerCommand::PushBranch { .. } => Some(true),
         _ => None,
     };
@@ -984,6 +997,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 write_stdout(result.diff.as_bytes())
             }
+        }
+        WorkerCommand::Bundle {
+            repository,
+            base,
+            branch,
+        } => {
+            let bundle = mj_checkpoint::archive::session_bundle_bytes(
+                &mj_checkpoint::archive::SystemGit,
+                &repository,
+                base.as_deref(),
+                branch.as_deref(),
+                // A checkout that recorded no launch base is bundled against
+                // what its origin already has, as a suspended session's is.
+                true,
+                None,
+            )
+            .map_err(export_error)?;
+            write_stdout(&bundle)
         }
         WorkerCommand::ReadFile { root, path } => write_stdout(
             &mj_checkpoint::archive::read_session_file(&root, &path).map_err(export_error)?,

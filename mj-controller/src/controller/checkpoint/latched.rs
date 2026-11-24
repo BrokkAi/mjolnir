@@ -18,60 +18,6 @@ pub(in crate::controller) fn lost_wakes_notice(count: usize, missed: &str, reaso
 
 impl Controller {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::controller) async fn checkpoint_session_latched_for_operation(
-        &self,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        manager: Option<&SessionManagerControl>,
-        exclusivity: LatchExclusivity,
-        export_policy: CheckpointExportPolicy,
-        requested_operation_id: Option<&str>,
-        held_relay: Option<ControllerRelayLease>,
-    ) -> Result<LatchedCheckpoint> {
-        self.checkpoint_session_latched_for_operation_with_consent(
-            admission,
-            session_id,
-            executor,
-            manager,
-            exclusivity,
-            export_policy,
-            requested_operation_id,
-            held_relay,
-            &mj_core::suspend_consent::CaptureConsent::default(),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_consent(
-        &self,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        manager: Option<&SessionManagerControl>,
-        exclusivity: LatchExclusivity,
-        export_policy: CheckpointExportPolicy,
-        requested_operation_id: Option<&str>,
-        held_relay: Option<ControllerRelayLease>,
-        consent: &mj_core::suspend_consent::CaptureConsent,
-    ) -> Result<LatchedCheckpoint> {
-        self.checkpoint_session_latched_for_operation_with_delivery(
-            admission,
-            session_id,
-            executor,
-            manager,
-            exclusivity,
-            export_policy,
-            CheckpointDelivery::DownloadToDaemon,
-            requested_operation_id,
-            held_relay,
-            consent,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_delivery(
         &self,
         admission: &crate::recovery_gate::SessionAdmission,
@@ -758,14 +704,11 @@ impl Controller {
             )
         {
             return Ok(LatchedCheckpoint {
-                relay_protocol,
-                admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
                 artifact,
                 relay,
                 barrier_command_id,
                 cursor,
-                completion: CheckpointCompletion::HeldBarrier,
             });
         }
 
@@ -1140,14 +1083,11 @@ impl Controller {
             }
         };
         Ok(LatchedCheckpoint {
-                relay_protocol,
-                admission: admission.clone(),
-                _worker_owner: crate::worker_lifecycle::require(session_id)?,
+            _worker_owner: crate::worker_lifecycle::require(session_id)?,
             artifact,
             relay,
             barrier_command_id,
             cursor,
-            completion,
         })
 
         }).await

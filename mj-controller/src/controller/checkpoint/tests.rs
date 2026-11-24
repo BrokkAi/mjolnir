@@ -15,15 +15,15 @@ use anyhow::Context;
 use anyhow::Result;
 
 #[cfg(unix)]
-use crate::controller::now;
 use crate::controller::restore_session_after_persistence_failure;
-#[cfg(unix)]
 use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
     RefusingExecutor, checkpoint_test_session, write_checkpoint_gate_archive,
 };
 #[cfg(unix)]
 use crate::session_manager::{ManagedSessionHandle, new_command_id};
+#[cfg(unix)]
+use crate::targets::ProcessExecutor;
 use crate::worker_client::RelayTransportDead;
 use mj_checkpoint::archive::{
     BundleManifest, CanonicalTranscriptBody, CanonicalTranscriptItem, TargetManifest,
@@ -1044,7 +1044,6 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
 #[cfg(unix)]
 const LATCH_TEST_CHILD: &str = "MJ_TEST_LATCH_CHILD";
 #[cfg(unix)]
-const ABANDON_TEST_CHILD: &str = "MJ_TEST_ABANDON_LATCH_CHILD";
 #[cfg(unix)]
 const RELEASE_TEST_CHILD: &str = "MJ_TEST_RELEASE_LATCH_CHILD";
 #[cfg(unix)]
@@ -1739,6 +1738,20 @@ async fn wait_until_the_actor_is_safe_to_replace(
     }
     unreachable!("the readiness loop returns or panics")
 }
+/// Ends a held checkpoint barrier the way a close's CompleteCheckpoint
+/// decision does, which is what hands ACP dispatch back and moves the floor.
+#[cfg(unix)]
+async fn complete_held_barrier(relay: &mut ControllerRelayLease, barrier_command_id: &str) {
+    relay
+        .submit(
+            new_command_id("checkpoint-complete").unwrap(),
+            RelayCommand::CompleteCheckpoint {
+                barrier_command_id: barrier_command_id.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+}
 /// Ending the latch is the whole point of the split checkpoint: the actor
 /// serves the dashboard again while the archive is still being exported,
 /// and the events it accepts do not invalidate the latched archive.
@@ -1808,15 +1821,7 @@ async fn ending_the_checkpoint_latch_returns_the_connection_to_its_actor() {
     assert!(snapshot.operational.latest_ordinal > cursor.ordinal);
     validate_checkpoint_barrier_snapshot(&snapshot, &barrier_command_id, &cursor).unwrap();
 
-    latched_checkpoint(
-        relay,
-        barrier_command_id,
-        cursor,
-        CheckpointCompletion::HeldBarrier,
-    )
-    .complete()
-    .await
-    .unwrap();
+    complete_held_barrier(&mut relay, &barrier_command_id).await;
     handle.sync_now().await.unwrap();
     assert_eq!(
         handle
@@ -1911,15 +1916,6 @@ async fn releasing_a_checkpoint_after_capture_needs_no_floor_move_on_ack_only_wo
     assert!(dispatched.is_some());
 
     // Installation has no additional journal-retention work on current workers.
-    latched_checkpoint(
-        relay,
-        barrier_command_id,
-        cursor.clone(),
-        CheckpointCompletion::ReleasedAfterCapture,
-    )
-    .complete()
-    .await
-    .unwrap();
     handle.sync_now().await.unwrap();
     let installed = handle
         .view()
@@ -1995,10 +1991,7 @@ async fn a_worker_that_rejects_the_release_keeps_its_barrier_through_the_transfe
     // completion both resumes dispatch and advances the recovery floor.
     let transferring = relay.sync_snapshot().await.unwrap();
     validate_checkpoint_barrier_snapshot(&transferring, &barrier_command_id, &cursor).unwrap();
-    latched_checkpoint(relay, barrier_command_id, cursor.clone(), completion)
-        .complete()
-        .await
-        .unwrap();
+    complete_held_barrier(&mut relay, &barrier_command_id).await;
     handle.sync_now().await.unwrap();
     let completed = handle
         .view()
@@ -2006,70 +1999,6 @@ async fn a_worker_that_rejects_the_release_keeps_its_barrier_through_the_transfe
         .expect("the actor published the completed barrier");
     assert_eq!(completed.operational.checkpoint_barrier, None);
     assert_eq!(completed.operational.recovery_floor_ordinal, cursor.ordinal);
-}
-/// A caller that cannot install a latched archive has to cancel its
-/// barrier. The latch is already back with the session actor, so the only
-/// thing that ends the barrier is dropping the connection that opened it:
-/// the worker cancels barriers whose connection disappears.
-#[cfg(unix)]
-#[tokio::test]
-async fn abandoning_a_latched_checkpoint_drops_the_connection_that_opened_its_barrier() {
-    // MJ_DATA_DIR is process-global, so run the database-backed half in an
-    // exact child test instead of racing unrelated tests in this process.
-    if std::env::var_os(ABANDON_TEST_CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let test_name = format!(
-            "{}::abandoning_a_latched_checkpoint_drops_the_connection_that_opened_its_barrier",
-            module_path!()
-                .strip_prefix("mj_controller::")
-                .unwrap_or(module_path!())
-        );
-        IsolatedTest::new(test_name)
-            .env(ABANDON_TEST_CHILD, "1")
-            .env("MJ_DATA_DIR", directory.path())
-            .run();
-        return;
-    }
-    // Alone in this child process, so it installs the one writer.
-    let _writer = crate::database::install_isolated_test_writer();
-
-    // An abandoned barrier that never releases its connection would hang
-    // the suite instead of failing it, so turn a stall into a hard error.
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(120));
-        eprintln!("an abandoned checkpoint never released its relay connection");
-        std::process::exit(101);
-    });
-
-    let relay_root = tempfile::tempdir().unwrap();
-    let start_log = tempfile::tempdir().unwrap();
-    let start_log = start_log.path().join("relay-starts");
-    let (_channels, handle, mut relay, barrier_command_id, cursor) = latch_a_live_checkpoint(
-        relay_root.path(),
-        Some(&start_log),
-        ReleaseSupport::Supported,
-        false,
-    )
-    .await;
-    relay.end_latch();
-    wait_until_the_actor_serves_again(&handle).await;
-    assert_eq!(relay_starts(&start_log), 1);
-
-    latched_checkpoint(
-        relay,
-        barrier_command_id,
-        cursor,
-        CheckpointCompletion::HeldBarrier,
-    )
-    .abandon(LATCH_RELAY_SESSION)
-    .await;
-
-    // The actor serves again, which proves the reclaimed lease was not
-    // leaked, and it is talking to a new relay process, which proves the
-    // connection that opened the barrier was dropped rather than handed
-    // back alive.
-    wait_until_the_actor_serves_again(&handle).await;
-    assert_eq!(relay_starts(&start_log), 2);
 }
 /// The close policy, end to end against a live relay: a latch that finds
 /// its own content already archived issues no export or transfer command
@@ -2297,15 +2226,17 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
 
     let executor = ExportRecorder::default();
     let result = controller
-        .checkpoint_session_latched_for_operation(
+        .checkpoint_session_latched_for_operation_with_delivery(
             &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::HoldThroughClose,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            CheckpointDelivery::DownloadToDaemon,
             None,
             None,
+            &mj_core::suspend_consent::CaptureConsent::default(),
         )
         .await;
     let Err(error) = result else {
@@ -2609,15 +2540,17 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
 
     let executor = RecordingExecutor::default();
     let latched = controller
-        .checkpoint_session_latched_for_operation(
+        .checkpoint_session_latched_for_operation_with_delivery(
             &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::HoldThroughClose,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            CheckpointDelivery::DownloadToDaemon,
             None,
             None,
+            &mj_core::suspend_consent::CaptureConsent::default(),
         )
         .await
         .unwrap();
@@ -2634,7 +2567,11 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     // checkpoint's own bookkeeping.
     assert!(latched.cursor.ordinal > checkpoint.event_frontier);
     let cursor = latched.cursor.clone();
-    latched.complete().await.unwrap();
+    let mut latched = latched;
+    let barrier_command_id = latched.barrier_command_id.clone();
+    complete_held_barrier(&mut latched.relay, &barrier_command_id).await;
+    // Ending the lease hands the connection back to the session actor.
+    drop(latched);
     wait_until_the_actor_serves_again(&handle).await;
 
     if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {
@@ -2675,15 +2612,17 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     assert_eq!(before.operational.execution, RelayExecutionState::Running);
     connection.release();
     let deferred = controller
-        .checkpoint_session_latched_for_operation(
+        .checkpoint_session_latched_for_operation_with_delivery(
             &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::ReleaseAfterLatch,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            CheckpointDelivery::DownloadToDaemon,
             None,
             None,
+            &mj_core::suspend_consent::CaptureConsent::default(),
         )
         .await;
     assert!(
@@ -2776,15 +2715,17 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     }
 
     let changed = controller
-        .checkpoint_session_latched_for_operation(
+        .checkpoint_session_latched_for_operation_with_delivery(
             &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::HoldThroughClose,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            CheckpointDelivery::DownloadToDaemon,
             None,
             None,
+            &mj_core::suspend_consent::CaptureConsent::default(),
         )
         .await;
     let Err(error) = changed else {
@@ -3017,15 +2958,17 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
 
     let executor = StagingExecutor::default();
     let deferred = controller
-        .checkpoint_session_latched_for_operation(
+        .checkpoint_session_latched_for_operation_with_delivery(
             &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::ReleaseAfterLatch,
             CheckpointExportPolicy::Always,
+            CheckpointDelivery::DownloadToDaemon,
             None,
             None,
+            &mj_core::suspend_consent::CaptureConsent::default(),
         )
         .await;
     let Err(error) = deferred else {
@@ -3055,43 +2998,6 @@ fn relay_starts(path: &Path) -> usize {
         .unwrap_or_default()
         .lines()
         .count()
-}
-/// A latched checkpoint carrying a placeholder artifact. These tests
-/// exercise its relay barrier, not the archive it names.
-#[cfg(unix)]
-fn latched_checkpoint(
-    relay: ControllerRelayLease,
-    barrier_command_id: String,
-    cursor: RelayCursor,
-    completion: CheckpointCompletion,
-) -> LatchedCheckpoint {
-    LatchedCheckpoint {
-        relay_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
-        admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
-        _worker_owner: crate::controller::test_support::worker_test_permit(
-            LATCH_RELAY_SESSION,
-            "test checkpoint",
-        )
-        .unwrap()
-        .unwrap(),
-        artifact: CheckpointArtifact {
-            metadata: CheckpointMetadata {
-                archive_path: PathBuf::from("checkpoint.hel.zip"),
-                sha256: "a".repeat(64),
-                created_at: now(),
-                event_frontier: cursor.ordinal,
-            },
-            native_session_id: "native-session".into(),
-            event_frontier_digest: cursor.digest.clone(),
-            on_source_target: false,
-            manifest: None,
-            captured_queue: None,
-        },
-        relay,
-        barrier_command_id,
-        cursor,
-        completion,
-    }
 }
 #[test]
 fn checkpoint_persistence_rollback_restores_memory_and_reports_both_failures() {
@@ -4369,16 +4275,12 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     // boxed. The wrapper now also carries its relay lease inline (about 4 KiB
     // with the session's operational state), so its limit only needs to
     // separate that from an unboxed capture future.
-    const ENTRY_LIMIT_BYTES: usize = 32 * 1024;
     const WRAPPER_LIMIT_BYTES: usize = 8 * 1024;
-    let mut controller = Controller {
+    let controller = Controller {
         config: Default::default(),
         state: State::default(),
     };
     let admission = crate::controller::test_support::session_admission("session-1");
-    let entry = controller.checkpoint_for_bundle_export(&admission, "session-1");
-    let entry_size = std::mem::size_of_val(&entry);
-    drop(entry);
     let executor = RefusingExecutor("not used");
     let consent = mj_core::suspend_consent::CaptureConsent::default();
     let latched = controller.checkpoint_session_latched_with_recovery_stage(
@@ -4397,9 +4299,8 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     let latched_size = std::mem::size_of_val(&latched);
     drop(latched);
     assert!(
-        entry_size < ENTRY_LIMIT_BYTES && latched_size < WRAPPER_LIMIT_BYTES,
-        "checkpoint_for_bundle_export future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
-         latched wrapper future is {latched_size} bytes (limit {WRAPPER_LIMIT_BYTES}); box the \
+        latched_size < WRAPPER_LIMIT_BYTES,
+        "the latched wrapper future is {latched_size} bytes (limit {WRAPPER_LIMIT_BYTES}); box the \
          capture future so the wrappers stay small"
     );
 }
