@@ -1157,3 +1157,122 @@ fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
         "Docker is not installed on this host. Install Docker or choose another target, then Retry launch."
     );
 }
+
+#[test]
+fn deployment_capacity_targets_ignore_bare_session_churn() {
+    use mj_core::state::{SessionState, TargetLocator};
+    for local in [false, true] {
+        for prefix in [".local/share/hel/workspaces", "/"] {
+            let template = if local {
+                TargetTemplate::LocalBare
+            } else {
+                TargetTemplate::SshBare {
+                    ssh: SshConnection {
+                        host: "builder".into(),
+                        user: None,
+                        identity_file: None,
+                        extra_args: Vec::new(),
+                    },
+                    permissions: mj_core::config::PermissionMode::Yolo,
+                    workspace_prefix: prefix.into(),
+                }
+            };
+            let mut controller = Controller {
+                config: Config {
+                    targets: BTreeMap::from([("bare".into(), template)]),
+                    ..Config::default()
+                },
+                state: State::default(),
+            };
+            let session = |id: &str, workspace: &str| {
+                let mut record = crate::database::test_session(id, "raw");
+                record.target_template_id = "bare".into();
+                record.state = SessionState::Running;
+                record.project_directory = Some(workspace.into());
+                record.target = Some(Box::new(if local {
+                    TargetLocator::LocalBare {
+                        worker_root: data_dir().join("workers").join(id),
+                    }
+                } else {
+                    TargetLocator::SshBare {
+                        host: "builder".into(),
+                        workspace: workspace.into(),
+                        worker_id: Some(id.into()),
+                    }
+                }));
+                record
+            };
+            for id in ["s1", "s2", "external"] {
+                controller
+                    .state
+                    .environment_owners
+                    .insert(id.into(), id.into());
+            }
+            let baseline = controller.deployment_capacity_targets();
+            for id in ["s1", "s2"] {
+                let workspace = if local {
+                    data_dir().join("workspaces").join(id)
+                } else {
+                    PathBuf::from(prefix).join(id)
+                };
+                controller
+                    .state
+                    .sessions
+                    .insert(id.into(), session(id, &workspace.to_string_lossy()));
+            }
+            // A root-like prefix intentionally does not cover arbitrary paths.
+            if local || prefix != "/" {
+                assert_eq!(baseline, controller.deployment_capacity_targets());
+            }
+            controller.state.sessions.clear();
+            assert_eq!(baseline, controller.deployment_capacity_targets());
+
+            controller
+                .state
+                .sessions
+                .insert("s1".into(), session("s1", "/mnt/data/repo/.mj/clones/s1/"));
+            let one = controller.deployment_capacity_targets();
+            controller.state.sessions.insert(
+                "s2".into(),
+                session("s2", "/mnt/data/repo/.mj/worktrees/s2"),
+            );
+            assert_eq!(one, controller.deployment_capacity_targets());
+            let first = controller.state.sessions.remove("s1").unwrap();
+            assert_eq!(one, controller.deployment_capacity_targets());
+            controller.state.sessions.insert("s1".into(), first);
+            assert_eq!(one, controller.deployment_capacity_targets());
+            controller
+                .state
+                .sessions
+                .insert("external".into(), session("external", "/mnt/other/project"));
+            let external = controller.deployment_capacity_targets();
+            assert_ne!(one, external);
+            if local {
+                assert_eq!(
+                    external[0]
+                        .local_storage_paths
+                        .iter()
+                        .filter(|p| *p == "/mnt/data/repo")
+                        .count(),
+                    1
+                );
+                assert!(
+                    external[0]
+                        .local_storage_paths
+                        .contains(&"/mnt/other/project".into())
+                );
+            } else {
+                let command = external[0].probes[0].args.join(" ");
+                assert!(command.contains("/mnt/data/repo"));
+                assert!(command.contains("/mnt/other/project"));
+                assert!(!command.contains("/.mj/clones/"));
+                assert!(!command.contains("/.mj/worktrees/"));
+            }
+            let ids: Vec<_> = controller.state.sessions.keys().cloned().collect();
+            for id in ids {
+                controller.state.sessions.get_mut(&id).unwrap().state = SessionState::Stopped;
+            }
+            assert_eq!(baseline, controller.deployment_capacity_targets());
+        }
+    }
+}

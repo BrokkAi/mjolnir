@@ -250,6 +250,45 @@ pub fn normalize_target_path(path: &str, home: Option<&str>) -> String {
     }
 }
 
+/// Merge capacity probe roots without letting per-session directories change
+/// the probe identity. Managed checkouts share their repository's filesystem.
+pub fn capacity_storage_paths(
+    template_paths: impl IntoIterator<Item = String>,
+    session_paths: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let normalize = |path: String| normalize_target_path(&path, None);
+    let mut bases: Vec<_> = template_paths
+        .into_iter()
+        .map(normalize)
+        .filter(|path| !path.is_empty())
+        .collect();
+    bases.sort();
+    bases.dedup();
+    let mut paths = bases.clone();
+    for path in session_paths {
+        let mut candidate = normalize(path);
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(index) = ["/.mj/clones/", "/.mj/worktrees/"]
+            .into_iter()
+            .filter_map(|marker| candidate.find(marker))
+            .filter(|index| *index > 0)
+            .min()
+        {
+            candidate.truncate(index);
+        }
+        if !bases.iter().any(|base| {
+            !matches!(base.as_str(), "" | "/" | "." | "~") && path_within(&candidate, base)
+        }) {
+            paths.push(candidate);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 /// Whether `path` is `base` or lies under it, by whole components.
 fn path_within(path: &str, base: &str) -> bool {
     path == base

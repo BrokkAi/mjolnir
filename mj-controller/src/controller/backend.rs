@@ -175,7 +175,10 @@ impl Controller {
         // sandbox, whose memory total is the engine's pool. A host shared
         // with other runtimes keeps its physical memory as the total, because
         // their sessions draw on all of it.
-        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
+        type HostProbes = (
+            Vec<String>,
+            Vec<(SshTarget, Vec<String>, bool, Vec<String>)>,
+        );
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
@@ -198,11 +201,11 @@ impl Controller {
                     let position = match entry
                         .1
                         .iter()
-                        .position(|(known, _, _)| *known == connection)
+                        .position(|(known, _, _, _)| *known == connection)
                     {
                         Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new(), true));
+                            entry.1.push((connection, Vec::new(), true, Vec::new()));
                             entry.1.len() - 1
                         }
                     };
@@ -221,7 +224,9 @@ impl Controller {
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
                     // clone can sit on a filesystem of its own.
-                    push_unique(paths, self.session_storage_paths(target_id));
+                    entry.1[position]
+                        .3
+                        .extend(self.session_storage_paths(target_id));
                 }
                 TargetTemplate::AwsEc2 { .. } => {
                     let mut probes = Vec::new();
@@ -280,11 +285,12 @@ impl Controller {
                     )
                 }
             };
+            let mut session_paths = Vec::new();
             for target_id in &local_ids {
                 if let Some(template) = self.config.targets.get(target_id) {
                     push_unique(&mut paths, local_storage_paths(template, &mbx_paths));
                 }
-                push_unique(&mut paths, self.session_storage_paths(target_id));
+                session_paths.extend(self.session_storage_paths(target_id));
             }
             targets.push(DeploymentCapacityTarget {
                 id: "local".into(),
@@ -293,7 +299,10 @@ impl Controller {
                 kind: DeploymentCapacityKind::Host,
                 local: true,
                 probes: Vec::new(),
-                local_storage_paths: paths,
+                local_storage_paths: mj_core::targets::storage::capacity_storage_paths(
+                    paths,
+                    session_paths,
+                ),
                 storage_warning,
                 probe_error: None,
             });
@@ -310,11 +319,15 @@ impl Controller {
                         local: false,
                         probes: connections
                             .iter()
-                            .map(|(ssh, paths, nitro)| {
+                            .map(|(ssh, paths, nitro, sessions)| {
+                                let paths = mj_core::targets::storage::capacity_storage_paths(
+                                    paths.clone(),
+                                    sessions.clone(),
+                                );
                                 if *nitro {
-                                    targets::ssh_nitro_host_capacity_command(ssh, paths)
+                                    targets::ssh_nitro_host_capacity_command(ssh, &paths)
                                 } else {
-                                    targets::ssh_host_capacity_command(ssh, paths)
+                                    targets::ssh_host_capacity_command(ssh, &paths)
                                 }
                             })
                             .collect(),
