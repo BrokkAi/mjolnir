@@ -15,6 +15,22 @@ latency and estimated cost.
 | Sol 6.1 medium + 2 × Terra 6.1 high | 138.50 | 122.33 | 54.3 | 724,975 | $0.187 |
 | Sol 6.2 medium + 2 × Terra 6.1 high | 284.33 | 210.00 | 109.6 | 1,244,991 | $0.339 |
 
+Confirmed findings by impact across the same 70 diffs:
+
+| Setup | Low | Medium | High |
+|---|---:|---:|---:|
+| Sol 6.1 medium | 2.50 | 33.50 | 14.00 |
+| Sol 6.2 medium | 70.00 | 153.00 | 36.00 |
+| 2 × Terra 6.1 high | 15.00 | 91.33 | 23.00 |
+| Sol 6.1 medium + 2 × Terra 6.1 high | 16.17 | 96.67 | 25.67 |
+| Sol 6.2 medium + 2 × Terra 6.1 high | 74.33 | 171.00 | 39.00 |
+
+These are the same expected union counts computed separately for each severity.
+Fractional counts average reviewer assignments; displayed components can differ
+from the all-severity total by 0.01 due to rounding. Most additional findings
+are medium impact. High-impact findings increase from 14.00 to 36.00 solo
+and from 25.67 to 39.00 with the Terra pair.
+
 The two Terra reviewers added 25.33 confirmed findings to Sol 6.2 solo,
 including 21.00 high or medium severity, for an estimated $0.087 more per
 diff. All five rows use the same 70 diffs.

@@ -13,7 +13,7 @@ Measure whether one GPT 6.2 Sol reviewer at medium effort improves on GPT 6.1 So
 - [x] (2026-11-24 00:29Z) Completed exactly 70 audited Sol 6.2 medium reviews, one per original diff, with live runtime/image capture and matched positive prompt clocks for all 70. Two handbacks explicitly contain no findings.
 - [x] (2026-11-24) Audited all 34 accepted Neon/medium judge outputs and durable model selections; scored all 70 diffs and 431 sessions with no missing timing or usage. Preserved verify6 checksum manifest.
 - [x] (2026-11-24) Independently reconstructed the raw pool, groups, all four comparisons, paired bootstrap intervals, and model attribution. Published the complete readout and supporting data in the worktree.
-- [ ] Commit final results, obtain review, and push to origin/master.
+- [x] (2026-11-24) Final result commit `07825127b` passed review and was pushed to origin/master in upstream merge `c6585cfed`.
 
 ## Surprises & Discoveries
 
@@ -61,7 +61,7 @@ Sol 6.2 medium raised confirmed findings from 50.00 to 259.00 solo and from 138.
 
 The quality improvement has higher recorded resource use: estimated median parallel turn time rises from 46.3 to 106.3 seconds solo and from 54.3 to 109.6 seconds with the pair. Estimated API cost per diff rises from $0.100 to $0.252 solo and from $0.187 to $0.339 with the pair. All counts use the same 70 diffs; costs exclude coordination/judging. The old and new cohorts ran on different dates and harness versions, and one new sample per diff does not measure repeat variance. These are the setups as run, assessed by the same fresh blinded judge round.
 
-The result and reproduction commands are in `.agents/evals/review-arms/results/sol-62-medium/README.md` and `reproduction.md`, with scored CSVs, paired comparisons, Pareto CSVs, usage, coverage, judge attribution/audit, and prior-round consistency data. The main study README links the addition. Real carrier/judge cleanup succeeded after the current-CLI fixes; the two existing recovery tests and applicable script syntax checks passed. No Rust build or installation was needed. Final result commit/review/push remains.
+The result and reproduction commands are in `.agents/evals/review-arms/results/sol-62-medium/README.md` and `reproduction.md`, with scored CSVs, paired comparisons, Pareto CSVs, usage, coverage, judge attribution/audit, and prior-round consistency data. The main study README links the addition. Real carrier/judge cleanup succeeded after the current-CLI fixes; the two existing recovery tests and applicable script syntax checks passed. No Rust build or installation was needed. Final result commit `07825127b` passed review and reached origin/master in merge `c6585cfed`.
 
 ## Context and Orientation
 
