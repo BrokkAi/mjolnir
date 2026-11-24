@@ -60,12 +60,35 @@ impl HarnessStartup {
 }
 
 #[derive(Default)]
-struct TaskMonitors {
+pub(super) struct TaskMonitors {
     kimi: Option<KimiTaskMonitor>,
     antigravity: Option<AntigravityTaskMonitor>,
 }
 
 impl TaskMonitors {
+    pub(super) fn new(
+        harness: HarnessKind,
+        credentials: &std::result::Result<CredentialEndpoint, String>,
+    ) -> Self {
+        let home = || {
+            credentials
+                .as_ref()
+                .map(|endpoint| endpoint.home.clone())
+                .map_err(Clone::clone)
+        };
+        match harness {
+            HarnessKind::Kimi => Self {
+                kimi: Some(KimiTaskMonitor::new(home())),
+                antigravity: None,
+            },
+            HarnessKind::Antigravity => Self {
+                kimi: None,
+                antigravity: Some(AntigravityTaskMonitor::new(home())),
+            },
+            _ => Self::default(),
+        }
+    }
+
     async fn prepare_event(
         &mut self,
         relay: &Arc<RelayCell>,
@@ -83,8 +106,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
     dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
-    kimi_tasks: Option<KimiTaskMonitor>,
-    antigravity_tasks: Option<AntigravityTaskMonitor>,
+    task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
 ) -> Result<()> {
@@ -95,10 +117,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
         dispatch_wakes,
         commands,
         user_shells,
-        TaskMonitors {
-            kimi: kimi_tasks,
-            antigravity: antigravity_tasks,
-        },
+        task_monitors,
         verdict,
         capture,
         Some(startup),
@@ -942,15 +961,67 @@ async fn observe_and_record(
             None
         }
     };
+    let reload = match &mut event {
+        RuntimeEvent::HarnessRestarting { reload, .. } => {
+            reload.take().and_then(HarnessReload::take)
+        }
+        _ => None,
+    };
     track_user_shell_completion(user_shells, &event);
-    record_runtime_event_with_startup(
+    let stopped = record_runtime_event_with_startup(
         relay,
         in_flight,
         event,
         session_configuration,
         work_facts,
         startup,
-    )
+    );
+    if let Some((transition, applied)) = reload {
+        let result = match stopped {
+            Ok(stopped) => apply_harness_reload_transition(relay, task_monitors, transition)
+                .await
+                .map(|()| stopped),
+            Err(error) => Err(error),
+        };
+        let _ = applied.send(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}")),
+        );
+        return result;
+    }
+    stopped
+}
+
+pub(super) async fn apply_harness_reload_transition(
+    relay: &Arc<RelayCell>,
+    task_monitors: &mut TaskMonitors,
+    transition: HarnessReloadTransition,
+) -> Result<()> {
+    let HarnessReloadTransition {
+        harness,
+        claude_login_path,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode,
+        credentials,
+        shared_credentials,
+    } = transition;
+    // Stop holds the endpoint read guard until it applies its SQLite sample.
+    // Drain those hooks before retiring state they may have just written.
+    shared_credentials.set(credentials.clone()).await;
+    {
+        let mut state = relay.lock().expect("relay state lock poisoned");
+        state.set_turn_verdict_harness(harness);
+        state.authentication_login_path = claude_login_path;
+        state.set_steering_delivery_mode(harness, boundary_mailbox_hook_available);
+        state.update_mailbox_delivery_mode(mailbox_delivery_mode);
+        state.set_harness_turn_policy(harness_turn_policy_for(harness));
+        state.set_background_work_policy(background_work_policy_for(harness));
+        state.retire_harness_process_state()?;
+    }
+    *task_monitors = TaskMonitors::new(harness, &credentials);
+    Ok(())
 }
 
 fn record_runtime_event_with_startup(
@@ -1421,7 +1492,7 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::Warning { message } => {
             relay.record_observation(RelayObservation::Warning { message })?;
         }
-        RuntimeEvent::HarnessRestarting { message } => {
+        RuntimeEvent::HarnessRestarting { message, .. } => {
             // Close admission before interrupting anything: interruption may
             // otherwise promote a replacement ahead of SessionRestarted.
             relay.clear_acp_readiness();
@@ -2159,6 +2230,7 @@ mod startup_tests {
             if arrival == Arrival::BatchedRestart {
                 events
                     .send(RuntimeEvent::HarnessRestarting {
+                        reload: None,
                         message: "restart".into(),
                     })
                     .await
@@ -2312,6 +2384,7 @@ mod startup_tests {
                             }
                         } else {
                             RuntimeEvent::HarnessRestarting {
+                                reload: None,
                                 message: "restart".into(),
                             }
                         })

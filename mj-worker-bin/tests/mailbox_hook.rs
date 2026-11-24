@@ -845,3 +845,98 @@ fn antigravity_mailbox_hook_formats_inject_steps_and_filters_conversation_id() {
             && hook_event == "PostToolBatch"
     )));
 }
+
+// Hard-won: a5eed662d: mj-worker-bin rejected --event Stop even though Antigravity hooks.json invokes it
+#[test]
+fn antigravity_stop_hook_settles_an_open_autonomous_turn() {
+    use mj_worker::relay::{BackgroundWorkPolicy, HarnessTurnPolicy};
+
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut relay = open_test_relay(&temp.path().join("relay"));
+    relay.set_background_work_policy(BackgroundWorkPolicy::AntigravityTasks);
+    relay.set_harness_turn_policy(HarnessTurnPolicy::Antigravity);
+    let native_id = "agy-autonomous";
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: native_id.into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.handle(RelayRequestEnvelope {
+        request_id: "pre-invocation".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::DrainMailbox {
+            hook_event: "PostToolBatch".into(),
+            conversation_id: Some(native_id.into()),
+            initial_num_steps: None,
+        },
+    });
+    assert!(relay.operational_state().harness_turn.is_some());
+    assert!(!relay.has_pending_antigravity_turn_settle());
+
+    let run_stop = |format| {
+        let mut command = CommandSpec::new(
+            env!("CARGO_BIN_EXE_mj-worker"),
+            [
+                "worker",
+                "mailbox-hook",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--event",
+                "Stop",
+                "--format",
+                format,
+            ],
+        )
+        .with_sensitive_stdin(
+            serde_json::to_vec(&serde_json::json!({
+                "conversationId": native_id,
+                "fullyIdle": true,
+                "terminationReason": "NO_TOOL_CALL",
+            }))
+            .unwrap(),
+        );
+        command.clear_env = true;
+        command.env.extend([
+            (
+                "MJ_DATA_DIR".into(),
+                temp.path().join("data").to_string_lossy().into_owned(),
+            ),
+            (
+                "MJ_CONFIG_DIR".into(),
+                temp.path().join("config").to_string_lossy().into_owned(),
+            ),
+        ]);
+        let output = CancellableProcessExecutor::with_timeout(Duration::from_secs(20))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            serde_json::json!({})
+        );
+        output.stderr
+    };
+
+    let stderr = run_stop("standard");
+    assert!(String::from_utf8_lossy(&stderr).contains("unsupported mailbox hook event"));
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        serve_relay_json_lines(&mut reader, &mut stream, &mut relay).unwrap();
+        relay
+    });
+    let stderr = run_stop("antigravity");
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+    assert!(server.join().unwrap().has_pending_antigravity_turn_settle());
+}

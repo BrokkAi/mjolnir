@@ -916,16 +916,30 @@ fn golden_dashboard_dialogs() {
                 ..Default::default()
             },
         ),
+        // Hard-won: #1679: backend-only warnings showed Continue anyway without a reason.
+        (
+            "suspend dialog with backend-only warnings",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                children_not_handed_back: vec!["native-child".into()],
+                interrupting: true,
+                ..Default::default()
+            },
+        ),
     ] {
         let mut dashboard = dashboard_with_session(running_session());
+        let request_id = 1;
         dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
             session_id: "session-1".into(),
-            children_not_handed_back: Vec::new(),
-            interrupting: false,
-            preflight: Some(preflight),
-            checking: false,
+            request_id,
+            child_warning_titles: Vec::new(),
+            preflight: None,
             viewing_all_untracked: false,
         }));
+        assert_eq!(
+            dashboard.apply_suspend_preflight(request_id, preflight),
+            DashboardAction::None
+        );
         let lines = drawn(&mut dashboard, 100, 28);
         append_dialog_render(&mut output, label, 100, 28, &lines);
     }

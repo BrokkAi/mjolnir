@@ -352,6 +352,10 @@ pub enum DashboardAction {
         key: String,
         config: String,
     },
+    SelectProviderProfile {
+        request: mj_client::http::ProviderProfileSelectionRequest,
+        generation: u64,
+    },
     /// Read the session checkout's branch and changed files on its target.
     /// The host runs it off the loop and answers with `set_git_status`.
     ProbeGitStatus {
@@ -385,7 +389,7 @@ pub enum DashboardAction {
         /// confirmation is still in flight, so the request keeps its origin.
         workspace_id: String,
         profile_id: String,
-        /// Load-balance across enabled profiles in this provider when `profile_id` is empty.
+        /// Provider placement; a nonempty `profile_id` pins its selected profile.
         provider: Option<mj_core::config::QuotaProvider>,
         bundle_id: String,
         project_directory: Option<std::path::PathBuf>,
@@ -533,6 +537,7 @@ pub enum DashboardAction {
     },
     SuspendPreflight {
         session_id: String,
+        request_id: u64,
     },
     Suspend {
         session_id: String,
@@ -1213,6 +1218,7 @@ pub struct DashboardState {
     suppress_modal_release: bool,
     pub(crate) spinner_save_pending: bool,
     session_preflight_generation: u64,
+    next_suspend_preflight_request_id: u64,
     pub(crate) wiki_search_generation: u64,
     /// Monotonic identity for move preparation requests. This lives outside
     /// the wizard so a late reply cannot match a newly opened wizard.
@@ -1475,6 +1481,7 @@ impl DashboardState {
             suppress_modal_release: false,
             spinner_save_pending: false,
             session_preflight_generation: 0,
+            next_suspend_preflight_request_id: 0,
             wiki_search_generation: 0,
             next_move_preparation_request_id: 0,
             archive_restores_in_flight: BTreeSet::new(),

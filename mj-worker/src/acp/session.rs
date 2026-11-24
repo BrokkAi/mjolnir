@@ -2033,6 +2033,8 @@ pub(super) async fn serve_session(
                 additional_directories,
                 supervisor_spec,
                 leases,
+                #[cfg(unix)]
+                on_restart,
                 resolved,
             } => {
                 let preserve_native_session = launch_config.harness == spec.harness;
@@ -2044,6 +2046,8 @@ pub(super) async fn serve_session(
                     additional_directories,
                     supervisor_spec,
                     leases,
+                    #[cfg(unix)]
+                    on_restart,
                     resume_session: preserve_native_session.then(|| session_id.to_string()),
                     resolved,
                 }));

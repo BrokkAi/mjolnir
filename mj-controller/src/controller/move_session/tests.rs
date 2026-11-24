@@ -435,6 +435,96 @@ fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoi
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn preparing_cross_harness_move_without_utility_profiles_succeeds() {
+    let name = crate::controller::test_support::test_name(
+        module_path!(),
+        "preparing_cross_harness_move_without_utility_profiles_succeeds",
+    );
+    if !super::test_fixtures::isolated_test_child(&name, "MJ_MOVE_NO_UTILITY_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join("checkout");
+    let source_home = dir.path().join("source-home");
+    let destination_home = dir.path().join("destination-home");
+    for path in [&checkout, &source_home, &destination_home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+
+    let mut config = mj_core::config::Config::default();
+    config.profiles.clear();
+    config.profiles.insert(
+        "source".into(),
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, source_home),
+    );
+    config.profiles.insert(
+        "destination".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::OpenCode,
+            destination_home,
+        ),
+    );
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+
+    let mut session = crate::controller::test_support::checkpoint_test_session("sess-no-utility");
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    session.state = SessionState::Running;
+    session.last_profile = "source".into();
+    session.target_template_id = "local-bare".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: dir.path().join("worker").join(&session.id),
+    }));
+    session.project_directory = Some(checkout);
+    crate::database::save_session(&session).unwrap();
+
+    let mut controller = crate::controller::Controller {
+        config,
+        state: mj_core::state::State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    controller
+        .state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
+
+    let catalog =
+        crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let selection = MoveSelection {
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            clear_resource_allocation: false,
+            session_id: session.id.clone(),
+            profile_id: Some("destination".into()),
+            target_template_id: None,
+            additional_mounts: None,
+            resource_allocation: None,
+            subagents: None,
+            oracle: None,
+            oracle_choice: None,
+        };
+        let preparation = controller
+            .prepare_move_session_controlled(&catalog, selection, &crate::targets::ProcessExecutor)
+            .await
+            .unwrap();
+        assert!(preparation.cross_harness);
+        assert!(preparation.in_place);
+    });
+}
+
 // Hard-won: #1631: retrying a partially started Move without --queue defaulted to Discard and was refused.
 #[cfg(unix)]
 #[test]

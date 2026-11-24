@@ -9,32 +9,69 @@
 //! executor and cancellation-poll wrapper that keeps a cancelled operation from
 //! waiting out several network requests belongs to each caller.
 
+use std::fs::File;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
-use mj_checkpoint::archive::CanonicalSessionSnapshot;
-use mj_core::config::{Config, HarnessProfile};
+use mj_checkpoint::archive::{ArchiveManifest, CanonicalSessionSnapshot};
+use mj_core::config::{Config, HarnessKind, HarnessProfile};
 
 pub mod claude;
 
-/// Checkpoint native history is optional evidence for a cross-harness handoff.
-/// A missing or unusable native summary leaves the canonical handoff intact.
-pub async fn native_prior_from_archive(
+#[allow(clippy::large_enum_variant)] // The archive source owns its manifest.
+pub enum NativePriorSource {
+    Archive {
+        archive_path: PathBuf,
+        manifest: ArchiveManifest,
+    },
+    ClaudeHome {
+        harness_home: PathBuf,
+        native_session_id: String,
+    },
+    ClaudeFile {
+        file: File,
+    },
+}
+
+/// Read optional Claude compaction evidence for a canonical handoff.
+pub async fn native_prior(
     session_id: &str,
-    archive_path: &std::path::Path,
-    manifest: &mj_checkpoint::archive::ArchiveManifest,
-    snapshot: &std::sync::Arc<CanonicalSessionSnapshot>,
+    source: NativePriorSource,
+    snapshot: &Arc<CanonicalSessionSnapshot>,
     cancel: CancellationToken,
 ) -> Result<Option<crate::compaction::PriorCompaction>> {
-    if manifest.session.harness_kind != mj_core::config::HarnessKind::Claude {
+    if matches!(&source, NativePriorSource::Archive { manifest, .. }
+        if manifest.session.harness_kind != HarnessKind::Claude)
+    {
         return Ok(None);
     }
     let session_id = session_id.to_owned();
-    let archive_path = archive_path.to_owned();
-    let manifest = manifest.clone();
-    let snapshot = std::sync::Arc::clone(snapshot);
+    let snapshot = Arc::clone(snapshot);
     mj_core::runtime::spawn_blocking(move || {
-        match claude::prior_compaction(&archive_path, &manifest, &snapshot, &cancel) {
+        let prior = match source {
+            NativePriorSource::Archive {
+                archive_path,
+                manifest,
+            } => {
+                claude::prior_compaction_from_archive(&archive_path, &manifest, &snapshot, &cancel)
+            }
+            NativePriorSource::ClaudeHome {
+                harness_home,
+                native_session_id,
+            } => claude::prior_compaction_from_home(
+                &harness_home,
+                &native_session_id,
+                &snapshot,
+                &cancel,
+            ),
+            NativePriorSource::ClaudeFile { file } => {
+                claude::prior_compaction_from_reader(file, &snapshot, &cancel)
+            }
+        };
+        match prior {
             Ok(prior) => Ok(prior),
             Err(error) if cancel.is_cancelled() => Err(error),
             Err(error) => {

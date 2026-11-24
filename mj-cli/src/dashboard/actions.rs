@@ -707,6 +707,24 @@ pub(crate) async fn apply_dashboard_action(
                 move |result| DashboardIoUpdate::ProfileHydration { key, result },
             );
         }
+        DashboardAction::SelectProviderProfile {
+            request,
+            generation,
+        } => {
+            super::io::spawn_async_io(
+                "selecting provider profile",
+                context.dashboard_io_tx.clone(),
+                async move {
+                    daemon::connect_existing()
+                        .await?
+                        .http()
+                        .await?
+                        .select_provider_profile(request)
+                        .await
+                },
+                move |result| DashboardIoUpdate::ProviderProfileSelection { generation, result },
+            );
+        }
         DashboardAction::ProbeGitStatus { session_id } => {
             context.spawn_git_probe(session_id);
         }
@@ -1635,7 +1653,10 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
-        DashboardAction::SuspendPreflight { session_id } => {
+        DashboardAction::SuspendPreflight {
+            session_id,
+            request_id,
+        } => {
             let updates = context.dashboard_io_tx.clone();
             mj_core::runtime::spawn(async move {
                 let result = async {
@@ -1649,7 +1670,11 @@ pub(crate) async fn apply_dashboard_action(
                 report(
                     "checking workspace before suspend",
                     &updates,
-                    DashboardIoUpdate::SuspendPreflight { session_id, result },
+                    DashboardIoUpdate::SuspendPreflight {
+                        session_id,
+                        request_id,
+                        result,
+                    },
                 );
             });
         }

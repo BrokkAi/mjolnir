@@ -48,6 +48,9 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn set_step(&mut self, step: WizardStep);
     fn profile(&self) -> usize;
     fn set_profile(&mut self, index: usize);
+    fn selection_pending(&self) -> bool {
+        false
+    }
     fn target(&self) -> usize;
     fn set_target(&mut self, index: usize);
     fn launch_error(&self) -> Option<&str>;
@@ -222,7 +225,8 @@ pub(crate) fn target_advance_enabled<W: WizardDraft>(
     wizard: &W,
 ) -> bool {
     let target_id = nth_key(&dashboard.config.targets, wizard.target());
-    wizard.target_rejection(dashboard, &target_id).is_none()
+    !wizard.selection_pending()
+        && wizard.target_rejection(dashboard, &target_id).is_none()
         && (wizard.resource_allocation().is_some()
             || !matches!(
                 dashboard.config.targets.get(&target_id),
@@ -236,6 +240,7 @@ impl WizardDraft for NewWizard {
     }
 
     fn set_step(&mut self, step: WizardStep) {
+        self.profile_selection_request = None;
         self.step = step;
     }
 
@@ -246,6 +251,12 @@ impl WizardDraft for NewWizard {
     fn set_profile(&mut self, index: usize) {
         self.profile = index;
         self.focused_provider = None;
+        self.profile_selection_request = None;
+        self.resolved_profile = None;
+    }
+
+    fn selection_pending(&self) -> bool {
+        self.profile_selection_request.is_some()
     }
 
     fn target(&self) -> usize {
@@ -597,8 +608,7 @@ impl WizardDraft for NewWizard {
                         ) && let Some(ProfilePickerItem::Profile { profile_index, .. }) =
                             items.get(pos + 1)
                         {
-                            self.focused_provider = None;
-                            self.profile = *profile_index;
+                            self.set_profile(*profile_index);
                         }
                     }
                 }
@@ -666,9 +676,10 @@ impl WizardDraft for NewWizard {
     }
 
     fn profile_advance_enabled(&self, dashboard: &DashboardState) -> bool {
-        !self
-            .effective_focused_provider(dashboard)
-            .is_some_and(|provider| Self::is_resolving_provider(&provider))
+        self.profile_selection_request.is_none()
+            && !self
+                .effective_focused_provider(dashboard)
+                .is_some_and(|provider| Self::is_resolving_provider(&provider))
     }
 
     fn select_profile_row(
@@ -677,6 +688,8 @@ impl WizardDraft for NewWizard {
         row: usize,
         toggle_provider: bool,
     ) {
+        self.profile_selection_request = None;
+        self.resolved_profile = None;
         let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
         match items.get(row) {
             Some(ProfilePickerItem::Auto) => {
