@@ -5,11 +5,18 @@ package githubwatch
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"maps"
+	"math"
 	"net/http"
+	"net/mail"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +29,7 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/githubrelevance"
 	"github.com/BrokkAi/mjolnir/go/internal/store"
+	"github.com/BrokkAi/mjolnir/go/internal/targets"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
@@ -112,14 +120,173 @@ type GithubWatchSnapshot struct {
 // `stop` CancellationToken). Poll progress lives only in the database; a
 // replacement daemon can resume from the same repo cursors and event keys.
 func Run(ctx context.Context, host GithubWatchHost) error {
-	panic("unported: mj-github-watch/src/service.rs run")
+	// Rust holds the host weakly here so the notices do not keep it alive;
+	// Go's collector handles the cycle.
+	notices := githubrelevance.NewNotices(func(text string) {
+		host.PushPublicNotice(text)
+	})
+	var student *githubrelevance.Student
+	result := runPollLoop(ctx, host, &student, notices)
+	var shutdown error
+	if student != nil {
+		shutdown = student.Shutdown(context.Background())
+	}
+	if shutdown != nil {
+		slog.Warn("GitHub student shutdown failed", "error", shutdown.Error())
+	}
+	if result != nil {
+		return result
+	}
+	return shutdown
 }
 
 // runPollLoop polls until ctx is done. student is the local relevance
 // model, created when local inference is enabled and shut down when it is
 // disabled (Rust's `&mut Option<Arc<Student>>`); Run shuts down what is left.
 func runPollLoop(ctx context.Context, host GithubWatchHost, student **githubrelevance.Student, notices *githubrelevance.Notices) error {
-	panic("unported: mj-github-watch/src/service.rs run_poll_loop")
+	for {
+		delay := configRecheckInterval
+		if snapshot := host.GithubWatchSnapshot(); snapshot.Enabled {
+			// Clamp the seconds before converting: a Duration overflows
+			// where Rust's Duration::from_secs does not.
+			seconds := min(snapshot.Config.IntervalSeconds, uint64(maxInterval/time.Second))
+			delay = max(time.Duration(seconds)*time.Second, minInterval)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		snapshot := host.GithubWatchSnapshot()
+		config := snapshot.Config
+		if !config.LocalInference && *student != nil {
+			previous := *student
+			*student = nil
+			if err := previous.Shutdown(context.Background()); err != nil {
+				return err
+			}
+		}
+		if !snapshot.Enabled {
+			continue
+		}
+		if config.LocalInference {
+			if *student == nil {
+				*student = githubrelevance.NewStudent(core.DataDir(), config.UseGPU, func(notice githubrelevance.StudentNotice) {
+					notices.StudentNotice(notice)
+				})
+			}
+			(*student).SetUseGPU(config.UseGPU)
+		}
+		jev := snapshot.Jev
+		type resolvedKey struct {
+			key *string
+			err error
+		}
+		resolved, err := spawnBlocking("resolve Fastino key", func() (resolvedKey, error) {
+			key, err := jev.ResolveFastinoKey()
+			return resolvedKey{key: key, err: err}, nil
+		})
+		if err != nil {
+			return err
+		}
+		fastinoKey := resolved.key
+		if resolved.err != nil {
+			slog.Warn("Jev will use the shared proxy key", "error", resolved.err.Error())
+			fastinoKey = nil
+		}
+		// A nil interface, not a nil *Student, when local inference is off.
+		var owner githubrelevance.StudentOwner
+		if *student != nil {
+			owner = *student
+		}
+		var classifier githubClassifier = githubrelevance.NewClassifier(owner, notices, fastinoKey)
+		repositories := sessionsByGithubRepo(&snapshot.State)
+		watchedRepositories, err := spawnBlocking("load watched GitHub repositories", store.LoadGithubWatchedRepositories)
+		if err != nil {
+			return err
+		}
+		for _, key := range watchedRepositories {
+			repository := ownerRepo(key)
+			if _, ok := repositories[repository]; !ok {
+				repositories[repository] = nil
+			}
+		}
+		if stopped := pollRepositories(ctx, host, repositories, config, classifier); stopped {
+			return nil
+		}
+	}
+}
+
+// repositoryPoll is one repository poll's outcome (Rust's JoinSet output,
+// with a panic as its JoinError).
+type repositoryPoll struct {
+	owner     string
+	repo      string
+	err       error
+	panicked  bool
+	recovered any
+}
+
+// pollRepositories polls every repository, at most repositoryConcurrency at
+// a time, in repository order. It is true when ctx ended, after every poll
+// it started has returned.
+func pollRepositories(ctx context.Context, host GithubWatchHost, repositories map[ownerRepo][]core.SessionRecord, config core.GithubWatchConfig, classifier githubClassifier) bool {
+	// Ending ctx aborts the running polls (Rust's abort_all).
+	jobs, abort := context.WithCancel(ctx)
+	defer abort()
+	keys := slices.SortedFunc(maps.Keys(repositories), compareOwnerRepo)
+	results := make(chan repositoryPoll)
+	running := 0
+	for {
+		for running < repositoryConcurrency && len(keys) > 0 {
+			key := keys[0]
+			keys = keys[1:]
+			sessions := repositories[key]
+			running++
+			go func() {
+				result := repositoryPoll{owner: key.Owner, repo: key.Repo}
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						result.panicked = true
+						result.recovered = recovered
+					}
+					results <- result
+				}()
+				control := newPollControl(host.GithubEventsEnabled)
+				result.err = pollRepository(jobs, key.Owner, key.Repo, sessions, config, classifier, control, host)
+			}()
+		}
+		if running == 0 {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			abort()
+			for ; running > 0; running-- {
+				if result := <-results; result.panicked {
+					slog.Warn("GitHub watch task failed during shutdown", "error", fmt.Sprintf("task panicked: %v", result.recovered))
+				}
+			}
+			return true
+		case result := <-results:
+			running--
+			switch {
+			case result.panicked:
+				slog.Warn("GitHub repository poll task panicked", "error", fmt.Sprintf("task panicked: %v", result.recovered))
+			case result.err == nil:
+				slog.Debug("GitHub repository poll completed", "owner", result.owner, "repo", result.repo)
+			case isGithubEventsDisabled(result.err):
+				slog.Debug("GitHub repository poll stopped because GitHub events were disabled", "owner", result.owner, "repo", result.repo)
+			default:
+				slog.Warn("GitHub repository poll failed; durable cursors remain available for retry", "owner", result.owner, "repo", result.repo, "error", result.err.Error())
+			}
+		}
+	}
 }
 
 // ownerRepo is a GitHub repository as the watcher keys it: Rust's
@@ -167,11 +334,109 @@ func sessionGithubRepositories(session *core.SessionRecord) []ownerRepo {
 }
 
 func pollRepository(ctx context.Context, owner, repo string, sessions []core.SessionRecord, config core.GithubWatchConfig, classifier githubClassifier, control pollControl, host GithubWatchHost) error {
-	panic("unported: mj-github-watch/src/service.rs poll_repository")
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := control.checkEnabled(); err != nil {
+		return err
+	}
+	watches, err := blockingDB(func() ([]store.GithubItemWatch, error) {
+		return store.LoadGithubWatches(owner, repo)
+	})
+	if err != nil {
+		return err
+	}
+	if len(sessions) == 0 && len(watches) == 0 {
+		return nil
+	}
+	// Any session the repository's items are polled for can lend its
+	// credential: a live session, a watch's creator, or an interested session
+	// of a watch. Interested sessions that are stopped keep their watches, so
+	// a merge must still be read while no session of the repository is live.
+	var tokenSession *string
+	if len(sessions) > 0 {
+		id := sessions[0].ID
+		tokenSession = &id
+	} else {
+		for _, watch := range watches {
+			if watch.CreatorSessionID != nil {
+				id := *watch.CreatorSessionID
+				tokenSession = &id
+				break
+			}
+		}
+	}
+	if tokenSession == nil {
+		type interested struct {
+			session string
+			ok      bool
+		}
+		found, err := blockingDB(func() (interested, error) {
+			session, ok, err := store.FirstGithubWatchInterestedSession(owner, repo)
+			return interested{session: session, ok: ok}, err
+		})
+		if err != nil {
+			return err
+		}
+		if found.ok {
+			tokenSession = &found.session
+		}
+	}
+	if tokenSession == nil {
+		slog.Debug("GitHub repository has no session to take a credential from; skipping", "owner", owner, "repo", repo)
+		return nil
+	}
+	token, err := host.GithubTokenForSession(ctx, *tokenSession)
+	if err != nil {
+		return err
+	}
+	api, err := newGithubAPIWithControl(config.APIBase, token, control)
+	if err != nil {
+		return err
+	}
+	return pollRepositoryWithContext(ctx, owner, repo, sessions, classifier, api)
 }
 
 func pollRepositoryWithContext(ctx context.Context, owner, repo string, sessions []core.SessionRecord, classifier githubClassifier, api *githubAPI) error {
-	panic("unported: mj-github-watch/src/service.rs poll_repository_with_context")
+	cursor, err := blockingDB(func() (store.GithubRepoCursor, error) {
+		return store.GithubRepoCursorFor(owner, repo)
+	})
+	if err != nil {
+		return err
+	}
+	if err := recordRepository(ctx, owner, repo, &cursor, api); err != nil {
+		return err
+	}
+	if err := reconcileRepository(ctx, owner, repo, api, time.Now().UTC()); err != nil {
+		if isGithubEventsDisabled(err) {
+			return err
+		}
+		// Ending ctx aborts the poll, as dropping Rust's future does.
+		if ctx.Err() != nil {
+			return nil
+		}
+		slog.Warn("GitHub reconciliation failed; retrying from checkpoint next hour", "owner", owner, "repo", repo, "error", err.Error())
+	}
+	// Classification and timeline work have separate durable progress. Neither
+	// one's failure prevents the other from running.
+	var classification error
+	var classificationPanic any
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// A panic reaches the caller, as it does from Rust's join!.
+		defer func() { classificationPanic = recover() }()
+		classification = classifyRecordedItems(ctx, owner, repo, sessions, classifier, cursor.WatchStartedAt, api)
+	}()
+	timeline := pollRepositoryTimelines(ctx, owner, repo, api)
+	<-done
+	if classificationPanic != nil {
+		panic(classificationPanic)
+	}
+	if classification != nil {
+		return classification
+	}
+	return timeline
 }
 
 func recordRepository(ctx context.Context, owner, repo string, cursor *store.GithubRepoCursor, api *githubAPI) error {
@@ -179,40 +444,615 @@ func recordRepository(ctx context.Context, owner, repo string, cursor *store.Git
 }
 
 func reconcileRepository(ctx context.Context, owner, repo string, api *githubAPI, now time.Time) error {
-	panic("unported: mj-github-watch/src/service.rs reconcile_repository")
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := api.control.checkEnabled(); err != nil {
+		return err
+	}
+	// Read the writer's current coverage after main acquisition, not its old snapshot.
+	cursor, err := blockingDB(func() (store.GithubRepoCursor, error) {
+		return store.GithubRepoCursorFor(owner, repo)
+	})
+	if err != nil {
+		return err
+	}
+	until := core.FormatChronoRFC3339(now.Add(-time.Hour))
+	if timestampPrecedes(cursor.UpdatedAt, until) {
+		until = cursor.UpdatedAt
+	}
+	// Equality must replay the boundary: a crash may leave its tie unfinished.
+	if timestampPrecedes(until, cursor.ReconciledThrough) {
+		return nil
+	}
+	claimed, err := blockingDB(func() (bool, error) {
+		return store.ClaimGithubReconciliation(owner, repo, now.UnixMilli())
+	})
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+	// Re-read every main-feed range once its item timestamps are an hour old.
+	// Page commits retain coverage across pauses, failed requests and crashes.
+	// With offset pages, an item can be missed only if moves within its tied
+	// second disturb both the main read and the later reconciliation read.
+	return acquireRepository(ctx, owner, repo, cursor.ReconciledThrough, &until, api)
 }
 
 // acquireRepository records the issues feed from `from`, up to until when it
 // is set (a reconciliation pass) or to the newest item otherwise.
 func acquireRepository(ctx context.Context, owner, repo, from string, until *string, api *githubAPI) error {
-	panic("unported: mj-github-watch/src/service.rs acquire_repository")
+	// GitHub's `since` is inclusive and offset pages are ordered by update
+	// time. After a full page, every item older than its last timestamp has
+	// been read, so the next read starts at that timestamp. Only a page that
+	// holds nothing newer than `since` itself pages forward by offset, so
+	// each request either advances `since` or reads deeper into one second.
+	newest := from
+	since := overlapTimestamp(newest)
+	page := 1
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		response, err := api.getJSON(ctx, fmt.Sprintf("repos/%s/%s/issues", owner, repo), []queryParam{
+			{"state", "all"},
+			{"sort", "updated"},
+			{"direction", "asc"},
+			{"since", since},
+			{"per_page", strconv.Itoa(itemsPerPage)},
+			{"page", strconv.Itoa(page)},
+		})
+		if err != nil {
+			return err
+		}
+		if err := api.control.checkEnabled(); err != nil {
+			return err
+		}
+		values, ok := jsonArray(response)
+		if !ok {
+			return errors.New("GitHub issues response is not an array")
+		}
+		reachedEnd := false
+		var last *string
+		items := []store.GithubSeenItem{}
+		for _, value := range values {
+			item, ok := parseGithubItem(value)
+			if !ok {
+				slog.Warn("GitHub issues feed contains an invalid item; skipping it", "owner", owner, "repo", repo)
+				continue
+			}
+			if until != nil && timestampPrecedes(*until, item.UpdatedAt) {
+				reachedEnd = true
+				continue
+			}
+			if timestampPrecedes(newest, item.UpdatedAt) {
+				newest = item.UpdatedAt
+			}
+			if last == nil || timestampPrecedes(*last, item.UpdatedAt) {
+				updatedAt := item.UpdatedAt
+				last = &updatedAt
+			}
+			items = append(items, item)
+		}
+		shortPage := len(values) < itemsPerPage
+		// A short page or the first item beyond the bound proves this range
+		// complete, including a gap with no items. Otherwise save the newest
+		// timestamp; restarting from its overlap rereads its whole second.
+		var completedRange *string
+		if until != nil && (reachedEnd || shortPage) {
+			completedRange = until
+		}
+		through := newest
+		if completedRange != nil {
+			through = *completedRange
+		}
+		var progress store.GithubFeedProgress = store.GithubFeedProgressMain{Through: through}
+		if until != nil {
+			progress = store.GithubFeedProgressReconciled{Through: through}
+		}
+		if _, err := blockingDB(func() (struct{}, error) {
+			return struct{}{}, store.RecordGithubPage(owner, repo, items, progress)
+		}); err != nil {
+			return err
+		}
+		if completedRange != nil || shortPage {
+			break
+		}
+		if last != nil && timestampPrecedes(since, *last) {
+			since = *last
+			page = 1
+		} else {
+			page++
+		}
+	}
+	return nil
+}
+
+// pendingClassification is one (item, session) pair awaiting
+// classification, with its retry state.
+type pendingClassification struct {
+	item          store.GithubSeenItem
+	session       core.SessionRecord
+	lastAttemptMs *int64
+	attempts      int64
+}
+
+// evidenceOutcome is a pair's prepared evidence: an error, nil evidence when
+// the session created the item, or the evidence to classify.
+type evidenceOutcome struct {
+	evidence *core.GithubItemEvidence
+	err      error
+}
+
+// classificationSlot is a pair with its place in the never-attempted /
+// oldest-retry order; outcome is nil while its evidence is still to be built
+// from the session's history scan.
+type classificationSlot struct {
+	index    int
+	item     store.GithubSeenItem
+	session  core.SessionRecord
+	attempts int64
+	outcome  *evidenceOutcome
+}
+
+// compareLastAttempt orders Rust's Option<i64>: never attempted first.
+func compareLastAttempt(a, b *int64) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	}
+	return cmp.Compare(*a, *b)
 }
 
 func classifyRecordedItems(ctx context.Context, owner, repo string, sessions []core.SessionRecord, classifier githubClassifier, watchStartedAt string, api *githubAPI) error {
-	panic("unported: mj-github-watch/src/service.rs classify_recorded_items")
+	items, err := blockingDB(func() ([]store.GithubSeenItem, error) {
+		return store.LoadGithubSeenItems(owner, repo)
+	})
+	if err != nil {
+		return err
+	}
+	failures, err := blockingDB(func() (map[store.GithubClassificationFailureKey]store.GithubClassificationFailure, error) {
+		return store.LoadGithubClassificationFailures(owner, repo)
+	})
+	if err != nil {
+		return err
+	}
+	now := core.EpochMillis()
+	var pending []pendingClassification
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := api.control.checkEnabled(); err != nil {
+			return err
+		}
+		if !timestampPrecedes(watchStartedAt, item.CreatedAt) {
+			continue
+		}
+		number := item.Number
+		classified, err := blockingDB(func() (map[string]struct{}, error) {
+			return store.LoadGithubItemClassifiedSessions(owner, repo, number)
+		})
+		if err != nil {
+			return err
+		}
+		for _, session := range sessions {
+			if _, done := classified[session.ID]; session.NoGithubEvents ||
+				timestampPrecedes(item.CreatedAt, session.CreatedAt) || done {
+				continue
+			}
+			failure, failed := failures[store.GithubClassificationFailureKey{Number: item.Number, SessionID: session.ID}]
+			if failed && failure.NextAttemptAtMs > now {
+				continue
+			}
+			pair := pendingClassification{item: item, session: session}
+			if failed {
+				lastAttempt := failure.LastAttemptAtMs
+				pair.lastAttemptMs = &lastAttempt
+				pair.attempts = failure.Attempts
+			}
+			pending = append(pending, pair)
+		}
+	}
+	// Each pair owns its retry state. Never-attempted work precedes retries;
+	// eligible retries run oldest-first and never consume the cap in backoff.
+	slices.SortStableFunc(pending, func(a, b pendingClassification) int {
+		return cmp.Or(
+			compareLastAttempt(a.lastAttemptMs, b.lastAttemptMs),
+			cmp.Compare(a.item.Number, b.item.Number),
+			strings.Compare(a.session.ID, b.session.ID),
+		)
+	})
+	if len(pending) == 0 {
+		return nil
+	}
+	pending = pending[:min(len(pending), maxClassificationsPerPoll)]
+	login, err := api.credentialLogin(ctx)
+	if err != nil {
+		return err
+	}
+	concurrency := len(pending)
+	bySession := map[string][]classificationSlot{}
+	for index, pair := range pending {
+		bySession[pair.session.ID] = append(bySession[pair.session.ID], classificationSlot{
+			index: index, item: pair.item, session: pair.session, attempts: pair.attempts,
+		})
+	}
+	prepared := make([]classificationSlot, 0, concurrency)
+	for _, sessionID := range slices.Sorted(maps.Keys(bySession)) {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := api.control.checkEnabled(); err != nil {
+			return err
+		}
+		// One pass over the session's stored transcript feeds every item of
+		// the session; no transcript text is held beyond a row at a time.
+		digest, digestErr := sessionDigestForEvidence(sessionID)
+		pairs := bySession[sessionID]
+		slots := make([]classificationSlot, 0, len(pairs))
+		var inputs []preparedPair
+		for _, slot := range pairs {
+			if ctx.Err() != nil {
+				return nil
+			}
+			var pair *preparedPair
+			var err error
+			if digestErr == nil {
+				pair, err = prepareSessionEvidence(owner, repo, &slot.item, &slot.session, digest, login, api.control)
+			} else {
+				err = errors.New(digestErr.Error())
+			}
+			switch {
+			case err != nil:
+				slot.outcome = &evidenceOutcome{err: err}
+			case pair == nil:
+				slot.outcome = &evidenceOutcome{}
+			default:
+				inputs = append(inputs, *pair)
+			}
+			slots = append(slots, slot)
+		}
+		// Ending this scan's context must also stop the blocking scan and
+		// release its snapshot.
+		scan, stopScan := context.WithCancel(ctx)
+		built, buildErr := buildSessionEvidence(scan, sessionID, inputs)
+		stopScan()
+		if ctx.Err() != nil {
+			return nil
+		}
+		var outcomes []evidenceOutcome
+		if buildErr == nil {
+			for index := range built {
+				outcomes = append(outcomes, evidenceOutcome{evidence: &built[index]})
+			}
+		} else {
+			message := buildErr.Error()
+			for _, slot := range slots {
+				if slot.outcome == nil {
+					outcomes = append(outcomes, evidenceOutcome{err: errors.New(message)})
+				}
+			}
+		}
+		for _, slot := range slots {
+			if slot.outcome == nil {
+				if len(outcomes) == 0 {
+					panic("one result per input")
+				}
+				slot.outcome = &outcomes[0]
+				outcomes = outcomes[1:]
+			}
+			prepared = append(prepared, slot)
+		}
+	}
+	// Grouping must not change the never-attempted / oldest-retry order.
+	slices.SortFunc(prepared, func(a, b classificationSlot) int { return cmp.Compare(a.index, b.index) })
+	type classified struct {
+		err       error
+		recovered any
+	}
+	results := make(chan classified, len(prepared))
+	for _, slot := range prepared {
+		go func() {
+			var result classified
+			// A panic reaches the poll, as it does from Rust's stream.
+			defer func() {
+				result.recovered = recover()
+				results <- result
+			}()
+			result.err = classifyPreparedPair(ctx, owner, repo, slot, classifier, api.control)
+		}()
+	}
+	var first error
+	var recovered any
+	for range prepared {
+		result := <-results
+		if result.recovered != nil && recovered == nil {
+			recovered = result.recovered
+		}
+		if result.err != nil && first == nil {
+			first = result.err
+		}
+	}
+	if recovered != nil {
+		panic(recovered)
+	}
+	return first
+}
+
+// classifyPreparedPair classifies one prepared pair and records a failure
+// for retry with backoff.
+func classifyPreparedPair(ctx context.Context, owner, repo string, slot classificationSlot, classifier githubClassifier, control pollControl) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	number := slot.item.Number
+	sessionID := slot.session.ID
+	err := slot.outcome.err
+	if err == nil {
+		err = classifyForSession(ctx, owner, repo, slot.item, slot.session, slot.outcome.evidence, classifier, control)
+	}
+	if err == nil {
+		return nil
+	}
+	if isGithubEventsDisabled(err) {
+		return err
+	}
+	// Ending ctx aborts the poll, as dropping Rust's future does; the
+	// interrupted attempt is not a classification failure.
+	if ctx.Err() != nil {
+		return nil
+	}
+	attempt := slot.attempts
+	if attempt < math.MaxInt64 {
+		attempt++
+	}
+	slog.Warn("GitHub classification failed; retrying with backoff", "owner", owner, "repo", repo, "number", number,
+		"session_id", sessionID, "attempt", attempt, "error", err.Error())
+	_, err = blockingDB(func() (struct{}, error) {
+		return struct{}{}, store.RecordGithubClassificationFailure(owner, repo, number, sessionID)
+	})
+	return err
 }
 
 // prepareSessionEvidence is nil without an error when the session created
 // the item: its creator is never told about it and the classifier is not
 // asked.
 func prepareSessionEvidence(owner, repo string, item *store.GithubSeenItem, session *core.SessionRecord, digest core.SessionContext, credentialLogin *string, control pollControl) (*preparedPair, error) {
-	panic("unported: mj-github-watch/src/service.rs prepare_session_evidence")
+	repoLabel := owner + "/" + repo
+	kind := itemKindFromWatch(item.Kind)
+	// Sessions share one GitHub account, so the author cannot name a session,
+	// but this session did not open an item another account authored.
+	ownAccount := credentialLogin == nil || asciiEqualFold(*credentialLogin, item.Author)
+	created := false
+	if ownAccount {
+		var err error
+		created, err = openedBySession(session.ID, item.CreatedAt, uint64(item.Number), item.URL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	evidence := core.GithubItemEvidence{
+		Item: core.GithubItem{
+			Repo:   repoLabel,
+			Kind:   kind,
+			Number: uint64(item.Number),
+			Title:  item.Title,
+			Body:   item.Body,
+			Author: item.Author,
+			URL:    item.URL,
+		},
+		Session: digest,
+	}
+	// A bare `#N` in the session names the item's repository only when the
+	// session works in no other one.
+	bareIsItemRepo := len(sessionGithubRepositories(session)) == 1
+	evidence.Session = evidence.Session.ForItem(&evidence.Item, bareIsItemRepo)
+	// The creator already knows its item, so it is never told about it and
+	// The classifier is not asked; its stored interest is false.
+	if created {
+		return nil, nil
+	}
+	if err := control.checkEnabled(); err != nil {
+		return nil, err
+	}
+	original := evidence.Item
+	cutoffMs, ok := timestampMillis(item.CreatedAt)
+	if !ok {
+		return nil, errors.New("invalid GitHub item creation time")
+	}
+	base, err := spawnBlocking("bound GitHub history evidence", func() (core.GithubItemEvidence, error) {
+		bounded, err := evidence.BoundedForRequest()
+		if err != nil {
+			return core.GithubItemEvidence{}, err
+		}
+		// serde_json::to_value, redact_json_strings, serde_json::from_value.
+		encoded, err := jsonvalue.Marshal(bounded)
+		if err != nil {
+			return core.GithubItemEvidence{}, err
+		}
+		value, err := jsonvalue.Parse(encoded)
+		if err != nil {
+			return core.GithubItemEvidence{}, err
+		}
+		core.RedactJSONStrings(&value)
+		if encoded, err = jsonvalue.Marshal(value); err != nil {
+			return core.GithubItemEvidence{}, err
+		}
+		var redacted core.GithubItemEvidence
+		if err := json.Unmarshal(encoded, &redacted); err != nil {
+			return core.GithubItemEvidence{}, err
+		}
+		return redacted, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &preparedPair{original: original, base: base, cutoffMs: cutoffMs}, nil
+}
+
+// errHistoryEvidenceCancelled is the history scan's own cancellation, as
+// Rust's `ensure!` words it.
+func errHistoryEvidenceCancelled() error {
+	return errors.New("GitHub history evidence cancelled")
 }
 
 // buildSessionEvidence builds every pair's evidence from one scan of the
 // session's transcript. Ending ctx stops the scan and releases its snapshot.
 func buildSessionEvidence(ctx context.Context, sessionID string, pairs []preparedPair) ([]core.GithubItemEvidence, error) {
-	panic("unported: mj-github-watch/src/service.rs build_session_evidence")
+	if len(pairs) == 0 {
+		return []core.GithubItemEvidence{}, nil
+	}
+	stopped := func() bool { return ctx.Err() != nil }
+	return spawnBlocking("build GitHub history evidence", func() ([]core.GithubItemEvidence, error) {
+		// Items without searchable identifiers get empty history without a scan.
+		var specs []transcript.HistoryPairSpec[*transcript.HistoryScanner]
+		var scanned []int
+		for index := range pairs {
+			pair := &pairs[index]
+			if stopped() {
+				return nil, errHistoryEvidenceCancelled()
+			}
+			sink, err := transcript.HistoryScannerForItem(&pair.original, &pair.base)
+			if err != nil {
+				return nil, err
+			}
+			if sink != nil {
+				scanned = append(scanned, index)
+				specs = append(specs, transcript.HistoryPairSpec[*transcript.HistoryScanner]{
+					CutoffMs: pair.cutoffMs,
+					Repo:     pair.original.Repo,
+					Number:   pair.original.Number,
+					Sink:     sink,
+				})
+			}
+		}
+		var results []transcript.HistoryResult[struct{}]
+		if len(specs) > 0 {
+			history := transcript.NewSessionHistory[struct{}, *transcript.HistoryScanner](sessionID, specs)
+			var err error
+			if results, err = store.ScanGithubHistory(sessionID, history, stopped); err != nil {
+				return nil, err
+			}
+		}
+		evidence := make([]core.GithubItemEvidence, 0, len(pairs))
+		for index := range pairs {
+			if stopped() {
+				return nil, errHistoryEvidenceCancelled()
+			}
+			spans := []transcript.Span{}
+			if len(scanned) > 0 && scanned[0] == index {
+				scanned = scanned[1:]
+				if len(results) == 0 {
+					panic("one result per scanned item")
+				}
+				spans = results[0].Spans
+				results = results[1:]
+			}
+			built, _, err := githubrelevance.BuildEvidence(&pairs[index].base, spans)
+			if err != nil {
+				return nil, err
+			}
+			evidence = append(evidence, built)
+		}
+		return evidence, nil
+	})
 }
 
 // classifyForSession classifies item for session; a nil evidence means the
 // session created the item, which is stored as not interested.
 func classifyForSession(ctx context.Context, owner, repo string, item store.GithubSeenItem, session core.SessionRecord, evidence *core.GithubItemEvidence, classifier githubClassifier, control pollControl) error {
-	panic("unported: mj-github-watch/src/service.rs classify_for_session")
+	repoLabel := owner + "/" + repo
+	kind := itemKindFromWatch(item.Kind)
+	if err := control.checkEnabled(); err != nil {
+		return err
+	}
+	created := evidence == nil
+	interested := false
+	if evidence != nil {
+		verdict, err := classifier.Classify(ctx, evidence)
+		if err != nil {
+			return err
+		}
+		if err := control.checkEnabled(); err != nil {
+			return err
+		}
+		interested = verdict.Interested
+	}
+	var event *store.GithubClassificationEvent
+	if interested {
+		key := fmt.Sprintf("github:%s#%d:interest:%s", repoLabel, item.Number, session.ID)
+		encoded, err := jsonvalue.Marshal(core.MailboxEvent{
+			Key:         key,
+			Source:      "github",
+			Wake:        false,
+			CreatedAtMs: uint64(max(core.EpochMillis(), 0)),
+			Body: core.MailboxEventBodyNewGithubItem{
+				Kind:   kind,
+				Number: uint64(item.Number),
+				Title:  item.Title,
+				Repo:   &repoLabel,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		event = &store.GithubClassificationEvent{Key: key, JSON: string(encoded), Wake: false}
+	}
+	classification := store.GithubItemClassification{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     item.Number,
+		SessionID:  session.ID,
+		Kind:       item.Kind,
+		Title:      item.Title,
+		URL:        item.URL,
+		CreatedAt:  item.CreatedAt,
+		Interested: interested,
+		Created:    created,
+	}
+	_, err := blockingDB(func() (struct{}, error) {
+		_, err := store.CommitGithubItemClassification(classification, event)
+		return struct{}{}, err
+	})
+	return err
 }
 
 func openedBySession(sessionID, createdAt string, number uint64, url string) (bool, error) {
-	panic("unported: mj-github-watch/src/service.rs opened_by_session")
+	atMs, ok := timestampMillis(createdAt)
+	if !ok {
+		return false, nil
+	}
+	references := core.GithubReferences(url)
+	if len(references) == 0 {
+		return false, nil
+	}
+	item := references[0]
+	output, err := blockingDB(func() ([]string, error) {
+		return store.LoadGithubSessionCreationOutput(sessionID, atMs)
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, text := range output {
+		for _, reference := range core.GithubReferences(text) {
+			// A bare `#N` cannot name the repository, and sessions work
+			// in several; creation output (gh, the API, MCP tools)
+			// carries the full URL.
+			if reference.Number == number &&
+				reference.Owner != nil && item.Owner != nil && asciiEqualFold(*reference.Owner, *item.Owner) &&
+				reference.Repo != nil && item.Repo != nil && asciiEqualFold(*reference.Repo, *item.Repo) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func sessionDigestForEvidence(sessionID string) (core.SessionContext, error) {
@@ -226,11 +1066,113 @@ func sessionDigestForEvidence(sessionID string) (core.SessionContext, error) {
 }
 
 func pollRepositoryTimelines(ctx context.Context, owner, repo string, api *githubAPI) error {
-	panic("unported: mj-github-watch/src/service.rs poll_repository_timelines")
+	watches, err := blockingDB(func() ([]store.GithubItemWatch, error) {
+		return store.LoadGithubWatches(owner, repo)
+	})
+	if err != nil {
+		return err
+	}
+	for _, watch := range watches {
+		if ctx.Err() != nil {
+			break
+		}
+		if err := api.control.checkEnabled(); err != nil {
+			return err
+		}
+		if watch.RecordedUpdatedAt == nil {
+			continue
+		}
+		if timestampPrecedes(*watch.RecordedUpdatedAt, watch.ProcessedAt) {
+			continue
+		}
+		number := watch.Number
+		if err := pollItemTimeline(ctx, watch, api); err != nil {
+			if isGithubEventsDisabled(err) {
+				return err
+			}
+			// Ending ctx aborts the poll, as dropping Rust's future does.
+			if ctx.Err() != nil {
+				break
+			}
+			slog.Warn("GitHub item timeline failed; will retry next poll", "owner", owner, "repo", repo, "number", number, "error", err.Error())
+		}
+	}
+	return nil
+}
+
+// fetchedActivity is one item's activity as read from GitHub.
+type fetchedActivity struct {
+	entries     []any
+	comments    []any
+	mergedAt    *string
+	processedAt string
 }
 
 func pollItemTimeline(ctx context.Context, watch store.GithubItemWatch, api *githubAPI) error {
-	panic("unported: mj-github-watch/src/service.rs poll_item_timeline")
+	fetch := func() (fetchedActivity, error) {
+		entries, processedAt, err := api.arrayPagesObserved(ctx,
+			fmt.Sprintf("repos/%s/%s/issues/%d/timeline", watch.Owner, watch.Repo, watch.Number), nil)
+		if err != nil {
+			return fetchedActivity{}, err
+		}
+		// A merge that lands commits directly, as Merge Marshall does, leaves
+		// only a closed entry in the timeline. Only the pull request itself
+		// records that it merged, so read it when such a close appears.
+		var mergedAt *string
+		if watch.Kind == "pull_request" && hasCloseWithoutMerge(entries, watch.TimelineAt) {
+			pull, err := api.getJSON(ctx, fmt.Sprintf("repos/%s/%s/pulls/%d", watch.Owner, watch.Repo, watch.Number), nil)
+			if err != nil {
+				return fetchedActivity{}, err
+			}
+			if at, ok := jsonStr(jsonIndex(pull, "merged_at")); ok {
+				mergedAt = &at
+			}
+		}
+		// Only a creator is told about review comments, so a watch kept for
+		// interested sessions does not pay for the read.
+		comments := []any{}
+		if watch.Kind == "pull_request" && watch.CreatorSessionID != nil {
+			// Use the stored cursor, before either source advances it.
+			comments, err = api.arrayPages(ctx,
+				fmt.Sprintf("repos/%s/%s/pulls/%d/comments", watch.Owner, watch.Repo, watch.Number),
+				[]queryParam{{"since", overlapTimestamp(watch.ReviewCommentsAt)}})
+			if err != nil {
+				return fetchedActivity{}, err
+			}
+		}
+		return fetchedActivity{entries: entries, comments: comments, mergedAt: mergedAt, processedAt: processedAt}, nil
+	}
+	fetched, err := fetch()
+	if err != nil {
+		var status githubHTTPStatus
+		if !errors.As(err, &status) || (status.status != http.StatusNotFound && status.status != http.StatusGone) {
+			return fmt.Errorf("GitHub activity %s/%s#%d: %w", watch.Owner, watch.Repo, watch.Number, err)
+		}
+		fetched = fetchedActivity{entries: []any{}, comments: []any{}, processedAt: status.observedAt}
+	}
+	mapped, err := mapItemActivity(&watch, fetched.entries, fetched.comments, fetched.mergedAt)
+	if err != nil {
+		return err
+	}
+	var login *string
+	if slices.ContainsFunc(mapped.events, func(event store.MappedGithubEvent) bool { return event.Author != nil }) {
+		if login, err = api.credentialLogin(ctx); err != nil {
+			return err
+		}
+	}
+	if err := api.control.checkEnabled(); err != nil {
+		return err
+	}
+	_, err = blockingDB(func() (struct{}, error) {
+		return struct{}{}, store.CommitGithubTimeline(watch, store.GithubItemProgress{
+			TimelineAt:       mapped.cursorAt,
+			TimelineID:       mapped.cursorID,
+			ReviewCommentsAt: mapped.reviewCommentsAt,
+			ReviewCommentsID: mapped.reviewCommentsID,
+			ProcessedAt:      fetched.processedAt,
+		}, mapped.events, login)
+	})
+	return err
 }
 
 type timelineMapping struct {
@@ -244,7 +1186,54 @@ type timelineMapping struct {
 // mapItemActivity: each source owns its cursor. A later comment read cannot
 // advance the timeline past an event that appeared after the timeline read.
 func mapItemActivity(watch *store.GithubItemWatch, entries []any, comments []any, mergedAt *string) (timelineMapping, error) {
-	panic("unported: mj-github-watch/src/service.rs map_item_activity")
+	mapped, err := mapTimeline(watch, entries, &watch.TimelineAt, mergedAt)
+	if err != nil {
+		return timelineMapping{}, err
+	}
+	// Apply the stored boundary to update time, replaying ties.
+	// A newly published comment can have an older creation time.
+	commentsToMap := []any{}
+	for _, comment := range comments {
+		if at, ok := reviewCommentTimestamp(comment); ok && !timestampPrecedes(at, watch.ReviewCommentsAt) {
+			commentsToMap = append(commentsToMap, comment)
+		}
+	}
+	reviewEntries := []any{jsonvalue.Object{
+		{Key: "event", Value: "line-commented"},
+		{Key: "comments", Value: commentsToMap},
+	}}
+	reviewMapping, err := mapTimeline(watch, reviewEntries, nil, nil)
+	if err != nil {
+		return timelineMapping{}, err
+	}
+	mapped.events = append(mapped.events, reviewMapping.events...)
+	for _, comment := range comments {
+		timestamp, ok := reviewCommentTimestamp(comment)
+		if !ok {
+			continue
+		}
+		id, ok := jsonI64(jsonIndex(comment, "id"))
+		if !ok {
+			continue
+		}
+		if _, ok := timestampMillis(timestamp); !ok {
+			return timelineMapping{}, errors.New("invalid GitHub review comment timestamp")
+		}
+		if compareWatermark(timestamp, uint64(id), mapped.reviewCommentsAt, uint64(mapped.reviewCommentsID)) > 0 {
+			mapped.reviewCommentsAt = timestamp
+			mapped.reviewCommentsID = id
+		}
+	}
+	return mapped, nil
+}
+
+// reviewCommentTimestamp is a review comment's update time, or its creation
+// time when it has none.
+func reviewCommentTimestamp(comment any) (string, bool) {
+	if at, ok := jsonStr(jsonIndex(comment, "updated_at")); ok {
+		return at, true
+	}
+	return commentCreationTimestamp(comment)
 }
 
 // hasCloseWithoutMerge is whether the timeline has a close after the cursor
@@ -287,7 +1276,127 @@ func sameMoment(left, right string) bool {
 // event IDs. Watch metadata supplies only the item's identity and display
 // title.
 func mapTimeline(watch *store.GithubItemWatch, entries []any, since *string, mergedAt *string) (timelineMapping, error) {
-	panic("unported: mj-github-watch/src/service.rs map_timeline")
+	result := timelineMapping{
+		events:           []store.MappedGithubEvent{},
+		cursorAt:         watch.TimelineAt,
+		cursorID:         watch.TimelineID,
+		reviewCommentsAt: watch.ReviewCommentsAt,
+		reviewCommentsID: watch.ReviewCommentsID,
+	}
+	merged := false
+	repo := fmt.Sprintf("%s/%s", watch.Owner, watch.Repo)
+	itemKind := itemKindFromWatch(watch.Kind)
+	number := uint64(watch.Number)
+	for _, entry := range entries {
+		eventType, _ := jsonStr(jsonIndex(entry, "event"))
+		// GitHub emits closed after merged, sometimes in a later second.
+		// A reopen starts a new lifecycle interval.
+		if eventType == "merged" {
+			merged = true
+		}
+		if eventType == "reopened" {
+			merged = false
+		}
+		values := []any{entry}
+		if eventType == "line-commented" {
+			comments, ok := jsonArray(jsonIndex(entry, "comments"))
+			if !ok {
+				return timelineMapping{}, errors.New("GitHub line-commented entry has no comments")
+			}
+			values = comments
+		}
+		for _, value := range values {
+			timestamp, ok := commentCreationTimestamp(value)
+			if !ok {
+				continue
+			}
+			id, ok := jsonI64(jsonIndex(value, "id"))
+			if !ok {
+				continue
+			}
+			if _, ok := timestampMillis(timestamp); !ok {
+				return timelineMapping{}, errors.New("invalid GitHub timeline timestamp")
+			}
+			if compareWatermark(timestamp, uint64(id), result.cursorAt, uint64(result.cursorID)) > 0 {
+				result.cursorAt = timestamp
+				result.cursorID = id
+			}
+			// IDs belong to different GitHub tables. Replay the boundary second
+			// and let the outbox deduplicate, so a lower ID cannot hide an event.
+			if since != nil && timestampPrecedes(timestamp, *since) {
+				continue
+			}
+			author, _ := jsonStr(jsonIndex(jsonIndex(value, "user"), "login"))
+			text, _ := jsonStr(jsonIndex(value, "body"))
+			body := truncateUTF8(text, core.MailboxCommentBodyLimit)
+			eventRepo := repo
+			var suffix string
+			var eventBody core.MailboxEventBody
+			var filterAuthor string
+			lifecycle := false
+			switch {
+			case eventType == "commented":
+				suffix = "comment"
+				eventBody = core.MailboxEventBodyGithubComment{
+					ItemKind: itemKind, Number: number, Title: watch.Title,
+					Author: author, Body: body, Repo: &eventRepo,
+				}
+				filterAuthor = author
+			case eventType == "reviewed":
+				suffix = "review"
+				var reviewState *string
+				if state, ok := jsonStr(jsonIndex(value, "state")); ok {
+					reviewState = &state
+				}
+				eventBody = core.MailboxEventBodyGithubReview{
+					ItemKind: itemKind, Number: number, Title: watch.Title,
+					Author: author, Body: body, ReviewState: reviewState, Repo: &eventRepo,
+				}
+				filterAuthor = author
+			case eventType == "line-commented":
+				suffix = "review-comment"
+				eventBody = core.MailboxEventBodyGithubReviewComment{
+					ItemKind: itemKind, Number: number, Title: watch.Title,
+					Author: author, Body: body, Repo: &eventRepo,
+				}
+				filterAuthor = author
+			case (eventType == "merged" || eventType == "closed" || eventType == "reopened") && watch.Kind == "pull_request":
+				if eventType == "closed" && merged {
+					continue
+				}
+				actor, _ := jsonStr(jsonIndex(jsonIndex(value, "actor"), "login"))
+				// Compare times so an earlier close, before a reopen and a
+				// later merge, still reads as a close.
+				var change core.MailboxPullRequestChange
+				switch {
+				case eventType == "merged":
+					suffix, change = "merged", core.MailboxPullRequestChangeMerged
+				case eventType == "closed" && mergedAt != nil && sameMoment(*mergedAt, timestamp):
+					suffix, change = "merged", core.MailboxPullRequestChangeMerged
+				case eventType == "closed":
+					suffix, change = "closed", core.MailboxPullRequestChangeClosedWithoutMerging
+				default:
+					suffix, change = "reopened", core.MailboxPullRequestChangeReopened
+				}
+				eventBody = core.MailboxEventBodyGithubPullRequestLifecycle{
+					Change: change, Number: number, Title: watch.Title, Actor: actor,
+					Recipient: core.LifecycleRecipientCreator, Repo: &eventRepo,
+				}
+				filterAuthor = actor
+				lifecycle = true
+			default:
+				continue
+			}
+			result.events = append(result.events, store.MappedGithubEvent{
+				Key:       fmt.Sprintf("github:%s/%s#%d:%s:%d", watch.Owner, watch.Repo, watch.Number, suffix, id),
+				Timestamp: timestamp,
+				Author:    &filterAuthor,
+				Body:      eventBody,
+				Lifecycle: lifecycle,
+			})
+		}
+	}
+	return result, nil
 }
 
 // parseGithubItem reads one issues-feed entry; false when it has no number
@@ -439,7 +1548,23 @@ var githubCredentials = struct {
 // credentialState is the shared state of token's credential; nil is
 // anonymous access.
 func credentialState(token *string) *githubCredentialState {
-	panic("unported: mj-github-watch/src/service.rs credential_state")
+	digest := sha256.New()
+	if token != nil {
+		digest.Write([]byte("token\x00"))
+		digest.Write([]byte(*token))
+	} else {
+		digest.Write([]byte("anonymous"))
+	}
+	var key [32]byte
+	copy(key[:], digest.Sum(nil))
+	githubCredentials.Lock()
+	defer githubCredentials.Unlock()
+	state, ok := githubCredentials.states[key]
+	if !ok {
+		state = newGithubCredentialState()
+		githubCredentials.states[key] = state
+	}
+	return state
 }
 
 // isLoopbackHost: host is the URL's host as url::Url::host_str gives it, so
@@ -477,7 +1602,94 @@ type queryParam struct {
 // HTTP to a loopback host; no redirects; requests time out after
 // apiTimeout.
 func newGithubAPIWithControl(base string, token *string, control pollControl) (*githubAPI, error) {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::new_with_control")
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return nil, fmt.Errorf("parse GitHub API base URL: %w", err)
+	}
+	if parsed.Scheme == "" {
+		return nil, errors.New("parse GitHub API base URL: relative URL without a base")
+	}
+	host := urlHostString(parsed)
+	if host == "" {
+		if specialURLScheme(parsed.Scheme) {
+			return nil, errors.New("parse GitHub API base URL: empty host")
+		}
+		return nil, errors.New("GitHub API base URL has no host")
+	}
+	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isLoopbackHost(host)) {
+		return nil, errors.New("GitHub API base URL must use HTTPS except for loopback HTTP hosts")
+	}
+	credential := credentialState(token)
+	headers := http.Header{}
+	headers.Set("Accept", "application/vnd.github+json")
+	headers.Set("User-Agent", "mjolnir/"+core.PackageVersion)
+	targets.InstallRustlsCryptoProvider()
+	if token != nil {
+		value := "Bearer " + *token
+		if !headerValueVisible(value) {
+			return nil, errors.New("invalid GitHub credential header: failed to parse header value")
+		}
+		headers.Set("Authorization", value)
+	}
+	return &githubAPI{
+		base: strings.TrimRight(base, "/"),
+		client: &http.Client{
+			Timeout: apiTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		headers:    headers,
+		credential: credential,
+		control:    control,
+	}, nil
+}
+
+// urlHostString is url::Url::host_str: an IPv6 address keeps its brackets.
+func urlHostString(parsed *url.URL) string {
+	host := parsed.Hostname()
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+// specialURLScheme: the WHATWG URL parser Rust's url crate implements
+// requires a host for these schemes.
+func specialURLScheme(scheme string) bool {
+	switch scheme {
+	case "http", "https", "ws", "wss", "ftp":
+		return true
+	}
+	return false
+}
+
+// headerValueVisible is what http::HeaderValue::from_str accepts: visible
+// ASCII and tabs.
+func headerValueVisible(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if b := value[i]; b != '\t' && (b < 32 || b >= 127) {
+			return false
+		}
+	}
+	return true
+}
+
+// formURLEncode is form_urlencoded::byte_serialize, as reqwest's `query`
+// writes each name and value.
+func formURLEncode(text string) string {
+	var encoded strings.Builder
+	for i := 0; i < len(text); i++ {
+		switch b := text[i]; {
+		case 'a' <= b && b <= 'z', 'A' <= b && b <= 'Z', '0' <= b && b <= '9', b == '*', b == '-', b == '.', b == '_':
+			encoded.WriteByte(b)
+		case b == ' ':
+			encoded.WriteByte('+')
+		default:
+			fmt.Fprintf(&encoded, "%%%02X", b)
+		}
+	}
+	return encoded.String()
 }
 
 func (a *githubAPI) arrayPages(ctx context.Context, path string, query []queryParam) ([]any, error) {
@@ -488,32 +1700,219 @@ func (a *githubAPI) arrayPages(ctx context.Context, path string, query []queryPa
 // arrayPagesObserved reads every page of an array resource, with the
 // observed time of the first page.
 func (a *githubAPI) arrayPagesObserved(ctx context.Context, path string, query []queryParam) ([]any, string, error) {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::array_pages_observed")
+	var observedAt *string
+	values := []any{}
+	for page := 1; ; page++ {
+		pageQuery := append(slices.Clone(query),
+			queryParam{"per_page", strconv.Itoa(itemsPerPage)},
+			queryParam{"page", strconv.Itoa(page)})
+		response, err := a.get(ctx, path, pageQuery)
+		if err != nil {
+			return nil, "", err
+		}
+		if response.notModified {
+			return nil, "", errors.New("unexpected 304 response for paged GitHub request")
+		}
+		if observedAt == nil {
+			observedAt = &response.observedAt
+		}
+		pageValues, ok := jsonArray(response.value)
+		if !ok {
+			return nil, "", errors.New("GitHub response is not an array")
+		}
+		values = append(values, pageValues...)
+		if len(pageValues) < itemsPerPage {
+			break
+		}
+	}
+	return values, *observedAt, nil
 }
 
 func (a *githubAPI) getJSON(ctx context.Context, path string, query []queryParam) (any, error) {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::get_json")
+	response, err := a.get(ctx, path, query)
+	if err != nil {
+		return nil, err
+	}
+	if response.notModified {
+		return nil, fmt.Errorf("unexpected 304 for GitHub resource %s", path)
+	}
+	return response.value, nil
 }
 
 // credentialLogin is the credential's GitHub login, cached once known; nil
 // while a failed lookup backs off.
 func (a *githubAPI) credentialLogin(ctx context.Context) (*string, error) {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::credential_login")
+	if err := a.control.checkEnabled(); err != nil {
+		return nil, err
+	}
+	var cache *githubLoginCache
+	select {
+	case cache = <-a.credential.login:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { a.credential.login <- cache }()
+	if cache.success != nil {
+		login := *cache.success
+		return &login, nil
+	}
+	if cache.retryAt != nil && cache.retryAt.After(time.Now()) {
+		return nil, nil
+	}
+	user, err := a.getJSON(ctx, "user", nil)
+	if err := a.control.checkEnabled(); err != nil {
+		return nil, err
+	}
+	var login string
+	if err == nil {
+		var ok bool
+		if login, ok = jsonStr(jsonIndex(user, "login")); !ok || login == "" {
+			err = errors.New("GitHub credential response has no login")
+		}
+	}
+	if err == nil {
+		cache.success = &login
+		cache.retryAt = nil
+		cache.consecutiveFailures = 0
+		result := login
+		return &result, nil
+	}
+	if isGithubEventsDisabled(err) {
+		return nil, err
+	}
+	// Ending ctx abandons the lookup, as dropping Rust's future does; it is
+	// not a failed lookup.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if cache.consecutiveFailures < math.MaxUint8 {
+		cache.consecutiveFailures++
+	}
+	exponent := min(max(cache.consecutiveFailures, 1)-1, 8)
+	retryDelay := min(time.Second<<exponent, 5*time.Minute)
+	retryAt := time.Now().Add(retryDelay)
+	cache.retryAt = &retryAt
+	slog.Debug("GitHub credential login is unknown; lookup will retry after backoff",
+		"error", err.Error(), "retry_seconds", uint64(retryDelay/time.Second))
+	return nil, nil
 }
 
 // get sends a GET for path (relative to the base) with query, after any
 // rate-limit deadline of the credential (Rust's GithubApi::get, given the
 // request the caller built from the same path and query).
 func (a *githubAPI) get(ctx context.Context, path string, query []queryParam) (githubResponse, error) {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::get")
+	if err := a.control.checkEnabled(); err != nil {
+		return githubResponse{}, err
+	}
+	if err := a.waitForRateLimit(ctx); err != nil {
+		return githubResponse{}, err
+	}
+	if err := a.control.checkEnabled(); err != nil {
+		return githubResponse{}, err
+	}
+	target := a.base + "/" + path
+	if len(query) > 0 {
+		pairs := make([]string, len(query))
+		for i, pair := range query {
+			pairs[i] = formURLEncode(pair.name) + "=" + formURLEncode(pair.value)
+		}
+		separator := "?"
+		if strings.Contains(target, "?") {
+			separator = "&"
+		}
+		target += separator + strings.Join(pairs, "&")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return githubResponse{}, fmt.Errorf("request GitHub REST API: %w", err)
+	}
+	request.Header = a.headers.Clone()
+	response, err := a.client.Do(request)
+	if err != nil {
+		return githubResponse{}, fmt.Errorf("request GitHub REST API: %w", err)
+	}
+	defer response.Body.Close()
+	a.recordRateLimit(response)
+	observed := time.Now()
+	if date := response.Header.Get("Date"); date != "" && headerValueVisible(date) {
+		if parsed, err := mail.ParseDate(date); err == nil {
+			observed = parsed
+		}
+	}
+	// Date may follow the response snapshot, and local clocks may be ahead.
+	observedAt := observed.Add(-30 * time.Second).UTC().Format("2006-01-02T15:04:05Z")
+	status := response.StatusCode
+	if status == http.StatusNotModified {
+		return githubResponse{value: nil, notModified: true, observedAt: observedAt}, nil
+	}
+	if status < 200 || status > 299 {
+		return githubResponse{}, githubHTTPStatus{status: status, observedAt: observedAt}
+	}
+	if response.ContentLength > githubResponseLimit {
+		return githubResponse{}, errors.New("GitHub REST API response is larger than 8 MiB")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, githubResponseLimit+1))
+	if err != nil {
+		return githubResponse{}, fmt.Errorf("read GitHub REST API response: %w", err)
+	}
+	if len(body) > githubResponseLimit {
+		return githubResponse{}, errors.New("GitHub REST API response is larger than 8 MiB")
+	}
+	value, err := jsonvalue.Parse(body)
+	if err != nil {
+		return githubResponse{}, fmt.Errorf("decode GitHub REST API response: %w", err)
+	}
+	return githubResponse{value: value, notModified: false, observedAt: observedAt}, nil
 }
 
 func (a *githubAPI) waitForRateLimit(ctx context.Context) error {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::wait_for_rate_limit")
+	for {
+		if err := a.control.checkEnabled(); err != nil {
+			return err
+		}
+		a.credential.rateLimitMu.Lock()
+		deadline := a.credential.rateLimitUntil
+		a.credential.rateLimitMu.Unlock()
+		if deadline == nil {
+			return nil
+		}
+		// Recheck enablement while waiting out a long deadline.
+		expired := time.NewTimer(time.Until(*deadline))
+		recheck := time.NewTimer(configRecheckInterval)
+		select {
+		case <-expired.C:
+			recheck.Stop()
+		case <-recheck.C:
+			expired.Stop()
+			continue
+		case <-ctx.Done():
+			expired.Stop()
+			recheck.Stop()
+			return ctx.Err()
+		}
+		now := time.Now()
+		a.credential.rateLimitMu.Lock()
+		if current := a.credential.rateLimitUntil; current != nil && !current.After(now) {
+			a.credential.rateLimitUntil = nil
+		}
+		a.credential.rateLimitMu.Unlock()
+	}
 }
 
 func (a *githubAPI) recordRateLimit(response *http.Response) {
-	panic("unported: mj-github-watch/src/service.rs GithubApi::record_rate_limit")
+	now := time.Now().UTC()
+	retryAt, limited := core.GithubRateLimitRetryAt(response.StatusCode, response.Header, now)
+	if !limited {
+		return
+	}
+	delay := max(retryAt.Sub(now), 0)
+	next := time.Now().Add(delay)
+	a.credential.rateLimitMu.Lock()
+	if current := a.credential.rateLimitUntil; current == nil || current.Before(next) {
+		a.credential.rateLimitUntil = &next
+	}
+	a.credential.rateLimitMu.Unlock()
+	slog.Warn("GitHub API rate limit reached; polling will back off", "retry_seconds", uint64(delay/time.Second))
 }
 
 // githubHTTPStatus is an unsuccessful GitHub response status.
