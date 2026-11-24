@@ -1,7 +1,6 @@
 import json
 import pathlib
 import tempfile
-import threading
 import unittest
 from unittest import mock
 
@@ -40,7 +39,7 @@ class DriverRecovery(unittest.TestCase):
                 if marker.endswith((".txt", ".json")):
                     (self.path / marker).write_text("ambiguous")
                 with mock.patch.object(driver, "mj") as mj:
-                    self.assertEqual("needs-recovery", driver.run_job(self.job, threading.Lock()))
+                    self.assertEqual("needs-recovery", driver.run_job(self.job))
                     mj.assert_not_called()
 
     def test_preprompt_recovery_uses_recorded_session_without_new(self):
@@ -66,11 +65,11 @@ class DriverRecovery(unittest.TestCase):
               mock.patch.object(driver, "inventory", return_value=before),
               mock.patch.object(driver, "mj", side_effect=StopBeforePrompt) as mj):
             live["last_turn_outcome"] = {"command_id": "unexpected"}
-            self.assertEqual("needs-recovery", driver.run_job(self.job, threading.Lock()))
+            self.assertEqual("needs-recovery", driver.run_job(self.job))
             mj.assert_not_called()
             del live["last_turn_outcome"]
             with self.assertRaises(StopBeforePrompt):
-                driver.run_job(self.job, threading.Lock())
+                driver.run_job(self.job)
             mj.assert_called_once()
             self.assertEqual(("message", "--session", "recorded"), mj.call_args.args[:3])
 
