@@ -1072,7 +1072,21 @@ struct MbxStorageConfig {
 }
 
 fn parse_storage_config(text: &str) -> Result<MbxStorageConfig> {
-    let document: toml::Value = toml::from_str(text).context("parse mbx storage configuration")?;
+    let document: toml::Value = toml::from_str(text).map_err(|error: toml::de::Error| {
+        if let Some(span) = error.span() {
+            let line = text.as_bytes()[..span.start.min(text.len())]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+                + 1;
+            anyhow::anyhow!(
+                "parse mbx storage configuration at line {line}: {}",
+                error.message()
+            )
+        } else {
+            anyhow::anyhow!("parse mbx storage configuration: {}", error.message())
+        }
+    })?;
     let string_path = |value: &toml::Value, name: &str| -> Result<PathBuf> {
         value
             .as_str()
@@ -2100,6 +2114,15 @@ mod tests {
                     .is_err()
             );
         }
+        let text = "# config\ncache_dir = \"https://user:super-secret-token@example.com\" invalid";
+        std::fs::write(&path, text).unwrap();
+        let error = resolve_local_storage_paths(None, None, Some(text), None)
+            .with_context(|| format!("resolve mbx config {}", path.display()))
+            .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("line 2"), "{error}");
+        assert!(!error.contains("super-secret-token"), "{error}");
         std::fs::remove_file(&path).unwrap();
         #[cfg(unix)]
         {

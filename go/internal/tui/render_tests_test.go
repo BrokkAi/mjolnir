@@ -1776,6 +1776,27 @@ func precisionCapacityTarget() core.DeploymentCapacityTarget {
 // on filesystems that are fine answers no question. Clicking the cell, or
 // `d` on the selected row, opens its details in a dropdown without changing
 // the one-line table layout.
+// Hard-won: #1597: config failures must remain visible with no sampled disks.
+func TestCapacityDisksWarningOpensWithoutFilesystems(t *testing.T) {
+	dashboard := NewDashboardState(config(), core.NewStateState(), map[string]client.ProfileQuota{})
+	target := precisionCapacityTarget()
+	warning := "mbx config: broken file"
+	target.StorageWarning = &warning
+	dashboard.setDeploymentCapacityTargets([]core.DeploymentCapacityTarget{target})
+	rendered := drawnDashboard(dashboard, 160)
+	if !strings.Contains(rendered, "Disks ! ▾") {
+		t.Fatal(rendered)
+	}
+	dashboard.beginCapacityDisksMenu(0)
+	if dashboard.paneMenu == nil {
+		t.Fatal("warning dropdown did not open")
+	}
+	rendered = drawnDashboard(dashboard, 160)
+	if !strings.Contains(rendered, warning) {
+		t.Fatal(rendered)
+	}
+}
+
 func TestCapacityDisksCellOpensADropdownAndKeepsTheTableOneLinePerTarget(t *testing.T) {
 	dashboard := NewDashboardState(config(), core.NewStateState(), map[string]client.ProfileQuota{})
 	dashboard.setDeploymentCapacityTargets([]core.DeploymentCapacityTarget{precisionCapacityTarget()})
