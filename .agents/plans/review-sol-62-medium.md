@@ -38,6 +38,8 @@ One carrier failed before any prompt or review acceptance during a daemon restar
 
 The initial judge driver found a stale cached workspace ID: all 34 new-session commands were explicitly refused as unknown workspace before session creation or prompting. The old named workspace was absent from the live list. Under the existing workspace-setup lock the owner archived the stale pointer, recreated the same named workspace over the unchanged verifier checkout, and retried the 34 refused units with the identical blinded inputs. The first 16 replacement session receipts are persisted. This is setup recovery, not repeated judging.
 
+Publication review requested an explicit comparison to the original Opus/high frontier, beyond the already documented current-round Neon blinding. Both 6.2 readouts now state the judge change and the measured historical shift: 88.5% verdict agreement on 1,928 shared findings, 212 promotions to confirmed versus 10 demotions, and upward severity changes. The new 6.2 outputs have only Neon judgments; current same-round contrasts remain distinct from original Opus absolute totals.
+
 ## Decision Log
 
 - Decision: Interpret “vs 6.1” as Sol 6.1 at medium effort, and “2xterra/high” as the saved Terra 6.1 high runs.

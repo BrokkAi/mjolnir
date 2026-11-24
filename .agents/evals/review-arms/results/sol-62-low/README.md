@@ -72,6 +72,19 @@ earlier runtimes. Timing and usage therefore describe the recorded setups.
 
 ## Coverage and verification
 
+The original Stage 4 Pareto round, `verify5`, used **Opus/high**. The later
+`verify6` switched to **Neon/medium** after Claude subscription profiles were
+exhausted. Across 1,928 shared raw findings, the judges agreed on 88.5% of
+verdicts: Neon promoted 212 plausible or rejected findings to confirmed and
+demoted 10 confirmed findings to rejected. It also raised severity in 394
+low-to-medium and 240 medium-to-high cases.
+[Earlier judge comparison](../stage4-hydrogen-medium/consistency-vs-verify5.json)
+
+All 6.1 and 6.2 findings in this report were judged together by Neon/medium
+in `verify8`. Keep these same-round comparisons separate from the original
+Opus/high frontier's absolute totals. The new 6.2 findings have only Neon's
+assessment; this follow-up did not obtain Opus judgments for them.
+
 - Arm P adds one Sol 6.2 low handback on each original diff. All 70 passed model,
   effort, review input, inventory, image, and prompt-clock checks. Three
   handbacks explicitly reported no findings. The canary counts toward the 70.
