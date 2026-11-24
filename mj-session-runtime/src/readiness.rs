@@ -485,6 +485,18 @@ impl std::fmt::Display for WorkerStartupFailure {
 
 impl std::error::Error for WorkerStartupFailure {}
 
+/// The worker refused checkout quiescence after opening an unsealed relay.
+#[derive(Debug)]
+pub struct UnsealedSuspendRefusal;
+
+impl std::fmt::Display for UnsealedSuspendRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the worker refused to quiesce an unsealed suspend")
+    }
+}
+
+impl std::error::Error for UnsealedSuspendRefusal {}
+
 /// What one look at the worker says the wait should do next.
 enum StartupVerdict {
     /// The worker will never answer. The string says why, and a refusal is the
@@ -657,7 +669,15 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
                                 .context(WorkerStartupFailure { reached_socket });
                             return Err(match refusal {
                                 Some(refusal) => {
-                                    error.context(mj_core::refusal::Refusal::precondition(refusal))
+                                    let error = error
+                                        .context(mj_core::refusal::Refusal::precondition(refusal));
+                                    if !reached_socket
+                                        && found.step() == Some("checkout-quiescence")
+                                    {
+                                        error.context(UnsealedSuspendRefusal)
+                                    } else {
+                                        error
+                                    }
                                 }
                                 None => error,
                             });
@@ -1434,28 +1454,39 @@ mod tests {
     async fn startup_connect_carries_a_refusing_workers_own_sentence() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(cancelled);
-        let mut worker = FakeStartingWorker {
-            death_after_attempts: Some(1),
-            refusal: Some("turn review cannot cover /work: it has 400000 untracked files"),
-            ..FakeStartingWorker::never_accepts()
-        };
-
-        let error =
-            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
-                .await
-                .unwrap_err();
-
-        let refusal =
-            mj_core::refusal::Refusal::of(&error).expect("the refusal reached the caller");
-        assert!(
-            refusal.message().contains("400000 untracked files"),
-            "{refusal}"
-        );
-        assert_eq!(
-            refusal.kind(),
-            mj_core::refusal::RefusalKind::Precondition,
-            "a workspace the user can clean is a precondition, not an unusable request"
-        );
+        const REFUSAL: &str = "the checkout still has an unknown holder";
+        for (step, steps, refusal, expect_unsealed) in [
+            ("checkout-quiescence", &[][..], Some(REFUSAL), true),
+            (
+                "checkout-quiescence",
+                &["serving"][..],
+                Some(REFUSAL),
+                false,
+            ),
+            ("login-environment", &[][..], Some(REFUSAL), false),
+            ("checkout-quiescence", &[][..], None, false),
+        ] {
+            let mut worker = FakeStartingWorker {
+                death_after_attempts: Some(1),
+                refusal,
+                stuck_step: Some(step),
+                steps,
+                ..FakeStartingWorker::never_accepts()
+            };
+            let error =
+                connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                    .await
+                    .unwrap_err();
+            assert_eq!(
+                error.is::<UnsealedSuspendRefusal>(),
+                expect_unsealed,
+                "{error:#}"
+            );
+            assert_eq!(
+                mj_core::refusal::Refusal::of(&error),
+                refusal.map(mj_core::refusal::Refusal::precondition),
+            );
+        }
     }
     #[tokio::test(start_paused = true)]
     async fn startup_connect_stops_as_soon_as_cancellation_is_observed() {

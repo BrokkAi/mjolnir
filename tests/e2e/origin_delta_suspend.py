@@ -19,6 +19,7 @@ import zipfile
 import reliability_lab
 
 WAIT = 120
+CLOSE_FAILURE_PREFIX = "the suspension did not finish"
 RECOVERY_HOOKS = {
     "dead-worker-live": "origin_delta_before_live_stop",
     "dead-worker-startup": "origin_delta_after_preflight",
@@ -351,14 +352,28 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
                 wait_for(ready.exists, "marked writer to start before refusal")
                 expected = patches()
                 before_refusal = harness_opens()
+                before_error = record().get("last_error")
                 old_worker = worker_pid() if live_race else None
                 assert pause_suspend().get("checkpoint") is None
                 if old_worker is not None:
                     kill_owned(old_worker)
                 checkpoint_hook.touch()
+
+                def settled_refusal():
+                    row = record()
+                    diagnostic = row.get("last_checkpoint_error") or ""
+                    public_error = row.get("last_error") or ""
+                    # The API projects Closing until the operation completes,
+                    # even after the rollback and its failure are persisted.
+                    if (row["state"] != "closing"
+                            and public_error != before_error
+                            and public_error.startswith(CLOSE_FAILURE_PREFIX)
+                            and "cannot prove these processes belong to this session" in diagnostic):
+                        return row
+                    return None
+
                 after = wait_for(
-                    lambda: row if "cannot prove these processes belong to this session"
-                    in ((row := record()).get("last_checkpoint_error") or "") else None,
+                    settled_refusal,
                     "unknown-holder refusal to be recorded",
                 )
                 assert after["state"] == ("error" if retry_error else "running"), after

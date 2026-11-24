@@ -4311,6 +4311,7 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
 #[tokio::test]
 async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
     use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     const NAME: &str = "interrupted_suspend_honors_dead_workers_refusal_receipt";
     const SESSION_ID: &str = "refused-dead-suspend";
@@ -4345,6 +4346,29 @@ async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
         },
     )
     .unwrap();
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let cancelled = targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)));
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &cancelled,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("suspend was cancelled"));
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, operation);
+    assert_eq!(restart.error.as_deref(), Some("suspend was cancelled"));
+    std::fs::remove_file(worker_root.join(wire::RESTART)).unwrap();
+
     wire::write(
         &worker_root,
         wire::RECEIPT,
@@ -4357,10 +4381,9 @@ async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
 
     // An empty worker root has no lock holder. The fixture leaves the launch
     // profile absent so rollback records its durable intent before booting.
-    let manager = crate::session_manager::spawn_session_manager().unwrap();
     let error = controller
         .recover_interrupted_close_managed(
-            &crate::controller::test_support::session_admission(SESSION_ID),
+            &admission,
             SESSION_ID,
             &ProcessExecutor,
             &manager.control,
@@ -5666,10 +5689,11 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     *fake.worker_alive.lock().unwrap() = true;
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);
-    for command in [
-        "read suspend record suspend-progress.json",
-        "probe Mjolnir worker daemon liveness",
+    for (worker_alive, command) in [
+        (true, "read suspend record suspend-progress.json"),
+        (false, "probe Mjolnir worker daemon liveness"),
     ] {
+        *fake.worker_alive.lock().unwrap() = worker_alive;
         fake.failed_stop_observation = Some(command);
         let error = controller
             .recover_interrupted_close_managed(
@@ -5686,7 +5710,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
         assert_eq!(
             reason,
-            Some(LifecycleFailureReason::SuspendStopPending),
+            Some(LifecycleFailureReason::SuspendPending),
             "{error:#}"
         );
         assert!(format!("{error:#}").contains(&format!("SSH failed during {command}")));

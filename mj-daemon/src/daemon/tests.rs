@@ -8649,7 +8649,7 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     assert_eq!(stored.sessions[&session.id].state, SessionState::Closing);
     let pending = LifecycleFailure::of(
         &anyhow::anyhow!("private SSH diagnostic")
-            .context(mj_controller::controller::LifecycleFailureReason::SuspendStopPending),
+            .context(mj_controller::controller::LifecycleFailureReason::SuspendPending),
     );
     state
         .record_failed_close(&session.id, "lifecycle-pending-stop", &pending)
@@ -10251,7 +10251,12 @@ async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
         format!(
             "#!/bin/sh\n\
              [ \"$2\" = stop ] && exit 0\n\
-             [ \"$2\" = liveness ] && {{ printf 'alive\\n'; exit 0; }}\n\
+             [ \"$2\" = liveness ] && {{\n\
+               if [ \"$3\" != --help ] && [ -f \"$(dirname \"$0\")/withhold-reattach\" ]; then\n\
+                 echo 'transient capture contact failure' >&2; exit 1\n\
+               fi\n\
+               printf 'alive\\n'; exit 0;\n\
+             }}\n\
              [ \"$2\" = proxy ] && {{ {proxy}; exit 0; }}\n\
              [ \"$1 $2\" = 'worker export-checkpoint' ] || \
              {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
@@ -10389,6 +10394,132 @@ async fn suspend_recovery_preserves_a_clones_unpushed_work() {
         std::fs::read_to_string(restored.join("session.txt")).unwrap(),
         "work\n"
     );
+    clone.channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sealed_suspend_retains_its_checkpoint_when_capture_contact_fails() {
+    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+    use mj_controller::controller::test_support::{
+        session_admission, write_checkpoint_gate_archive,
+    };
+    use mj_core::worker_suspend as wire;
+
+    if !in_isolated_live_parent_test(
+        "sealed_suspend_retains_its_checkpoint_when_capture_contact_fails",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let clone = quiesced_clone_with_an_unpushed_commit().await;
+    let handle = clone
+        .channels
+        .control
+        .session(LATCH_RELAY_SESSION)
+        .await
+        .unwrap();
+    let admission = session_admission(LATCH_RELAY_SESSION);
+    let mut lease = handle.lease_connection(&admission).await.unwrap();
+    let barrier = new_command_id("sealed-capture").unwrap();
+    let relay = lease.connection_mut();
+    relay
+        .submit(
+            barrier.clone(),
+            RelayCommand::BeginCheckpoint { reason: None },
+        )
+        .await
+        .unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = relay
+                .sync()
+                .await
+                .unwrap()
+                .operational
+                .checkpoint_ready
+                .clone()
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let checkpoint =
+        write_checkpoint_gate_archive(clone._directory.path(), LATCH_RELAY_SESSION, ready.ordinal);
+    let mut session = mj_controller::database::read_durable_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
+    mj_controller::database::save_checkpointed_session(&session).unwrap();
+    relay
+        .submit(
+            new_command_id("close").unwrap(),
+            RelayCommand::Close {
+                barrier_command_id: barrier.clone(),
+                expected: ready,
+            },
+        )
+        .await
+        .unwrap();
+    relay
+        .submit(
+            new_command_id("checkpoint-complete").unwrap(),
+            RelayCommand::CompleteCheckpoint {
+                barrier_command_id: barrier,
+            },
+        )
+        .await
+        .unwrap();
+    lease.release();
+    assert!(relay_sealed(&clone.relay_root));
+
+    let root = clone._directory.path().join(LATCH_RELAY_SESSION);
+    let operation: String = wire::read(&root, wire::ACCEPTED).unwrap().unwrap();
+    let fault = root.join("withhold-reattach");
+    std::fs::write(&fault, b"fail capture observation").unwrap();
+    let error = clone
+        .state
+        .recover_suspension(LATCH_RELAY_SESSION.into())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("transient capture contact failure"),
+        "{error:#}"
+    );
+    let retained = mj_controller::database::read_durable_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.state, SessionState::Closing);
+    assert_eq!(retained.checkpoint.as_deref(), Some(&checkpoint));
+    assert!(retained.public_error().unwrap().contains("Retry Suspend"));
+    assert_eq!(
+        wire::read::<String>(&root, wire::ACCEPTED)
+            .unwrap()
+            .as_deref(),
+        Some(operation.as_str())
+    );
+    assert!(
+        wire::read::<wire::SuspendReceipt>(&root, wire::RESTART)
+            .unwrap()
+            .is_none()
+    );
+    assert!(clone.checkout.exists());
+
+    std::fs::remove_file(fault).unwrap();
+    clone
+        .state
+        .recover_suspension(LATCH_RELAY_SESSION.into())
+        .await
+        .unwrap();
+    let stopped = mj_controller::database::read_durable_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.state, SessionState::Stopped);
+    assert_eq!(stopped.checkpoint.as_deref(), Some(&checkpoint));
+    assert!(!clone.checkout.exists());
     clone.channels.shutdown.shutdown().await.unwrap();
 }
 

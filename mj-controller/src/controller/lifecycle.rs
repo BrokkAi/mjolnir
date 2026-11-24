@@ -18,6 +18,7 @@ use super::checkpoint::{
     adopt_restarted_checkpoint_relay, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
+use super::readiness::UnsealedSuspendRefusal;
 use super::worker_restart::WorkerRestartLeftNoWorker;
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
@@ -1140,75 +1141,68 @@ impl Controller {
                     mj_core::test_hooks::reach_test_hook("origin_delta_after_preflight")
                 })?;
             }
-            // An accepted suspend owns this Closing record. The worker's
-            // receipt carries the stop across a controller handoff.
-            if let Some(reason) = attempt.restart_reason(executor)? {
-                if attempt.request_recorded() {
-                    attempt.wait_for_stop(executor).await?;
+            if attempt.request_recorded() {
+                // The original worker owns the accepted stop. Wait for its
+                // identity directly, including recording cancellation.
+                attempt.wait_for_stop(executor).await?;
+            } else {
+                if let Some(reason) = attempt.restart_reason(executor)? {
+                    drop(held_relay.take());
+                    return Err(self.restart_after_refused_origin_delta(
+                        admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
+                    ).await);
                 }
-                drop(held_relay.take());
-                return Err(self.restart_after_refused_origin_delta(
-                    admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
-                ).await);
-            }
-            if before_close.is_some() {
-                executor.begin_resumable_work()?;
-                let children = executor.stop_borrowed_workers_before_quiesce().await;
-                executor.end_resumable_work("start managed clone quiescence")?;
-                if let Err(error) = children {
-                    if attempt.already_quiescent() {
-                        return Err(self.restart_after_refused_origin_delta(
-                            admission, session_id, executor, manager, attempt, &previous, error,
-                        ).await);
-                    }
-                    let record = self.state.sessions.get_mut(session_id).unwrap();
-                    apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
-                    return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
-                }
-            }
-            if !attempt.already_quiescent()
-                && attempt.live_worker_mode(executor).map_err(|error| {
-                    if attempt.request_recorded() {
-                        error.context(LifecycleFailureReason::SuspendStopPending)
-                    } else {
-                        error
-                    }
-                })? == Some(WorkerRunMode::Harness)
-            {
-                if mj_core::test_hooks::test_hooks_enabled() {
-                    mj_core::runtime::off_async_worker(|| {
-                        mj_core::test_hooks::reach_test_hook("origin_delta_before_live_stop")
-                    })?;
-                }
-                let stopped = async {
-                    if !attempt.request_recorded() && !attempt.worker_capable(executor)? {
-                        // Compatibility upgrades only operate on live harness workers.
-                        if let Some(relay) = held_relay.take() {
-                            relay.release();
+                if before_close.is_some() {
+                    executor.begin_resumable_work()?;
+                    let children = executor.stop_borrowed_workers_before_quiesce().await;
+                    executor.end_resumable_work("start managed clone quiescence")?;
+                    if let Err(error) = children {
+                        if attempt.already_quiescent() {
+                            return Err(self.restart_after_refused_origin_delta(
+                                admission, session_id, executor, manager, attempt, &previous, error,
+                            ).await);
                         }
-                        let manager = manager.context(
-                            "older worker cannot be upgraded for origin-delta suspend without a session manager",
-                        )?;
-                        if let Some(pending) = crate::database::load_worker_restart(session_id)?
-                            && self.state.sessions[session_id].target.as_deref() == Some(&pending.target)
-                        {
-                            // Reattach a live replacement without starting a harness
-                            // if it has exited since the liveness observation.
-                            attempt.start_worker(
-                                self, admission, session_id, executor, Some(manager),
-                                WorkerRunMode::Harness, true,
-                            ).await?.release();
-                        }
+                        let record = self.state.sessions.get_mut(session_id).unwrap();
+                        apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
+                        return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+                    }
+                }
+                if !attempt.already_quiescent()
+                    && attempt.live_worker_mode(executor)? == Some(WorkerRunMode::Harness)
+                {
+                    if mj_core::test_hooks::test_hooks_enabled() {
+                        mj_core::runtime::off_async_worker(|| {
+                            mj_core::test_hooks::reach_test_hook("origin_delta_before_live_stop")
+                        })?;
+                    }
+                    let stopped = async {
                         if !attempt.worker_capable(executor)? {
-                            self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
-                                .await?;
-                            ensure!(
-                                attempt.worker_capable(executor)?,
-                                "upgraded worker did not advertise origin-delta suspend capability"
-                            );
+                            // Compatibility upgrades only operate on live harness workers.
+                            if let Some(relay) = held_relay.take() {
+                                relay.release();
+                            }
+                            let manager = manager.context(
+                                "older worker cannot be upgraded for origin-delta suspend without a session manager",
+                            )?;
+                            if let Some(pending) = crate::database::load_worker_restart(session_id)?
+                                && self.state.sessions[session_id].target.as_deref() == Some(&pending.target)
+                            {
+                                // Reattach a live replacement without starting a harness
+                                // if it has exited since the liveness observation.
+                                attempt.start_worker(
+                                    self, admission, session_id, executor, Some(manager),
+                                    WorkerRunMode::Harness, true,
+                                ).await?.release();
+                            }
+                            if !attempt.worker_capable(executor)? {
+                                self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
+                                    .await?;
+                                ensure!(
+                                    attempt.worker_capable(executor)?,
+                                    "upgraded worker did not advertise origin-delta suspend capability"
+                                );
+                            }
                         }
-                    }
-                    if !attempt.request_recorded() {
                         // Move already holds the source lease. Keep it through stop.
                         if held_relay.is_none() && let Some(manager) = manager {
                             let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
@@ -1229,30 +1223,30 @@ impl Controller {
                                 return Err(error);
                             }
                         }
-                    }
-                    attempt.wait_for_stop(executor).await
-                }.await;
-                match stopped {
-                    Ok(()) => {},
-                    Err(error) if executor.shutdown_interrupted() => return Err(error),
-                    Err(error) => match attempt.live_worker_mode(executor) {
-                        Ok(None | Some(WorkerRunMode::CheckpointOnly)) => {},
-                        Ok(Some(WorkerRunMode::Harness)) => {
-                            if attempt.request_recorded() {
-                                return Err(error);
+                        attempt.wait_for_stop(executor).await
+                    }.await;
+                    match stopped {
+                        Ok(()) => {},
+                        Err(error) if executor.shutdown_interrupted() => return Err(error),
+                        Err(error) => match attempt.live_worker_mode(executor) {
+                            Ok(None | Some(WorkerRunMode::CheckpointOnly)) => {},
+                            Ok(Some(WorkerRunMode::Harness)) => {
+                                if attempt.request_recorded() {
+                                    return Err(error);
+                                }
+                                if let Err(cleanup) = attempt.clear_after_restart(executor) {
+                                    tracing::warn!(session_id, %cleanup, "could not clear an unstarted suspend");
+                                }
+                                let record = self.state.sessions.get_mut(session_id).unwrap();
+                                apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
+                                return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
                             }
-                            if let Err(cleanup) = attempt.clear_after_restart(executor) {
-                                tracing::warn!(session_id, %cleanup, "could not clear an unstarted suspend");
-                            }
-                            let record = self.state.sessions.get_mut(session_id).unwrap();
-                            apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
-                            return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
-                        }
-                        Err(probe_error) => return Err(error.context(format!(
-                            "could not establish worker liveness after failed suspend stop: {probe_error:#}"
-                        ))),
-                    },
-                };
+                            Err(probe_error) => return Err(error.context(format!(
+                                "could not establish worker liveness after failed suspend stop: {probe_error:#}"
+                            ))),
+                        },
+                    };
+                }
             }
             // Capture must connect to the replacement, never to the stopped worker.
             drop(held_relay.take());
@@ -1278,11 +1272,12 @@ impl Controller {
             ).await {
                 Ok(relay) => relay,
                 Err(error) if executor.shutdown_interrupted() => return Err(error),
-                Err(error) => {
+                Err(error) if error.is::<UnsealedSuspendRefusal>() => {
                     return Err(self.restart_after_refused_origin_delta(
                         admission, session_id, executor, manager, attempt, &previous, error,
                     ).await);
                 }
+                Err(error) => return Err(error.context(LifecycleFailureReason::SuspendPending)),
             });
         }
 
@@ -1291,11 +1286,13 @@ impl Controller {
             && move_intent.is_none()
             && let Some(relay) = held_relay.as_mut()
         {
-            let execution = relay.sync_snapshot().await?.operational.execution;
+            let execution = relay.sync_snapshot().await
+                .context(LifecycleFailureReason::SuspendPending)?.operational.execution;
             if matches!(execution, RelayExecutionState::Closing | RelayExecutionState::Closed) {
                 relay_sealed = true;
                 if execution == RelayExecutionState::Closing {
-                    wait_for_relay_closed(relay.connection_mut()).await?;
+                    wait_for_relay_closed(relay.connection_mut()).await
+                        .context(LifecycleFailureReason::SuspendPending)?;
                 }
                 drop(held_relay.take());
                 let verified = previous.checkpoint.as_deref().context("sealed origin-delta close has no verified checkpoint")?;
@@ -1711,7 +1708,9 @@ impl Controller {
 
         }.await;
         match close {
-            Err(error) if !relay_sealed && self.state.sessions[session_id].state == SessionState::Closing => {
+            Err(error) if !relay_sealed
+                && error.downcast_ref::<LifecycleFailureReason>() != Some(&LifecycleFailureReason::SuspendPending)
+                && self.state.sessions[session_id].state == SessionState::Closing => {
                 if let Some(attempt) = origin_delta.as_ref().filter(|attempt| attempt.already_quiescent()) {
                     Err(self.restart_after_refused_origin_delta(
                         admission, session_id, executor, manager, attempt, &previous, error,
@@ -2366,7 +2365,7 @@ impl Controller {
         // transaction as failure publication; admission may have been refused.
         let saved = crate::database::save_failed_close(
             &record,
-            reason == Some(LifecycleFailureReason::SuspendStopPending),
+            reason == Some(LifecycleFailureReason::SuspendPending),
         )
         .context("persist the reason a close did not finish")?;
         self.state.sessions.insert(session_id.to_owned(), saved);
