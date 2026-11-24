@@ -247,9 +247,14 @@ if (!rename($tree, $destination)) {
     die "stage materialized profile: $!" unless $!{EXDEV};
     my $mode = (stat($tree))[2];
     defined($mode) or die "inspect materialized profile: $!";
-    $exdev_staging = tempdir('stage-XXXXXXXXXX', DIR => dirname($destination));
-    copy_directory_contents($tree, $exdev_staging);
-    chmod($mode & 07777, $exdev_staging) or die "set staged profile mode: $!";
-    rename($exdev_staging, $destination) or die "stage materialized profile: $!";
+    # The destination is unique to this session, so a staging directory left
+    # by a killed attempt is ours to replace.
+    my $staging = "$destination.staging";
+    remove_tree($staging);
+    mkdir($staging) or die "create staged profile directory: $!";
+    $exdev_staging = $staging;
+    copy_directory_contents($tree, $staging);
+    chmod($mode & 07777, $staging) or die "set staged profile mode: $!";
+    rename($staging, $destination) or die "stage materialized profile: $!";
     undef $exdev_staging;
 }

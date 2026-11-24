@@ -153,21 +153,33 @@ impl ProfileContentManifest {
         if !supported(&executor, ssh)? {
             return Ok(false);
         }
-        // One transfer per host at a time in this daemon: the receiver would
-        // answer a concurrent one `busy` for every shared object and make it
-        // poll. Other daemons still meet the receiver's claims.
-        let host = targets::TargetLocator::SshBare {
-            ssh: ssh.clone(),
-            worker_id: None,
-            workspace: String::new(),
-        };
-        let gate = super::super::store::store_gate(&host, PROFILE_CONTENT_STORE);
-        let _transfer = super::super::store::lock_gate(
-            &executor,
-            &gate,
-            destination.unwrap_or("prewarm"),
-            "transfer profile content",
-        )?;
+        // One transfer per host and shared content set at a time in this
+        // daemon: the receiver would answer a concurrent one over the same
+        // objects `busy` and make it poll. Transfers of other content do not
+        // wait for each other (the legacy upload takes the same gate), and a
+        // launch with nothing shareable takes none. Other daemons still meet
+        // the receiver's claims.
+        let gate = (!self.objects.is_empty()).then(|| {
+            let keys: Vec<_> = self.objects.keys().map(String::as_str).collect();
+            let content = mj_core::hex::lower_hex(Sha256::digest(keys.join("\n").as_bytes()));
+            let host = targets::TargetLocator::SshBare {
+                ssh: ssh.clone(),
+                worker_id: None,
+                workspace: String::new(),
+            };
+            super::super::store::store_gate(&host, &format!("{PROFILE_CONTENT_STORE}/{content}"))
+        });
+        let _transfer = gate
+            .as_deref()
+            .map(|gate| {
+                super::super::store::lock_gate(
+                    &executor,
+                    gate,
+                    destination.unwrap_or("prewarm"),
+                    "transfer profile content",
+                )
+            })
+            .transpose()?;
         transfer(&executor, ssh, self, destination)?;
         Ok(true)
     }
@@ -1054,6 +1066,10 @@ BEGIN {
         .unwrap();
         let roots = ["replica"].map(Path::new);
 
+        // A hard-killed earlier attempt left its staging beside the destination.
+        let stale = home.join("elsewhere/exdev-out.staging");
+        std::fs::create_dir_all(stale.join("half-copied")).unwrap();
+        std::fs::write(stale.join("half-copied/file"), b"stale").unwrap();
         let log = home.join("exdev.log");
         let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
         let forced = LocalReceiver {
@@ -1103,6 +1119,7 @@ BEGIN {
             .collect();
         siblings.sort();
         assert_eq!(siblings, ["exdev-out", "renamed-out"]);
+        assert!(!copied.keys().any(|path| path.contains("half-copied")));
         // The copy is its own: the store object is untouched by changing it.
         let object = home.join(PROFILE_CONTENT_STORE).join(digest(&shared));
         make_writable(&home.join("elsewhere"));
@@ -1112,10 +1129,11 @@ BEGIN {
         make_writable(&source);
     }
 
-    // A transfer to one host is serialized in this daemon, so overlapping
-    // profiles never meet the receiver's `busy` reply; an empty prewarm does
-    // not touch the host; and the host's upload generation advances only when
-    // a launch had to send objects.
+    // Transfers of one content set to a host are serialized in this daemon, so
+    // they never meet the receiver's `busy` reply, while a transfer of other
+    // content to the same host does not wait behind them; an empty prewarm
+    // does not touch the host; and the host's upload generation advances only
+    // when a launch had to send objects.
     #[test]
     fn host_transfers_serialize_and_only_a_launch_that_sends_objects_advances_the_generation() {
         let directory = tempfile::tempdir().unwrap();
@@ -1147,8 +1165,13 @@ BEGIN {
         assert!(nothing.try_transfer(&untouched, &ssh, None).unwrap());
         assert!(untouched.batches.lock().unwrap().is_empty());
 
+        let other = home.join("other");
+        std::fs::create_dir_all(other.join("replica")).unwrap();
+        std::fs::write(other.join("replica/other"), b"other shared content").unwrap();
+        let other = ProfileContentManifest::from_staged(&other, &roots).unwrap();
         let first = LocalReceiver::new(home);
         let second = LocalReceiver::new(home);
+        let third = LocalReceiver::new(home);
         let (reached, ready) = mpsc::channel();
         let (release, held) = mpsc::channel();
         *first.hold.lock().unwrap() = Some((reached, held));
@@ -1161,7 +1184,10 @@ BEGIN {
                     worker_id: None,
                     workspace: String::new(),
                 },
-                PROFILE_CONTENT_STORE,
+                &format!(
+                    "{PROFILE_CONTENT_STORE}/{}",
+                    digest(digest(&shared).as_bytes())
+                ),
             );
             assert!(gate.try_lock("probe", "probe").is_none(), "gate not held");
             let queued = scope.spawn(|| profiles[1].try_transfer(&second, &ssh, Some("two-out")));
@@ -1173,6 +1199,18 @@ BEGIN {
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            // Other content to the same host goes through while the first
+            // transfer is held.
+            let disjoint = scope.spawn(|| other.try_transfer(&third, &ssh, Some("three-out")));
+            let start = Instant::now();
+            while !disjoint.is_finished() && start.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                disjoint.is_finished(),
+                "waited behind an unrelated transfer"
+            );
+            assert!(disjoint.join().unwrap().unwrap());
             std::thread::sleep(Duration::from_millis(300));
             assert_eq!(second.batches.lock().unwrap().len(), 1, "only the probe");
             release.send(()).unwrap();
@@ -1188,7 +1226,12 @@ BEGIN {
             std::fs::read(home.join("two-out/replica/topic")).unwrap(),
             shared
         );
-        assert_eq!(generation(), initial + 1);
+        assert_eq!(
+            third.claimed_objects(),
+            [BTreeSet::from([digest(b"other shared content")])]
+        );
+        // The first launch and the unrelated one each sent objects.
+        assert_eq!(generation(), initial + 2);
 
         // A launch that finds everything present, and a prewarm that sends
         // an object, leave the generation alone.
@@ -1200,15 +1243,6 @@ BEGIN {
         std::fs::write(fresh.join("replica/new"), b"new shared content").unwrap();
         let fresh = ProfileContentManifest::from_staged(&fresh, &roots).unwrap();
         fresh.try_transfer(&second, &ssh, None).unwrap();
-        assert_eq!(generation(), initial + 1);
-        // A launch that sends one advances it.
-        let other = home.join("other");
-        std::fs::create_dir_all(other.join("replica")).unwrap();
-        std::fs::write(other.join("replica/other"), b"other shared content").unwrap();
-        let other = ProfileContentManifest::from_staged(&other, &roots).unwrap();
-        other
-            .try_transfer(&second, &ssh, Some("other-out"))
-            .unwrap();
         assert_eq!(generation(), initial + 2);
     }
 }
