@@ -15860,7 +15860,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
     assert!(request.await.unwrap_err().is_cancelled());
     let pid = started_result.expect("OpenSSH proxy never started");
     let reaped = tokio::time::timeout(Duration::from_secs(30), async {
-        while daemon_process_is_alive(pid) {
+        while mj_client::daemon::process_is_alive(pid) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -18475,7 +18475,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     })
     .await
     .expect("OpenSSH proxy never started");
-    assert!(daemon_process_is_alive(pid));
+    assert!(mj_client::daemon::process_is_alive(pid));
     let gate = mj_controller::upgrade::gate();
     let blockers = gate.blockers();
     assert!(
@@ -18491,7 +18491,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     tokio::time::timeout(Duration::from_secs(30), async {
-        while daemon_process_is_alive(pid) {
+        while mj_client::daemon::process_is_alive(pid) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
