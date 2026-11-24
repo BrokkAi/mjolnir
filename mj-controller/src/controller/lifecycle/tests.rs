@@ -5339,7 +5339,6 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
 
     const NAME: &str =
         "ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator";
-    const LOST_PROGRESS: &str = "SSH failed while reading suspend progress";
     if !in_isolated_store(NAME) {
         return;
     }
@@ -5352,7 +5351,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         commands: RecordedCommands,
         worker_alive: Arc<Mutex<bool>>,
-        fail_progress_read: bool,
+        failed_stop_observation: Option<&'static str>,
     }
 
     impl CommandExecutor for TargetWireFake {
@@ -5379,6 +5378,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     stderr: Vec::new(),
                 });
             }
+            if self.failed_stop_observation == Some(command.purpose.as_str()) {
+                anyhow::bail!("SSH failed during {}", command.purpose);
+            }
             if joined.contains("identity-alive")
                 || command.purpose == "probe Mjolnir worker daemon liveness"
             {
@@ -5392,11 +5394,6 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     },
                     stderr: Vec::new(),
                 });
-            }
-            if self.fail_progress_read
-                && command.purpose == "read suspend record suspend-progress.json"
-            {
-                anyhow::bail!(LOST_PROGRESS);
             }
             if joined.contains("quiesce") {
                 // Extract --operation and --checkout and record request + receipt, then mark dead.
@@ -5625,8 +5622,8 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         assert!(!files.contains_key(wire::RESTART));
     }
 
-    // A daemon can lose the progress read after the exact worker has
-    // accepted the stop. Publishing that failure must keep startup's owner.
+    // SSH can fail before or during the wait for an accepted stop.
+    // Publishing either failure keeps the close for retry and startup.
     controller.state.sessions.get_mut(session_id).unwrap().state = SessionState::Closing;
     persist_controller_fixture(&mut controller);
     let consent = SuspendConsent {
@@ -5636,10 +5633,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     let session = &controller.state.sessions[session_id];
     crate::database::save_suspension_intent(session, None, Some(&consent)).unwrap();
     let target = session.target.clone();
-    let fake = TargetWireFake {
-        fail_progress_read: true,
-        ..fake
-    };
+    let mut fake = fake;
     let operation = "origin-delta-suspend-interrupted-wait".to_owned();
     let request = SuspendRequest {
         operation: operation.clone(),
@@ -5672,52 +5666,59 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     *fake.worker_alive.lock().unwrap() = true;
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);
-    let error = controller
-        .recover_interrupted_close_managed(
-            &admission,
-            session_id,
-            &fake,
-            &manager.control,
-            &consent,
-            Some(Box::pin(async { panic!("pending stop entered teardown") })),
-            SuspendSettlement::Suspend,
-        )
-        .await
-        .unwrap_err();
-    let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
-    assert_eq!(
-        reason,
-        Some(LifecycleFailureReason::SuspendStopPending),
-        "{error:#}"
-    );
-    assert!(format!("{error:#}").contains(LOST_PROGRESS));
-    assert_eq!(
-        controller.state.sessions[session_id].state,
-        SessionState::Closing
-    );
+    for command in [
+        "read suspend record suspend-progress.json",
+        "probe Mjolnir worker daemon liveness",
+    ] {
+        fake.failed_stop_observation = Some(command);
+        let error = controller
+            .recover_interrupted_close_managed(
+                &admission,
+                session_id,
+                &fake,
+                &manager.control,
+                &consent,
+                Some(Box::pin(async { panic!("pending stop entered teardown") })),
+                SuspendSettlement::Suspend,
+            )
+            .await
+            .unwrap_err();
+        let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
+        assert_eq!(
+            reason,
+            Some(LifecycleFailureReason::SuspendStopPending),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains(&format!("SSH failed during {command}")));
+        assert_eq!(
+            controller.state.sessions[session_id].state,
+            SessionState::Closing
+        );
 
-    let public = format!(
-        "{}: {} Reference lifecycle-test.",
-        mj_core::state::CLOSE_FAILURE_PREFIX,
-        reason.unwrap()
-    );
-    controller
-        .record_failed_close(session_id, &public, reason)
-        .unwrap();
-    let retained = crate::database::read_durable_session_record(session_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(retained.state, SessionState::Closing);
-    assert_eq!(retained.target, target);
-    assert_eq!(retained.public_error(), Some(public.as_str()));
-    assert_eq!(
-        crate::database::load_closing_consent(session_id).unwrap(),
-        Some(consent.clone())
-    );
-    assert_eq!(
-        fake.files.lock().unwrap()[wire::REQUEST],
-        serde_json::to_vec(&request).unwrap()
-    );
+        let public = format!(
+            "{}: {} Reference lifecycle-test.",
+            mj_core::state::CLOSE_FAILURE_PREFIX,
+            reason.unwrap()
+        );
+        controller
+            .record_failed_close(session_id, &public, reason)
+            .unwrap();
+        let retained = crate::database::read_durable_session_record(session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.state, SessionState::Closing);
+        assert_eq!(retained.target, target);
+        assert_eq!(retained.public_error(), Some(public.as_str()));
+        assert_eq!(
+            crate::database::load_closing_consent(session_id).unwrap(),
+            Some(consent.clone())
+        );
+        assert_eq!(
+            fake.files.lock().unwrap()[wire::REQUEST],
+            serde_json::to_vec(&request).unwrap()
+        );
+    }
+    fake.failed_stop_observation = None;
 
     // Let the same worker finish. Retry must see its actual refusal and run
     // the existing rollback, which this fixture stops before harness launch.

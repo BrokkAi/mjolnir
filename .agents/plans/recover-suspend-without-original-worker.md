@@ -27,6 +27,7 @@ Fresh managed Suspend, a user's retry, and startup recovery will enter one captu
 - [x] (2026-11-24 02:24Z) Fixed both first-review findings in the common route/post-stop decision; 2 new persisted-boundary tests plus 7 affected controller cases pass.
 - [x] (2026-11-24 02:24Z) Controller strict all-targets Clippy and formatting passed after the two review fixes.
 - [x] (2026-11-24 02:48Z) Fixed second-review pending-stop publication and dead sealed-capture ordering. All targeted checks pass: 6 Rust executions, 3 affected E2Es, rebuilt CLI/worker, and 5-crate strict Clippy.
+- [x] (2026-11-24 02:55Z) Third-review stop-probe classification correction passed the persisted SSH test and controller strict Clippy.
 - [ ] Obtain clean final review and push.
 - [ ] Run targeted regression/controls and affected-crate Clippy under one build owner.
 - [ ] Review integrated simplicity and behavior, commit on the current branch, obtain before-push review, push origin/master, and dispatch platform CI.
@@ -198,3 +199,5 @@ Revision note (2026-11-24 02:24Z): The common route now recognizes durable parke
 Revision note (2026-11-24 02:31Z): Second review identified pending accepted-stop state ownership and a dead sealed-capture worker restart. Keep recorded unresolved worker stops durably Closing. Move capture proof after journal open but before attachability and use existing sealed_by_close() so accepted Close proceeds to verified cleanup even if a new foreign checkout holder appears. Add focused persisted-progress failure coverage and one variant of the existing sealed E2E that kills both daemon and capture worker. No new state or mechanism is introduced.
 
 Revision note (2026-11-24 02:48Z): Second-review fixes and all affected validation are complete. Existing lost-ACK code refreshes the in-place attempt before waiting; final read-only verification required no additional patch. Ready for committed code review and delivery.
+
+Revision note (2026-11-24 02:53Z): Third review's initial liveness observation edge is handled at the existing stop-entry boundary, only for a matching recorded request. The shared liveness helper used for adoption and rollback is unchanged; the existing persisted SSH fixture loops over initial-probe and progress-read failures. No extra mechanism or new validation scope beyond this filter and controller Clippy.

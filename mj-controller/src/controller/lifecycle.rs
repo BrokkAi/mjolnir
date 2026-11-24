@@ -1167,7 +1167,13 @@ impl Controller {
                 }
             }
             if !attempt.already_quiescent()
-                && attempt.live_worker_mode(executor)? == Some(WorkerRunMode::Harness)
+                && attempt.live_worker_mode(executor).map_err(|error| {
+                    if attempt.request_recorded() {
+                        error.context(LifecycleFailureReason::SuspendStopPending)
+                    } else {
+                        error
+                    }
+                })? == Some(WorkerRunMode::Harness)
             {
                 if mj_core::test_hooks::test_hooks_enabled() {
                     mj_core::runtime::off_async_worker(|| {
