@@ -210,6 +210,7 @@ pub(super) async fn submit_prompt(
         command_id: command_id.clone(),
         session_id: session_id.clone(),
         text: text.clone(),
+        files: Vec::new(),
         images: Vec::new(),
     };
     // Wait for startup or lifecycle work to release the session instead of

@@ -1,4 +1,5 @@
 //! Clipboard and image jobs belong to the live composer, independently of its chat feed.
+use super::attachments::AttachmentFailure;
 use super::input_state::AttachmentFallback;
 use super::*;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -9,13 +10,26 @@ pub(super) const MAX_ATTACHMENT_TASKS: usize = 2;
 pub(super) struct AttachmentResult {
     pub(super) sequence: u64,
     pub(super) fallback: AttachmentFallback,
-    pub(super) result: std::result::Result<ClipboardImage, String>,
+    pub(super) result: Result<ReadyAttachment, AttachmentFailure>,
 }
 
 #[derive(Debug)]
 pub(super) enum AttachmentSource {
     Clipboard(ClipboardImage),
-    Path(super::pasted_paths::PastedPath),
+    ImagePath(super::pasted_paths::PastedPath),
+    FilePath(super::pasted_paths::PastedPath),
+}
+
+#[derive(Debug)]
+pub(super) enum ReadyAttachment {
+    Image(ClipboardImage),
+    File(AttachedFile),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingMarker {
+    Image(u64),
+    File(u64),
 }
 
 #[derive(Debug)]
@@ -148,21 +162,27 @@ pub struct LiveComposer {
     input: String,
     input_cursor: usize,
     input_images: Vec<PromptImage>,
+    input_files: Vec<PromptFile>,
     next_image_number: u64,
+    next_file_number: u64,
     submitting_images: Vec<PromptImage>,
-    pending_attachment_markers: BTreeMap<u64, u64>,
+    submitting_files: Vec<PromptFile>,
+    pending_attachment_markers: BTreeMap<u64, PendingMarker>,
     input_generation: u64,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
     history_draft_images: Vec<PromptImage>,
+    history_draft_files: Vec<PromptFile>,
     kill_buffer: String,
     kill_images: Vec<PromptImage>,
+    kill_files: Vec<PromptFile>,
     chain_kill: bool,
     preferred_column: Option<usize>,
     queued_prompts: VecDeque<super::QueuedPrompt>,
     pending_queue_removals: BTreeSet<String>,
     pending_queue_images: BTreeMap<String, Vec<PromptImage>>,
+    pending_queue_files: BTreeMap<String, Vec<PromptFile>>,
     history_search: Option<HistorySearch>,
     next_history_search_generation: u64,
     composer_requests: VecDeque<super::history::ComposerRequest>,
@@ -186,6 +206,8 @@ impl ChatState {
         let was_empty = self.input.is_empty();
         self.input = payload.text;
         self.input_images = payload.images;
+        self.input_files = payload.files;
+        self.advance_file_number();
         if was_empty {
             self.input_cursor = self.input.len();
         }
@@ -209,6 +231,7 @@ impl ChatState {
         self.queued_prompts.retain(|queued| queued.id != command_id);
         self.pending_queue_removals.remove(command_id);
         self.pending_queue_images.remove(command_id);
+        self.pending_queue_files.remove(command_id);
         self.composer_runtime.preview_origins.remove(command_id);
     }
     pub fn recalled_startup_prompt(&self, command_id: &str, text: &str) -> StartupPrompt {
@@ -227,6 +250,11 @@ impl ChatState {
                     .get(command_id)
                     .cloned()
                     .unwrap_or_default(),
+                files: self
+                    .pending_queue_files
+                    .get(command_id)
+                    .cloned()
+                    .unwrap_or_default(),
             },
         }
     }
@@ -237,6 +265,7 @@ impl ChatState {
     ) -> anyhow::Result<bool> {
         self.pending_queue_removals.remove(&prompt.command_id);
         self.pending_queue_images.remove(&prompt.command_id);
+        self.pending_queue_files.remove(&prompt.command_id);
         match result {
             Ok(true) => Ok(false),
             Ok(false) => {
@@ -259,6 +288,7 @@ impl ChatState {
                         id: prompt.command_id,
                         text: prompt.payload.text,
                         images: prompt.payload.images,
+                        files: prompt.payload.files,
                         kind: QueuedCommandKind::Prompt,
                         attachments_unsupported: false,
                     });
@@ -281,6 +311,7 @@ impl ChatState {
                 payload: PromptPayload {
                     text: queued.text.clone(),
                     images: queued.images.clone(),
+                    files: queued.files.clone(),
                 },
             })
             .collect()
@@ -302,21 +333,27 @@ impl ChatState {
             input: std::mem::take(&mut self.input),
             input_cursor: std::mem::take(&mut self.input_cursor),
             input_images: std::mem::take(&mut self.input_images),
+            input_files: std::mem::take(&mut self.input_files),
             next_image_number: std::mem::take(&mut self.next_image_number),
+            next_file_number: std::mem::take(&mut self.next_file_number),
             submitting_images: std::mem::take(&mut self.submitting_images),
+            submitting_files: std::mem::take(&mut self.submitting_files),
             pending_attachment_markers: std::mem::take(&mut self.pending_attachment_markers),
             input_generation: std::mem::take(&mut self.input_generation),
             prompt_history: std::mem::take(&mut self.prompt_history),
             history_index: std::mem::take(&mut self.history_index),
             history_draft: std::mem::take(&mut self.history_draft),
             history_draft_images: std::mem::take(&mut self.history_draft_images),
+            history_draft_files: std::mem::take(&mut self.history_draft_files),
             kill_buffer: std::mem::take(&mut self.kill_buffer),
             kill_images: std::mem::take(&mut self.kill_images),
+            kill_files: std::mem::take(&mut self.kill_files),
             chain_kill: std::mem::take(&mut self.chain_kill),
             preferred_column: std::mem::take(&mut self.preferred_column),
             queued_prompts: std::mem::take(&mut self.queued_prompts),
             pending_queue_removals: std::mem::take(&mut self.pending_queue_removals),
             pending_queue_images: std::mem::take(&mut self.pending_queue_images),
+            pending_queue_files: std::mem::take(&mut self.pending_queue_files),
             history_search: std::mem::take(&mut self.history_search),
             next_history_search_generation: std::mem::take(
                 &mut self.next_history_search_generation,
@@ -341,21 +378,27 @@ impl ChatState {
         self.input = composer.input;
         self.input_cursor = composer.input_cursor;
         self.input_images = composer.input_images;
+        self.input_files = composer.input_files;
         self.next_image_number = composer.next_image_number;
+        self.next_file_number = composer.next_file_number;
         self.submitting_images = composer.submitting_images;
+        self.submitting_files = composer.submitting_files;
         self.pending_attachment_markers = composer.pending_attachment_markers;
         self.input_generation = composer.input_generation;
         self.prompt_history = composer.prompt_history;
         self.history_index = composer.history_index;
         self.history_draft = composer.history_draft;
         self.history_draft_images = composer.history_draft_images;
+        self.history_draft_files = composer.history_draft_files;
         self.kill_buffer = composer.kill_buffer;
         self.kill_images = composer.kill_images;
+        self.kill_files = composer.kill_files;
         self.chain_kill = composer.chain_kill;
         self.preferred_column = composer.preferred_column;
         self.queued_prompts = composer.queued_prompts;
         self.pending_queue_removals = composer.pending_queue_removals;
         self.pending_queue_images = composer.pending_queue_images;
+        self.pending_queue_files = composer.pending_queue_files;
         self.history_search = composer.history_search;
         self.next_history_search_generation = composer.next_history_search_generation;
         self.composer_requests = composer.composer_requests;
@@ -430,29 +473,54 @@ impl ChatState {
         match action {
             ChatAction::PasteFromClipboard => self.read_clipboard(),
             ChatAction::Attach { path, command } => {
-                self.queue_attachment(
-                    AttachmentSource::Path(path),
-                    AttachmentFallback::Command(command),
-                );
+                let is_image = path.is_image_extension();
+                let source = self.attachment_source(path, is_image);
+                self.queue_attachment(source, AttachmentFallback::Command(command));
             }
-            ChatAction::AttachPaste { text, images } => {
+            ChatAction::AttachPaste { text, paths } => {
                 let mut cursor = 0;
-                for image in images {
-                    self.paste_plain(&text[cursor..image.range.start]);
-                    let pasted = &text[image.range.clone()];
-                    if !self.queue_attachment(
-                        AttachmentSource::Path(image.path),
-                        AttachmentFallback::Text(pasted.to_owned()),
-                    ) {
+                let mut rejection = None;
+                for path in paths {
+                    self.paste_plain(&text[cursor..path.range.start]);
+                    let pasted = &text[path.range.clone()];
+                    let source = self.attachment_source(path.path, path.is_image);
+                    if !self.queue_attachment(source, AttachmentFallback::Text(pasted.to_owned())) {
+                        rejection = self.notice();
                         self.paste_plain(pasted);
                     }
-                    cursor = image.range.end;
+                    cursor = path.range.end;
                 }
                 self.paste_plain(&text[cursor..]);
+                if let Some(notice) = rejection {
+                    self.set_notice(notice);
+                }
             }
             _ => {}
         }
     }
+    pub(super) fn path_uses_image_mode(&self, path: &pasted_paths::PastedPath) -> bool {
+        self.uses_image_mode(path.is_image_extension())
+    }
+
+    fn uses_image_mode(&self, is_image: bool) -> bool {
+        is_image
+            && (self.standby
+                || self.composer_runtime.accepting_staged
+                || self.prompt_images_supported)
+    }
+
+    fn attachment_source(
+        &self,
+        path: pasted_paths::PastedPath,
+        is_image: bool,
+    ) -> AttachmentSource {
+        if self.uses_image_mode(is_image) {
+            AttachmentSource::ImagePath(path)
+        } else {
+            AttachmentSource::FilePath(path)
+        }
+    }
+
     fn read_clipboard(&mut self) {
         if self.composer_runtime.paste_in_flight {
             self.set_notice("Clipboard read already in progress…");
@@ -513,12 +581,7 @@ impl ChatState {
             .remote_streams
             .retain(|stream| !stream.is_finished());
         let deferred = self.composer_runtime.submit_when_ready.as_ref()?;
-        if self.composer_runtime.paste_in_flight
-            || self
-                .input_images
-                .iter()
-                .any(|image| image.image.is_pending())
-        {
+        if self.composer_runtime.paste_in_flight || self.has_pending_attachments() {
             return None;
         }
         let origin = match &deferred.origin {
@@ -528,12 +591,16 @@ impl ChatState {
         self.composer_runtime.submit_when_ready = None;
         let current_origin = std::mem::replace(&mut self.composer_runtime.origin, origin);
         let was_standby = std::mem::replace(&mut self.standby, true);
-        let action = self.submit_input();
+        let prompt = match self.submit_input() {
+            ChatAction::Prompt(_) => self.latest_startup_prompt(),
+            action => {
+                self.dispatch_composer_action(action);
+                None
+            }
+        };
         self.standby = was_standby;
         self.composer_runtime.origin = current_origin;
-        matches!(action, ChatAction::Prompt(_))
-            .then(|| self.latest_startup_prompt())
-            .flatten()
+        prompt
     }
     pub(super) fn apply_composer_update(&mut self, update: ComposerIoUpdate) {
         match update {
@@ -618,7 +685,11 @@ impl ChatState {
         fallback: AttachmentFallback,
     ) -> bool {
         let sequence = self.composer_runtime.next_attachment_sequence;
-        if !self.reserve_attachment(sequence) {
+        let reserved = match &source {
+            AttachmentSource::FilePath(path) => self.reserve_file_attachment(sequence, path),
+            _ => self.reserve_attachment(sequence),
+        };
+        if !reserved {
             return false;
         }
         self.composer_runtime.next_attachment_sequence = self
@@ -641,7 +712,7 @@ impl ChatState {
                 self.composer_runtime.next_attachment_sequence = sequence.wrapping_add(1);
                 let source = std::mem::replace(&mut image.image, ClipboardImage::pending());
                 self.pending_attachment_markers
-                    .insert(sequence, image.number);
+                    .insert(sequence, PendingMarker::Image(image.number));
                 self.composer_runtime.attachment_queue.push_back((
                     sequence,
                     AttachmentSource::Clipboard(source),
@@ -650,17 +721,20 @@ impl ChatState {
                 self.input_generation = self.input_generation.wrapping_add(1);
             }
         }
+        self.pending_attachment_markers
+            .retain(|_, marker| match marker {
+                PendingMarker::Image(number) => self
+                    .input_images
+                    .iter()
+                    .any(|image| image.number == *number && image.image.is_pending()),
+                PendingMarker::File(number) => self
+                    .input_files
+                    .iter()
+                    .any(|file| file.number == *number && file.file.is_pending()),
+            });
         self.composer_runtime
             .attachment_cancellations
-            .retain(|sequence, _| {
-                self.pending_attachment_markers
-                    .get(sequence)
-                    .is_some_and(|number| {
-                        self.input_images
-                            .iter()
-                            .any(|image| image.number == *number && image.image.is_pending())
-                    })
-            });
+            .retain(|sequence, _| self.pending_attachment_markers.contains_key(sequence));
         self.composer_runtime
             .attachment_queue
             .retain(|(sequence, _, _)| self.pending_attachment_markers.contains_key(sequence));
@@ -681,10 +755,11 @@ impl ChatState {
                 .insert(sequence, cancel);
             mj_core::runtime::spawn(async move {
                 let upload_session = session_id;
-                let preparation = async move { prepare_attachment(&upload_session, source).await };
+                let preparation =
+                    async move { prepare_composer_attachment(&upload_session, source).await };
                 let result = tokio::select! {
                     result = preparation => result,
-                    _ = cancelled => Err("attachment cancelled".to_owned()),
+                    _ = cancelled => Err(AttachmentFailure::error("attachment cancelled")),
                 };
                 if let Err(error) =
                     updates.send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
@@ -711,25 +786,65 @@ impl ChatState {
     }
 }
 
-/// Shared codec and daemon-install path for composer markers and old receipts.
-pub(super) async fn prepare_attachment(
+/// Prepare and install the attachment off the composer event loop.
+pub(super) async fn prepare_composer_attachment(
     session_id: &str,
     source: AttachmentSource,
-) -> Result<ClipboardImage, String> {
-    let blocking_session = session_id.to_owned();
-    let image = match mj_core::runtime::spawn_blocking(move || match source {
+) -> Result<ReadyAttachment, AttachmentFailure> {
+    let path = match source {
         AttachmentSource::Clipboard(image) => {
-            attachments::install_clipboard_image(&blocking_session, image)
+            return prepare_attachment(session_id, image)
+                .await
+                .map(ReadyAttachment::Image)
+                .map_err(AttachmentFailure::Error);
         }
-        AttachmentSource::Path(path) => path
-            .resolve()
-            .and_then(|path| attachments::install_path(&blocking_session, &path)),
+        AttachmentSource::ImagePath(path) => {
+            let session = session_id.to_owned();
+            let image = mj_core::runtime::spawn_blocking(move || {
+                let path = path.resolve().map_err(AttachmentFailure::error)?;
+                attachments::install_path(&session, &path)
+            })
+            .await
+            .map_err(AttachmentFailure::error)??;
+            return attachments::upload_prepared_image(session_id, image)
+                .await
+                .map(ReadyAttachment::Image)
+                .map_err(|error| AttachmentFailure::Error(format!("{error:#}")));
+        }
+        AttachmentSource::FilePath(path) => path,
+    };
+    let upload = mj_core::runtime::spawn_blocking(move || {
+        let path = path.resolve().map_err(AttachmentFailure::error)?;
+        attachments::read_file(&path)
     })
     .await
-    {
-        Ok(result) => result.map_err(|error| format!("{error:#}")),
-        Err(error) => Err(format!("attachment task failed: {error}")),
-    }?;
+    .map_err(AttachmentFailure::error)??;
+    let reference = mj_client::daemon::connect_existing()
+        .await
+        .map_err(AttachmentFailure::error)?
+        .http()
+        .await
+        .map_err(AttachmentFailure::error)?
+        .upload_file_attachment(session_id, &upload.filename, upload.bytes, upload.mime_type)
+        .await
+        .map_err(|error| AttachmentFailure::Error(format!("{error:#}")))?;
+    AttachedFile::from_reference(reference)
+        .map(ReadyAttachment::File)
+        .map_err(AttachmentFailure::error)
+}
+
+/// Shared clipboard codec and daemon-install path for composer markers and old receipts.
+pub(super) async fn prepare_attachment(
+    session_id: &str,
+    image: ClipboardImage,
+) -> Result<ClipboardImage, String> {
+    let blocking_session = session_id.to_owned();
+    let image = mj_core::runtime::spawn_blocking(move || {
+        attachments::install_clipboard_image(&blocking_session, image)
+    })
+    .await
+    .map_err(|error| format!("attachment task failed: {error}"))?
+    .map_err(|error| format!("{error:#}"))?;
     attachments::upload_prepared_image(session_id, image)
         .await
         .map_err(|error| format!("{error:#}"))

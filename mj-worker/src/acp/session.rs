@@ -959,8 +959,10 @@ pub(super) async fn serve_session(
                     Ok(Ok(prompt)) => CommandRequest::Prompt { request_id, prompt },
                     result => {
                         let message = match result {
-                            Ok(Err(error)) => format!("could not load attached images: {error:#}"),
-                            Err(error) => format!("image loading task failed: {error}"),
+                            Ok(Err(error)) => {
+                                format!("could not load prompt attachments: {error:#}")
+                            }
+                            Err(error) => format!("attachment loading task failed: {error}"),
                             Ok(Ok(_)) => unreachable!(),
                         };
                         emit_runtime_event(

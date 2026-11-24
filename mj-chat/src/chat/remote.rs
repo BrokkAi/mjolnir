@@ -11,11 +11,11 @@ use mj_client::session::{
 };
 use mj_core::relay::RelayCommand;
 
-use super::PromptImage;
 use super::{
     ChatElicitationDraft, ChatState, PlanControl, PlanReviewFollowup, PromptPayload,
     SubmissionKind, TurnControlIntent, queued_prompt_preview,
 };
+use super::{PromptFile, PromptImage};
 #[cfg(test)]
 use crate::clipboard::ClipboardImage;
 
@@ -112,6 +112,7 @@ pub(super) enum ChatRemoteOperation {
         command_id: String,
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
     },
     RunShell {
         command_id: String,
@@ -211,6 +212,7 @@ pub(super) enum ChatRemoteResult {
         command_id: String,
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
         result: std::result::Result<u64, String>,
     },
     RunShell {
@@ -630,8 +632,11 @@ async fn enqueue_chat_remote_operation(
             command_id,
             text,
             images,
+            files,
         } => {
-            if images.iter().any(|image| image.image.reference.is_none()) {
+            if images.iter().any(|image| image.image.reference.is_none())
+                || files.iter().any(|file| file.file.reference.is_none())
+            {
                 publish_chat_remote_result(
                     results,
                     attached,
@@ -639,7 +644,8 @@ async fn enqueue_chat_remote_operation(
                         command_id,
                         text,
                         images,
-                        result: Err("Image attachment is not ready".into()),
+                        files,
+                        result: Err("Prompt attachment is not ready".into()),
                     },
                 );
                 return;
@@ -648,6 +654,7 @@ async fn enqueue_chat_remote_operation(
             let prompt = PromptPayload {
                 text: text.clone(),
                 images: normalized.clone(),
+                files: files.clone(),
             }
             .content_blocks();
             let command = RelayCommand::Prompt { prompt };
@@ -661,6 +668,7 @@ async fn enqueue_chat_remote_operation(
                         command_id,
                         text,
                         images: normalized.clone(),
+                        files: files.clone(),
                         result: Err(
                             "Prompt exceeds the relay command budget; shorten the text".into()
                         ),
@@ -681,6 +689,7 @@ async fn enqueue_chat_remote_operation(
                         command_id,
                         text,
                         images: normalized,
+                        files,
                         result: Err(super::input_state::IMAGE_CAPABILITY_NOTICE.into()),
                     },
                 );
@@ -713,6 +722,7 @@ async fn enqueue_chat_remote_operation(
                                         command_id,
                                         text,
                                         images: normalized.clone(),
+                                        files: files.clone(),
                                         result: Err(format!("{error:#}")),
                                     },
                                 );
@@ -726,6 +736,7 @@ async fn enqueue_chat_remote_operation(
                                 command_id,
                                 text: text.clone(),
                                 images: normalized.clone(),
+                                files: files.clone(),
                                 result: Ok(ordinal),
                             },
                         );
@@ -739,6 +750,7 @@ async fn enqueue_chat_remote_operation(
                             command_id,
                             text,
                             images: normalized,
+                            files,
                             result: Err(format!("{error:#}")),
                         },
                     );
@@ -1134,11 +1146,10 @@ async fn enqueue_chat_remote_operation(
 }
 
 pub(super) fn restore_unsent_input(chat: &mut ChatState, input: &str) {
-    restore_unsent_prompt(chat, input.to_owned(), Vec::new());
+    restore_unsent_prompt(chat, PromptPayload::text(input));
 }
 
-pub(super) fn restore_unsent_prompt(chat: &mut ChatState, text: String, images: Vec<PromptImage>) {
-    let mut payload = PromptPayload { text, images };
+pub(super) fn restore_unsent_prompt(chat: &mut ChatState, mut payload: PromptPayload) {
     if chat.draft_payload() == payload {
         return;
     }
@@ -1227,16 +1238,28 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             command_id,
             text,
             images,
+            files,
             result: Err(error),
         } => {
             if !chat.finish_submission(&command_id, false) {
                 return;
             }
-            restore_unsent_prompt(chat, text.clone(), images.clone());
+            let command = files
+                .is_empty()
+                .then(|| refused_slash_command(&text, &images))
+                .flatten();
+            restore_unsent_prompt(
+                chat,
+                PromptPayload {
+                    text: text.clone(),
+                    images,
+                    files,
+                },
+            );
             // A refusal is an event in the conversation, and the draft already
             // holds the text for a retry. It becomes a dated notice in time
             // order instead of a row pinned below every later turn (I1-12).
-            if let Some(command) = refused_slash_command(&text, &images) {
+            if let Some(command) = command {
                 chat.conversation_notice(format!("{command} was not run: {error}"));
                 return;
             }
@@ -1425,12 +1448,14 @@ pub(super) fn queue_chat_remote_operation(
             command_id,
             text,
             images,
+            files,
         } => chat.begin_submission(
             command_id.clone(),
             SubmissionKind::Prompt,
             PromptPayload {
                 text: text.clone(),
                 images: images.clone(),
+                files: files.clone(),
             },
             "Sending…",
         ),
@@ -1482,9 +1507,17 @@ pub(super) fn queue_chat_remote_operation(
                     command_id,
                     text,
                     images,
+                    files,
                 } => {
                     chat.finish_submission(&command_id, false);
-                    restore_unsent_prompt(chat, text.clone(), images);
+                    restore_unsent_prompt(
+                        chat,
+                        PromptPayload {
+                            text: text.clone(),
+                            images,
+                            files,
+                        },
+                    );
                     report_refused_submission(
                         chat,
                         SubmissionKind::Prompt,
@@ -1699,6 +1732,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 text: "keep going".into(),
                 images: Vec::new(),
+                files: Vec::new(),
             })
             .await
             .unwrap();
@@ -1713,7 +1747,8 @@ mod tests {
                 command_id: _,
                 text,
                 images,
-                result: Ok(73)
+                result: Ok(73),
+                ..
             } if text == "keep going" && images.is_empty()
         ));
     }
@@ -2021,6 +2056,7 @@ mod tests {
                     command_id: format!("image-{text}"),
                     text: payload.text.clone(),
                     images: payload.images.clone(),
+                    files: payload.files.clone(),
                 })
                 .await
                 .unwrap();
@@ -2075,6 +2111,7 @@ mod tests {
                 command_id: "capability-revoked".into(),
                 text: revoked.text.clone(),
                 images: revoked.images.clone(),
+                files: Vec::new(),
             })
             .await
             .unwrap();
@@ -2096,6 +2133,7 @@ mod tests {
                 command_id: "too-big".into(),
                 text: huge.text.clone(),
                 images: huge.images.clone(),
+                files: Vec::new(),
             })
             .await
             .unwrap();
@@ -2111,7 +2149,8 @@ mod tests {
                 command_id: _,
                 text,
                 images,
-                result: Err(_)
+                result: Err(_),
+                ..
             } if text == huge.text && images == expected_images
         ));
         assert!(
@@ -2220,6 +2259,7 @@ mod tests {
                 command_id: "malformed-image".into(),
                 text: payload.text.clone(),
                 images: payload.images.clone(),
+                files: Vec::new(),
             })
             .await
             .unwrap();
@@ -2234,7 +2274,8 @@ mod tests {
                 command_id: _,
                 text,
                 images,
-                result: Err(_)
+                result: Err(_),
+                ..
             } if text == payload.text && images == payload.images
         ));
         assert!(
@@ -2256,6 +2297,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 text: "unsent prompt".into(),
                 images: Vec::new(),
+                files: Vec::new(),
             },
             &mut chat,
         );
@@ -2328,6 +2370,7 @@ mod tests {
                 command_id: "test-submit".into(),
                 text: "read the journal\nand summarise it".into(),
                 images: Vec::new(),
+                files: Vec::new(),
                 result: Err("relay attach failed".into()),
             },
         );
@@ -2404,6 +2447,7 @@ mod tests {
                 command_id: "test-submit".into(),
                 text: "tweak the close tool description".into(),
                 images: Vec::new(),
+                files: Vec::new(),
                 result: Err(clearing.into()),
             },
         );

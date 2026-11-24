@@ -5808,3 +5808,40 @@ async fn aws_renewal_uses_the_pinned_profile_for_scoped_and_unscoped_sessions() 
         "configure original\nconfigure from-file\nsts original\nsts from-environment\n"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_attachment_submission_refuses_protocol_89_before_writing_a_request() {
+    let script = format!(
+        r#"python3 -c '
+import json, sys
+req = json.loads(sys.stdin.readline())
+print(json.dumps({{"request_id":req["request_id"], "protocol_version":89, "result":"ok", "payload":{{"type":"hello", "data":{{"negotiated":89, "relay_version":"old", "session_id":{SESSION_ID:?}}}}}}}), flush=True)
+sys.stdin.read()
+'"#
+    );
+    let spec = CommandSpec::new("sh", ["-c", &script]).purpose("protocol 89 attachment test");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let reference =
+        mj_core::attachment::FileAttachmentRef::new(b"abc", "input.txt", "text/plain".into())
+            .unwrap();
+    let before = client.next_request;
+    let error = client
+        .submit(
+            "file-prompt",
+            RelayCommand::Prompt {
+                prompt: vec![reference.content_block()],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<mj_core::refusal::Refusal>(),
+        Some(&mj_core::refusal::Refusal::precondition(
+            "this session's worker predates file attachments; restart the session to attach files",
+        ))
+    );
+    assert_eq!(client.next_request, before);
+}

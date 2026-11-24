@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::rendering::sanitize_terminal_text;
-use super::{ChatAction, ChatState, PromptPayload, attachments};
+use super::{AttachedFile, ChatAction, ChatState, PromptPayload, attachments};
 use crate::text_input::{
     line_end, line_start, next_grapheme, next_word_end, previous_grapheme, previous_word_start,
 };
@@ -137,11 +137,16 @@ impl ChatState {
         range: std::ops::Range<usize>,
         inserted: &PromptPayload,
     ) -> PromptPayload {
-        if range.is_empty() && inserted.text.is_empty() && inserted.images.is_empty() {
+        if range.is_empty() && inserted.text.is_empty() {
             return PromptPayload::text("");
         }
-        let (cursor, removed) =
-            attachments::replace_range(&mut self.input, &mut self.input_images, range, inserted);
+        let (cursor, removed) = attachments::replace_range(
+            &mut self.input,
+            &mut self.input_images,
+            &mut self.input_files,
+            range,
+            inserted,
+        );
         self.input_cursor = cursor;
         self.input_generation = self.input_generation.wrapping_add(1);
         self.composer_runtime.submit_when_ready = None;
@@ -153,6 +158,7 @@ impl ChatState {
                 .max()
                 .unwrap_or(1),
         );
+        self.advance_file_number();
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
@@ -188,19 +194,15 @@ impl ChatState {
         self.paste_or_attach(pasted)
     }
 
-    /// Paste into the composer, or, when the paste is only image paths and
-    /// the agent takes images, ask for those files to be attached.
+    /// Paste plain text or dispatch a paste made entirely of paths.
     pub(super) fn paste_or_attach(&mut self, pasted: &str) -> ChatAction {
         if self.elicitation.is_none()
             && self.history_search.is_none()
-            && (self.standby
-                || self.composer_runtime.accepting_staged
-                || self.prompt_images_supported)
             && self.clipboard_target() == super::input_state::ClipboardTarget::Composer
         {
             let text = sanitize_terminal_text(pasted);
-            if let Some(images) = super::pasted_paths::image_paths(&text) {
-                return ChatAction::AttachPaste { text, images };
+            if let Some(paths) = super::pasted_paths::file_paths(&text) {
+                return ChatAction::AttachPaste { text, paths };
             }
         }
         self.handle_paste(pasted);
@@ -262,7 +264,12 @@ impl ChatState {
         } else {
             next_grapheme(&self.input, self.input_cursor)
         };
-        self.input_cursor = attachments::snap_cursor(&self.input_images, self.input_cursor, delta);
+        self.input_cursor = attachments::snap_cursor(
+            &self.input_images,
+            &self.input_files,
+            self.input_cursor,
+            delta,
+        );
         self.preferred_column = None;
         self.update_autocomplete();
     }
@@ -319,9 +326,13 @@ impl ChatState {
             .nth(column)
             .map_or(target_end, |(offset, _)| target_start + offset);
         // Only the composer needs this: a cursor that lands inside an
-        // `[image N]` marker is pushed to the near edge of the whole marker.
-        self.input_cursor =
-            attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
+        // marker is pushed to the near edge of the whole marker.
+        self.input_cursor = attachments::snap_cursor(
+            &self.input_images,
+            &self.input_files,
+            self.input_cursor,
+            direction,
+        );
         self.preferred_column = Some(column);
         self.update_autocomplete();
     }
@@ -332,8 +343,12 @@ impl ChatState {
         } else {
             next_word_end(&self.input, self.input_cursor)
         };
-        self.input_cursor =
-            attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
+        self.input_cursor = attachments::snap_cursor(
+            &self.input_images,
+            &self.input_files,
+            self.input_cursor,
+            direction,
+        );
         self.preferred_column = None;
         self.update_autocomplete();
     }
@@ -342,9 +357,16 @@ impl ChatState {
         if range.is_empty() {
             return;
         }
-        let removed = self.replace_input_range(range, &PromptPayload::text(""));
+        let mut removed = self.replace_input_range(range, &PromptPayload::text(""));
+        // A yanked marker cannot inherit the job owned by its former position.
+        for file in &mut removed.files {
+            if file.file.is_pending() {
+                file.file = AttachedFile::failed(&file.file.filename);
+            }
+        }
         self.kill_buffer = removed.text;
         self.kill_images = removed.images;
+        self.kill_files = removed.files;
     }
 
     pub(super) fn kill_to_line_start(&mut self) {
@@ -373,6 +395,7 @@ impl ChatState {
             PromptPayload {
                 text: std::mem::take(&mut self.kill_buffer),
                 images: std::mem::take(&mut self.kill_images),
+                files: std::mem::take(&mut self.kill_files),
             }
         } else {
             PromptPayload::text("")
@@ -382,6 +405,7 @@ impl ChatState {
             attachments::replace_range(
                 &mut self.kill_buffer,
                 &mut self.kill_images,
+                &mut self.kill_files,
                 0..0,
                 &previous,
             );
@@ -392,9 +416,16 @@ impl ChatState {
         if self.kill_buffer.is_empty() {
             return;
         }
+        use mj_core::attachment::MAX_FILES;
+
+        if self.input_files.len() + self.kill_files.len() > MAX_FILES {
+            self.set_notice(format!("A prompt can contain at most {MAX_FILES} files"));
+            return;
+        }
         let payload = PromptPayload {
             text: self.kill_buffer.clone(),
             images: self.kill_images.clone(),
+            files: self.kill_files.clone(),
         };
         self.replace_input_range(self.input_cursor..self.input_cursor, &payload);
     }

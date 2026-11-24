@@ -1,0 +1,15 @@
+option,reviewers,findings,findings_per_diff,median_latency_s,tokens_per_diff,cost_per_diff_usd,frontier,cost_frontier,bootstrap_frontier_share
+Terra/high,1,91.92,1.313,43.1,244964,0.044,True,True,1.0
+Sol/medium,1,47.5,0.679,46.3,235047,0.1,False,False,0.053
+2× Terra/high,2,114.33,1.633,47.3,489928,0.087,True,True,1.0
+3× Terra/high,3,125.5,1.793,51.7,734891,0.131,True,True,1.0
+Sol/medium + Terra/high,2,103.38,1.477,52.2,480011,0.143,False,False,0.004
+2× Sol/medium,2,61.0,0.871,53.0,470095,0.2,False,False,0.0
+Sol/medium + 2× Terra/high,3,122.33,1.748,54.3,724975,0.187,False,False,0.105
+2× Sol/medium + Terra/high,3,109.5,1.564,55.6,715059,0.243,False,False,0.001
+gpt-6.2-sol/medium,1,189.0,2.7,106.3,755063,0.252,False,True,0.014
+Sol/medium + gpt-6.2-sol/medium,2,191.0,2.729,106.3,990111,0.352,False,False,0.014
+2× Sol/medium + gpt-6.2-sol/medium,3,193.0,2.757,106.3,1225158,0.451,True,False,0.698
+Terra/high + gpt-6.2-sol/medium,2,204.17,2.917,108.0,1000027,0.295,False,True,0.328
+Sol/medium + Terra/high + gpt-6.2-sol/medium,3,205.0,2.929,108.0,1235075,0.395,True,False,0.686
+2× Terra/high + gpt-6.2-sol/medium,3,210.0,3.0,109.6,1244991,0.339,True,True,1.0

@@ -587,7 +587,7 @@ draft after command: "[image 1]"
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 markers: 2
 
-=== text file attachment feedback (100x24) ===
+=== file attachment on a session without image capability (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
 │ No messages yet — send a prompt to begin.                                                       ▐│
 │                                                                                                 ▐│
@@ -606,12 +606,12 @@ markers: 2
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-/attach adds image files only, and this agent does not accept images
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
-│> What would you like to build?                                                                   │
+│> [file 1: notes.txt]                                                                             │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-action: None
-installer feedback includes image-only explanation: true
-installer mentions marker: false
+action: Attach { path: Local("notes.txt"), command: "/attach notes.txt" }
+pending files: 1
+pending images: 0

@@ -1,14 +1,15 @@
-use super::{HttpApiError, HttpDaemonClient, encode_segment};
+use super::{HttpApiError, HttpDaemonClient, encode_segment, percent_encode};
 use crate::daemon::{
     RegisteredSession, WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo,
     WikiSyncStatus,
 };
 use anyhow::{Context, Result};
-use mj_core::attachment::AttachmentRef;
+use mj_core::attachment::{AttachmentRef, FileAttachmentRef};
 use mj_core::local_git::SessionGitStatus;
 use mj_core::state::{ContainerUpgradePreview, ContainerUpgradeRequest, SessionResourceAllocation};
 use mj_core::targets::AdditionalMount;
 use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -92,6 +93,30 @@ impl HttpDaemonClient {
             .post_bytes(&session_path(id, "/attachments")?, bytes, mime_type, None)
             .await?;
         Ok(uploaded.attachment)
+    }
+
+    pub async fn upload_file_attachment(
+        &self,
+        id: &str,
+        filename: &str,
+        bytes: Vec<u8>,
+        mime_type: &str,
+    ) -> Result<FileAttachmentRef> {
+        #[derive(Deserialize)]
+        struct Uploaded {
+            file: FileAttachmentRef,
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("x-mjolnir-filename", percent_encode(filename).parse()?);
+        let uploaded: Uploaded = self
+            .post_bytes(
+                &session_path(id, "/attachments?mode=file")?,
+                bytes,
+                mime_type,
+                Some(headers),
+            )
+            .await?;
+        Ok(uploaded.file)
     }
 
     pub async fn start_turn_review(&self, id: &str) -> Result<()> {

@@ -55,6 +55,8 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["compression-br", "compression-gzip"] }
 tracing.workspace = true
 url.workspace = true
+mime = "0.3"
+percent-encoding = "2"
 
 [dev-dependencies]
 mj-github-relevance.workspace = true

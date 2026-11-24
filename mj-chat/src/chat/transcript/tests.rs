@@ -3970,6 +3970,7 @@ fn golden_transcript_navigation() {
                 command_id: "scroll-send".into(),
                 text: "a new question".into(),
                 images: Vec::new(),
+                files: Vec::new(),
             }
         };
         super::super::remote::queue_chat_remote_operation(&tx, operation, &mut chat);
