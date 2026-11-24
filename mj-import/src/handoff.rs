@@ -304,19 +304,56 @@ pub async fn build_handoff_context_with_prior(
         Ok(candidates) => candidates,
         // A cancelled discovery is the caller's own doing; report it.
         Err(error) if cancel.is_cancelled() => return Err(error),
-        // No utility model is configured, credentialed, or in quota. The
-        // handoff still has to happen, so send the shared recent transcript view
-        // instead of failing.
+        // No utility model is configured, credentialed, or in quota. A Claude
+        // profile can still summarize through the Claude Code CLI; failing
+        // that, the handoff still has to happen, so send the shared recent
+        // transcript view instead of failing.
         Err(error) => {
             tracing::warn!(
                 session_id,
                 error = format!("{error:#}"),
-                "no utility model is available for the handoff; handing over the shared recent transcript view"
+                "no utility model is available for the handoff; trying Claude Code print mode"
             );
-            return Ok(crate::compaction::render_recent_snapshot(
-                snapshot,
-                context_bytes,
-            ));
+            return match crate::claude_compaction::ClaudePrintCompactionBackend::resolve(
+                config, cancel,
+            )
+            .await
+            {
+                Ok(Some(backend)) => {
+                    summarize_or_recent(
+                        session_id,
+                        snapshot,
+                        context_bytes,
+                        &backend,
+                        backend.page_bytes(),
+                        prior,
+                        cancel,
+                    )
+                    .await
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        session_id,
+                        "no Claude profile can summarize the handoff; handing over the shared recent transcript view"
+                    );
+                    Ok(crate::compaction::render_recent_snapshot(
+                        snapshot,
+                        context_bytes,
+                    ))
+                }
+                Err(error) if cancel.is_cancelled() => Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "Claude Code print mode is unavailable for the handoff; handing over the shared recent transcript view"
+                    );
+                    Ok(crate::compaction::render_recent_snapshot(
+                        snapshot,
+                        context_bytes,
+                    ))
+                }
+            };
         }
     };
     let backend = crate::utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
@@ -342,7 +379,7 @@ pub async fn build_handoff_context_with_prior(
 /// caller never loses the transcript to a summarizer error. The native-continuity
 /// path in particular installed bounded recent context before this code was shared, and
 /// must keep that floor. A cancellation is the caller's own doing and propagates.
-async fn summarize_or_recent(
+pub(crate) async fn summarize_or_recent(
     session_id: &str,
     snapshot: &CanonicalSessionSnapshot,
     context_bytes: usize,
@@ -377,7 +414,7 @@ async fn summarize_or_recent(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::compaction::{CompactionBackend, HANDOFF_PREAMBLE};
     use mj_checkpoint::archive::{
@@ -411,7 +448,7 @@ mod tests {
         }
     }
 
-    fn one_exchange_snapshot() -> CanonicalSessionSnapshot {
+    pub(crate) fn one_exchange_snapshot() -> CanonicalSessionSnapshot {
         let bodies = vec![
             CanonicalTranscriptBody::User {
                 content: vec![serde_json::json!({"type": "text", "text": "fix the bug"})],

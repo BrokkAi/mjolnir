@@ -2571,6 +2571,117 @@ fn managed_raw_worktree_refuses_dirty_primary_and_skips_existing_worktree() {
     let linked = inspect_raw_project(&ProcessExecutor, &target, &existing).unwrap();
     assert!(!linked.primary_checkout);
 }
+/// Runs what ssh would hand the remote login shell, on this machine.
+#[cfg(unix)]
+struct LoopbackSsh {
+    commands: RefCell<usize>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for LoopbackSsh {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        *self.commands.borrow_mut() += 1;
+        assert_eq!(command.program, "ssh");
+        ProcessExecutor.execute(&CommandSpec::new(
+            "sh",
+            ["-c".to_owned(), command.args.last().unwrap().clone()],
+        ))
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_remote_raw_project_is_inspected_in_one_ssh_command() {
+    let origin = committed_repository();
+    let root = tempfile::tempdir().unwrap();
+    let clone = root.path().join("user's clone");
+    test_git(
+        root.path(),
+        &[
+            "clone",
+            "-q",
+            &origin.path().to_string_lossy(),
+            &clone.to_string_lossy(),
+        ],
+    );
+    let target = ManagedWorktreeTarget::Ssh {
+        destination: "builder".into(),
+        ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
+    };
+    let inspect = |directory: &Path| {
+        let executor = LoopbackSsh {
+            commands: RefCell::new(0),
+        };
+        let inspection = inspect_raw_project(&executor, &target, directory);
+        assert_eq!(*executor.commands.borrow(), 1, "{}", directory.display());
+        inspection
+    };
+    // A branch with an upstream, asked from a subdirectory.
+    let branch = test_git(&clone, &["branch", "--show-current"]);
+    let inspection = inspect(&clone.join("nested")).unwrap();
+    assert_eq!(
+        inspection.upstream.as_deref(),
+        Some(format!("origin/{branch}").as_str())
+    );
+    assert_eq!(
+        inspection.source_project_directory,
+        inspection.source_repository.join("nested")
+    );
+    assert_eq!(
+        inspection.source_repository.file_name().unwrap(),
+        "user's clone"
+    );
+    assert!(inspection.primary_checkout);
+    // A branch without an upstream.
+    test_git(&clone, &["switch", "-q", "-c", "local-only"]);
+    assert_eq!(inspect(&clone).unwrap().upstream, None);
+    // A detached HEAD has no branch, and so no upstream to ask for.
+    test_git(&clone, &["switch", "-q", "--detach"]);
+    assert_eq!(inspect(&clone).unwrap().upstream, None);
+    // A linked worktree shares its Git directory with the primary checkout.
+    let linked = root.path().join("linked");
+    test_git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+    );
+    assert!(!inspect(&linked).unwrap().primary_checkout);
+    // A directory outside any repository fails with Git's own words.
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let error = inspect(&outside).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("resolve raw project repository root failed with status 128"),
+        "{error:#}"
+    );
+}
 #[test]
 fn managed_worktree_preflight_preserves_colliding_branch_and_directory() {
     let repository = committed_repository();
@@ -3802,6 +3913,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         &upgraded_clone,
         &archive_path,
         &verified.manifest,
+        None,
     )
     .unwrap();
 
@@ -3861,6 +3973,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         &upgraded_originless,
         &originless_archive,
         &verified_originless.manifest,
+        None,
     )
     .unwrap();
     assert!(notices_originless.is_empty());
@@ -4019,6 +4132,7 @@ fn legacy_clone_restore_repairs_nested_linked_worktree_after_publish_and_preserv
         &clone_record,
         &archive_path,
         &verified.manifest,
+        None,
     )
     .unwrap();
 

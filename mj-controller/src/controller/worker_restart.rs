@@ -779,10 +779,7 @@ impl Controller {
                     replace_installed_worker_binary(executor, backend, session_id, &worker)
                         .context(messages.replace)?;
                     if let Some(launch) = launch {
-                        replace_installed_worker_launch_config(
-                            executor, backend, session_id, launch,
-                        )
-                        .context("install the current Mjolnir worker launch configuration")?;
+                        self.install_launch_config(session_id, backend, launch, executor)?;
                     }
                 }
                 if let Some(command_id) = &discard_queued_prompts {

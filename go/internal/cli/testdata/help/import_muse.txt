@@ -1,0 +1,19 @@
+Import a session created by Muse Code
+
+Usage: mj import muse [OPTIONS] <--session <SESSION>|--latest>
+
+Options:
+  -i, --instance <NAME>            Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>          Native session UUID to import
+      --latest                     Import the most recently modified session
+      --no-splash                  Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --profile <PROFILE>          Daemon profile to associate with the session. Needed when several enabled profiles run this harness
+      --bundle <BUNDLE>            Existing configured bundle to associate with the imported session
+      --path <PATH>                Project directory on the daemon host (defaults to the recorded directory)
+      --title <TITLE>              Title displayed in Mjolnir's dashboard
+      --allow-dirty                Proceed after acknowledging dirty detected Git roots [aliases: --allow-dirty-local]
+      --allow-omitted-non-git      Proceed after acknowledging edited non-Git or scratch directories will be omitted
+      --reviewer <MODEL[:EFFORT]>  Reviewer model and optional effort; final colon suffix is effort only for known efforts (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times
+      --review <off|push>          Whether the imported session is reviewed before push (`push`) or not (`off`). Omitted follows `[review]`: review runs when reviewers are configured
+      --workspace <NAME>           Workspace to work in, by name. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it, and need it when the instance has more than one workspace
+  -h, --help                       Print help

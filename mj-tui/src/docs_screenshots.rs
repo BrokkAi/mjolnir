@@ -252,6 +252,7 @@ fn documentation_dashboard() -> DashboardState {
     );
 
     dashboard.set_deployment_capacity_targets(vec![DeploymentCapacityTarget {
+        stable_identity: None,
         id: "local".into(),
         host: "local".into(),
         target_ids: vec!["podman".into()],

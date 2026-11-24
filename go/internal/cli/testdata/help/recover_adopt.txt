@@ -1,0 +1,13 @@
+Probe a managed worker and add it back to controller state
+
+Usage: mj recover adopt [OPTIONS] --session <SESSION> --target <TARGET>
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id of the worker, as `mj recover scan` lists it
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --target <TARGET>    Target the worker runs on, as `mj recover scan` lists it
+      --profile <PROFILE>  Required only for current-v1 workers created before ownership markers
+      --bundle <BUNDLE>    Required only for current-v1 workers created before ownership markers
+      --all-instances      Allow adopting a worker another instance created, or one with no instance stamp
+  -h, --help               Print help

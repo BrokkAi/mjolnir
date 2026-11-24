@@ -59,7 +59,7 @@ fn read_wire_bytes(
     }
 }
 
-fn read_wire<T: serde::de::DeserializeOwned>(
+pub(in crate::controller) fn read_wire<T: serde::de::DeserializeOwned>(
     backend: &targets::TargetLocator,
     session_id: &str,
     root: &str,

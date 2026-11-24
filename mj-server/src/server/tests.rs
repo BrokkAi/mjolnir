@@ -567,6 +567,12 @@ impl SubagentBackend for ViewerBackend {
     ) -> futures::future::BoxFuture<'_, Result<api::PushedBranch, api::ExportError>> {
         Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
     }
+    fn export_patch(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::ExportPatch, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
     fn bundle(
         &self,
         _: String,

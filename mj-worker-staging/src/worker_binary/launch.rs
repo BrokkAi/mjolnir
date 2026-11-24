@@ -9,9 +9,14 @@ pub fn oracle_launch_enabled(
     owns_environment && !session.effective_oracle(choices).is_empty()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum WorkerFilePreparation {
     Install,
+    StageCandidate {
+        operation_id: String,
+        expected_store_id: String,
+        candidate_id: String,
+    },
     /// Restage the profile into a retained home, and replace the worker
     /// binary when the retained worker's build differs.
     RefreshProfile,
@@ -19,8 +24,6 @@ pub enum WorkerFilePreparation {
     /// starts, so it starts with the profile's current login (#1547). The
     /// worker binary is the caller's business.
     RefreshProfileOnly,
-    /// Restore a source home after a failed in-place Move, keeping its AWS selection.
-    RestoreProfileOnly,
 }
 
 /// The session history a launch continues. A restore deletes the worker's
@@ -349,12 +352,17 @@ pub fn worker_launch_config_with_checkout(
         if nitro_build_cache {
             target_environment.remove("MJ_MBX_CONFIG_DIR");
         } else {
+            // A private snapshot of the host's policy, staged before launch.
             target_environment.insert(
                 "MJ_MBX_CONFIG_DIR".into(),
-                mj_core::config::build_cache_configuration_directory(&build_cache.directory)
-                    .to_string_lossy()
-                    .into_owned(),
+                super::install::CONTAINER_MBX_CONFIG_DIRECTORY.into(),
             );
+            // The root the container was created with, whatever the host's
+            // configuration says now.
+            if let Some(root) = &build_cache.target_root {
+                target_environment
+                    .insert("MBX_TARGET_ROOT".into(), mj_core::target_path::text(root));
+            }
         }
         // Compiler symlinks name this worker's private executable. Sharing
         // them lets another container replace them with an unreachable path.
@@ -509,6 +517,7 @@ pub fn worker_launch_config_with_checkout(
     let approval_choices = config.profile_approval_choices(profile);
     Ok((
         WorkerLaunchConfig {
+            accepted_reload_operation_id: None,
             cpu_accounting: backend.cpu_accounting(),
             no_github_credentials: session.no_github_credentials,
             oracle: false,

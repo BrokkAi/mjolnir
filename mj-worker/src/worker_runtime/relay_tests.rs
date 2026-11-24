@@ -374,6 +374,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -10698,7 +10699,7 @@ async fn file_attachment_protocol_90_transfers_binary_and_dispatches_file_only_p
         ));
     }
     let [present, install, read, submit] = requests;
-    let protocol = RELAY_FILE_ATTACHMENT_PROTOCOL;
+    let protocol = mj_core::relay::RELAY_PROTOCOL_VERSION;
     assert!(matches!(
         exchange(protocol, present.clone()).await,
         RelayResponseBody::Ok {

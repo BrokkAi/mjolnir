@@ -84,6 +84,18 @@ pub fn bootstrap_probe_plan(
     })
 }
 
+/// The shell steps that make the configured user's HOME exist with the right
+/// owner. They run `mj_home_engine` (the container engine) against
+/// `$container`. Container creation on an SSH Podman host runs them inside
+/// its own script; [`initialize_container_home`] runs them after every other
+/// way of creating a container. This is the one text of the steps.
+pub(super) const CONTAINER_HOME_INIT_STEPS: &str = r#"owner=$(mj_home_engine exec "$container" sh -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')
+# The slash sentinel preserves even a HOME ending with newlines through $().
+home=$(mj_home_engine exec "$container" sh -c 'printf "%s/" "${HOME:?container HOME is unset}"')
+home=${home%/}
+mj_home_engine exec --user 0 "$container" sh -c 'set -eu; mkdir -p -- "$1"; chown -- "$2" "$1"' mj-home "$home" "$owner"
+"#;
+
 /// Complete container creation before clone/profile staging can write HOME.
 /// Query as the configured container user, then create/chown as container root.
 /// This also handles images whose non-root user's home is missing.
@@ -118,15 +130,7 @@ pub fn initialize_container_home(
         _ => return Ok(()),
     };
     let script = format!(
-        r#"set -eu
-mj_home_engine() {{ {} "$@"; }}
-container=$1
-owner=$(mj_home_engine exec "$container" sh -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')
-# The slash sentinel preserves even a HOME ending with newlines through $().
-home=$(mj_home_engine exec "$container" sh -c 'printf "%s/" "${{HOME:?container HOME is unset}}"')
-home=${{home%/}}
-mj_home_engine exec --user 0 "$container" sh -c 'set -eu; mkdir -p -- "$1"; chown -- "$2" "$1"' mj-home "$home" "$owner"
-"#,
+        "set -eu\nmj_home_engine() {{ {} \"$@\"; }}\ncontainer=$1\n{CONTAINER_HOME_INIT_STEPS}",
         engine_shell_words(engine)
     );
     let command = CommandSpec::new("sh", ["-c", &script, "mj-container-home", container]);

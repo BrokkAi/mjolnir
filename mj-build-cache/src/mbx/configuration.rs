@@ -1,32 +1,34 @@
-//! Machine policy. Inspection never writes; application atomically publishes
-//! the same document all containers mount. Native mbx configuration is read-only.
+//! The host's own mbx configuration, which is only ever read. Each session's
+//! launch stages a private snapshot of it; nothing is published into the
+//! shared cache directory.
 
 use super::*;
-use mj_core::state::BuildCacheApplication;
-use sha2::{Digest, Sha256};
 
-#[cfg(all(test, target_os = "linux"))]
-const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
+/// Prints the host's mbx configuration directory.
+pub(super) const DIRECTORY_SCRIPT: &str = r#"printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/mbx""#;
 
-/// Already reachable through every session's cache mount, including sessions
-/// provisioned before machine-level policy. No container recreation is needed.
-pub fn shared_directory(cache: &Path) -> PathBuf {
-    mj_core::config::build_cache_configuration_directory(cache)
-}
+/// Reads the file named by `$1`, or exits 3 when it is not there. A trailing
+/// `x` marks the end of the file, so a shell that captures the output (a
+/// batched probe does) keeps the file's final newlines.
+pub(super) const READ_FRAMED_SCRIPT: &str = r#"[ -f "$1" ] || exit 3
+cat -- "$1" && printf x"#;
+
+const DIRECTORY_PURPOSE: &str = "locate host mbx configuration";
+const READ_PURPOSE: &str = "read machine mbx configuration";
 
 pub fn host_directory(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
     if matches!(host, CacheHost::Local) {
         return dirs::config_dir()
             .map(|path| path.join("mbx"))
-            .context("locate host mbx configuration");
+            .context(DIRECTORY_PURPOSE);
     }
-    let command = host.shell_command(
-        r#"printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/mbx""#,
-        LABEL,
-        [],
-        "locate host mbx configuration",
-    );
-    let output = checked(executor.execute(&command)?, &command)?;
+    let command = host.shell_command(DIRECTORY_SCRIPT, LABEL, [], DIRECTORY_PURPOSE);
+    directory_from_probe(executor.execute(&command)?)
+}
+
+/// Read the answer to [`DIRECTORY_SCRIPT`], however the probe was run.
+pub(super) fn directory_from_probe(output: CommandOutput) -> Result<PathBuf> {
+    let output = checked_as(output, DIRECTORY_PURPOSE)?;
     let path =
         PathBuf::from(String::from_utf8(output.stdout).context("decode mbx configuration path")?);
     ensure!(
@@ -45,7 +47,7 @@ pub fn read_file(
         READ_CONFIG_SCRIPT,
         LABEL,
         [path.to_string_lossy().into_owned()],
-        "read machine mbx configuration",
+        READ_PURPOSE,
     );
     let output = executor.execute(&command)?;
     if output.status == 3 {
@@ -57,43 +59,17 @@ pub fn read_file(
     ))
 }
 
-#[cfg(all(test, target_os = "linux"))]
-pub fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
-    #[derive(serde::Serialize)]
-    struct Document<'a> {
-        gc: Gc<'a>,
-        #[serde(skip_serializing_if = "Scheduler::is_empty")]
-        scheduler: Scheduler<'a>,
+/// Read the answer to [`READ_FRAMED_SCRIPT`] run in a batched probe.
+pub(super) fn file_from_framed_probe(output: CommandOutput) -> Result<Option<String>> {
+    if output.status == 3 {
+        return Ok(None);
     }
-    #[derive(serde::Serialize)]
-    struct Gc<'a> {
-        max_total_size: &'a str,
-    }
-    #[derive(serde::Serialize)]
-    struct Scheduler<'a> {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cpus: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        memory: Option<&'a str>,
-    }
-    impl Scheduler<'_> {
-        fn is_empty(&self) -> bool {
-            self.cpus.is_none() && self.memory.is_none()
-        }
-    }
-    let document = Document {
-        gc: Gc {
-            max_total_size: settings.max_total_size.as_deref().unwrap_or(automatic),
-        },
-        scheduler: Scheduler {
-            cpus: settings.scheduler.cpus,
-            memory: settings.scheduler.memory.as_deref(),
-        },
-    };
-    Ok(format!(
-        "# Managed by Mjolnir. Change the machine's Build cache settings.\n{DEFAULT_MARKER}{automatic}\n{}",
-        toml::to_string(&document)?
-    ))
+    let output = checked_as(output, READ_PURPOSE)?;
+    let text = String::from_utf8(output.stdout).context("decode machine mbx configuration")?;
+    let text = text
+        .strip_suffix('x')
+        .context("the machine mbx configuration was cut short")?;
+    Ok(Some(text.to_owned()))
 }
 
 pub fn configured_limit(text: Option<&str>, table: &str, field: &str) -> Result<Option<String>> {
@@ -114,217 +90,177 @@ pub fn configured_limit(text: Option<&str>, table: &str, field: &str) -> Result<
     Ok(Some(value.to_owned()))
 }
 
-// A lock belongs to the host, not the container or daemon. Compare-and-replace
-// prevents an inspection made before another application from overwriting it.
-// Atomic rename also leaves the last complete policy intact on cancellation.
-const APPLY_SCRIPT: &str = r#"set -eu
-directory=$1
-expected=$2
-mkdir -p -- "$directory"
-exec 9>"$directory/.mj-apply.lock"
-flock -w 5 9
-file="$directory/config.toml"
-temporary=$(mktemp "$directory/.config.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-cat > "$temporary"
-chmod 600 "$temporary"
-# Another launch may have applied this same policy since our inspection; the
-# outcome is already what we want, so that is not a conflict.
-if [ -f "$file" ] && cmp -s -- "$temporary" "$file"; then exit 0; fi
-actual=missing
-if [ -f "$file" ]; then actual=$(sha256sum -- "$file"); actual=${actual%% *}; fi
-[ "$actual" = "$expected" ] || exit 75
-mv -f -- "$temporary" "$file"
-"#;
+/// The host configuration as a session's container must see it, so the mbx
+/// inside reads and writes only the mounts that session was created with.
+///
+/// The host's configuration can change after the container was created, or
+/// between the inspection that chose its mounts and this read. `cache_dir` and
+/// `[target] root` are therefore pinned to what the session recorded; every
+/// other setting passes through. A document that already agrees is returned
+/// byte for byte. A rewrite drops comments and formatting.
+///
+/// A record from before the target root was recorded (`None`) mounted only the
+/// cache directory, so a root outside it is removed and mbx falls back to
+/// `<cache>/targets`; a root inside it is kept.
+///
+/// A document that is not TOML is refused without quoting it: it can hold
+/// credentials, and the error reaches notices and logs.
+pub fn reconcile_container_config(text: &str, cache: &SessionBuildCache) -> Result<String> {
+    use mj_core::target_path::{is_within, join, normalize, text as path_text};
 
-pub fn apply(
-    host: &CacheHost,
-    cache: &ResolvedBuildCache,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    if cache.previous_config == cache.config_file {
-        return Ok(true);
+    let mut document: toml::Table = toml::from_str(text).map_err(|error| {
+        let line = error.span().map(|span| {
+            text.as_bytes()[..span.start.min(text.len())]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+                + 1
+        });
+        match line {
+            Some(line) => {
+                anyhow::anyhow!("the host mbx configuration is not valid TOML (line {line})")
+            }
+            None => anyhow::anyhow!("the host mbx configuration is not valid TOML"),
+        }
+    })?;
+    let directory = normalize(&cache.directory);
+    let mut changed = false;
+
+    if let Some(value) = document.get("cache_dir") {
+        let configured = value
+            .as_str()
+            .context("the host mbx configuration's cache_dir must be a string")?;
+        if normalize(&join(&directory, Path::new(configured))) != directory {
+            document.insert(
+                "cache_dir".into(),
+                toml::Value::String(path_text(&cache.directory)),
+            );
+            changed = true;
+        }
     }
-    let expected = cache
-        .previous_config
-        .as_deref()
-        .map(|text| mj_core::hex::lower_hex(Sha256::digest(text.as_bytes())))
-        .unwrap_or_else(|| "missing".into());
-    let command = host
-        .shell_command(
-            APPLY_SCRIPT,
-            LABEL,
-            [
-                cache.config_directory.to_string_lossy().into_owned(),
-                expected,
-            ],
-            "apply machine build cache budgets",
-        )
-        .with_sensitive_stdin(
-            cache
-                .config_file
-                .as_deref()
-                .context("missing managed mbx configuration")?
-                .as_bytes()
-                .to_vec(),
-        );
-    let output = executor.execute(&command)?;
-    if output.status == 75 {
-        return Ok(false);
+
+    let configured_root = match document.get("target") {
+        None => None,
+        Some(target) => target
+            .as_table()
+            .context("the host mbx configuration's target must be a table")?
+            .get("root")
+            .map(|root| {
+                root.as_str()
+                    .map(PathBuf::from)
+                    .context("the host mbx configuration's target.root must be a string")
+            })
+            .transpose()?,
+    };
+    let current = normalize(&match &configured_root {
+        Some(root) => join(&directory, root),
+        None => directory.join("targets"),
+    });
+    match &cache.target_root {
+        Some(recorded) if normalize(recorded) != current => {
+            let target = document
+                .entry("target")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .expect("checked to be a table above");
+            target.insert("root".into(), toml::Value::String(path_text(recorded)));
+            changed = true;
+        }
+        None if configured_root.is_some() && !is_within(&current, &directory) => {
+            if let Some(target) = document
+                .get_mut("target")
+                .and_then(toml::Value::as_table_mut)
+            {
+                target.remove("root");
+            }
+            changed = true;
+        }
+        _ => {}
     }
-    checked(output, &command)?;
-    Ok(true)
+
+    if !changed {
+        return Ok(text.to_owned());
+    }
+    toml::to_string(&document).context("serialize the container's mbx configuration")
 }
 
-pub fn application(previous: Option<&str>, desired: Option<&str>) -> BuildCacheApplication {
-    if previous == desired {
-        BuildCacheApplication::Applied
-    } else {
-        BuildCacheApplication::Pending
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, symlink};
 
-    fn cache(directory: &Path, previous: Option<String>, text: String) -> ResolvedBuildCache {
-        ResolvedBuildCache {
-            directory: directory.to_owned(),
-            native_mbx: NativeMbx {
-                program: PathBuf::from("/usr/local/bin/mbx"),
-                version: MBX_VERSION.into(),
-            },
-            target_root: None,
-            config_directory: shared_directory(directory),
-            config_file: Some(text),
-            previous_config: previous,
+    fn recorded(target_root: Option<&str>) -> SessionBuildCache {
+        SessionBuildCache {
+            host: "local".into(),
+            directory: "/cache".into(),
+            max_size: None,
+            target_root: target_root.map(PathBuf::from),
+        }
+    }
+
+    fn table(text: &str) -> toml::Table {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_configuration_that_agrees_with_the_record_passes_through_byte_for_byte() {
+        let text = "# keep me\ncache_dir = \"/cache\"\n[gc]\nmax_total_size = \"1GB\"\n";
+        for target_root in [None, Some("/cache/targets")] {
+            assert_eq!(
+                reconcile_container_config(text, &recorded(target_root)).unwrap(),
+                text
+            );
         }
     }
 
     #[test]
-    fn both_consumers_see_atomic_budget_updates_without_relinking() {
-        let temporary = tempfile::tempdir().unwrap();
-        let executor = targets::ProcessExecutor;
-        let first = managed_document(
-            &TargetBuildCache {
-                max_total_size: Some("500GiB".into()),
-                ..Default::default()
-            },
-            "100GB",
-        )
-        .unwrap();
-        let initial = cache(temporary.path(), None, first.clone());
-        assert!(apply(&CacheHost::Local, &initial, &executor).unwrap());
-        let file = initial.config_directory.join("config.toml");
-        let paths = [
-            temporary.path().join("harness.toml"),
-            temporary.path().join("reviewer.toml"),
-        ];
-        for path in &paths {
-            symlink(&file, path).unwrap();
+    fn a_recorded_target_root_wins_over_a_host_configuration_changed_since() {
+        let host = "cache_dir = \"/elsewhere\"\n[target]\nroot = \"/mnt/new\"\n[gc]\nmax_total_size = \"1GB\"\n";
+        for (record, root) in [
+            (Some("/cache/views"), "/cache/views"),
+            (Some("/mnt/slow/targets"), "/mnt/slow/targets"),
+            (Some("/cache/targets"), "/cache/targets"),
+        ] {
+            let out = table(&reconcile_container_config(host, &recorded(record)).unwrap());
+            assert_eq!(out["cache_dir"].as_str(), Some("/cache"));
+            assert_eq!(out["target"]["root"].as_str(), Some(root));
+            assert_eq!(out["gc"]["max_total_size"].as_str(), Some("1GB"));
         }
-        let second = managed_document(
-            &TargetBuildCache {
-                max_total_size: Some("100GB".into()),
-                ..Default::default()
-            },
-            "100GB",
-        )
-        .unwrap();
-        // Exercise the shared subprocess stdin path beyond a pipe buffer.
-        let second = format!("{second}# {}\n", "x".repeat(256 * 1024));
-        let updated = cache(temporary.path(), Some(first), second.clone());
-        assert!(apply(&CacheHost::Local, &updated, &executor).unwrap());
-        for path in &paths {
-            let text = std::fs::read_to_string(path).unwrap();
-            assert_eq!(text, second);
-            assert_eq!(
-                configured_limit(Some(&text), "target", "max_size")
-                    .unwrap()
-                    .as_deref(),
-                None
-            );
-            assert_eq!(
-                configured_limit(Some(&text), "gc", "max_total_size")
-                    .unwrap()
-                    .as_deref(),
-                Some("100GB")
-            );
-        }
-        let inode = std::fs::metadata(&file).unwrap().ino();
-        assert!(
-            apply(
-                &CacheHost::Local,
-                &cache(temporary.path(), Some(second.clone()), second),
-                &executor
+        // A host that has since gained a root where the session recorded the
+        // default is pinned back to what was mounted.
+        let out = table(
+            &reconcile_container_config(
+                "[target]\nroot = \"/mnt/new\"\n",
+                &recorded(Some("/cache/targets")),
             )
-            .unwrap()
+            .unwrap(),
         );
-        assert_eq!(
-            std::fs::metadata(&file).unwrap().ino(),
-            inode,
-            "unchanged policy must not be rewritten"
-        );
+        assert_eq!(out["target"]["root"].as_str(), Some("/cache/targets"));
     }
 
     #[test]
-    fn existing_cache_mounts_receive_machine_changes_without_changing_the_source() {
-        let temporary = tempfile::tempdir().unwrap();
-        let host = CacheHost::Local;
-        let executor = targets::ProcessExecutor;
-        let source = temporary.path().join("native.toml");
-        let current = temporary.path().join("current-cache");
-        let existing = temporary.path().join("existing-container-cache");
-        for budget in ["150GiB", "250GiB"] {
-            let text = format!("[target]\nmax_size = '{budget}'\n");
-            std::fs::write(&source, &text).unwrap();
-            let policy = cache(&current, None, text.clone());
-            super::super::publish_at(&host, &policy, &existing, &executor).unwrap();
-            assert_eq!(std::fs::read_to_string(&source).unwrap(), text);
-            assert_eq!(
-                std::fs::read_to_string(shared_directory(&existing).join("config.toml")).unwrap(),
-                text,
+    fn a_record_without_a_target_root_drops_an_unmounted_root_but_keeps_one_in_the_cache() {
+        for outside in ["/mnt/new", "../outside", "/cache/../outside"] {
+            let host = format!("[target]\nroot = \"{outside}\"\nmax_age = \"30d\"\n");
+            let out = table(&reconcile_container_config(&host, &recorded(None)).unwrap());
+            assert!(
+                out["target"].as_table().unwrap().get("root").is_none(),
+                "{outside}"
             );
+            assert_eq!(out["target"]["max_age"].as_str(), Some("30d"));
         }
-    }
-
-    #[test]
-    fn stale_application_cannot_overwrite_a_newer_machine_policy() {
-        let temporary = tempfile::tempdir().unwrap();
-        let executor = targets::ProcessExecutor;
-        let first = cache(
-            temporary.path(),
-            None,
-            "[gc]\nmax_total_size = '500GiB'\n".into(),
-        );
-        let stale = cache(
-            temporary.path(),
-            None,
-            "[gc]\nmax_total_size = '1GiB'\n".into(),
-        );
-        assert!(apply(&CacheHost::Local, &first, &executor).unwrap());
-        assert!(!apply(&CacheHost::Local, &stale, &executor).unwrap());
+        let inside = "[target]\nroot = \"views\"\n";
         assert_eq!(
-            std::fs::read_to_string(first.config_directory.join("config.toml")).unwrap(),
-            first.config_file.unwrap()
+            reconcile_container_config(inside, &recorded(None)).unwrap(),
+            inside
         );
     }
 
-    // Hard-won: #1580: concurrent launches applying the same policy from one inspection failed the loser
     #[test]
-    fn launches_applying_the_same_policy_from_one_inspection_both_succeed() {
-        let temporary = tempfile::tempdir().unwrap();
-        let executor = targets::ProcessExecutor;
-        let policy = "[gc]\nmax_total_size = '500GiB'\n".to_owned();
-        let file = shared_directory(temporary.path()).join("config.toml");
-        // Both launches inspected the host before either applied.
-        let inspection = cache(temporary.path(), None, policy.clone());
-        assert!(apply(&CacheHost::Local, &inspection, &executor).unwrap());
-        let inode = std::fs::metadata(&file).unwrap().ino();
-        assert!(apply(&CacheHost::Local, &inspection, &executor).unwrap());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), policy);
-        assert_eq!(std::fs::metadata(&file).unwrap().ino(), inode);
+    fn a_malformed_configuration_is_refused_without_quoting_it() {
+        let secret = "token = \"s3cr3t-value\"\n[";
+        let error = reconcile_container_config(secret, &recorded(None)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("not valid TOML (line "), "{message}");
+        assert!(!message.contains("s3cr3t"), "{message}");
     }
 }

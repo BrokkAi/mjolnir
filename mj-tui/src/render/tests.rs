@@ -1912,6 +1912,7 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
     let mut dashboard = dashboard_with_session(session.clone());
     dashboard.set_session_connectivity(&session.id, false);
     dashboard.set_deployment_capacity_targets(vec![mj_core::targets::DeploymentCapacityTarget {
+        stable_identity: None,
         id: "ssh:precision-3260".into(),
         host: "precision-3260".into(),
         target_ids: vec!["precision".into()],
@@ -1987,6 +1988,7 @@ fn ascii_symbols_reach_the_capacity_row() {
 
 fn precision_capacity_target() -> mj_core::targets::DeploymentCapacityTarget {
     mj_core::targets::DeploymentCapacityTarget {
+        stable_identity: None,
         id: "ssh:precision-3260".into(),
         host: "precision-3260".into(),
         target_ids: vec!["precision".into()],
@@ -2277,6 +2279,7 @@ fn a_one_line_targets_viewport_keeps_a_stale_reading_on_screen() {
         ["host-0", "host-1"]
             .into_iter()
             .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                stable_identity: None,
                 id: host.into(),
                 host: host.into(),
                 target_ids: vec!["podman".into()],
@@ -2603,6 +2606,7 @@ fn two_machine_cpu_report() -> (
         ["machine-a", "machine-b"]
             .into_iter()
             .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                stable_identity: None,
                 id: host.into(),
                 host: host.into(),
                 target_ids: vec![host.into()],
@@ -2803,6 +2807,7 @@ fn session_cpu_report_opens_on_the_selected_sessions_machine() {
         ["machine-a", "machine-b"]
             .into_iter()
             .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                stable_identity: None,
                 id: host.into(),
                 host: host.into(),
                 target_ids: vec![host.into()],
@@ -3467,6 +3472,7 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     remote.sessions.get_mut("kid-b").unwrap().target_template_id = "other-machine".into();
     dashboard.set_state(remote);
     dashboard.set_deployment_capacity_targets(vec![mj_core::targets::DeploymentCapacityTarget {
+        stable_identity: None,
         id: "other-machine".into(),
         host: "other-machine".into(),
         target_ids: vec!["other-machine".into()],
@@ -4682,6 +4688,7 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     // heading and the row whose Disks cell the clicks below land on.
     dashboard.set_deployment_capacity_targets(vec![
         mj_core::targets::DeploymentCapacityTarget {
+            stable_identity: None,
             id: "a:stale".into(),
             host: "stale-host".into(),
             target_ids: vec!["podman".into()],

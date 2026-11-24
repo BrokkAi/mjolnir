@@ -24,11 +24,14 @@ use drive::*;
 #[cfg(unix)]
 pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
 #[cfg(unix)]
+pub(crate) use launch::launch_subagent_mcp_socket;
+#[cfg(unix)]
 pub(crate) use launch::read_claude_login_fingerprint;
 use launch::*;
 pub use launch::{
     ClaudeLoginIdentity, ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket,
 };
+pub(crate) use launch::{launch_extra_mcp_servers, launch_subagent_policy};
 pub use opencode_logins::ImportedLogins;
 use permissions::*;
 use session::*;
@@ -281,6 +284,26 @@ fn remove_session_failure(update: &mut SessionUpdate) {
 }
 
 #[derive(Debug)]
+pub enum ReloadResolution {
+    Started,
+    RefusedBeforeCommit(String),
+    FailedAfterCommit(String),
+}
+
+impl ReloadResolution {
+    fn failed(committed: bool, message: String) -> Self {
+        if committed {
+            Self::FailedAfterCommit(message)
+        } else {
+            Self::RefusedBeforeCommit(message)
+        }
+    }
+    fn refused(message: String) -> Self {
+        Self::RefusedBeforeCommit(message)
+    }
+}
+
+#[derive(Debug)]
 pub enum CommandRequest {
     ClearContext {
         request_id: String,
@@ -327,6 +350,8 @@ pub enum CommandRequest {
     /// without stopping the worker daemon or its non-harness processes.
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        subagent_mcp_socket: Option<SubagentMcpSocket>,
+        managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
         args: Option<Vec<String>>,
@@ -335,7 +360,7 @@ pub enum CommandRequest {
         leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
         #[cfg(unix)]
         on_restart: Option<Box<HarnessReloadTransition>>,
-        resolved: oneshot::Sender<std::result::Result<(), String>>,
+        resolved: oneshot::Sender<ReloadResolution>,
     },
     CancelTurnFor {
         request_id: String,
@@ -439,6 +464,8 @@ pub(super) enum SessionRestart {
     /// Restart only the harness bridge under a new launch configuration.
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        subagent_mcp_socket: Option<SubagentMcpSocket>,
+        managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
         args: Option<Vec<String>>,
@@ -448,7 +475,7 @@ pub(super) enum SessionRestart {
         #[cfg(unix)]
         on_restart: Option<Box<HarnessReloadTransition>>,
         resume_session: Option<String>,
-        resolved: oneshot::Sender<std::result::Result<(), String>>,
+        resolved: oneshot::Sender<ReloadResolution>,
     },
     Clear {
         reset: ContextReset,
@@ -488,6 +515,8 @@ impl Eq for SessionRestart {}
 
 struct LaunchConfigReload {
     launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+    subagent_mcp_socket: Option<SubagentMcpSocket>,
+    managed_subagent: bool,
     environment: BTreeMap<String, String>,
     command: Option<PathBuf>,
     args: Option<Vec<String>>,
@@ -496,7 +525,7 @@ struct LaunchConfigReload {
     leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
     #[cfg(unix)]
     on_restart: Option<Box<HarnessReloadTransition>>,
-    resolved: oneshot::Sender<std::result::Result<(), String>>,
+    resolved: oneshot::Sender<ReloadResolution>,
 }
 
 struct BridgeRestart {
@@ -519,7 +548,7 @@ struct BridgeSessionOpen<'a> {
     replacing_previous_bridge: bool,
     replace_unused_codex_thread: bool,
     first_replaced_unused_native_session_id: &'a mut Option<String>,
-    pending_reload_ack: &'a mut Option<oneshot::Sender<std::result::Result<(), String>>>,
+    pending_reload_ack: &'a mut Option<oneshot::Sender<ReloadResolution>>,
 }
 
 async fn run_inner(
@@ -537,15 +566,20 @@ async fn run_inner(
     // A new worker starts from the relay journal's latest native session ID.
     // Within this worker, restore readiness can first see any replacement.
     let mut first_replaced_unused_native_session_id = None;
-    let mut pending_reload_ack: Option<oneshot::Sender<std::result::Result<(), String>>> = None;
+    let mut pending_reload_ack: Option<oneshot::Sender<ReloadResolution>> = None;
     #[cfg(unix)]
     let mut pending_reload_transition: Option<Box<HarnessReloadTransition>> = None;
     let mut _active_reload_leases: Option<Box<dyn std::fmt::Debug + Send + Sync>> = None;
     let mut rollback = None;
+    let mut reload_committed = false;
+    let mut pending_supervisor_spec: Option<
+        Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>,
+    > = None;
     loop {
         if shutdown.is_cancelled() {
             if let Some(resolved) = pending_reload_ack.take() {
-                let _ = resolved.send(Err(
+                let _ = resolved.send(ReloadResolution::failed(
+                    reload_committed,
                     "ACP runtime shut down before replacement bridge opened".into(),
                 ));
             }
@@ -580,20 +614,32 @@ async fn run_inner(
                 // The replacement can run native hooks as soon as it starts.
                 // Wait for the coordinator to retire the old state and install
                 // the new harness state before starting the process.
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => {
-                        if let Some(resolved) = pending_reload_ack.take() {
-                            let _ = resolved.send(Err("ACP runtime shut down while applying harness reload".into()));
+                // Once handed to the coordinator, retirement is owned by that
+                // decision. Wait for its typed outcome even during shutdown.
+                async {
+                    emit_runtime_event(&events, restarting).await?;
+                    match applied
+                        .await
+                        .context("coordinator stopped while applying harness reload")?
+                    {
+                        Ok(Some(runtime)) => {
+                            reload_committed = runtime.committed;
+                            pending_supervisor_spec = None;
+                            spec.environment = runtime.environment;
+                            spec.subagent_mcp_socket = runtime.subagent_mcp_socket;
+                            spec.managed_subagent = runtime.managed_subagent;
+                            Ok(())
                         }
-                        return Ok(());
+                        Ok(None) => Ok(()),
+                        Err(resolution) => {
+                            if let Some(resolved) = pending_reload_ack.take() {
+                                let _ = resolved.send(resolution);
+                            }
+                            anyhow::bail!("coordinator could not apply harness reload")
+                        }
                     }
-                    result = async {
-                        emit_runtime_event(&events, restarting).await?;
-                        applied.await.context("coordinator stopped while applying harness reload")?
-                            .map_err(anyhow::Error::msg)
-                    } => result,
                 }
+                .await
             } else {
                 emit_runtime_event(&events, restarting).await
             };
@@ -601,10 +647,19 @@ async fn run_inner(
             let notification = emit_runtime_event(&events, restarting).await;
             if let Err(error) = notification {
                 if let Some(resolved) = pending_reload_ack.take() {
-                    let _ = resolved.send(Err(format!("{error:#}")));
+                    let _ = resolved.send(ReloadResolution::failed(
+                        reload_committed,
+                        format!("{error:#}"),
+                    ));
                 }
                 return Err(error);
             }
+        }
+        if let Some(supervisor) = pending_supervisor_spec.take() {
+            let (path, spec) = *supervisor;
+            // Staged transitions wrote the finalized spec in the coordinator.
+            // Legacy callers without a transition still publish after retirement.
+            spec.write_spec(&path)?;
         }
         let opened = Arc::new(Mutex::new(None));
         let result = run_bridge(
@@ -659,7 +714,8 @@ async fn run_inner(
             result => match result {
                 Ok(None) => {
                     if let Some(resolved) = pending_reload_ack.take() {
-                        let _ = resolved.send(Err(
+                        let _ = resolved.send(ReloadResolution::failed(
+                            reload_committed,
                             "ACP runtime stopped before replacement bridge opened".into(),
                         ));
                     }
@@ -668,7 +724,10 @@ async fn run_inner(
                 Ok(Some(restart)) => restart,
                 Err(error) => {
                     if let Some(resolved) = pending_reload_ack.take() {
-                        let _ = resolved.send(Err(format!("{error:#}")));
+                        let _ = resolved.send(ReloadResolution::failed(
+                            reload_committed,
+                            format!("{error:#}"),
+                        ));
                     }
                     return Err(error);
                 }
@@ -713,6 +772,8 @@ async fn run_inner(
         restart_notice = Some(restart.notice);
         if let Some(LaunchConfigReload {
             launch_config,
+            subagent_mcp_socket,
+            managed_subagent,
             environment,
             command,
             args,
@@ -732,14 +793,7 @@ async fn run_inner(
             } else {
                 mj_harness_install::login_environment::with_overrides(&environment).await
             };
-            if let Some(supervisor) = supervisor_spec {
-                let (supervisor_path, supervisor_spec) = *supervisor;
-                if let Err(error) = supervisor_spec.write_spec(&supervisor_path) {
-                    let _ =
-                        resolved.send(Err(format!("write updated ACP supervisor spec: {error:#}")));
-                    return Err(error);
-                }
-            }
+            pending_supervisor_spec = supervisor_spec;
             match resolved_environment {
                 Ok(environment) => {
                     spec.apply_reload_accepted_config(&launch_config);
@@ -758,7 +812,12 @@ async fn run_inner(
                     spec.approval_choices = launch_config.approval_choices();
                     spec.instruction_role = InstructionRole::from_launch(&launch_config);
                     spec.project_memory = launch_config.project_memory.clone();
+                    spec.subagent_mcp_socket = subagent_mcp_socket;
+                    spec.managed_subagent = managed_subagent;
+                    spec.subagent_policy = launch_subagent_policy(&launch_config);
+                    spec.extra_mcp_servers = launch_extra_mcp_servers(&launch_config);
                     _active_reload_leases = leases;
+                    reload_committed = false;
                     pending_reload_ack = Some(resolved);
                     #[cfg(unix)]
                     {
@@ -766,7 +825,10 @@ async fn run_inner(
                     }
                 }
                 Err(error) => {
-                    let _ = resolved.send(Err(format!("{error:#}")));
+                    let _ = resolved.send(ReloadResolution::failed(
+                        reload_committed,
+                        format!("{error:#}"),
+                    ));
                     return Err(error);
                 }
             }
@@ -1003,6 +1065,8 @@ async fn run_bridge(
         })),
         Ok(Some(SessionRestart::ReloadLaunchConfig {
             launch_config,
+            subagent_mcp_socket,
+            managed_subagent,
             environment,
             command,
             args,
@@ -1018,6 +1082,8 @@ async fn run_bridge(
             resume_session,
             reload_launch_config: Some(LaunchConfigReload {
                 launch_config,
+                subagent_mcp_socket,
+                managed_subagent,
                 environment,
                 command,
                 args,

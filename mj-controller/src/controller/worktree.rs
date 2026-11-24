@@ -1894,11 +1894,127 @@ fn checkout_position_text(head_commit: &str, branch: Option<&str>) -> String {
     }
 }
 
+/// Everything [`inspect_raw_project`] asks of a remote project, in one SSH
+/// round trip. The directory is a positional argument, never script text. A
+/// required answer that fails ends the script, since the rest could only
+/// repeat the failure; the upstream is asked only for a named branch.
+const RAW_PROJECT_PROBES: &str = r#"probe toplevel git -C "$1" rev-parse --show-toplevel || exit 0
+probe prefix git -C "$1" rev-parse --show-prefix || exit 0
+probe git_dir git -C "$1" rev-parse --absolute-git-dir || exit 0
+probe common_git_dir git -C "$1" rev-parse --path-format=absolute --git-common-dir || exit 0
+if probe branch git -C "$1" symbolic-ref --quiet --short HEAD && [ -n "$out" ]; then
+    probe upstream git -C "$1" for-each-ref --format='%(upstream:short)' "refs/heads/$out"
+fi
+exit 0
+"#;
+
+fn inspect_raw_project_over_ssh(
+    executor: &impl CommandExecutor,
+    target: &ManagedWorktreeTarget,
+    selected: &Path,
+) -> Result<RawProjectInspection> {
+    const PURPOSE: &str = "inspect raw project Git state";
+    let command = managed_target_command(
+        SshTrafficClass::Control,
+        target,
+        "sh",
+        [
+            "-c".to_owned(),
+            format!("{}{RAW_PROJECT_PROBES}", targets::PROBE_HELPER_SH),
+            "mj-inspect-raw-project".into(),
+            selected.to_string_lossy().into_owned(),
+        ],
+    )
+    .purpose(PURPOSE);
+    let output = executor.execute(&command)?;
+    // The script exits 0 whatever its probes did, so another status means the
+    // shell or the connection failed before the probes could speak.
+    ensure!(
+        output.status == 0,
+        "{PURPOSE} failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut probes = targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+    fn answer(
+        probes: &mut std::collections::BTreeMap<String, CommandOutput>,
+        name: &str,
+        purpose: &str,
+    ) -> Result<CommandOutput> {
+        probes
+            .remove(name)
+            .with_context(|| format!("{purpose} returned no answer"))
+    }
+    let stdout =
+        |probes: &mut std::collections::BTreeMap<String, CommandOutput>,
+         name: &str,
+         purpose: &str| command_stdout(answer(probes, name, purpose)?, purpose);
+    let repository = git_output_path(
+        target,
+        PathBuf::from(stdout(
+            &mut probes,
+            "toplevel",
+            "resolve raw project repository root",
+        )?),
+    )?;
+    let prefix = stdout(
+        &mut probes,
+        "prefix",
+        "resolve raw project relative directory",
+    )?;
+    let git_dir = git_output_path(
+        target,
+        PathBuf::from(stdout(
+            &mut probes,
+            "git_dir",
+            "resolve raw project Git directory",
+        )?),
+    )?;
+    let common_git_dir = git_output_path(
+        target,
+        mj_core::local_git::resolve_git_path(
+            &repository,
+            &stdout(
+                &mut probes,
+                "common_git_dir",
+                "resolve raw project common Git directory",
+            )?,
+        )?,
+    )?;
+    let branch = answer(&mut probes, "branch", "resolve raw project branch")?;
+    let named_branch = match branch.status {
+        0 => !String::from_utf8(branch.stdout)
+            .context("raw project branch was not UTF-8")?
+            .trim()
+            .is_empty(),
+        1 | 128 => false,
+        status => bail!(
+            "resolve raw project branch failed with status {status}: {}",
+            String::from_utf8_lossy(&branch.stderr).trim()
+        ),
+    };
+    let upstream = if named_branch {
+        let upstream = stdout(&mut probes, "upstream", "resolve raw project upstream")?;
+        (!upstream.is_empty()).then_some(upstream)
+    } else {
+        None
+    };
+    Ok(RawProjectInspection {
+        source_project_directory: target_path::join(&repository, Path::new(&prefix)),
+        source_repository: repository,
+        primary_checkout: git_dir == common_git_dir,
+        upstream,
+    })
+}
+
 fn inspect_raw_project(
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
     selected: &Path,
 ) -> Result<RawProjectInspection> {
+    if matches!(target, ManagedWorktreeTarget::Ssh { .. }) {
+        return inspect_raw_project_over_ssh(executor, target, selected);
+    }
     let repository = git_output_path(
         target,
         PathBuf::from(managed_git_stdout(
@@ -1980,6 +2096,15 @@ fn inspect_raw_project(
         primary_checkout: git_dir == common_git_dir,
         upstream,
     })
+}
+
+/// Whether the checkout lives under its source repository, where the exclusion
+/// of `.mj/clones/` belongs. A checkout built elsewhere (an export's scratch
+/// directory) must leave the user's repository configuration alone.
+fn managed_checkout_is_inside_source(checkout: &ManagedWorktree) -> bool {
+    checkout
+        .worktree_root
+        .starts_with(&checkout.source_repository)
 }
 
 fn ensure_managed_worktree_excluded(
@@ -2187,7 +2312,11 @@ pub(super) fn create_managed_worktree(
 
 enum CloneSeedMode<'a> {
     FreshBranch,
-    LocalSnapshot(&'a mj_checkpoint::snapshot::WorkspaceSnapshot),
+    /// Apply the snapshot with `git`, which carries the caller's cancellation.
+    LocalSnapshot {
+        snapshot: &'a mj_checkpoint::snapshot::WorkspaceSnapshot,
+        git: &'a dyn mj_checkpoint::archive::GitCommandRunner,
+    },
     RemoteSnapshot {
         object_format: &'a str,
         origin_url: Option<&'a str>,
@@ -2198,7 +2327,7 @@ impl<'a> CloneSeedMode<'a> {
     fn snapshot_object_format(&self) -> Option<&'a str> {
         match self {
             Self::FreshBranch => None,
-            Self::LocalSnapshot(snapshot) => Some(snapshot.metadata.object_format.as_str()),
+            Self::LocalSnapshot { snapshot, .. } => Some(snapshot.metadata.object_format.as_str()),
             Self::RemoteSnapshot { object_format, .. } => Some(*object_format),
         }
     }
@@ -2206,14 +2335,19 @@ impl<'a> CloneSeedMode<'a> {
     fn snapshot_origin_url(&self) -> Option<&'a str> {
         match self {
             Self::FreshBranch => None,
-            Self::LocalSnapshot(snapshot) => snapshot.metadata.origin_url.as_deref(),
+            Self::LocalSnapshot { snapshot, .. } => snapshot.metadata.origin_url.as_deref(),
             Self::RemoteSnapshot { origin_url, .. } => *origin_url,
         }
     }
 
-    fn local_snapshot(&self) -> Option<&'a mj_checkpoint::snapshot::WorkspaceSnapshot> {
+    fn local_snapshot(
+        &self,
+    ) -> Option<(
+        &'a mj_checkpoint::snapshot::WorkspaceSnapshot,
+        &'a dyn mj_checkpoint::archive::GitCommandRunner,
+    )> {
         match self {
-            Self::LocalSnapshot(snapshot) => Some(snapshot),
+            Self::LocalSnapshot { snapshot, git } => Some((snapshot, *git)),
             Self::FreshBranch | Self::RemoteSnapshot { .. } => None,
         }
     }
@@ -2436,15 +2570,11 @@ fn create_managed_clone_with_snapshot(
                 .purpose("seed independent managed clone from origin"),
             )?;
         }
-        let notices = if let Some(snapshot) = mode.local_snapshot() {
+        let notices = if let Some((snapshot, git)) = mode.local_snapshot() {
             let mut notices = snapshot.notices.clone();
             // Restore runs Git fetches; keep them off the async workers.
             notices.extend(mj_core::runtime::off_async_worker(|| {
-                mj_checkpoint::snapshot::restore_workspace_snapshot(
-                    &mj_checkpoint::archive::SystemGit,
-                    snapshot,
-                    &staging,
-                )
+                mj_checkpoint::snapshot::restore_workspace_snapshot(git, snapshot, &staging)
             })?);
             notices
         } else {
@@ -2465,9 +2595,9 @@ fn create_managed_clone_with_snapshot(
             .purpose("publish managed clone checkout"),
         )?;
         published = true;
-        if let Some(snapshot) = mode.local_snapshot() {
+        if let Some((snapshot, git)) = mode.local_snapshot() {
             mj_checkpoint::snapshot::repair_workspace_snapshot(
-                &mj_checkpoint::archive::SystemGit,
+                git,
                 snapshot,
                 &checkout.worktree_root,
             )?;
@@ -2676,14 +2806,11 @@ fn clone_local_preference(key: &str) -> bool {
 /// call created it, so a failed resume can put the session back into its
 /// stopped, checkout-free state.
 pub(super) fn restore_managed_clone_origin_delta(
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     worktree: &ManagedWorktree,
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
 ) -> Result<ManagedCloneRestoreOutcome> {
-    use mj_checkpoint::archive::CheckpointPayloadReader;
-    use mj_checkpoint::snapshot::WorkspaceSnapshot;
-
     ensure!(
         worktree.kind == ManagedCheckoutKind::Clone,
         "origin delta resume requires an independent managed clone"
@@ -2691,12 +2818,6 @@ pub(super) fn restore_managed_clone_origin_delta(
     let [repository] = manifest.repositories.as_slice() else {
         bail!("origin delta resume requires exactly one repository");
     };
-    let metadata = repository
-        .metadata
-        .origin_delta
-        .as_deref()
-        .context("origin delta metadata is missing")?
-        .clone();
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
         && executor
             .execute(&managed_git_command(
@@ -2707,6 +2828,7 @@ pub(super) fn restore_managed_clone_origin_delta(
                 "check whether source repository is a Git repository",
             ))
             .is_ok_and(|output| output.status == 0)
+        && managed_checkout_is_inside_source(worktree)
     {
         ensure_managed_worktree_excluded(
             executor,
@@ -2717,29 +2839,20 @@ pub(super) fn restore_managed_clone_origin_delta(
     }
     match &worktree.target {
         ManagedWorktreeTarget::Local => {
-            let pack = repository
-                .origin_delta_pack_path
-                .as_ref()
-                .map(|path| -> Result<_> {
-                    let descriptor = manifest
-                        .payloads
-                        .iter()
-                        .find(|payload| &payload.path == path)
-                        .context("origin delta pack descriptor is missing")?;
-                    let mut pack = tempfile::NamedTempFile::new()?;
-                    CheckpointPayloadReader::open(archive)?
-                        .copy_payload(descriptor, pack.as_file_mut())?;
-                    Ok(pack)
-                })
-                .transpose()?;
-            let snapshot = WorkspaceSnapshot {
-                metadata,
-                pack: pack.as_ref().map(|pack| pack.path().to_owned()),
-            };
+            let spooled = mj_checkpoint::checkpoint::spool_origin_delta_snapshot_unless(
+                archive,
+                manifest,
+                repository,
+                &|| executor.cancellation_requested(),
+            )?
+            .context("origin delta metadata is missing")?;
             let notices = create_managed_clone_with_snapshot(
                 executor,
                 worktree,
-                CloneSeedMode::LocalSnapshot(&snapshot),
+                CloneSeedMode::LocalSnapshot {
+                    snapshot: spooled.snapshot(),
+                    git: &ExecutorGit::local(executor),
+                },
             )?;
             Ok(ManagedCloneRestoreOutcome::RestoredLocally(notices))
         }
@@ -2748,6 +2861,11 @@ pub(super) fn restore_managed_clone_origin_delta(
             // invokes `mj-worker worker restore-checkpoint` with
             // `restore_repositories = true` so the snapshot is unpacked and
             // applied directly on the SSH host.
+            let metadata = repository
+                .metadata
+                .origin_delta
+                .as_deref()
+                .context("origin delta metadata is missing")?;
             create_managed_clone_with_snapshot(
                 executor,
                 worktree,
@@ -2798,10 +2916,11 @@ pub(super) fn upgrade_legacy_worktree_to_clone(
 /// 3. Apply the archived legacy delta and check out the saved commit on the
 ///    saved branch name, or as a detached HEAD (with a notice) on collision.
 pub(super) fn restore_legacy_worktree_as_managed_clone(
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     checkout: &ManagedWorktree,
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
+    cancel: Option<&mj_checkpoint::archive::ArchivePurgeCancel>,
 ) -> Result<Vec<String>> {
     ensure!(
         checkout.kind == ManagedCheckoutKind::Clone,
@@ -2824,6 +2943,7 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
                 "check whether source repository is a Git repository",
             ))
             .is_ok_and(|output| output.status == 0)
+        && managed_checkout_is_inside_source(checkout)
     {
         ensure_managed_worktree_excluded(
             executor,
@@ -3005,7 +3125,8 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
         let notices = mj_checkpoint::checkpoint::restore_single_repository_into_clone(
             archive,
             &staging,
-            &mj_checkpoint::archive::SystemGit,
+            &ExecutorGit::local(executor),
+            cancel,
         )?;
         execute_checked(
             executor,

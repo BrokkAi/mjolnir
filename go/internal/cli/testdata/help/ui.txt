@@ -1,0 +1,15 @@
+Change what the person's dashboard shows: pane sizes, which session is open, or Settings with changes staged for them to save
+
+Usage: mj ui [OPTIONS] <COMMAND>
+
+Commands:
+  pane      Set one support pane's size, as its title-bar control does
+  show      Show a session in the conversation area, or in a new pane beside it
+  settings  Open Settings with these changes staged for the person to review and save. Paths are the Settings page paths, which match the configuration file's keys: `notify.bell=false`, `theme=dark`, `advanced.auto_afk_minutes=30`. A value that reads as JSON (`true`, `30`, `null`) is used as that value; anything else is text, and `null` clears a field
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --json             Print the daemon's answer as JSON instead of text
+  -h, --help             Print help

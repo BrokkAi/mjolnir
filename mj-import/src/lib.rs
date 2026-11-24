@@ -15,6 +15,7 @@ pub(crate) use mj_accounts::{kimi_auth, quota};
 pub(crate) use mj_store::{database, upgrade};
 pub(crate) use mj_targets::targets;
 
+pub mod claude_compaction;
 pub mod compaction;
 pub mod handoff;
 pub mod import;

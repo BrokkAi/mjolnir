@@ -120,15 +120,16 @@ pub use mj_session_runtime::host_git_config::{
 };
 pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
-    recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
-    shared_content_ssh, worker_source_problem,
+    profile_upload_generation, recorded_exit_reason, refresh_target_worker_binary_if_stale,
+    run_control_command, shared_content_ssh, worker_source_problem,
 };
 
 pub use checkpoint::{
-    CheckpointArtifact, CheckpointDeferred, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease,
-    SessionExportLayout, checkpoint_was_deferred, host_snapshot_cache_wakeup,
-    reconcile_managed_checkpoint_archives, sweep_expired_host_snapshot_cache,
-    sweep_local_checkpoint_leftovers,
+    CheckpointArtifact, CheckpointBundle, CheckpointDeferred, CheckpointExportError,
+    CheckpointPatch, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease, SessionExportLayout,
+    checkpoint_bundle, checkpoint_patch, checkpoint_was_deferred, export_reads_checkpoint,
+    host_snapshot_cache_wakeup, reconcile_managed_checkpoint_archives,
+    sweep_expired_host_snapshot_cache, sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,

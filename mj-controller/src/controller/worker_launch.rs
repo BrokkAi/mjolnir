@@ -78,6 +78,11 @@ impl Controller {
 
     /// Return the pending harness preflight so a new checkout can finish first,
     /// and the staged credential identities.
+    ///
+    /// `created_container` is what this launch's own creation command reported
+    /// about the container, if it reported anything.
+    // Each argument is an independent input of one launch's worker staging.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) fn stage_worker_files_for(
         &self,
         session_id: &str,
@@ -86,6 +91,7 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
         history: LaunchHistory<'_>,
+        created_container: Option<&targets::CreationObservation>,
     ) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
         worker_launch::stage_worker_files_for(
             &self.config,
@@ -96,6 +102,7 @@ impl Controller {
             executor,
             preparation,
             history,
+            created_container,
         )
     }
 
@@ -106,14 +113,28 @@ impl Controller {
         launch: &WorkerLaunchConfig,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        worker_launch::prepare_build_cache_links(
-            &self.config,
-            &self.state,
-            session,
-            backend,
-            launch,
-            executor,
+        worker_launch::prepare_build_cache_links(session, backend, launch, executor)
+    }
+
+    /// Replace the installed launch configuration of a session whose worker is
+    /// not running. A session with a build cache first gets the private mbx and
+    /// policy snapshot that configuration names, so no restart can boot with a
+    /// `MJ_MBX_CONFIG_DIR` whose files are not there.
+    pub(in crate::controller) fn install_launch_config(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+        launch: &WorkerLaunchConfig,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        if let Some(session) = self.state.sessions.get(session_id) {
+            self.prepare_build_cache_links(session, backend, launch, executor)
+                .context("stage the session's mbx before installing its launch configuration")?;
+        }
+        super::worker_binary::replace_installed_worker_launch_config(
+            executor, backend, session_id, launch,
         )
+        .context("install the current Mjolnir worker launch configuration")
     }
 
     /// Probe the installed binary and the worker's recorded state after a

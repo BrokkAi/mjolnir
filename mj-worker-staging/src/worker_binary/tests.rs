@@ -154,6 +154,16 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
         .run();
         return;
     }
+    let cache = data_dir().join("workers").join("pinned");
+    let source = cache.join("source");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(&source, stamped_worker(b"matching cached worker")).unwrap();
+    WorkerBinarySourceSnapshot::capture(&cache, |_, _| {
+        Ok(WorkerBinaryAvailability::Local {
+            path: source.clone(),
+            source: "test".into(),
+        })
+    });
     // A matching worker in MJ_WORKER_DIR must not replace the named override.
     let error = format!(
         "{:#}",
@@ -1249,7 +1259,7 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
     );
     assert!(
         error.starts_with(
-            "Codex launch preflight failed on local host; provide Node.js 22+ with npm and npx \
+            "Codex launch preflight failed on local host; provide Node.js 22.0.0+ with npm and npx \
              on the target PATH"
         ),
         "{error}"
@@ -2350,6 +2360,139 @@ fn ssh_bare_installs_upload_the_worker_once_per_host_and_link_it_per_session() {
             && line.contains(&destination)));
     }
 }
+// The launch and ownership files reach an SSH container host on the install
+// script's stdin, not in commands of their own or in argv, and the script's
+// first step unpacks them where the later steps copy from.
+#[cfg(unix)]
+#[test]
+fn ssh_container_install_carries_worker_files_on_the_install_script_stdin() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = podman_install_fixture();
+    std::fs::write(&fixture.launch_config, br#"{"launch":"launch-marker-5d1"}"#).unwrap();
+    std::fs::write(&fixture.ownership, br#"{"owner":"ownership-marker-9c2"}"#).unwrap();
+    let executor = SshHostExecutor::default();
+    let session = "fedcba9876543210fedcba9876543210";
+    let root = targets::worker_root(&fixture.locator, session).unwrap();
+    install_worker_files(
+        &executor,
+        &fixture.locator,
+        session,
+        &root,
+        &format!("{root}/profile"),
+        &WorkerInstall::Host(fixture.worker_binary.clone()),
+        &fixture.launch_config,
+        &fixture.ownership,
+        &fixture.profile_stage,
+        None,
+        &[],
+    )
+    .unwrap();
+    let commands = executor.commands.take();
+    let purposes: Vec<_> = commands.iter().map(|c| c.purpose.as_str()).collect();
+    for removed in [
+        "create remote upload staging",
+        "upload remote container worker file",
+    ] {
+        assert!(!purposes.contains(&removed), "{purposes:?}");
+    }
+    let install: Vec<_> = commands
+        .iter()
+        .filter(|command| command.purpose == "install remote container worker")
+        .collect();
+    assert_eq!(install.len(), 1, "{purposes:?}");
+    let install = install[0];
+    for command in &commands {
+        let argv = format!("{} {}", command.program, command.args.join(" "));
+        assert!(
+            !argv.contains("marker-"),
+            "worker file bytes in argv: {argv}"
+        );
+    }
+    let archive = install.sensitive_stdin().expect("worker files on stdin");
+    let files: Vec<_> = tar::Archive::new(archive)
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let mut entry = entry.unwrap();
+            let mode = entry.header().mode().unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            (
+                entry.path().unwrap().to_string_lossy().into_owned(),
+                mode,
+                bytes,
+            )
+        })
+        .collect();
+    assert_eq!(
+        files,
+        [
+            (
+                "launch.json".to_owned(),
+                0o600,
+                std::fs::read(&fixture.launch_config).unwrap()
+            ),
+            (
+                "ownership.json".to_owned(),
+                0o600,
+                std::fs::read(&fixture.ownership).unwrap()
+            ),
+        ]
+    );
+
+    // Run the script as the host's login shell would, against an engine that
+    // records the files it is asked to copy into the container.
+    let home = tempfile::tempdir().unwrap();
+    let shim = home.path().join("shim");
+    std::fs::create_dir(&shim).unwrap();
+    std::fs::write(
+        shim.join("podman"),
+        "#!/bin/sh\nif [ \"$1\" = cp ]; then case \"$2\" in */launch.json|*/ownership.json)\n\
+         cp -- \"$2\" \"$HOME/seen-${2##*/}\"; ls -l \"$2\" | cut -c1-10 > \"$HOME/mode-${2##*/}\";; esac; fi\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(shim.join("podman"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut run = CommandSpec::new("sh", ["-c".into(), install.args.last().unwrap().clone()]);
+    run.cwd = Some(home.path().to_owned());
+    run.env
+        .insert("HOME".into(), home.path().display().to_string());
+    run.env.insert(
+        "PATH".into(),
+        format!("{}:{}", shim.display(), std::env::var("PATH").unwrap()),
+    );
+    let run = run.with_sensitive_stdin(archive.to_vec());
+    let output = mj_core::targets::ProcessExecutor.execute(&run).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (name, original) in [
+        ("launch.json", &fixture.launch_config),
+        ("ownership.json", &fixture.ownership),
+    ] {
+        assert_eq!(
+            std::fs::read(home.path().join(format!("seen-{name}"))).unwrap(),
+            std::fs::read(original).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(format!("mode-{name}")))
+                .unwrap()
+                .trim(),
+            "-rw-------"
+        );
+    }
+    // The staging is gone once the install succeeded.
+    assert!(
+        !home
+            .path()
+            .join(targets::REMOTE_UPLOAD_STAGING)
+            .join(session)
+            .exists()
+    );
+}
+
 // Hard-won: 62a232f: SSH-bare and SSH-container installs duplicated the host worker cache
 #[test]
 fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
@@ -4083,7 +4226,7 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 }
 
 #[test]
-fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_path() {
+fn installing_the_build_cache_places_marked_session_mbx_shims_on_the_session_path() {
     #[derive(Default)]
     struct RecordingExecutor {
         commands: std::sync::Mutex<Vec<String>>,
@@ -4144,9 +4287,7 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
         &executor,
         &locator,
         "/home/hel/.hel/worker",
-        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
-        Some(Path::new("/cache/.mjolnir/config/mbx")),
-        &[],
+        Path::new("/home/hel/.hel/worker/mbx"),
     )
     .unwrap();
 
@@ -4161,22 +4302,20 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     );
     assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        shim.contains(&targets::posix_quote(
-            "exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""
-        )),
-        "both wrappers execute the synchronized cache copy: {shim}"
+        shim.matches("exec '/home/hel/.hel/worker/mbx' \"$@\"")
+            .count()
+            == 2,
+        "both wrappers execute the session's private mbx: {shim}"
     );
     assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
-        commands.iter().any(|line| {
-            line.contains("'exec' '-i' 'hel-session' 'sh' '-c'") && line.contains("config/mbx")
-        }),
-        "the machine mbx configuration is linked into the container: {commands:#?}"
+        commands.iter().all(|line| !line.contains(".mjolnir")),
+        "nothing refers to the shared cache mount: {commands:#?}"
     );
 }
 
 #[test]
-fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
+fn container_mbx_version_must_match_the_staged_copy_before_shim_installation() {
     #[derive(Default)]
     struct VersionExecutor {
         commands: std::sync::Mutex<Vec<String>>,
@@ -4229,7 +4368,7 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     let error = verify_mbx_binary(
         &executor,
         &locator,
-        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
+        Path::new("/var/lib/hel/workers/session/mbx"),
         "1.22.0",
     )
     .unwrap_err();
@@ -4237,8 +4376,7 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     let commands = executor.commands.lock().unwrap();
     assert_eq!(commands.len(), 1);
     assert!(
-        commands[0]
-            .contains("podman exec hel-session /mnt/fast/mbx-cache/.mjolnir/bin/mbx --version")
+        commands[0].contains("podman exec hel-session /var/lib/hel/workers/session/mbx --version")
     );
 }
 /// A Codex profile whose `auth.json` records this `auth_mode`, and whose own
@@ -4504,6 +4642,67 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
     .unwrap()
     .0;
     assert_eq!(launch.environment["IS_SANDBOX"], "1");
+}
+
+#[test]
+fn a_cached_container_launch_pins_the_recorded_target_root_and_container_policy() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(session_id).unwrap();
+    let docker = mj_core::config::TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
+            build_cache: None,
+            image: mj_core::config::DEFAULT_SESSION_IMAGE.to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    // The root lies in the cache directory, so nothing extra is mounted, yet
+    // the container still names it.
+    for target_root in ["/srv/cache/views", "/mnt/slow/targets"] {
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(session_id);
+        session.project_directory = None;
+        session.container_workspace = Some(workspace.clone());
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "local".into(),
+            directory: "/srv/cache".into(),
+            max_size: None,
+            target_root: Some(target_root.into()),
+        });
+        let launch = worker_launch_config(
+            &session,
+            &profile,
+            Some(&crate::database::test_fixtures::local_bundle(Path::new(
+                "/src/project",
+            ))),
+            &targets::TargetLocator::LocalDocker {
+                container_id: targets::resource_name(session_id).unwrap(),
+                borrowed_from: None,
+            },
+            LaunchWorkspace {
+                session_id,
+                container: Some(&workspace),
+                parent_worktree: None,
+                owner: None,
+                working_directories: &[],
+            },
+            &mj_core::state::TargetRuntimeSettings::from(&docker),
+            &mj_core::config::Config::default(),
+        )
+        .unwrap()
+        .0;
+        let environment = &launch.target_environment;
+        assert_eq!(environment["MBX_TARGET_ROOT"], target_root);
+        assert_eq!(environment["MBX_CACHE_DIR"], "/srv/cache");
+        // One container-scoped snapshot, never a worker directory's.
+        assert_eq!(environment["MJ_MBX_CONFIG_DIR"], "/var/lib/hel/mbx-config");
+    }
 }
 
 #[test]
@@ -5326,6 +5525,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -5395,7 +5595,6 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
             "create managed harness preparation staging",
             "remove stale private worker staging",
             "link shared Mjolnir worker into session",
-            "collect unused Mjolnir worker binaries",
             "stage managed harness launch configuration",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
@@ -5501,6 +5700,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -6730,4 +6930,629 @@ fn session_state_instructions_are_appended_once_for_every_harness() {
         );
         assert!(actual.contains(text), "{harness:?}");
     }
+}
+
+#[test]
+fn worker_url_override_precedes_build_pin_and_validates_checksum() {
+    const CASE: &str = "MJ_TEST_WORKER_URL_BUILD_PIN";
+    let Ok(case) = std::env::var(CASE) else {
+        for case in ["valid", "missing", "malformed"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut test = IsolatedTest::new(test_name(
+                module_path!(),
+                "worker_url_override_precedes_build_pin_and_validates_checksum",
+            ))
+            .isolated_store(directory.path())
+            .env(CASE, case)
+            .env_remove("MJ_WORKER_BINARY")
+            .env_remove("MJ_WORKER_DIR")
+            .env("MJ_WORKER_URL", "https://example.invalid/{target}")
+            .env_remove("MJ_WORKER_SHA256");
+            if case != "missing" {
+                test = test.env(
+                    "MJ_WORKER_SHA256",
+                    if case == "valid" {
+                        "a".repeat(64)
+                    } else {
+                        "invalid".into()
+                    },
+                );
+            }
+            test.run();
+        }
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let source = directory.path().join("source");
+    std::fs::write(&source, stamped_worker(b"cached worker")).unwrap();
+    WorkerBinarySourceSnapshot::capture(&cache, |_, _| {
+        Ok(WorkerBinaryAvailability::Local {
+            path: source.clone(),
+            source: "installed".into(),
+        })
+    });
+    let result = super::binary_source::worker_binary_prerequisite_with_cache(
+        "x86_64",
+        WorkerBinaryRequirement::PortableLinux,
+        &directory.path().join("missing-controller"),
+        &|p| p.is_file(),
+        &verify_worker_build,
+        Some(&cache),
+    );
+    match case.as_str() {
+        "valid" => assert!(
+            matches!(result.unwrap(), WorkerBinaryAvailability::Remote { sha256, .. } if sha256 == "a".repeat(64))
+        ),
+        "missing" => assert!(
+            format!("{:#}", result.unwrap_err())
+                .contains("MJ_WORKER_URL requires MJ_WORKER_SHA256")
+        ),
+        "malformed" => assert!(result.is_err()),
+        _ => panic!("unknown test case"),
+    }
+}
+
+/// Records every command with its input, and answers `--version` as the
+/// container would.
+struct MbxStagingRecorder {
+    commands: std::sync::Mutex<Vec<CommandSpec>>,
+    container_version: &'static str,
+}
+
+impl MbxStagingRecorder {
+    fn new(container_version: &'static str) -> Self {
+        Self {
+            commands: Default::default(),
+            container_version,
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+            .collect()
+    }
+}
+
+impl CommandExecutor for MbxStagingRecorder {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        _input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.lock().unwrap().push(command.clone());
+        let line = format!("{} {}", command.program, command.args.join(" "));
+        let stdout = if line.contains("--version") {
+            format!("mbx {}", self.container_version).into_bytes()
+        } else {
+            Vec::new()
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout,
+            stderr: Vec::new(),
+        })
+    }
+}
+
+const SESSION_WORKER_ROOT: &str = "/var/lib/hel/workers/0123456789abcdef0123456789abcdef";
+
+fn ssh_podman_locator() -> targets::TargetLocator {
+    targets::TargetLocator::SshPodman {
+        ssh: SshTarget {
+            destination: "builder@container-host.test".into(),
+            ssh_args: Vec::new(),
+        },
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        borrowed_from: None,
+    }
+}
+
+#[test]
+fn a_local_container_mbx_is_copied_checked_and_only_then_published() {
+    let executor = MbxStagingRecorder::new("1.30.0");
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+
+    let installed = stage_container_mbx(
+        &executor,
+        &locator,
+        SESSION_WORKER_ROOT,
+        Path::new("/home/dev/.local/bin/mbx"),
+        "1.30.0",
+    )
+    .unwrap();
+
+    assert_eq!(installed, Path::new(SESSION_WORKER_ROOT).join("mbx"));
+    let lines = executor.lines();
+    let staged = lines[0]
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .strip_prefix("hel-session:")
+        .unwrap()
+        .to_owned();
+    assert!(
+        staged.starts_with(&format!("{SESSION_WORKER_ROOT}/.mbx.mj-mbx-")),
+        "{staged}"
+    );
+    assert!(
+        lines[0].starts_with("podman cp /home/dev/.local/bin/mbx "),
+        "{lines:#?}"
+    );
+    assert!(lines[1].contains("chown"), "{lines:#?}");
+    assert!(
+        lines[2].ends_with(&format!("chmod 755 {staged}")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[3].ends_with(&format!("hel-session {staged} --version")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[4].ends_with(&format!(
+            "mv -f -- {staged} {installed}",
+            installed = installed.display()
+        )),
+        "the executable is verified before it takes the stable path: {lines:#?}"
+    );
+    assert_eq!(lines.len(), 5, "{lines:#?}");
+}
+
+#[test]
+fn a_container_mbx_that_reports_another_version_never_replaces_the_stable_path() {
+    let executor = MbxStagingRecorder::new("1.29.0");
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+
+    let error = stage_container_mbx(
+        &executor,
+        &locator,
+        SESSION_WORKER_ROOT,
+        Path::new("/home/dev/.local/bin/mbx"),
+        "1.30.0",
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("container reports mbx 1.29.0"),
+        "{error:#}"
+    );
+    let lines = executor.lines();
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("'mv'") && !line.contains(" mv ")),
+        "{lines:#?}"
+    );
+    let last = lines.last().unwrap();
+    assert!(
+        last.contains("rm") && last.contains(".mbx.mj-mbx-"),
+        "the failed staging file is removed: {lines:#?}"
+    );
+    assert!(!last.contains("/home/dev/.local/bin/mbx"), "{last}");
+}
+
+#[test]
+fn reload_candidate_install_and_cleanup_leave_live_files_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("test-session");
+    let home = dir.path().join("home");
+    let stage = dir.path().join("stage");
+    for path in [&root, &home, &stage] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for name in ["launch.json", "ownership.json"] {
+        std::fs::write(root.join(name), "live").unwrap();
+    }
+    std::fs::write(home.join("config.toml"), "live profile").unwrap();
+    std::fs::write(stage.join("config.toml"), "candidate profile").unwrap();
+    let launch = dir.path().join("launch.json");
+    let manifest = dir.path().join("manifest.json");
+    std::fs::write(&launch, "candidate").unwrap();
+    std::fs::write(&manifest, "manifest").unwrap();
+    let root_text = root.to_str().unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.into(),
+    };
+    install_reload_candidate(
+        &ProcessExecutor,
+        &locator,
+        "test-session",
+        root_text,
+        "candidate",
+        &manifest,
+        StagedWorkerProfile {
+            launch: &launch,
+            ownership: &launch,
+            profile: &stage,
+            shared_login: None,
+            shared_paths: &[],
+        },
+    )
+    .unwrap();
+    let candidate = root.join("reload-candidates/candidate");
+    for name in [
+        "launch.json",
+        "ownership.json",
+        "manifest.json",
+        "profile/config.toml",
+    ] {
+        assert!(candidate.join(name).is_file(), "{name}");
+    }
+    for name in ["launch.json", "ownership.json"] {
+        assert_eq!(std::fs::read(root.join(name)).unwrap(), b"live");
+    }
+    assert_eq!(
+        std::fs::read(home.join("config.toml")).unwrap(),
+        b"live profile"
+    );
+    for unsafe_id in ["..", "/", "", "../worker", "a/b", "a\\b"] {
+        assert!(remove_reload_candidate(&ProcessExecutor, &locator, root_text, unsafe_id).is_err());
+    }
+    remove_reload_candidate(&ProcessExecutor, &locator, root_text, "candidate").unwrap();
+    assert!(!candidate.exists());
+    assert_eq!(std::fs::read(root.join("launch.json")).unwrap(), b"live");
+}
+
+/// An SSH container host that is a directory on this machine. Its `ssh`
+/// commands run their remote line in a real shell, and its `podman` is a
+/// script that treats this machine as the container, with `/var/lib/hel`
+/// standing at `hel`. Every `podman` call is logged.
+#[cfg(target_os = "linux")]
+struct SshContainerHost {
+    _root: tempfile::TempDir,
+    hel: PathBuf,
+    home: PathBuf,
+    worker_root: PathBuf,
+    reviewer_config_root: PathBuf,
+    host_mbx: PathBuf,
+    log: PathBuf,
+    path: String,
+    commands: std::sync::Mutex<Vec<CommandSpec>>,
+}
+
+#[cfg(target_os = "linux")]
+const FAKE_PODMAN: &str = r#"#!/bin/sh
+nl='
+'
+line=podman
+for a; do
+    case "$a" in *"$nl"*) a='<script>' ;; esac
+    line="$line $a"
+done
+printf '%s\n' "${line# }" | sed 's/^podman //' >> "$FAKE_LOG"
+n=$#
+while [ "$n" -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in /var/lib/hel/*) a=$FAKE_HEL/${a#/var/lib/hel/} ;; esac
+    set -- "$@" "$a"
+    n=$((n - 1))
+done
+verb=$1
+shift
+case "$verb" in
+    cp) exec cp -- "$1" "${2#*:}" ;;
+    exec)
+        while :; do
+            case "$1" in
+                -i) shift ;;
+                --user) shift 2 ;;
+                *) break ;;
+            esac
+        done
+        shift
+        HOME=$FAKE_HOME exec "$@"
+        ;;
+    *) echo "fake podman: unexpected $verb" >&2; exit 97 ;;
+esac
+"#;
+
+#[cfg(target_os = "linux")]
+impl SshContainerHost {
+    fn new(mbx_version: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let write_script = |path: &Path, body: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let fake_bin = root.path().join("fake-bin");
+        write_script(&fake_bin.join("podman"), FAKE_PODMAN);
+        let host_mbx = root.path().join("host/bin/mbx");
+        write_script(&host_mbx, &format!("#!/bin/sh\necho 'mbx {mbx_version}'\n"));
+        let worker_root = root
+            .path()
+            .join("hel/workers/0123456789abcdef0123456789abcdef");
+        std::fs::create_dir_all(worker_root.join("bin")).unwrap();
+        std::fs::create_dir_all(root.path().join("home")).unwrap();
+        Self {
+            hel: root.path().join("hel"),
+            home: root.path().join("home"),
+            reviewer_config_root: root.path().join("reviewer-xdg"),
+            log: root.path().join("podman.log"),
+            path: format!("{}:/usr/bin:/bin", fake_bin.display()),
+            worker_root,
+            host_mbx,
+            _root: root,
+            commands: Default::default(),
+        }
+    }
+
+    fn stage(
+        &self,
+        configuration: &str,
+        host_mbx: Option<(&str, &str)>,
+    ) -> Result<SshContainerMbx> {
+        stage_ssh_container_mbx(
+            self,
+            &ssh_podman_locator(),
+            &self.worker_root.to_string_lossy(),
+            configuration,
+            std::slice::from_ref(&self.reviewer_config_root),
+            host_mbx.map(|(program, version)| HostMbx {
+                program: if program.is_empty() {
+                    &self.host_mbx
+                } else {
+                    Path::new(program)
+                },
+                version,
+            }),
+        )
+    }
+
+    fn podman_calls(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn staging_files(&self) -> Vec<String> {
+        std::fs::read_dir(&self.worker_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".mbx.mj-"))
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl CommandExecutor for SshContainerHost {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        false
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        _input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.lock().unwrap().push(command.clone());
+        assert_eq!(command.program, "ssh", "{command:?}");
+        let mut shell = CommandSpec::new("/bin/sh", ["-c", command.args.last().unwrap().as_str()]);
+        shell.clear_env = true;
+        for (name, value) in [
+            ("PATH", self.path.as_str()),
+            ("HOME", &self.home.to_string_lossy()),
+            ("FAKE_HOME", &self.home.to_string_lossy()),
+            ("FAKE_HEL", &self.hel.to_string_lossy()),
+            ("FAKE_LOG", &self.log.to_string_lossy()),
+        ] {
+            shell.env.insert(name.into(), value.into());
+        }
+        if let Some(input) = command.sensitive_stdin() {
+            shell = shell.with_sensitive_stdin(input.to_vec());
+        }
+        targets::ProcessExecutor.execute(&shell)
+    }
+}
+
+#[cfg(target_os = "linux")]
+const MBX_POLICY: &str = "# secret-policy-marker\n[gc]\nmax_total_size = '50GB'\n\n";
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_ssh_container_stages_its_policy_and_mbx_in_one_host_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = SshContainerHost::new("1.30.0");
+    let installed = host.stage(MBX_POLICY, Some(("", "1.30.0"))).unwrap();
+
+    let published = host.worker_root.join("mbx");
+    assert_eq!(installed, SshContainerMbx::Installed(published.clone()));
+    // One round trip, and the policy rode its stdin rather than its arguments.
+    let commands = host.commands.lock().unwrap();
+    assert_eq!(commands.len(), 1, "{commands:#?}");
+    assert_eq!(commands[0].sensitive_stdin(), Some(MBX_POLICY.as_bytes()));
+    assert!(
+        commands[0]
+            .args
+            .iter()
+            .all(|argument| !argument.contains("secret-policy-marker")),
+        "{:?}",
+        commands[0].args
+    );
+    drop(commands);
+
+    let snapshot = host.hel.join("mbx-config/config.toml");
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), MBX_POLICY);
+    assert_eq!(
+        std::fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    for link in [
+        host.home.join(".config/mbx/config.toml"),
+        host.reviewer_config_root.join("mbx/config.toml"),
+    ] {
+        assert_eq!(std::fs::read_link(&link).unwrap(), snapshot);
+    }
+    assert_eq!(
+        std::fs::metadata(&published).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    for name in ["cargo", "mbx"] {
+        let launcher = std::fs::read_to_string(host.worker_root.join("bin").join(name)).unwrap();
+        assert!(launcher.contains("# mjolnir-mbx-shim"), "{launcher}");
+        assert!(
+            launcher.contains(&format!("exec '{}' \"$@\"", published.display())),
+            "{launcher}"
+        );
+    }
+    assert!(
+        host.staging_files().is_empty(),
+        "{:?}",
+        host.staging_files()
+    );
+    // The executable is copied, checked, and only then published.
+    let calls = host.podman_calls();
+    let position = |needle: &str| {
+        calls
+            .iter()
+            .position(|call| call.contains(needle))
+            .unwrap_or_else(|| panic!("no podman call with {needle:?}: {calls:#?}"))
+    };
+    assert!(position("cp ") < position("--version"), "{calls:#?}");
+    assert!(position("--version") < position("mv -f --"), "{calls:#?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_legacy_private_mbx_keeps_its_executable_and_only_gets_the_policy_link() {
+    let host = SshContainerHost::new("1.30.0");
+    let legacy = host.worker_root.join("bin/mbx");
+    std::fs::write(&legacy, "legacy copied mbx executable").unwrap();
+
+    let result = host.stage(MBX_POLICY, Some(("", "1.30.0"))).unwrap();
+
+    assert_eq!(result, SshContainerMbx::Legacy);
+    assert_eq!(
+        std::fs::read(&legacy).unwrap(),
+        b"legacy copied mbx executable"
+    );
+    assert!(!host.worker_root.join("mbx").exists());
+    let snapshot = host.hel.join("mbx-config/config.toml");
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), MBX_POLICY);
+    assert_eq!(
+        std::fs::read_link(host.home.join(".config/mbx/config.toml")).unwrap(),
+        snapshot
+    );
+    assert!(
+        host.podman_calls()
+            .iter()
+            .all(|call| !call.starts_with("cp ")),
+        "no executable was copied: {:#?}",
+        host.podman_calls()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_host_without_mbx_still_stages_the_policy_and_reports_it_missing() {
+    let host = SshContainerHost::new("1.30.0");
+
+    let result = host.stage(MBX_POLICY, None).unwrap();
+
+    assert_eq!(result, SshContainerMbx::HostMbxUnavailable);
+    assert_eq!(
+        std::fs::read_to_string(host.hel.join("mbx-config/config.toml")).unwrap(),
+        MBX_POLICY
+    );
+    assert!(!host.worker_root.join("mbx").exists());
+    assert!(
+        host.podman_calls()
+            .iter()
+            .all(|call| !call.starts_with("cp "))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_staged_mbx_of_another_version_fails_visibly_and_leaves_no_file_behind() {
+    let host = SshContainerHost::new("1.30.0");
+
+    let error = host.stage(MBX_POLICY, Some(("", "1.31.0"))).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("verify the staged mbx inside the session container failed"),
+        "{message}"
+    );
+    assert!(
+        message.contains("the container reports mbx 1.30.0, but the staged binary is mbx 1.31.0"),
+        "{message}"
+    );
+    assert!(!host.worker_root.join("mbx").exists(), "never published");
+    assert!(
+        host.staging_files().is_empty(),
+        "the staging file was removed: {:?}",
+        host.staging_files()
+    );
+    assert!(!host.worker_root.join("bin/cargo").exists(), "no launchers");
+    assert!(
+        host.podman_calls()
+            .iter()
+            .all(|call| !call.contains("mv -f --"))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_copy_names_its_step_and_the_hosts_own_executable_is_untouched() {
+    let host = SshContainerHost::new("1.30.0");
+
+    let error = host
+        .stage(MBX_POLICY, Some(("/nonexistent/host/mbx", "1.30.0")))
+        .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("copy the host mbx into the session container failed"),
+        "{message}"
+    );
+    assert!(host.staging_files().is_empty());
+    assert!(host.host_mbx.exists());
 }

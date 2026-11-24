@@ -28,6 +28,32 @@ static HOMES: LazyLock<Mutex<BTreeMap<String, (Instant, PathBuf)>>> =
 
 /// `$0` for the shell that prints a remote home.
 const HOME_LABEL: &str = "hel-home";
+const HOME_SCRIPT: &str = r#"printf '%s' "$HOME""#;
+const HOME_PURPOSE: &str = "resolve remote home directory";
+
+fn parse_home_output(output: &targets::CommandOutput) -> Result<PathBuf> {
+    ensure!(
+        output.status == 0,
+        "Could not resolve remote home: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let home =
+        String::from_utf8(output.stdout.clone()).context("Remote home is not valid UTF-8")?;
+    ensure!(!home.is_empty(), "Remote home is empty");
+    let home = PathBuf::from(home);
+    ensure!(
+        mj_core::target_path::is_absolute(&home),
+        "Remote home is not absolute"
+    );
+    Ok(home)
+}
+
+fn remember_home(key: String, home: &Path) {
+    HOMES
+        .lock()
+        .expect("resolved homes")
+        .insert(key, (Instant::now(), home.to_path_buf()));
+}
 
 #[derive(Debug, Clone)]
 pub enum CacheHost {
@@ -66,31 +92,35 @@ pub enum HostPlatform {
     Windows,
 }
 
+/// What the platform probe is called in a failure.
+pub(crate) const PLATFORM_PURPOSE: &str = "detect build cache host platform";
+
+/// Read the answer to `uname -sm`, however the probe was run: on its own or
+/// framed in a batch with other probes.
+pub(crate) fn parse_platform_output(output: &targets::CommandOutput) -> Result<HostPlatform> {
+    ensure!(
+        output.status == 0,
+        "{PLATFORM_PURPOSE} failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let platform = targets::TargetPlatform::parse(
+        std::str::from_utf8(&output.stdout).context("decode build cache host platform")?,
+    )?;
+    Ok(match platform.os {
+        targets::TargetOs::Linux => HostPlatform::Linux,
+        targets::TargetOs::Darwin => HostPlatform::Darwin,
+    })
+}
+
 impl CacheHost {
     /// Ask the host itself, not the controller or a container on that host.
     pub fn platform(&self, executor: &impl CommandExecutor) -> Result<HostPlatform> {
         if self.ssh().is_none() && !cfg!(unix) {
             return Ok(HostPlatform::Windows);
         }
-        let command = self.command(
-            vec!["uname".into(), "-sm".into()],
-            "detect build cache host platform",
-        );
-        let output = executor.execute(&command)?;
-        ensure!(
-            output.status == 0,
-            "{} failed with status {}: {}",
-            command.purpose,
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let platform = targets::TargetPlatform::parse(
-            std::str::from_utf8(&output.stdout).context("decode build cache host platform")?,
-        )?;
-        Ok(match platform.os {
-            targets::TargetOs::Linux => HostPlatform::Linux,
-            targets::TargetOs::Darwin => HostPlatform::Darwin,
-        })
+        let command = self.command(vec!["uname".into(), "-sm".into()], PLATFORM_PURPOSE);
+        parse_platform_output(&executor.execute(&command)?)
     }
 
     pub fn for_target(target: &targets::TargetTemplate) -> Option<Self> {
@@ -177,30 +207,52 @@ impl CacheHost {
         {
             return Ok(home.clone());
         }
+        let command = self.shell_command(HOME_SCRIPT, HOME_LABEL, [], HOME_PURPOSE);
+        let home = parse_home_output(&executor.execute(&command)?)?;
+        remember_home(key, &home);
+        Ok(home)
+    }
+
+    /// The platform and the login home, which an SSH host answers in one round
+    /// trip. The home is reported separately so a caller that has no use for it
+    /// on this platform is not failed by it; a local host runs no command for
+    /// either.
+    pub fn platform_and_home(
+        &self,
+        executor: &impl CommandExecutor,
+    ) -> Result<(HostPlatform, Result<PathBuf>)> {
+        let Self::Ssh(_) = self else {
+            return Ok((self.platform(executor)?, self.home(executor)));
+        };
+        let script = format!(
+            "{}probe platform uname -sm || exit 0\nprobe home sh -c \"$1\" {HOME_LABEL}\nexit 0\n",
+            targets::PROBE_HELPER_SH
+        );
         let command = self.shell_command(
-            r#"printf '%s' "$HOME""#,
-            HOME_LABEL,
-            [],
-            "resolve remote home directory",
+            &script,
+            "hel-platform-home",
+            [HOME_SCRIPT.to_owned()],
+            "detect build cache host platform and home",
         );
         let output = executor.execute(&command)?;
-        ensure!(
-            output.status == 0,
-            "Could not resolve remote home: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let home = String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
-        ensure!(!home.is_empty(), "Remote home is empty");
-        let home = PathBuf::from(home);
-        ensure!(
-            mj_core::target_path::is_absolute(&home),
-            "Remote home is not absolute"
-        );
-        HOMES
-            .lock()
-            .expect("resolved homes")
-            .insert(key, (Instant::now(), home.clone()));
-        Ok(home)
+        let probes = targets::parse_framed_probes(&output.stdout, targets::DEFAULT_PROBE_FRAMES);
+        let platform = probes.get("platform").with_context(|| {
+            format!(
+                "{} failed with status {}: {}",
+                command.purpose,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+        let platform = parse_platform_output(platform)?;
+        let home = probes
+            .get("home")
+            .context("the host did not report its home")
+            .and_then(parse_home_output);
+        if let Ok(home) = &home {
+            remember_home(self.key(), home);
+        }
+        Ok((platform, home))
     }
 
     /// The SSH connection to this host, or `None` when it is this machine.

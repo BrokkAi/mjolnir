@@ -350,25 +350,9 @@ fn archive_round_trip_verifies_multi_repo_payloads_and_mode() {
     assert_eq!(verified.canonical_session, input().canonical_session);
     assert_eq!(verified.manifest.schema_version, ARCHIVE_SCHEMA_VERSION);
     assert_eq!(verified.archive_sha256.len(), 64);
-    let repository_bundles = verify_repository_bundles_streaming(&path).unwrap();
-    assert_eq!(repository_bundles.archive_sha256, verified.archive_sha256);
     assert_eq!(
         read_checkpoint_repository_bundles(&path)
             .unwrap()
-            .iter()
-            .map(|repository| (
-                repository.metadata.id.as_str(),
-                repository.committed_bundle.as_slice(),
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            ("hel", b"bundle-hel".as_slice()),
-            ("worker", b"bundle-worker".as_slice()),
-        ]
-    );
-    assert_eq!(
-        repository_bundles
-            .repositories
             .iter()
             .map(|repository| (
                 repository.metadata.id.as_str(),
@@ -3194,6 +3178,331 @@ fn a_session_diff_from_a_subdirectory_covers_the_checkout_without_writing_object
     }
     assert_eq!(object_files(root), before);
     assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+}
+
+#[test]
+fn a_session_patch_keeps_every_byte_and_applies_to_the_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("work");
+    initialize_repository(&root);
+    // Bytes that are not UTF-8, in text Git diffs line by line.
+    commit_file(&root, "latin.txt", b"caf\xe9\nkeep\n", "text");
+    commit_file(&root, "both.txt", b"one\ntwo\nthree\n", "both");
+    commit_file(&root, "blob.bin", &[0, 1, 2, 3, 255], "binary");
+    let base = git_line(&root, &["rev-parse", "HEAD"]);
+
+    fs::write(root.join("latin.txt"), b"caf\xe9 \xff au lait\nkeep\n").unwrap();
+    fs::write(root.join("blob.bin"), [0, 9, 8, 7, 254, 253]).unwrap();
+    // One path edited twice: the first edit is staged, the second is not.
+    fs::write(root.join("both.txt"), b"ONE\ntwo\nthree\n").unwrap();
+    git(&root, &["add", "both.txt"]);
+    fs::write(root.join("both.txt"), b"ONE\ntwo\nTHREE\n").unwrap();
+
+    let patch = session_diff_patch_bytes(&SystemGit, &root, Some(&base), None).unwrap();
+    assert!(String::from_utf8(patch.clone()).is_err());
+    assert!(
+        patch
+            .windows(b"caf\xe9 \xff au lait".len())
+            .any(|window| window == b"caf\xe9 \xff au lait")
+    );
+    assert!(String::from_utf8_lossy(&patch).contains("GIT binary patch"));
+
+    let fresh = temp.path().join("fresh");
+    git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            root.to_str().unwrap(),
+            fresh.to_str().unwrap(),
+        ],
+    );
+    git(&fresh, &["checkout", "-q", &base]);
+    let patch_file = temp.path().join("work.patch");
+    fs::write(&patch_file, &patch).unwrap();
+    git(&fresh, &["apply", "--binary", patch_file.to_str().unwrap()]);
+    for name in ["latin.txt", "both.txt", "blob.bin"] {
+        assert_eq!(
+            fs::read(fresh.join(name)).unwrap(),
+            fs::read(root.join(name)).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn copying_a_large_payload_stops_when_cancelled() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.hel.zip");
+    let mut archive_input = input();
+    // More than one 64KB buffer, so cancellation lands mid-copy.
+    archive_input.repositories[0].committed_bundle = vec![7; 300_000];
+    let verified = write_archive_atomic(&path, &archive_input).unwrap();
+    let descriptor = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| payload.size == 300_000)
+        .expect("the large payload")
+        .clone();
+
+    let writes = std::cell::Cell::new(0_usize);
+    struct Counting<'a>(&'a std::cell::Cell<usize>);
+    impl Write for Counting<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.set(self.0.get() + 1);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let error = CheckpointPayloadReader::open(&path)
+        .unwrap()
+        .copy_payload_unless(&descriptor, &mut Counting(&writes), &|| writes.get() >= 2)
+        .unwrap_err();
+    assert!(archive_verification_cancelled(&error), "{error:#}");
+    assert_eq!(
+        writes.get(),
+        2,
+        "the copy stopped at the first probe that said so"
+    );
+
+    CheckpointPayloadReader::open(&path)
+        .unwrap()
+        .copy_payload_unless(&descriptor, &mut std::io::sink(), &|| false)
+        .unwrap();
+}
+
+#[test]
+fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    git(
+        temp.path(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let work = clone_repository(temp.path(), &origin, "work");
+    commit_file(&work, "tracked.txt", b"base\n", "base");
+    git(&work, &["push", "-q", "-u", "origin", "main"]);
+    let base = git_line(&work, &["rev-parse", "HEAD"]);
+
+    // One commit already pushed to origin, one that is not, a stash and a
+    // dirty file: only the commits belong in a bundle.
+    commit_file(&work, "pushed.txt", b"pushed\n", "pushed");
+    git(&work, &["push", "-q", "origin", "main"]);
+    let pushed = git_line(&work, &["rev-parse", "HEAD"]);
+    git(&work, &["checkout", "-q", "-b", "feature"]);
+    commit_file(&work, "local.txt", b"local\n", "local");
+    let head = git_line(&work, &["rev-parse", "HEAD"]);
+    git(&work, &["tag", "session-tag"]);
+    fs::write(work.join("tracked.txt"), b"stashed edit\n").unwrap();
+    git(&work, &["stash", "push", "-q"]);
+    let stash = git_line(&work, &["rev-parse", "refs/stash"]);
+    fs::write(work.join("tracked.txt"), b"dirty edit\n").unwrap();
+
+    let assert_bundle_fetches = |bytes: &[u8], prerequisite: &str, expected_new: &[&str]| {
+        let bundle = temp.path().join("session.bundle");
+        fs::write(&bundle, bytes).unwrap();
+        assert!(bytes.starts_with(b"# v"), "a native Git bundle header");
+        // The bundle assumes the base and nothing newer, so what the base
+        // already holds is not carried.
+        let header = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).into_owned();
+        assert!(header.contains(&format!("\n-{prerequisite}")), "{header}");
+        let fresh = temp.path().join("fresh");
+        let _ = fs::remove_dir_all(&fresh);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                fresh.to_str().unwrap(),
+            ],
+        );
+        git(&fresh, &["bundle", "verify", bundle.to_str().unwrap()]);
+        git(
+            &fresh,
+            &[
+                "fetch",
+                "-q",
+                bundle.to_str().unwrap(),
+                "refs/heads/feature:refs/heads/imported",
+                "refs/tags/session-tag:refs/tags/session-tag",
+            ],
+        );
+        assert_eq!(git_line(&fresh, &["rev-parse", "imported"]), head);
+        for commit in expected_new {
+            git(&fresh, &["cat-file", "-e", &format!("{commit}^{{commit}}")]);
+        }
+        let heads = git_line(&fresh, &["bundle", "list-heads", bundle.to_str().unwrap()]);
+        assert!(!heads.contains("refs/stash"), "{heads}");
+        let missing_stash = std::process::Command::new("git")
+            .current_dir(&fresh)
+            .args(["cat-file", "-e", &stash])
+            .status()
+            .unwrap();
+        assert!(!missing_stash.success(), "the stash commit is not bundled");
+    };
+
+    // A launch base bundles everything beyond it, including what was pushed.
+    let bytes = session_bundle_bytes(&SystemGit, &work, Some(&base), None, false, None).unwrap();
+    assert_bundle_fetches(&bytes, &base, &[&pushed, &head]);
+
+    // With no base, origin's own commits are left out.
+    let bytes = session_bundle_bytes(&SystemGit, &work, None, None, true, None).unwrap();
+    assert_bundle_fetches(&bytes, &pushed, &[&head]);
+    let fresh = temp.path().join("fresh");
+    assert_eq!(
+        git_line(&fresh, &["rev-list", "--count", "imported", "^origin/main"]),
+        "1"
+    );
+
+    // Selected refs bundle exactly those, and not the tag the seed gained.
+    let selected = ["refs/heads/feature".to_owned()];
+    let bytes =
+        session_bundle_bytes(&SystemGit, &work, Some(&base), None, false, Some(&selected)).unwrap();
+    let listing = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).into_owned();
+    assert!(listing.contains("refs/heads/feature"), "{listing}");
+    assert!(!listing.contains("refs/tags/session-tag"), "{listing}");
+    assert!(!listing.contains("refs/heads/main"), "{listing}");
+    let not_a_ref = ["--all".to_owned()];
+    assert!(
+        session_bundle_bytes(
+            &SystemGit,
+            &work,
+            Some(&base),
+            None,
+            false,
+            Some(&not_a_ref)
+        )
+        .is_err()
+    );
+
+    // No base and no fallback is not a guess.
+    let error = session_bundle_bytes(&SystemGit, &work, None, None, false, None).unwrap_err();
+    assert!(matches!(error, SessionExportError::Refused(_)), "{error}");
+
+    // Nothing beyond the base: a refusal that names the patch export.
+    git(&work, &["checkout", "-q", "main"]);
+    git(&work, &["reset", "-q", "--hard", &base]);
+    git(&work, &["branch", "-q", "-D", "feature"]);
+    git(&work, &["tag", "-d", "session-tag"]);
+    git(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let SessionExportError::Refused(reason) =
+        session_bundle_bytes(&SystemGit, &work, Some(&base), None, false, None).unwrap_err()
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        reason.contains("no commits beyond the session base"),
+        "{reason}"
+    );
+    assert!(reason.contains("mj export --kind patch"), "{reason}");
+    git(&work, &["fetch", "-q", "origin"]);
+    let SessionExportError::Refused(reason) =
+        session_bundle_bytes(&SystemGit, &work, None, None, true, None).unwrap_err()
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(reason.contains("no commits beyond origin"), "{reason}");
+    assert!(reason.contains("mj export --kind patch"), "{reason}");
+}
+
+#[test]
+fn a_linked_worktrees_bundle_holds_only_its_own_head_not_its_siblings_refs() {
+    let temp = tempfile::tempdir().unwrap();
+    let main = temp.path().join("main");
+    initialize_repository(&main);
+    commit_file(&main, "tracked.txt", b"base\n", "base");
+    let base = git_line(&main, &["rev-parse", "HEAD"]);
+    // A sibling's branch and tag, with a commit of their own.
+    git(&main, &["checkout", "-q", "-b", "other"]);
+    commit_file(&main, "other.txt", b"other\n", "other");
+    let other = git_line(&main, &["rev-parse", "HEAD"]);
+    git(&main, &["tag", "sibling-tag"]);
+    git(&main, &["checkout", "-q", "main"]);
+    let worktree = temp.path().join("worktree");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "session",
+            worktree.to_str().unwrap(),
+            &base,
+        ],
+    );
+
+    // Nothing of the worktree's own beyond the base: the sibling's commits are
+    // not its work.
+    let SessionExportError::Refused(reason) =
+        session_bundle_bytes(&SystemGit, &worktree, Some(&base), None, false, None).unwrap_err()
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        reason.contains("no commits beyond the session base"),
+        "{reason}"
+    );
+
+    git(&worktree, &["config", "user.name", "Hel Test"]);
+    git(&worktree, &["config", "user.email", "hel@example.test"]);
+    commit_file(&worktree, "session.txt", b"session\n", "session");
+    let head = git_line(&worktree, &["rev-parse", "HEAD"]);
+    let bytes =
+        session_bundle_bytes(&SystemGit, &worktree, Some(&base), None, false, None).unwrap();
+    let bundle = temp.path().join("session.bundle");
+    fs::write(&bundle, &bytes).unwrap();
+    let heads = git_line(&main, &["bundle", "list-heads", bundle.to_str().unwrap()]);
+    assert!(heads.contains(&head), "{heads}");
+    assert!(heads.contains("refs/heads/session"), "{heads}");
+    assert!(!heads.contains("refs/heads/other"), "{heads}");
+    assert!(!heads.contains("refs/heads/main"), "{heads}");
+    assert!(!heads.contains("sibling-tag"), "{heads}");
+    assert!(!heads.contains(&other), "{heads}");
+    // Applied to a repository that holds only the base, the bundle brings
+    // the worktree's commit and nothing of the sibling's.
+    git(&main, &["bundle", "verify", bundle.to_str().unwrap()]);
+    let unbundled = temp.path().join("unbundled");
+    initialize_repository(&unbundled);
+    git(
+        &unbundled,
+        &[
+            "fetch",
+            "-q",
+            main.to_str().unwrap(),
+            "refs/heads/main:refs/heads/seed",
+        ],
+    );
+    git(
+        &unbundled,
+        &[
+            "fetch",
+            "-q",
+            bundle.to_str().unwrap(),
+            "HEAD:refs/heads/imported",
+        ],
+    );
+    assert_eq!(git_line(&unbundled, &["rev-parse", "imported"]), head);
+    let missing = std::process::Command::new("git")
+        .current_dir(&unbundled)
+        .args(["cat-file", "-e", &other])
+        .status()
+        .unwrap();
+    assert!(
+        !missing.success(),
+        "the sibling's commit travelled in the bundle"
+    );
 }
 
 #[test]

@@ -1,0 +1,14 @@
+Show a session in the conversation area, or in a new pane beside it
+
+Usage: mj ui show [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  The session's full ID
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --right            Open it in a new pane to the right of the conversation
+      --below            Open it in a new pane below the conversation
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --json             Print the daemon's answer as JSON instead of text
+  -h, --help             Print help

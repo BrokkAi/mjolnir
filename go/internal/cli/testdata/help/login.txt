@@ -1,0 +1,12 @@
+Sign in a profile, installing its pinned harness when needed. Live sessions pick up fresh credentials
+
+Usage: mj login [OPTIONS]
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --profile <PROFILE>  Profile to authenticate. Optional when exactly one profile exists
+      --setup-token        Claude profiles only: mint a long-lived subscription token with `claude setup-token` and store it for every session of this profile
+      --method <ID>        ACP authentication method id. Sign-in normally picks an interactive method itself; use this to choose one when a bridge offers several
+      --cli                Use the harness command on PATH instead of the pinned ACP login
+  -h, --help               Print help

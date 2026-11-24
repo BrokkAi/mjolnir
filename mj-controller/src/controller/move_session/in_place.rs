@@ -1,10 +1,10 @@
 //! Compatibility checks and notices for same-target in-place Move.
 
 use anyhow::{Result, bail};
-use mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL;
+use mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL;
 
 /// User-facing refusal when a manual same-target Move targets a worker that
-/// predates Relay Protocol 81 (`RELAY_IN_PLACE_MOVE_PROTOCOL`).
+/// predates Relay Protocol 91 (`RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL`).
 pub fn pre_release_worker_manual_refusal(session_id: &str) -> String {
     format!(
         "this session's worker predates in-place restarts. Restart the agent first; \
@@ -13,11 +13,11 @@ pub fn pre_release_worker_manual_refusal(session_id: &str) -> String {
     )
 }
 
-/// Notice for automatic quota Move when the worker predates Relay Protocol 81.
+/// Notice for automatic quota Move when the worker predates Relay Protocol 91.
 pub fn pre_release_worker_quota_notice(session_id: &str) -> String {
     format!(
         "automatic quota Move skipped for {session_id}: this session's worker predates \
-         in-place restarts (relay protocol {RELAY_IN_PLACE_MOVE_PROTOCOL} required). \
+         in-place restarts (relay protocol {RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL} required). \
          Waiting for quota reset, or run `mj restart --session {session_id}` first."
     )
 }
@@ -33,7 +33,7 @@ pub fn ensure_worker_supports_in_place_move(
     worker_protocol: u32,
     is_automatic_quota: bool,
 ) -> Result<()> {
-    if worker_protocol >= RELAY_IN_PLACE_MOVE_PROTOCOL {
+    if worker_protocol >= RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL {
         return Ok(());
     }
     if is_automatic_quota {
@@ -48,7 +48,8 @@ mod tests {
 
     #[test]
     fn pre_release_worker_refuses_manual_move_naming_restart_command() {
-        let err = ensure_worker_supports_in_place_move("sess-42", 80, false).unwrap_err();
+        assert!(ensure_worker_supports_in_place_move("sess-42", 91, false).is_ok());
+        let err = ensure_worker_supports_in_place_move("sess-42", 90, false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("mj restart --session sess-42"), "{msg}");
         assert!(msg.contains("Restart agent"), "{msg}");
@@ -56,7 +57,7 @@ mod tests {
 
     #[test]
     fn pre_release_worker_skips_automatic_quota_move_with_notice() {
-        let err = ensure_worker_supports_in_place_move("sess-42", 80, true).unwrap_err();
+        let err = ensure_worker_supports_in_place_move("sess-42", 90, true).unwrap_err();
         assert!(err.to_string().contains("Waiting for quota reset"));
     }
 }

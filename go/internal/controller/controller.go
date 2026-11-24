@@ -14,6 +14,8 @@ package controller
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -64,7 +66,28 @@ func ControllerStoreGuardTryAcquire() (*ControllerStoreGuard, error) {
 }
 
 func controllerStoreGuardTryAcquireAt(directory string) (*ControllerStoreGuard, error) {
-	panic("unported: mj-controller/src/controller.rs ControllerStoreGuard::try_acquire_at")
+	// The lock holder starts the database writer, which migrates the store.
+	if err := core.EnsureMayControlStore(directory, "own this data store"); err != nil {
+		return nil, err
+	}
+	if err := core.CreateOwnerOnlyDirectory(directory); err != nil {
+		return nil, fmt.Errorf("create controller data directory %s: %w", directory, err)
+	}
+	path := filepath.Join(directory, "controller.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open controller lock %s: %w", path, err)
+	}
+	locked, err := core.TryLockFile(file, false)
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("lock controller store %s: %w", directory, err)
+	}
+	if !locked {
+		file.Close()
+		return nil, nil
+	}
+	return &ControllerStoreGuard{file: core.NewFileLock(file)}, nil
 }
 
 // Release releases the store now and reports an unlock failure.
@@ -75,4 +98,14 @@ func (g *ControllerStoreGuard) Release() error {
 // Drop is Rust's Drop: release if still held, logging a failure.
 func (g *ControllerStoreGuard) Drop() {
 	g.file.Drop()
+}
+
+// Controller is the configuration and session state the controller acts on.
+//
+// The dashboard holds one built from the daemon's runtime publication
+// (mj-cli's LoadedDashboard::from_daemon) and edits only its local copy of
+// the state; the operations on a controller arrive with the Go daemon.
+type Controller struct {
+	Config core.Config
+	State  core.StateState
 }

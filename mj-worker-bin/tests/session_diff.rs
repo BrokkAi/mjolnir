@@ -26,7 +26,11 @@ fn session_diff_worker_accepts_repeated_literal_paths_and_exports_a_patch() {
     git(root, &["config", "user.email", "test@example.com"]);
     fs::write(root.join("-dash.txt"), b"old dash\n").unwrap();
     fs::write(root.join("amp & space.txt"), b"old space\n").unwrap();
-    git(root, &["add", "--", "-dash.txt", "amp & space.txt"]);
+    fs::write(root.join("latin.txt"), b"caf\xe9\n").unwrap();
+    git(
+        root,
+        &["add", "--", "-dash.txt", "amp & space.txt", "latin.txt"],
+    );
     git(root, &["commit", "-qm", "base"]);
 
     fs::write(root.join("-dash.txt"), b"new dash\n").unwrap();
@@ -65,6 +69,19 @@ fn session_diff_worker_accepts_repeated_literal_paths_and_exports_a_patch() {
         String::from_utf8_lossy(&exported.stderr)
     );
     assert_eq!(exported.stdout, patch.diff.as_bytes());
+
+    // A patch is the bytes Git wrote; content that is not UTF-8 reaches the
+    // caller unchanged, so `git apply` reproduces it.
+    fs::write(root.join("latin.txt"), b"caf\xe9 \xff\n").unwrap();
+    let exported = diff(&["--patch"]);
+    assert_eq!(exported.status, 0);
+    assert!(
+        exported
+            .stdout
+            .windows(b"+caf\xe9 \xff\n".len())
+            .any(|window| window == b"+caf\xe9 \xff\n")
+    );
+    fs::write(root.join("latin.txt"), b"caf\xe9\n").unwrap();
 
     let refused = diff(&["--path=new.txt"]);
     assert_eq!(refused.status, EXPORT_REFUSED_EXIT_CODE);

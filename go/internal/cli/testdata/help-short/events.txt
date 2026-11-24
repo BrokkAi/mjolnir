@@ -1,0 +1,12 @@
+Follow durable session events as line-delimited JSON
+
+Usage: mj events [OPTIONS]
+
+Options:
+  -i, --instance <NAME>              Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>            Restrict the stream to this session
+      --no-splash                    Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --workspace-id <WORKSPACE_ID>  Restrict the stream to this workspace ID
+      --after-seq <AFTER_SEQ>        Replay events after this sequence; omit to follow new events only
+      --workspace <NAME>             Workspace to work in, by name. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it, and need it when the instance has more than one workspace
+  -h, --help                         Print help

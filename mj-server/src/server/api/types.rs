@@ -105,8 +105,6 @@ pub struct DiffOptions {
     pub json: bool,
     #[serde(default)]
     pub paths: Vec<String>,
-    #[serde(skip)]
-    pub full_patch: bool,
 }
 
 /// One session as the API presents it. This is a narrower, more stable shape
@@ -792,6 +790,19 @@ pub struct ExportRequest {
     /// The branch to push. Required when `kind` is `branch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+}
+
+/// Response header carrying [`ExportPatch::notice`].
+pub const EXPORT_NOTICE_HEADER: &str = "x-mj-export-notice";
+
+/// A unified patch of the session's tracked work, exactly as Git wrote it.
+/// File content need not be UTF-8, so the patch is bytes.
+#[derive(Debug, Clone, Default)]
+pub struct ExportPatch {
+    pub bytes: Vec<u8>,
+    /// One line telling the caller what the patch is relative to, when that is
+    /// not the session's launch base.
+    pub notice: Option<String>,
 }
 
 /// A git bundle of the session's work.

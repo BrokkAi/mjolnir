@@ -1573,6 +1573,16 @@ pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
 ) -> Result<VerifiedResumeArchive> {
+    verify_resume_checkpoint_unless(session_id, checkpoint, None)
+}
+
+/// [`verify_resume_checkpoint`] that stops reading the archive once `cancel`
+/// returns true, for work that runs for a client that can leave.
+pub(super) fn verify_resume_checkpoint_unless(
+    session_id: &str,
+    checkpoint: &mj_core::state::CheckpointMetadata,
+    cancel: Option<&mj_checkpoint::archive::ArchivePurgeCancel>,
+) -> Result<VerifiedResumeArchive> {
     let archive_path = {
         let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive");
         checkpoint.archive_path.canonicalize().with_context(|| {
@@ -1593,7 +1603,12 @@ pub(super) fn verify_resume_checkpoint(
         archive_sha256,
     } = {
         let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive contents");
-        verify_archive_streaming(&archive_path)?
+        match cancel {
+            Some(cancel) => {
+                mj_checkpoint::archive::verify_archive_streaming_unless(&archive_path, cancel)?
+            }
+            None => verify_archive_streaming(&archive_path)?,
+        }
     };
     if archive_sha256 != checkpoint.sha256 || manifest.session.id != session_id {
         bail!("persisted checkpoint verification failed");
@@ -2600,6 +2615,7 @@ impl Controller {
                     upgraded_clone,
                     &archive_path,
                     archive_manifest,
+                    None,
                 )?);
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 if !transferring_workspace

@@ -63,7 +63,7 @@ pub enum CompactionFailure {
 /// Read a backend failure the only way an ACP harness reports one: the text the
 /// provider sent. Only a named size complaint earns a smaller retry; any other
 /// reason, recognized or not, is the answer the caller gets.
-fn classify_failure_detail(detail: &str) -> CompactionFailure {
+pub(crate) fn classify_failure_detail(detail: &str) -> CompactionFailure {
     const OVERSIZE_MARKERS: &[&str] = &[
         "too long",
         "too large",

@@ -1,0 +1,10 @@
+Print the local authenticated control endpoint for an SSH client
+
+Usage: mj daemon endpoint [OPTIONS] --json
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --json             Emit exactly one JSON object containing control credentials
+      --existing         Fail if no daemon is running; never start one
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+  -h, --help             Print help

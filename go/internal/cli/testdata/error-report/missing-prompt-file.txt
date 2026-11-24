@@ -1,0 +1,4 @@
+Error: read prompt file /nonexistent/prompt.txt
+
+Caused by:
+    No such file or directory (os error 2)
