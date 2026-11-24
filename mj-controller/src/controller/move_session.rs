@@ -1787,20 +1787,6 @@ impl Controller {
                 super::backend::TargetCheck::Launch,
             )?;
         }
-        if cross_harness {
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let resolve =
-                crate::utility_llm::UtilityLlmRuntime::shared().resolve(&self.config, &cancel);
-            tokio::pin!(resolve);
-            loop {
-                tokio::select! {
-                    result = &mut resolve => { result.context("cross-harness move needs an available utility model")?; break; }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                        if executor.cancellation_requested() { cancel.cancel(); bail!("move preparation cancelled"); }
-                    }
-                }
-            }
-        }
         // What moving a local checkout into a target really does, computed
         // before anything is stopped so a person can confirm it.
         let conversion = planned_conversion

@@ -320,22 +320,10 @@ pub(super) async fn run_daemon_runtime(
     ));
     manager_control
         .install_guardian_stage1(Arc::new(WolfGuardianStage1(guardian_classifier.clone())));
-    // Install the bounded failure recorder before worker observations start.
-    manager_targets.send_replace(dashboard_worker_targets(&controller));
-    log_relay_actors_launched(&manager_targets.borrow());
     state
         .reviewer_runtime
         .set(Arc::downgrade(&state))
         .expect("reviewer runtime installed once");
-    // Views are published only from the serving loop below, so the first
-    // targets are installed before any can arrive.
-    state.owner().install_relay_sessions(
-        manager_targets
-            .borrow()
-            .iter()
-            .map(|target| target.session_id.clone())
-            .collect(),
-    );
     // Fires once the startup start of Apple's container service has finished,
     // however it ended, so the image refresher's first look sees the service
     // as startup left it instead of mid-start.
@@ -659,6 +647,8 @@ pub(super) async fn run_daemon_runtime(
         super::jev_limit::publish_notices(&jev_notice_state, jev_notice_cancel).await
     });
 
+    // The first publication uses the same owner-filtered inputs as every
+    // refresh, after bootstrap re-admits interrupted lifecycle work.
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
         cancellation.clone(),
@@ -1623,27 +1613,6 @@ pub(super) fn spawn_manager_target_refresher(
             };
             let controller = inputs.controller();
             state.session_manager.update_model_policies(&controller.config, &controller.state);
-            let config = controller.config;
-            if auth_profiles.as_ref() != Some(&config.profiles) {
-                let mut cache = auth.clone();
-                let profiles = config.profiles.clone();
-                match mj_core::runtime::spawn_blocking(move || {
-                    cache.refresh(&config);
-                    cache
-                })
-                .await
-                {
-                    Ok(cache) => {
-                        auth = cache;
-                        auth_profiles = Some(profiles);
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "provider refresh task stopped");
-                        cancellation.cancel();
-                        return;
-                    }
-                }
-            }
             if !installed
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &inputs))
@@ -1669,6 +1638,9 @@ pub(super) fn spawn_manager_target_refresher(
                     if !Arc::ptr_eq(&owner.pollable_worker_inputs(), &inputs) {
                         continue;
                     }
+                    if installed.is_none() {
+                        log_relay_actors_launched(&refreshed);
+                    }
                     targets.send_if_modified(|current| {
                         if *current == refreshed {
                             false
@@ -1691,6 +1663,28 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 state.review_host().retain_sessions(retained);
                 installed = Some(inputs.clone());
+            }
+            // Publish worker targets before probing profile homes for credential sync.
+            let config = controller.config;
+            if auth_profiles.as_ref() != Some(&config.profiles) {
+                let mut cache = auth.clone();
+                let profiles = config.profiles.clone();
+                match mj_core::runtime::spawn_blocking(move || {
+                    cache.refresh(&config);
+                    cache
+                })
+                .await
+                {
+                    Ok(cache) => {
+                        auth = cache;
+                        auth_profiles = Some(profiles);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "provider refresh task stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
             }
             let closing = state.owner().close_requested.clone();
             if !staged_sources

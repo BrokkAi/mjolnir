@@ -48,12 +48,7 @@ pub enum CreateEnd {
 pub fn session_create_end(session_id: &str) -> Result<CreateEnd> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
-    let unfinished: bool = snapshot.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
-        [session_id],
-        |row| row.get(0),
-    )?;
-    if unfinished {
+    if has_create_intent_with(&snapshot, session_id)? {
         return Ok(CreateEnd::Unfinished);
     }
     let Some(record) = state_io::load_session_with(&snapshot, session_id)? else {
@@ -71,6 +66,19 @@ pub fn session_create_end(session_id: &str) -> Result<CreateEnd> {
         ),
         _ => CreateEnd::Finished,
     })
+}
+
+pub fn has_session_create_intent(session_id: &str) -> Result<bool> {
+    let connection = open_reader(&database_path())?;
+    has_create_intent_with(&connection, session_id)
+}
+
+pub(super) fn has_create_intent_with(connection: &Connection, session_id: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
+        [session_id],
+        |row| row.get(0),
+    )?)
 }
 
 pub(super) fn insert_create_intent(
@@ -233,8 +241,29 @@ pub fn reset_session_for_create_retry(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("reset_session_for_create_retry", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current = state_io::load_session_with(&tx, &session.id)?
+            .context("cannot reset Create for a missing session")?;
+        anyhow::ensure!(
+            !create_intent_is_stale(&current) && has_create_intent_with(&tx, &session.id)?,
+            "session {} no longer has an unfinished Create",
+            session.id
+        );
+        // The lifecycle owner fences relay attachment and confirms worker stop
+        // before calling this, so no page from the retired worker can arrive.
         tx.execute(
             "DELETE FROM worker_restart_intents WHERE session_id = ?1",
+            [&session.id],
+        )?;
+        tx.execute(
+            "DELETE FROM materialized_sessions WHERE session_id = ?1",
+            [&session.id],
+        )?;
+        tx.execute(
+            "INSERT INTO materialized_sessions(session_id) VALUES (?1)",
+            [&session.id],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET acp_session_title = NULL, native_session_id = NULL WHERE session_id = ?1",
             [&session.id],
         )?;
         update_lifecycle_fields(&tx, &session)?;
@@ -248,6 +277,114 @@ mod tests {
     use super::*;
     use crate::test_isolation::{IsolatedTest, test_name};
     use std::sync::mpsc::channel;
+
+    // Hard-won: #1675: interrupted Create reused its retired worker projection
+    #[test]
+    fn create_retry_resets_only_the_retired_worker_projection() {
+        const CHILD: &str = "MJ_TEST_CREATE_PROJECTION_RESET";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "create_retry_resets_only_the_retired_worker_projection",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "create-projection-reset")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let writer = install_isolated_test_writer();
+        let mut session = super::super::tests::session("retry", "project");
+        session.state = SessionState::Disconnected;
+        session.acp_session_title = Some("Retired title".into());
+        session.native_session_id = Some("retired-native".into());
+        save_new_session(&session, None, false, false).unwrap();
+        let intents = load_session_create_intents().unwrap();
+        assert_eq!(intents.len(), 1);
+
+        submit_database_write("seed legacy Create projection", |connection| {
+            connection.execute_batch(
+                "UPDATE materialized_sessions SET applied_event_ordinal=42,
+                    applied_event_digest=replace(applied_event_digest,'0','a'),
+                    session_title='Retired title', last_activity_at_ms=7,
+                    input_required_event_frontier=42, operator_away_event_frontier=41
+                    WHERE session_id='retry';
+                 INSERT INTO materialized_transcript_items(session_id,stable_id,position,
+                    created_at_ms,last_changed_at_ms,body_json)
+                    VALUES ('retry','first',1,1,1,'{}');
+                 INSERT INTO materialized_queued_prompts(session_id,ordinal,command_id,
+                    content_json,queued_at_ms) VALUES ('retry',0,'queued','[]',1);
+                 INSERT INTO api_config_results VALUES ('retry','config',NULL);
+                 INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase)
+                    VALUES ('retry','worker-start','{}','old','prepared');
+                 INSERT INTO startup_steps(session_id,command_id,step_json)
+                    VALUES ('retry','startup','{}');
+                 INSERT INTO mailbox_outbox(event_key,target_session_id,event_json,wake,created_at)
+                    VALUES ('mail','retry','{}',0,'now');
+                 INSERT INTO detached_drafts(draft_id,workspace_id,session_id,source,saved_at,text)
+                    SELECT 'draft',workspace_id,'retry','terminal','now','unsent'
+                    FROM session_contexts WHERE session_id='retry';
+                 INSERT INTO session_turn_usage VALUES ('retry','usage',2,1,'{}');
+                 INSERT INTO session_provider_cost VALUES ('retry','{}');",
+            )?;
+            Ok(())
+        }).unwrap();
+
+        session.state = SessionState::Provisioning;
+        reset_session_for_create_retry(&session).unwrap();
+
+        assert_eq!(
+            materialized_event_frontier("retry").unwrap(),
+            Some((0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into()))
+        );
+        let connection = open_reader(&database_path()).unwrap();
+        let cleared: bool = connection
+            .query_row(
+                "SELECT session_title IS NULL AND last_activity_at_ms IS NULL
+                    AND input_required_event_frontier=0 AND operator_away_event_frontier=0
+             FROM materialized_sessions WHERE session_id='retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cleared);
+        for (table, expected) in [
+            ("materialized_transcript_items", 0),
+            ("materialized_queued_prompts", 0),
+            ("api_config_results", 0),
+            ("worker_restart_intents", 0),
+            ("startup_steps", 1),
+            ("mailbox_outbox", 1),
+            ("detached_drafts", 1),
+            ("session_turn_usage", 1),
+            ("session_provider_cost", 1),
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, expected, "{table}");
+        }
+        let reset = load_session_record("retry").unwrap().unwrap();
+        assert_eq!(reset.state, SessionState::Provisioning);
+        assert_eq!(reset.acp_session_title, None);
+        assert_eq!(reset.native_session_id, None);
+        assert_eq!(load_session_create_intents().unwrap(), intents);
+
+        discard_session_create_intent("retry", &intents[0].operation_id).unwrap();
+        assert!(reset_session_for_create_retry(&session).is_err());
+        let mut running = reset;
+        running.state = SessionState::Running;
+        running.native_session_id = Some("new-native".into());
+        save_session(&running).unwrap();
+        assert!(reset_session_for_create_retry(&session).is_err());
+        let committed = load_session_record("retry").unwrap().unwrap();
+        assert_eq!(committed.state, SessionState::Running);
+        assert_eq!(committed.native_session_id.as_deref(), Some("new-native"));
+        writer.shutdown().unwrap();
+    }
 
     // Hard-won: 4e82c9302e: session_create_end mixed an SQL intent check with a stale cached session record
     #[test]
