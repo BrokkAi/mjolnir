@@ -99,3 +99,13 @@ func (g *ControllerStoreGuard) Release() error {
 func (g *ControllerStoreGuard) Drop() {
 	g.file.Drop()
 }
+
+// Controller is the configuration and session state the controller acts on.
+//
+// The dashboard holds one built from the daemon's runtime publication
+// (mj-cli's LoadedDashboard::from_daemon) and edits only its local copy of
+// the state; the operations on a controller arrive with the Go daemon.
+type Controller struct {
+	Config core.Config
+	State  core.StateState
+}

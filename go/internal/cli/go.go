@@ -3,7 +3,13 @@
 
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"context"
+
+	"github.com/BrokkAi/mjolnir/go/internal/client"
+	"github.com/BrokkAi/mjolnir/go/internal/tui"
+	"github.com/spf13/cobra"
+)
 
 // goArgs are the arguments of `mj go`.
 type goArgs struct {
@@ -27,4 +33,17 @@ func (args *goArgs) bind(cmd *cobra.Command, run func() error) {
 	meta.flag(&args.setup, "setup", "Change the remembered setup for this folder")
 	meta.flag(&args.globalDefault, "global_default", "Choose a setup and also make it the default for other new projects")
 	leaf(cmd, run)
+}
+
+// resolveGoWorkspace is go.rs's resolve_workspace: the workspace the folder
+// of mode belongs to, created when it has none. Declared for the dashboard
+// (slice 2b).
+func resolveGoWorkspace(ctx context.Context, daemon *client.DaemonClient, mode *tui.GoMode) (string, error) {
+	panic("unported: mj-cli/src/go.rs resolve_workspace")
+}
+
+// savedWorkspaceModes is every project folder's remembered fast-start mode.
+// Declared for the dashboard (slice 2b).
+func savedWorkspaceModes() ([]tui.GoMode, error) {
+	panic("unported: mj-cli/src/go.rs saved_workspace_modes")
 }

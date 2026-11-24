@@ -4,6 +4,10 @@
 package cli
 
 import (
+	"sync/atomic"
+
+	"github.com/BrokkAi/mjolnir/go/internal/client"
+	"github.com/BrokkAi/mjolnir/go/internal/controller"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/spf13/cobra"
 )
@@ -97,4 +101,97 @@ func (args *nativeImportArgs) bind(cmd *cobra.Command) {
 	meta.option("review", "Whether the imported session is reviewed before push (`push`) or not (`off`). Omitted follows `[review]`: review runs when reviewers are configured", storeOptional(&args.review), withValueName("off|push"))
 	args.workspace.bind(cmd)
 	meta.group("import-session-selection", true, false, "session", "latest")
+}
+
+// The dashboard's import of a native session. Declared for the dashboard
+// (slice 2b); the import itself is not ported yet.
+
+// pendingDashboardImport is the native session the dashboard was asked to
+// import.
+type pendingDashboardImport struct {
+	profileID       string
+	nativeSessionID string
+	displayTitle    string
+}
+
+// dashboardImportSafety is what the person settled about the import's
+// checkout before it starts.
+type dashboardImportSafety struct {
+	createManagedWorktree *bool
+	accepted              bool
+	projectRoot           *string
+}
+
+// importBundlePrompt asks how to bundle a project the import found.
+type importBundlePrompt struct {
+	recordedRoot      string
+	managedWorktree   core.ManagedWorktreeOptions
+	dirtyGitRoots     []string
+	omittedNonGitDirs []string
+	scratchGitRoots   []string
+}
+
+// dashboardImportSuccess is a finished import.
+type dashboardImportSuccess struct {
+	harness string
+	// archiveDirectory is the temporary directory the archive was staged
+	// in, removed with the success (Rust's tempfile::TempDir).
+	archiveDirectory string
+	sessionID        string
+	controller       controller.Controller
+}
+
+// dashboardImportTaskResult is how an import task ended.
+type dashboardImportTaskResult interface{ isDashboardImportTaskResult() }
+
+type dashboardImportTaskResultNeedsBundle struct{ prompt importBundlePrompt }
+
+type dashboardImportTaskResultImported struct{ success *dashboardImportSuccess }
+
+type dashboardImportTaskResultCancelled struct{}
+
+func (dashboardImportTaskResultNeedsBundle) isDashboardImportTaskResult() {}
+func (dashboardImportTaskResultImported) isDashboardImportTaskResult()    {}
+func (dashboardImportTaskResultCancelled) isDashboardImportTaskResult()   {}
+
+// dashboardImportUpdate is one report from a running import task.
+type dashboardImportUpdate interface{ isDashboardImportUpdate() }
+
+type dashboardImportUpdateUploading struct{ taskID uint64 }
+
+type dashboardImportUpdateRegistering struct{ taskID uint64 }
+
+type dashboardImportUpdateProgress struct {
+	taskID  uint64
+	step    int
+	total   *int
+	message string
+}
+
+// dashboardImportUpdateFinished carries the task's result, or err when it
+// failed (Rust's Box<Result<DashboardImportTaskResult>>).
+type dashboardImportUpdateFinished struct {
+	taskID  uint64
+	pending pendingDashboardImport
+	result  dashboardImportTaskResult
+	err     error
+}
+
+func (dashboardImportUpdateUploading) isDashboardImportUpdate()   {}
+func (dashboardImportUpdateRegistering) isDashboardImportUpdate() {}
+func (dashboardImportUpdateProgress) isDashboardImportUpdate()    {}
+func (dashboardImportUpdateFinished) isDashboardImportUpdate()    {}
+
+// dashboardImportRequest is one import the dashboard starts.
+type dashboardImportRequest struct {
+	workspaceID string
+	pending     pendingDashboardImport
+	safety      dashboardImportSafety
+	taskID      uint64
+	cancelled   *atomic.Bool
+}
+
+// spawnDashboardImport runs request off the loop, reporting on updates.
+func spawnDashboardImport(controller *controller.Controller, request dashboardImportRequest, updates chan<- dashboardImportUpdate, tracker client.CriticalOperationTracker) {
+	panic("unported: mj-cli/src/import.rs spawn_dashboard_import")
 }
