@@ -14,5 +14,19 @@ import (
 // harness's own sub-agents. A child never gets them, and only a harness
 // whose HarnessKind.SupportsDelegationTools holds can receive them at all.
 func SubagentToolsEnabled(session *core.SessionRecord, isChild bool) bool {
-	panic("unported: mj-worker-staging/src/worker_binary/launch.rs subagent_tools_enabled")
+	var child *core.SubagentRecord
+	if isChild {
+		child = &core.SubagentRecord{
+			Kind:           core.SubagentKindWorker,
+			ChildSessionID: session.ID,
+			ProfileID:      session.LastProfile,
+			HandbackTool:   true,
+		}
+	}
+	policy := core.SubagentPolicy{Mode: core.SubagentPolicyNative}
+	if session.Subagents != nil {
+		policy = *session.Subagents
+	}
+	launched := policy.ForLaunch(session.HarnessKind, child)
+	return launched.UsesMjolnir()
 }

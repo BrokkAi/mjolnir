@@ -3,7 +3,16 @@
 package workerstaging
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"sync"
+
+	"github.com/BrokkAi/mjolnir/go/internal/accounts"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/targets"
 )
 
 // WorkspacePaths is the repository paths a worker opens: the primary
@@ -11,7 +20,30 @@ import (
 // the session whose workspace is used, which for a sub-agent child is its
 // parent; containerWorkspace is nil when the session recorded none.
 func WorkspacePaths(locator *core.TargetsTargetLocator, bundle *core.ProjectBundle, sessionID string, containerWorkspace *string) (string, []string, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/harness.rs workspace_paths")
+	var root string
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalBare:
+		return "", nil, errors.New("local bare projects use their selected directory")
+	case core.TargetsTargetLocatorAwsEc2, core.TargetsTargetLocatorSshBare:
+		root = locator.Workspace
+	default:
+		root = core.ContainerWorkspaceRoot(containerWorkspace)
+	}
+	if locator.Kind == core.TargetsTargetLocatorAwsEc2 && root != ".local/share/hel/workspaces/"+sessionID {
+		return "", nil, errors.New("AWS workspace does not match session")
+	}
+	primary := bundle.Primary()
+	if primary == nil {
+		return "", nil, errors.New("bundle primary is missing")
+	}
+	primaryPath := root + "/" + primary.Destination
+	additional := []string{}
+	for _, repository := range bundle.Repositories {
+		if repository.ID != bundle.PrimaryRepo {
+			additional = append(additional, root+"/"+repository.Destination)
+		}
+	}
+	return primaryPath, additional, nil
 }
 
 // Package versions for ACP bridges and their harnesses. Keep these in
@@ -37,7 +69,71 @@ func BridgeLaunch(harness core.HarnessKind, policy core.ExecutionPolicy) (string
 }
 
 func PreflightHarness(template core.TargetTemplate, profile *core.HarnessProfile, executor core.CommandExecutor) error {
-	panic("unported: mj-worker-staging/src/worker_binary/harness.rs preflight_harness")
+	if sshBare, ok := template.(core.TargetTemplateSshBare); ok {
+		ssh := core.SshTargetFromSshConnection(&sshBare.SSH)
+		if _, err := targets.ExecuteChecked(executor, targets.SSHLoginScript(&ssh,
+			"git --version >/dev/null || { echo 'Git is missing or unusable; install Git and, on macOS, the Xcode Command Line Tools on the target' >&2; exit 1; }",
+		).WithPurpose("preflight remote Git")); err != nil {
+			return err
+		}
+	}
+	if !core.HarnessUsesNodeRuntime(profile.Kind) {
+		return nil
+	}
+	// Only a managed installation downloads Node.js. A daemon container's
+	// local sessions run the image's harnesses and never reach this check.
+	managed := false
+	switch template.(type) {
+	case core.TargetTemplateLocalBare:
+		managed = core.LocalHarnessRuntime() == core.HarnessRuntimePolicyManaged
+	case core.TargetTemplateSshBare:
+		managed = true
+	}
+	if !managed {
+		return nil
+	}
+	// Mjolnir installs its own pinned Node.js when the target has no
+	// compatible runtime. The worker performs that download, so the
+	// controller only needs to establish that one of the two paths exists
+	// before provisioning creates target state.
+	script := nodeOrDownloaderPreflightScript()
+	if profile.Kind == core.HarnessKindDsh {
+		script = fmt.Sprintf("if command -v dsh-acp >/dev/null 2>&1 && %s; then exit 0; fi; %s",
+			core.DshACPVersionSupportedScript(), nodeOrDownloaderPreflightScript())
+	}
+	path, hasPath := profile.Environment.Get("PATH")
+	args := []string{"-lc", script}
+	if hasPath {
+		args = []string{"-c", "export PATH=\"$1\"; " + script, "mj-node-preflight", path}
+	}
+	var command core.CommandSpec
+	var destination string
+	switch template := template.(type) {
+	case core.TargetTemplateLocalBare:
+		command, destination = core.NewCommandSpec("sh", args), "local host"
+	case core.TargetTemplateSshBare:
+		ssh := core.SshTargetFromSshConnection(&template.SSH)
+		if hasPath {
+			command = core.SSHCommand(core.SshTrafficClassControl, &ssh, append([]string{"sh"}, args...))
+		} else {
+			command = targets.SSHLoginScript(&ssh, script)
+		}
+		destination = ssh.Destination
+	}
+	command = command.WithPurpose("preflight managed harness Node.js")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	if output.Status == 0 {
+		return nil
+	}
+	failure := targets.CommandErrorDetail(output.Stderr)
+	if failure == "" {
+		failure = fmt.Sprintf("%s failed with status %d", command.Purpose, output.Status)
+	}
+	return fmt.Errorf("%s launch preflight failed on %s; provide Node.js 22+ with npm and npx on the target PATH, or use a target where Mjolnir's managed runtime can run: %w",
+		profile.Kind.DisplayName(), destination, errors.New(failure))
 }
 
 func nodeOrDownloaderPreflightScript() string {
@@ -157,7 +253,82 @@ func SharedProfilePaths(harness core.HarnessKind) []string {
 // StageProfile stages the profile's own files only. Outside this file,
 // stage through StageProfileWithCatalog.
 func StageProfile(profile *core.HarnessProfile, destination string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/harness.rs stage_profile")
+	harness := profile.Kind
+	source := profile.Home
+	if err := os.MkdirAll(destination, 0o777); err != nil {
+		return rustIOError(err)
+	}
+	allowlist := ProfileConfigurationPaths(harness)
+	// Allowlist entries (and, within each, a copied directory's children)
+	// are independent of one another, so copying them concurrently shortens
+	// the stage step for profiles with large skills/plugins trees. What the
+	// harness maintains itself inside an allowlisted entry, such as the
+	// skills Claude Code syncs from the user's claude.ai account, stays
+	// behind: the harness provisions its own copy in the session home.
+	var harnessOwned []string
+	for _, owned := range harness.HarnessOwnedSkillPaths() {
+		harnessOwned = append(harnessOwned, pathJoin(source, owned))
+	}
+	failures := make([]error, len(allowlist))
+	var group sync.WaitGroup
+	for index, name := range allowlist {
+		group.Go(func() {
+			from := pathJoin(source, name)
+			if _, err := os.Stat(from); err == nil {
+				failures[index] = CopyProfileEntryExcept(from, pathJoin(destination, name), harnessOwned)
+			}
+		})
+	}
+	group.Wait()
+	for _, err := range failures {
+		if err != nil {
+			return err
+		}
+	}
+	if err := StripStagedRefreshToken(harness, destination); err != nil {
+		return err
+	}
+	// `codex app-server` refuses `--profile`, so a Codex profile overlay
+	// reaches the session already layered into the staged `config.toml`.
+	if profile.CodexProfile != nil {
+		config, err := profile.CodexConfig()
+		if err != nil {
+			return err
+		}
+		if config != nil {
+			if err := os.WriteFile(pathJoin(destination, "config.toml"), []byte(*config), 0o666); err != nil {
+				return fmt.Errorf("stage Codex configuration %s: %w", profile.DescribeCodexConfig(), rustIOError(err))
+			}
+		}
+	}
+	if harness == core.HarnessKindOpenCode {
+		logins, err := accounts.ProfileLogins(profile)
+		if err != nil {
+			return err
+		}
+		if logins != nil {
+			if err := core.AtomicWrite(pathJoin(destination, harness.CredentialFileName()), logins); err != nil {
+				return fmt.Errorf("stage OpenCode logins: %w", err)
+			}
+		}
+	}
+	// `muse serve` never fetches its model list: it reads the list the
+	// person's own `muse` last saved in its data directory, and without one
+	// offers only its built-in model. A staged home starts with empty data,
+	// so it gets that saved list.
+	if harness == core.HarnessKindMuse {
+		data, ok := harness.NestedDataDir(source)
+		if !ok {
+			panic("Muse has an XDG home")
+		}
+		catalog := pathJoin(data, "model-catalog")
+		if _, err := os.Stat(catalog); err == nil {
+			if err := CopyProfileEntry(catalog, pathJoin(destination, museModelCatalog)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // StripStagedRefreshToken: every staged copy of a login is made here
@@ -165,7 +336,24 @@ func StageProfile(profile *core.HarnessProfile, destination string) error {
 // a harness copy loses the refresh token that only the daemon may spend
 // (#1490).
 func StripStagedRefreshToken(harness core.HarnessKind, destination string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/harness.rs strip_staged_refresh_token")
+	if !harness.CopiesOmitRefreshToken() {
+		return nil
+	}
+	path := pathJoin(destination, harness.CredentialFileName())
+	login, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read staged login %s: %w", path, rustIOError(err))
+	}
+	copied := core.CredentialCopyForHarness(harness, login)
+	if !bytes.Equal(copied, login) {
+		if err := core.WriteCredentialFile(harness, path, copied); err != nil {
+			return fmt.Errorf("remove the refresh token from staged login %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // StageProfileWithCatalog stages profile into destination for one harness

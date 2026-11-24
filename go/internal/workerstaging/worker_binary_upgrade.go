@@ -3,12 +3,16 @@
 package workerstaging
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -180,7 +184,22 @@ func (p *PreparedWorkerBinary) Close() {
 // image's worker and a host copy never share bytes, so the digest gate below
 // would otherwise copy a host worker over a current one.
 func PrepareRecoveryWorkerBinary(executor core.CommandExecutor, refresh *sessiontypes.DeferredWorkerBinaryRefresh) (*PreparedWorkerBinary, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs prepare_recovery_worker_binary")
+	worker, err := WorkerInstallForTarget(&refresh.Locator, executor)
+	if err != nil {
+		return nil, err
+	}
+	host, ok := worker.(WorkerInstallHost)
+	if !ok {
+		return StageWorkerBinaryForUpgrade(executor, &refresh.Locator, refresh.SessionID, worker)
+	}
+	expected, err := core.WorkerExecutableDigest(host.Path)
+	if err != nil {
+		return nil, err
+	}
+	if targets.InstalledDigestMatches(executor, &refresh.InstalledDigest, expected) {
+		return nil, nil
+	}
+	return StageWorkerBinaryForUpgrade(executor, &refresh.Locator, refresh.SessionID, worker)
 }
 
 // FileSize is the bytes a local file will take on the target.
@@ -193,7 +212,36 @@ func FileSize(path string) (uint64, error) {
 }
 
 func StageWorkerBinaryForUpgrade(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, worker WorkerInstall) (*PreparedWorkerBinary, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs stage_worker_binary_for_upgrade")
+	id, err := core.NewCommandID("upgrade-stage")
+	if err != nil {
+		return nil, err
+	}
+	staging := "hel.prepared-" + id
+	root, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	live, err := LiveStagingRegisterAndSweep(executor, locator, sessionID, root, staging)
+	if err != nil {
+		return nil, err
+	}
+	// The guard exists before the first byte is written, so a failed or
+	// cancelled upload removes its partial `.next` file on the way out.
+	prepared := &PreparedWorkerBinary{
+		cleanup: core.LocatorCommand(core.SshTrafficClassControl, locator, []string{
+			"rm", "-f", "--", root + "/" + staging, root + "/" + staging + ".next",
+		}).WithPurpose("discard private worker staging"),
+		name:      staging,
+		executor:  executor,
+		locator:   *locator,
+		sessionID: sessionID,
+		live:      live,
+	}
+	if err := InstallWorkerBinary(executor, locator, sessionID, worker, prepared.name); err != nil {
+		prepared.Close()
+		return nil, err
+	}
+	return prepared, nil
 }
 
 // PromoteWorkerBinary is Rust's PROMOTE_WORKER_BINARY.
@@ -205,7 +253,28 @@ const PromoteWorkerBinary = `promote_worker_binary() {
 }`
 
 func InstallStagedWorkerBinary(owner *store.WorkerPermit, staging string, executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs install_staged_worker_binary")
+	if owner.SessionID() != sessionID {
+		return errors.New("prepared worker owner mismatch")
+	}
+	if !strings.HasPrefix(staging, "hel.prepared-") || strings.Contains(staging, "/") {
+		return errors.New("invalid worker staging name")
+	}
+	root, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = targets.ExecuteChecked(executor, core.LocatorCommand(core.SshTrafficClassControl, locator, []string{
+		"sh", "-c",
+		PromoteWorkerBinary + "\npromote_worker_binary \"$1\" \"$2\" || exit $?\n" +
+			"# The promoted build serves every control subcommand; a staged\n" +
+			"# control worker would only pin a store entry.\n" +
+			"rm -f -- \"$3\"/hel-control*",
+		"mj-worker-promote",
+		root + "/" + staging,
+		root + "/hel",
+		root,
+	}).WithPurpose("install the prepared Mjolnir worker"))
+	return err
 }
 
 // ReplaceInstalledWorkerLaunchConfig: ctx carries the session's worker
@@ -232,18 +301,186 @@ func ReplaceInstalledWorkerLaunchConfig(ctx context.Context, executor core.Comma
 // config. The running worker is not stopped or replaced, so any failure
 // here leaves the quiet session attachable on its previous build.
 func PrepareManagedHarnessForUpgrade(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, worker WorkerInstall, launch *core.WorkerLaunchConfig) error {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs prepare_managed_harness_for_upgrade")
+	if !launch.RequiresHarnessPreparation() {
+		return nil
+	}
+	workerRoot, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := targets.EnsureRoomFor(locator,
+		[]string{workerRoot, targets.HarnessCachePath(locator), launch.HarnessHome},
+		func() (uint64, error) { return 0, nil }, "prepare the managed harness"); err != nil {
+		return err
+	}
+	if _, ok := locator.ContainerEngine(); ok {
+		return prepareContainerHarnessForUpgrade(executor, locator, sessionID, worker, launch)
+	}
+	workerBinary, ok := worker.HostBinary()
+	if !ok {
+		return errors.New("only a container target can run its image's worker")
+	}
+	id, err := core.NewCommandID("harness-prepare")
+	if err != nil {
+		return err
+	}
+	stagingRoot := workerRoot + "/" + id
+	stagingBinary := stagingRoot + "/hel"
+	stagingConfig := stagingRoot + "/launch.json"
+	staging, err := os.MkdirTemp("", ".tmp")
+	if err != nil {
+		return fmt.Errorf("create managed harness upgrade staging: %w", rustIOError(err))
+	}
+	defer os.RemoveAll(staging)
+	localConfig := pathJoin(staging, "launch.json")
+	if err := launch.Write(localConfig); err != nil {
+		return err
+	}
+
+	// Local bare workers already share the controller's filesystem. Running
+	// the current binary against a private launch config is enough to
+	// prepare the cache, and leaves the live worker root completely
+	// untouched.
+	if locator.Kind == core.TargetsTargetLocatorLocalBare {
+		_, err := targets.ExecuteChecked(executor, core.NewCommandSpec(workerBinary,
+			[]string{"worker", "prepare-harness", "--config", localConfig}).
+			WithPurpose("prepare exact managed harness"))
+		return err
+	}
+
+	if locator.Kind != core.TargetsTargetLocatorAwsEc2 && locator.Kind != core.TargetsTargetLocatorSshBare {
+		return errors.New("managed harness policy requires a local bare, SSH-bare, or EC2 target")
+	}
+	ssh := locator.SSH
+	result := func() error {
+		if _, err := targets.ExecuteChecked(executor,
+			core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"rm", "-rf", "--", stagingRoot}).
+				WithPurpose("clear managed harness preparation staging")); err != nil {
+			return err
+		}
+		if _, err := targets.ExecuteChecked(executor,
+			core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"mkdir", "-p", stagingRoot}).
+				WithPurpose("create managed harness preparation staging")); err != nil {
+			return err
+		}
+		stagingName, ok := pathFileName(stagingRoot)
+		if !ok {
+			return errors.New("harness staging has no name")
+		}
+		if err := InstallWorkerBinary(executor, locator, sessionID, worker,
+			core.Text(core.Join(stagingName, "hel"))); err != nil {
+			return err
+		}
+		if _, err := targets.ExecuteChecked(executor,
+			core.SCPUpload(ssh, localConfig, stagingConfig, false).
+				WithPurpose("stage managed harness launch configuration")); err != nil {
+			return err
+		}
+		_, err := targets.ExecuteChecked(executor,
+			core.SSHCommand(core.SshTrafficClassControl, ssh, []string{
+				stagingBinary, "worker", "prepare-harness", "--config", stagingConfig,
+			}).WithPurpose("prepare exact managed harness"))
+		return err
+	}()
+	// A failed remote exec may still be using its files. Retain them until
+	// process exit is known, just as for container harness preparation.
+	if result != nil {
+		return fmt.Errorf("harness preparation failed; staging retained at %s: %w", stagingRoot, result)
+	}
+	if _, err := targets.ExecuteChecked(executor,
+		core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"rm", "-rf", "--", stagingRoot}).
+			WithPurpose("remove managed harness preparation staging")); err != nil {
+		return fmt.Errorf("clean managed harness preparation staging: %w", err)
+	}
+	return nil
 }
 
 // prepareContainerHarnessForUpgrade: a private staged binary prepares
 // container fallbacks without touching the live worker's executable, launch
 // config, control connection, or idle state.
 func prepareContainerHarnessForUpgrade(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, worker WorkerInstall, launch *core.WorkerLaunchConfig) error {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs prepare_container_harness_for_upgrade")
+	staging, err := os.MkdirTemp("", "harness-prepare-")
+	if err != nil {
+		return rustIOError(err)
+	}
+	defer os.RemoveAll(staging)
+	name, ok := pathFileName(staging)
+	if !ok {
+		return errors.New("harness staging directory has no name")
+	}
+	workerRoot, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return err
+	}
+	stagingRoot := workerRoot + "/" + name
+	stagingBinary := stagingRoot + "/hel"
+	stagingConfig := stagingRoot + "/launch.json"
+
+	result := func() error {
+		if _, err := targets.ExecuteChecked(executor,
+			core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"mkdir", "-p", stagingRoot}).
+				WithPurpose("create container harness preparation staging")); err != nil {
+			return err
+		}
+		if err := InstallWorkerBinary(executor, locator, sessionID, worker, name+"/hel"); err != nil {
+			return err
+		}
+		body, err := upgradeSerdeJSONPretty(launch)
+		if err != nil {
+			return err
+		}
+		if _, err := targets.ExecuteChecked(executor, writeLaunchConfigCommand(locator, stagingConfig, body).
+			WithPurpose("stage container harness launch configuration")); err != nil {
+			return err
+		}
+		_, err = targets.ExecuteChecked(executor,
+			core.LocatorCommand(core.SshTrafficClassControl, locator, []string{
+				stagingBinary, "worker", "prepare-harness", "--config", stagingConfig,
+			}).WithPurpose("prepare exact container harness before worker upgrade"))
+		return err
+	}()
+	// A lost exec connection does not prove that the target process stopped.
+	// Retain its private files on failure; never delete a possibly live
+	// process's working files as cleanup. Successful exec has waited for the
+	// process exit.
+	if result != nil {
+		return fmt.Errorf("container harness preparation failed; staging retained at %s: %w", stagingRoot, result)
+	}
+	if _, err := targets.ExecuteChecked(executor,
+		core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"rm", "-rf", "--", stagingRoot}).
+			WithPurpose("remove container harness preparation staging")); err != nil {
+		return fmt.Errorf("clean container harness preparation staging: %w", err)
+	}
+	return nil
+}
+
+// upgradeSerdeJSONPretty is serde_json::to_vec_pretty: two-space
+// indentation and no HTML escapes.
+func upgradeSerdeJSONPretty(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
 }
 
 func PrepareInstalledManagedHarness(executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string, launch *core.WorkerLaunchConfig) error {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs prepare_installed_managed_harness")
+	if !launch.RequiresHarnessPreparation() {
+		return nil
+	}
+	if err := targets.EnsureRoomFor(locator,
+		[]string{targets.HarnessCachePath(locator), launch.HarnessHome},
+		func() (uint64, error) { return 0, nil }, "install the managed harness"); err != nil {
+		return err
+	}
+	command := core.LocatorCommand(core.SshTrafficClassControl, locator, []string{
+		workerRoot + "/hel", "worker", "prepare-harness", "--config", workerRoot + "/launch.json",
+	})
+	_, err := targets.ExecuteChecked(executor, command.WithPurpose("prepare exact managed harness before worker startup"))
+	return err
 }
 
 // WorkerBinaryUploadPlan transfers into a private path. Published store and
@@ -263,7 +500,91 @@ func WorkerBinaryUploadPlan(locator *core.TargetsTargetLocator, sessionID string
 
 // binaryUploadPlan: source nil installs the container image's worker.
 func binaryUploadPlan(locator *core.TargetsTargetLocator, sessionID string, source *string, installed string, remoteSource *string) (core.CommandPlan, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs binary_upload_plan")
+	workerRoot, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return core.CommandPlan{}, err
+	}
+	staged := installed + ".next"
+	if source == nil {
+		if _, ok := locator.ContainerEngine(); !ok {
+			return core.CommandPlan{}, errors.New("only a container target can run its image's worker")
+		}
+		// A link renamed into place, like a copied binary: the image owns
+		// the file, so there is nothing to re-own or make private.
+		return core.CommandPlan{
+			Description: "link the image's Mjolnir worker for session " + sessionID,
+			Commands: []core.CommandSpec{
+				core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"ln", "-sfn", ImageWorker, staged}).
+					WithPurpose("stage a link to the image's Mjolnir worker"),
+				core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"mv", "-f", "--", staged, installed}).
+					WithPurpose("replace installed Mjolnir worker"),
+			},
+		}, nil
+	}
+	workerBinary := *source
+	var commands []core.CommandSpec
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalBare:
+		commands = []core.CommandSpec{
+			core.NewCommandSpec("cp", []string{workerBinary, staged}).
+				WithPurpose("stage replacement Mjolnir worker"),
+			core.NewCommandSpec("mv", []string{"-f", staged, installed}).
+				WithPurpose("replace installed Mjolnir worker"),
+			core.NewCommandSpec("chmod", []string{"700", installed}).
+				WithPurpose("make replaced Mjolnir worker executable"),
+		}
+	case core.TargetsTargetLocatorLocalPodman, core.TargetsTargetLocatorLocalDocker, core.TargetsTargetLocatorAppleContainer:
+		engine := map[core.TargetsTargetLocatorKind]string{
+			core.TargetsTargetLocatorLocalPodman:    "podman",
+			core.TargetsTargetLocatorLocalDocker:    "docker",
+			core.TargetsTargetLocatorAppleContainer: "container",
+		}[locator.Kind]
+		containerID := locator.ContainerID
+		commands = []core.CommandSpec{
+			core.NewCommandSpec(engine, []string{"cp", workerBinary, containerID + ":" + staged}).
+				WithPurpose("stage replacement Mjolnir worker"),
+			core.NewCommandSpec(engine, ContainerUploadOwnershipArgs(engine, containerID, workerRoot, []string{staged})).
+				WithPurpose("match replacement worker to the worker directory owner"),
+			core.NewCommandSpec(engine, []string{"exec", containerID, "mv", "-f", staged, installed}).
+				WithPurpose("replace installed Mjolnir worker"),
+			core.NewCommandSpec(engine, []string{"exec", containerID, "chmod", "700", installed}).
+				WithPurpose("make replaced Mjolnir worker executable"),
+		}
+	case core.TargetsTargetLocatorAwsEc2, core.TargetsTargetLocatorSshBare:
+		return core.CommandPlan{}, errors.New("SSH host worker uploads must stream to the private worker store")
+	default:
+		engine, ok := locator.ContainerEngine()
+		if !ok {
+			panic("matched a remote container target")
+		}
+		if remoteSource == nil {
+			return core.CommandPlan{}, errors.New("remote container worker copy needs its host store pin")
+		}
+		upload := *remoteSource
+		containerID := locator.ContainerID
+		var steps []core.CommandStep
+		for _, step := range []struct {
+			purpose string
+			args    []string
+		}{
+			{"stage replacement Mjolnir worker", []string{engine, "cp", upload, containerID + ":" + staged}},
+			{"match replacement worker to the worker directory owner",
+				append([]string{engine}, ContainerUploadOwnershipArgs(engine, containerID, workerRoot, []string{staged})...)},
+			{"replace installed Mjolnir worker", []string{engine, "exec", containerID, "mv", "-f", "--", staged, installed}},
+			{"make replaced Mjolnir worker executable", []string{engine, "exec", containerID, "chmod", "700", installed}},
+		} {
+			steps = append(steps, core.NewCommandStep(step.purpose, core.WithEngineArgv(step.args)))
+		}
+		steps = append(steps, core.NewCommandStep("remove remote replacement worker staging", []string{"rm", "-f", "--", upload}))
+		commands = []core.CommandSpec{
+			core.SSHCommandOwned(core.SshTrafficClassBulk, locator.SSH, core.StepScript(steps)).
+				WithPurpose("stage replacement Mjolnir worker"),
+		}
+	}
+	return core.CommandPlan{
+		Description: "replace stale Mjolnir worker for session " + sessionID,
+		Commands:    commands,
+	}, nil
 }
 
 // installedFileDigestScript is the script of InstalledFileDigestCommand.
@@ -278,7 +599,26 @@ func InstalledFileDigestCommand(locator *core.TargetsTargetLocator, path, purpos
 }
 
 func WorkerLaunchRefreshPlan(locator *core.TargetsTargetLocator, sessionID string, launch *core.WorkerLaunchConfig) (sessiontypes.WorkerLaunchRefreshPlan, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs worker_launch_refresh_plan")
+	workerRoot, err := core.WorkerRoot(locator, sessionID)
+	if err != nil {
+		return sessiontypes.WorkerLaunchRefreshPlan{}, err
+	}
+	installed := workerRoot + "/launch.json"
+	body, err := upgradeSerdeJSONPretty(launch)
+	if err != nil {
+		return sessiontypes.WorkerLaunchRefreshPlan{}, fmt.Errorf("serialize worker launch config: %w", err)
+	}
+	digest := sha256.Sum256(body)
+	replace := writeLaunchConfigCommand(locator, installed, body).
+		WithPurpose("replace stale Mjolnir worker launch config")
+	return sessiontypes.WorkerLaunchRefreshPlan{
+		ExpectedSHA256:  core.LowerHex(digest[:]),
+		InstalledDigest: InstalledFileDigestCommand(locator, installed, "identify installed Mjolnir worker launch config"),
+		Replace: core.CommandPlan{
+			Description: "replace stale Mjolnir launch config for session " + sessionID,
+			Commands:    []core.CommandSpec{replace},
+		},
+	}, nil
 }
 
 func writeLaunchConfigCommand(locator *core.TargetsTargetLocator, installed string, body []byte) core.CommandSpec {
@@ -319,7 +659,21 @@ func WorkerBinaryRefreshPlan(locator *core.TargetsTargetLocator, sessionID strin
 // installed, its digest matches the source and nothing is copied again,
 // even though recovery may still restart the worker.
 func RefreshTargetWorkerBinaryIfStale(executor core.CommandExecutor, refresh *sessiontypes.DeferredWorkerBinaryRefresh) error {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs refresh_target_worker_binary_if_stale")
+	worker, err := WorkerInstallForTarget(&refresh.Locator, executor)
+	if err != nil {
+		return fmt.Errorf("resolve the worker for the recovering target: %w", err)
+	}
+	host, ok := worker.(WorkerInstallHost)
+	if !ok {
+		// Relinking is cheap and idempotent; digests cannot tell an image's
+		// worker from a host copy of the same build.
+		if err := InstallWorkerBinary(executor, &refresh.Locator, refresh.SessionID, worker, "hel"); err != nil {
+			return fmt.Errorf("link the image's Mjolnir worker: %w", err)
+		}
+		return nil
+	}
+	_, err = ReplaceTargetWorkerBinaryIfStale(executor, &refresh.Locator, refresh.SessionID, &refresh.InstalledDigest, host.Path)
+	return err
 }
 
 // RefreshInstalledWorkerBinary copies the worker binary this controller
@@ -344,5 +698,24 @@ func RefreshInstalledWorkerBinary(executor core.CommandExecutor, locator *core.T
 // copy ran. Split from the resolver above so the digest gate is testable
 // without resolving a real worker binary for a target architecture.
 func ReplaceTargetWorkerBinaryIfStale(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, installedDigest *core.CommandSpec, source string) (bool, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/upgrade.rs replace_target_worker_binary_if_stale")
+	// Digest equality is meaningful only after the source matches this build.
+	if err := core.VerifyWorkerBuild(source); err != nil {
+		return false, err
+	}
+	expected, err := core.WorkerExecutableDigest(source)
+	if err != nil {
+		return false, err
+	}
+	installed, err := executor.Execute(installedDigest)
+	if err != nil {
+		return false, fmt.Errorf("read the installed worker digest: %w", err)
+	}
+	fields := strings.Fields(lossyText(installed.Stdout))
+	if installed.Status == 0 && len(fields) > 0 && strings.EqualFold(fields[0], expected) {
+		return false, nil
+	}
+	if err := InstallWorkerBinary(executor, locator, sessionID, WorkerInstallHost{Path: source}, "hel"); err != nil {
+		return false, fmt.Errorf("replace stale relay worker binary: %w", err)
+	}
+	return true, nil
 }
