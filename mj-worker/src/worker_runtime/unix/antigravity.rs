@@ -1,5 +1,7 @@
 use super::*;
-use crate::acp::antigravity_tasks::{AntigravityStateFollower, read_summary_row_digest};
+use crate::acp::antigravity_tasks::{
+    AntigravityStateFollower, is_sqlite_busy, read_summary_row_digest,
+};
 
 pub(super) async fn handle_antigravity_stop(
     relay: &Arc<RelayCell>,
@@ -59,13 +61,21 @@ pub(crate) const ANTIGRAVITY_TASK_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(500);
 const ANTIGRAVITY_TASK_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 
+const ANTIGRAVITY_TASK_IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const ANTIGRAVITY_BUSY_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub(crate) struct AntigravityTaskMonitor {
     home: std::result::Result<PathBuf, String>,
     native_session_id: Option<String>,
     follower: Option<AntigravityStateFollower>,
-    retry_at: tokio::time::Instant,
+    next_error_retry_at: Option<tokio::time::Instant>,
+    busy_since: Option<tokio::time::Instant>,
+    last_success_at: Option<tokio::time::Instant>,
+    last_synced_hook_epoch: Option<u64>,
     retry_delay: std::time::Duration,
     last_warning: Option<String>,
+    #[cfg(test)]
+    pub(crate) busy_warn_after: std::time::Duration,
 }
 
 impl AntigravityTaskMonitor {
@@ -74,16 +84,29 @@ impl AntigravityTaskMonitor {
             home,
             native_session_id: None,
             follower: None,
-            retry_at: tokio::time::Instant::now(),
+            next_error_retry_at: None,
+            busy_since: None,
+            last_success_at: None,
+            last_synced_hook_epoch: None,
             retry_delay: ANTIGRAVITY_TASK_POLL_INTERVAL,
             last_warning: None,
+            #[cfg(test)]
+            busy_warn_after: ANTIGRAVITY_BUSY_WARN_AFTER,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_busy_timeout(&mut self, timeout: std::time::Duration) {
+        self.follower.as_mut().unwrap().set_busy_timeout(timeout);
     }
 
     fn detach(&mut self) {
         self.native_session_id = None;
         self.follower = None;
-        self.retry_at = tokio::time::Instant::now();
+        self.next_error_retry_at = None;
+        self.busy_since = None;
+        self.last_success_at = None;
+        self.last_synced_hook_epoch = None;
         self.retry_delay = ANTIGRAVITY_TASK_POLL_INTERVAL;
         self.last_warning = None;
     }
@@ -98,11 +121,36 @@ impl AntigravityTaskMonitor {
     }
 
     pub(crate) async fn refresh(&mut self, relay: &Arc<RelayCell>, force: bool) -> Result<()> {
+        self.refresh_outcome(relay, force).await.map(|_| ())
+    }
+
+    pub(crate) async fn refresh_for_idle_reservation(
+        &mut self,
+        relay: &Arc<RelayCell>,
+    ) -> Result<bool> {
+        self.refresh_outcome(relay, true).await
+    }
+
+    async fn refresh_outcome(&mut self, relay: &Arc<RelayCell>, force: bool) -> Result<bool> {
         let Some(native_session_id) = self.native_session_id.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
-        if !force && tokio::time::Instant::now() < self.retry_at {
-            return Ok(());
+        let now = tokio::time::Instant::now();
+        if !force {
+            if self.next_error_retry_at.is_some_and(|at| now < at) {
+                return Ok(false);
+            }
+            if self.next_error_retry_at.is_none()
+                && !relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .antigravity_needs_fast_poll(self.last_synced_hook_epoch)
+                && self.last_success_at.is_some_and(|at| {
+                    now.saturating_duration_since(at) < ANTIGRAVITY_TASK_IDLE_POLL_INTERVAL
+                })
+            {
+                return Ok(false);
+            }
         }
         let follower = match (self.follower.take(), &self.home) {
             (Some(follower), _) => follower,
@@ -110,10 +158,12 @@ impl AntigravityTaskMonitor {
                 AntigravityStateFollower::new(home.clone(), native_session_id.clone())
             }
             (None, Err(error)) => {
-                return self.record_failure(
-                    relay,
-                    anyhow::anyhow!("cannot locate Antigravity home: {error}"),
-                );
+                return self
+                    .record_failure(
+                        relay,
+                        anyhow::anyhow!("cannot locate Antigravity home: {error}"),
+                    )
+                    .map(|()| false);
             }
         };
         let mut follower = Some(follower);
@@ -124,7 +174,7 @@ impl AntigravityTaskMonitor {
                 .antigravity_hook_epoch();
             let mut scan_follower = follower.take().expect("follower returned after scan");
             let scanned = mj_core::runtime::spawn_blocking(move || {
-                let result = scan_follower.refresh_pending();
+                let result = scan_follower.refresh_pending_with_force(force);
                 (scan_follower, result)
             })
             .await;
@@ -132,7 +182,8 @@ impl AntigravityTaskMonitor {
                 Ok((mut scan_follower, result)) => match result {
                     Ok((snapshot, cursor)) => {
                         self.retry_delay = ANTIGRAVITY_TASK_POLL_INTERVAL;
-                        self.retry_at = tokio::time::Instant::now() + self.retry_delay;
+                        self.next_error_retry_at = None;
+                        self.busy_since = None;
                         self.last_warning = None;
                         let applied = relay
                             .lock()
@@ -141,34 +192,52 @@ impl AntigravityTaskMonitor {
                         if applied {
                             scan_follower.commit_refresh(cursor);
                             self.follower = Some(scan_follower);
-                            return Ok(());
+                            self.last_success_at = Some(tokio::time::Instant::now());
+                            self.last_synced_hook_epoch = Some(scan_hook_epoch);
+                            return Ok(true);
                         }
                         if attempt == 1 || !force {
-                            self.retry_at = tokio::time::Instant::now();
+                            self.next_error_retry_at = None;
                             self.follower = Some(scan_follower);
-                            return Ok(());
+                            return Ok(false);
                         }
                         follower = Some(scan_follower);
                     }
                     Err(error) => {
                         self.follower = Some(scan_follower);
-                        return self.record_failure(relay, error);
+                        return self.record_failure(relay, error).map(|()| false);
                     }
                 },
                 Err(error) => {
-                    return self.record_failure(
-                        relay,
-                        anyhow::anyhow!("Antigravity background task scan stopped: {error}"),
-                    );
+                    return self
+                        .record_failure(
+                            relay,
+                            anyhow::anyhow!("Antigravity background task scan stopped: {error}"),
+                        )
+                        .map(|()| false);
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn record_failure(&mut self, relay: &Arc<RelayCell>, error: anyhow::Error) -> Result<()> {
-        self.retry_at = tokio::time::Instant::now() + self.retry_delay;
+        let now = tokio::time::Instant::now();
+        self.next_error_retry_at = Some(now + self.retry_delay);
         self.retry_delay = (self.retry_delay * 2).min(ANTIGRAVITY_TASK_MAX_RETRY_DELAY);
+        if is_sqlite_busy(&error) {
+            let since = *self.busy_since.get_or_insert(now);
+            #[cfg(test)]
+            let busy_warn_after = self.busy_warn_after;
+            #[cfg(not(test))]
+            let busy_warn_after = ANTIGRAVITY_BUSY_WARN_AFTER;
+            if now.saturating_duration_since(since) < busy_warn_after {
+                tracing::debug!(%error, "Antigravity task database temporarily locked");
+                return Ok(());
+            }
+        } else {
+            self.busy_since = None;
+        }
         let message = format!(
             "Antigravity background task tracking is unavailable; worker replacement is blocked: {error:#}"
         );

@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::types::Value;
@@ -11,6 +11,57 @@ use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+
+// Conversation DB WAL checkpoint/close has been observed taking about 570 ms.
+const ANTIGRAVITY_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(2_000);
+
+pub fn is_sqlite_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(cause.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(err, _)) if matches!(err.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+impl FileStamp {
+    fn read(path: &Path) -> Result<Option<Self>> {
+        let meta = match fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("stat Antigravity task database"),
+        };
+        Ok(Some(Self {
+            #[cfg(unix)]
+            dev: meta.dev(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        }))
+    }
+    fn clean(&self, started: SystemTime) -> bool {
+        self.modified.is_some_and(|t| {
+            started
+                .duration_since(t)
+                .is_ok_and(|age| age >= Duration::from_secs(2))
+        })
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskDbStamp {
+    db: FileStamp,
+    wal: Option<FileStamp>,
+    clean: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AntigravityRunStatus {
@@ -56,6 +107,7 @@ pub struct AntigravitySnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub struct AntigravityRefreshCursor {
+    tasks: Option<(TaskDbStamp, Vec<AntigravityBackgroundTask>)>,
     data_version: Option<i64>,
     summary: Option<(AntigravitySummarySnapshot, [u8; 32])>,
 }
@@ -67,6 +119,8 @@ pub struct AntigravityStateFollower {
     summary: Option<Connection>,
     summary_identity: Option<(u64, u64)>,
     cursor: AntigravityRefreshCursor,
+    #[cfg(test)]
+    busy_timeout: Duration,
 }
 
 struct SummaryRow {
@@ -144,8 +198,20 @@ impl AntigravityStateFollower {
             summary: None,
             summary_identity: None,
             cursor: AntigravityRefreshCursor::default(),
+            #[cfg(test)]
+            busy_timeout: ANTIGRAVITY_SQLITE_BUSY_TIMEOUT,
         }
     }
+    #[cfg(test)]
+    pub(crate) fn set_busy_timeout(&mut self, timeout: Duration) {
+        self.busy_timeout = timeout;
+        if let Some(summary) = &self.summary {
+            summary
+                .busy_timeout(timeout)
+                .expect("configure test summary busy timeout");
+        }
+    }
+
     pub fn home(&self) -> &Path {
         &self.home
     }
@@ -163,21 +229,54 @@ impl AntigravityStateFollower {
     /// cursor. Call [`Self::commit_refresh`] only after the relay accepts the
     /// snapshot so a rejected concurrent scan cannot drop a real commit.
     pub fn refresh_pending(&mut self) -> Result<(AntigravitySnapshot, AntigravityRefreshCursor)> {
+        self.refresh_pending_with_force(true)
+    }
+
+    pub fn refresh_pending_with_force(
+        &mut self,
+        force: bool,
+    ) -> Result<(AntigravitySnapshot, AntigravityRefreshCursor)> {
         validate_conversation_id(&self.conversation_id)?;
+        #[cfg(test)]
+        let timeout = self.busy_timeout;
+        #[cfg(not(test))]
+        let timeout = ANTIGRAVITY_SQLITE_BUSY_TIMEOUT;
         let dir = self.home.join("antigravity-cli");
         // Do not consume a summary commit if the steps read fails and the
         // relay cannot reconcile the resulting snapshot.
         let task_path = dir
             .join("conversations")
             .join(format!("{}.db", self.conversation_id));
-        let (conversation_db_present, running_tasks) = if task_path
-            .try_exists()
-            .context("locate Antigravity steps database")?
-        {
-            (true, read_tasks(&task_path)?)
+        let scan_started = SystemTime::now();
+        let tasks = if let Some(db) = FileStamp::read(&task_path)? {
+            let mut wal_path = task_path.as_os_str().to_os_string();
+            wal_path.push("-wal");
+            let wal = FileStamp::read(Path::new(&wal_path))?;
+            let stamp = TaskDbStamp {
+                clean: db.clean(scan_started) && wal.as_ref().is_none_or(|w| w.clean(scan_started)),
+                db,
+                wal,
+            };
+            let running = match &self.cursor.tasks {
+                Some((cached, tasks))
+                    if !force
+                        && cached.clean
+                        && cached.db == stamp.db
+                        && cached.wal == stamp.wal =>
+                {
+                    tasks.clone()
+                }
+                _ => read_tasks_with_timeout(&task_path, timeout)?,
+            };
+            Some((stamp, running))
         } else {
-            (false, Vec::new())
+            None
         };
+        let conversation_db_present = tasks.is_some();
+        let running_tasks = tasks
+            .as_ref()
+            .map(|(_, tasks)| tasks.clone())
+            .unwrap_or_default();
         let summary_path = summary_db_path(&self.home);
         if summary_path
             .try_exists()
@@ -189,7 +288,7 @@ impl AntigravityStateFollower {
             #[cfg(not(unix))]
             let identity = (0, meta.len());
             if self.summary_identity != Some(identity) || self.summary.is_none() {
-                self.summary = Some(open_readonly(&summary_path)?);
+                self.summary = Some(open_readonly_with_timeout(&summary_path, timeout)?);
                 self.summary_identity = Some(identity);
                 self.cursor.data_version = None;
             }
@@ -197,7 +296,7 @@ impl AntigravityStateFollower {
             self.summary = None;
             self.summary_identity = None;
         }
-        let cursor = if let Some(conn) = &self.summary {
+        let mut cursor = if let Some(conn) = &self.summary {
             let version: i64 = conn
                 .query_row("PRAGMA data_version", [], |r| r.get(0))
                 .context("read Antigravity summary data_version")?;
@@ -208,6 +307,7 @@ impl AntigravityStateFollower {
                     .map(|row| Ok::<_, anyhow::Error>((row.snapshot()?, row.digest())))
                     .transpose()?;
                 AntigravityRefreshCursor {
+                    tasks: None,
                     data_version: Some(version),
                     summary,
                 }
@@ -215,6 +315,7 @@ impl AntigravityStateFollower {
         } else {
             AntigravityRefreshCursor::default()
         };
+        cursor.tasks = tasks;
         // data_version covers the entire database. A child conversation
         // can commit without changing any field in the parent's row.
         let summary_row_digest = cursor.summary.as_ref().map(|(_, digest)| *digest);
@@ -289,12 +390,16 @@ fn read_summary_row(conn: &Connection, conversation_id: &str) -> Result<Option<S
 }
 
 fn open_readonly(path: &Path) -> Result<Connection> {
+    open_readonly_with_timeout(path, ANTIGRAVITY_SQLITE_BUSY_TIMEOUT)
+}
+
+fn open_readonly_with_timeout(path: &Path, timeout: Duration) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("open Antigravity database {}", path.display()))?;
-    conn.busy_timeout(Duration::from_millis(250))?;
+    conn.busy_timeout(timeout)?;
     Ok(conn)
 }
 fn status_from_text(s: &str) -> AntigravityRunStatus {
@@ -400,8 +505,15 @@ fn decode_summary(bytes: &[u8], s: &mut AntigravitySummarySnapshot) -> Result<()
         Ok(())
     })
 }
+#[cfg(test)]
 fn read_tasks(path: &Path) -> Result<Vec<AntigravityBackgroundTask>> {
-    let conn = open_readonly(path)?;
+    read_tasks_with_timeout(path, ANTIGRAVITY_SQLITE_BUSY_TIMEOUT)
+}
+fn read_tasks_with_timeout(
+    path: &Path,
+    timeout: Duration,
+) -> Result<Vec<AntigravityBackgroundTask>> {
+    let conn = open_readonly_with_timeout(path, timeout)?;
     let mut stmt=conn.prepare("SELECT idx, task_details FROM steps WHERE status = 2 AND task_details IS NOT NULL ORDER BY idx ASC").context("prepare Antigravity steps query")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
@@ -519,6 +631,75 @@ mod tests {
         let d = root.join("antigravity-cli");
         fs::create_dir_all(d.join("conversations")).unwrap();
         d
+    }
+
+    #[test]
+    fn antigravity_task_stamps_only_skip_clean_committed_unchanged_databases() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = dirs(temp.path()).join("conversations/c1.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch("CREATE TABLE steps (idx INTEGER,status INTEGER,task_details BLOB);")
+            .unwrap();
+        let old = SystemTime::now() - Duration::from_secs(5);
+        let set_mtime = |time| {
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap()
+        };
+        set_mtime(old);
+        let mut follower = AntigravityStateFollower::new(temp.path().into(), "c1".into());
+        follower.set_busy_timeout(Duration::from_millis(10));
+        let (_, rejected) = follower.refresh_pending_with_force(false).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(is_sqlite_busy(
+            &follower.refresh_pending_with_force(false).unwrap_err()
+        ));
+        follower.commit_refresh(rejected);
+        assert!(follower.refresh_pending_with_force(false).is_ok());
+        assert!(is_sqlite_busy(
+            &follower.refresh_pending_with_force(true).unwrap_err()
+        ));
+        set_mtime(SystemTime::now());
+        assert!(is_sqlite_busy(
+            &follower.refresh_pending_with_force(false).unwrap_err()
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        let (_, fresh) = follower.refresh_pending_with_force(false).unwrap();
+        follower.commit_refresh(fresh);
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(is_sqlite_busy(
+            &follower.refresh_pending_with_force(false).unwrap_err()
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        set_mtime(old);
+        let (_, clean) = follower.refresh_pending_with_force(false).unwrap();
+        follower.commit_refresh(clean);
+        let wal = path.with_file_name("c1.db-wal");
+        fs::write(&wal, []).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(is_sqlite_busy(
+            &follower.refresh_pending_with_force(false).unwrap_err()
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn antigravity_short_exclusive_lock_clears_inside_busy_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = dirs(temp.path()).join("conversations/c1.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("CREATE TABLE steps (idx INTEGER,status INTEGER,task_details BLOB); BEGIN EXCLUSIVE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(350));
+            writer.execute_batch("ROLLBACK").unwrap();
+        });
+        let mut follower = AntigravityStateFollower::new(temp.path().into(), "c1".into());
+        assert!(follower.refresh_pending_with_force(true).is_ok());
+        release.join().unwrap();
     }
 
     #[test]

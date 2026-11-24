@@ -302,6 +302,7 @@ async fn antigravity_coordinator_orders_stop_after_buffered_output_and_preserves
         None,
         None,
         None,
+        None,
     ));
     wait_state(&relay, |state| state.native_session_is_ready()).await;
     assert!(matches!(
@@ -884,6 +885,7 @@ impl ReloadFixture {
             None,
             None,
             None,
+            None,
         ));
         let fixture = Self {
             relay,
@@ -1226,4 +1228,231 @@ fn antigravity_in_place_reload_drains_old_stop_before_retiring_its_work() {
             assert!(state.background_commands.is_empty());
             assert_eq!(state.background_work_known, Some(false));
         });
+}
+
+#[tokio::test]
+async fn antigravity_busy_grace_preserves_known_state_and_recovers() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    monitor.set_busy_timeout(Duration::from_millis(10));
+    monitor.busy_warn_after = Duration::from_millis(60);
+    databases.steps.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(!monitor.refresh_for_idle_reservation(&relay).await.unwrap());
+    {
+        let state = relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_work_known, Some(true));
+        assert!(
+            !state
+                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e.observation, RelayObservation::Warning { .. }))
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert!(!monitor.refresh_for_idle_reservation(&relay).await.unwrap());
+    {
+        let state = relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_work_known, Some(false));
+        assert!(
+            state
+                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e.observation, RelayObservation::Warning { .. }))
+        );
+    }
+    databases.steps.execute_batch("ROLLBACK").unwrap();
+    assert!(monitor.refresh_for_idle_reservation(&relay).await.unwrap());
+    assert_eq!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_work_known,
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn antigravity_reserve_idle_socket_refreshes_hookless_tasks_and_fails_closed_on_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    stop(
+        &mut relay.lock().unwrap(),
+        Some(NATIVE),
+        Some(true),
+        "END_TURN",
+    );
+    monitor.refresh(&relay, true).await.unwrap();
+    monitor.set_busy_timeout(Duration::from_millis(10));
+    let (refresh_tx, refresh_rx) = mpsc::channel(16);
+    let (wake_tx, wakes) = mpsc::channel(8);
+    let (_event_tx, events) = mpsc::channel(8);
+    let (commands, _command_rx) = mpsc::channel(8);
+    let (shell_events, _shell_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().into(),
+        BTreeMap::new(),
+        shell_events,
+    );
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
+        relay.clone(),
+        events,
+        wakes,
+        commands,
+        shells,
+        TaskMonitors {
+            antigravity: Some(monitor),
+            ..Default::default()
+        },
+        None,
+        None,
+        None,
+        Some(refresh_rx),
+    ));
+    let (server, client) = UnixStream::pair().unwrap();
+    let (fatal, _errors) = mpsc::channel(1);
+    let connection = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+        server,
+        relay.clone(),
+        wake_tx,
+        SharedCredentials::new(Ok(credential_endpoint(
+            HarnessKind::Antigravity,
+            temp.path(),
+        ))),
+        ConnectionRuntime {
+            antigravity_refresh: Some(refresh_tx),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    for (id, locked) in [("locked", true), ("hookless", false)] {
+        if locked {
+            databases.steps.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        } else {
+            databases.task(1);
+        }
+        let envelope = RelayRequestEnvelope {
+            request_id: id.into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::ReserveIdle {
+                command_id: id.into(),
+            },
+        };
+        let mut bytes = serde_json::to_vec(&envelope).unwrap();
+        bytes.push(b'\n');
+        client.write_all(&bytes).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::IdleReservation { ordinal: None }
+            }
+        ));
+        if locked {
+            assert!(
+                !relay
+                    .lock()
+                    .unwrap()
+                    .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(&event.observation, RelayObservation::Warning { .. }))
+            );
+            databases.steps.execute_batch("ROLLBACK").unwrap();
+        }
+    }
+    assert!(
+        !relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_commands
+            .is_empty()
+    );
+    databases.clear_tasks();
+    wait_state(&relay, |state| state.background_commands.is_empty()).await;
+    let envelope = RelayRequestEnvelope {
+        request_id: "accepted".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::ReserveIdle {
+            command_id: "accepted".into(),
+        },
+    };
+    let mut bytes = serde_json::to_vec(&envelope).unwrap();
+    bytes.push(b'\n');
+    let mut accepted = None;
+    for _ in 0..2 {
+        client.write_all(&bytes).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::IdleReservation {
+                    ordinal: Some(ordinal),
+                },
+        } = response.body
+        else {
+            panic!("reservation rejected: {response:?}");
+        };
+        if let Some(prior) = accepted {
+            assert_eq!(prior, ordinal);
+        }
+        accepted = Some(ordinal);
+    }
+    drop(client);
+    connection.await.unwrap().unwrap();
+    coordinator.abort();
+    assert!(coordinator.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn antigravity_hooks_wake_settled_idle_polling() {
+    let temp = tempfile::tempdir().unwrap();
+    let _databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    let epoch = relay.lock().unwrap().antigravity_hook_epoch();
+    assert!(
+        !relay
+            .lock()
+            .unwrap()
+            .antigravity_needs_fast_poll(Some(epoch))
+    );
+    pre_invocation(&mut relay.lock().unwrap(), Some(NATIVE));
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .antigravity_needs_fast_poll(Some(epoch))
+    );
+    monitor.refresh(&relay, true).await.unwrap();
+    let epoch = relay.lock().unwrap().antigravity_hook_epoch();
+    stop(
+        &mut relay.lock().unwrap(),
+        Some(NATIVE),
+        Some(true),
+        "END_TURN",
+    );
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .antigravity_needs_fast_poll(Some(epoch))
+    );
 }

@@ -208,6 +208,38 @@ fn kimi_agent_description(
 }
 
 impl DurableRelay {
+    pub(crate) fn antigravity_needs_fast_poll(&self, last_synced_hook_epoch: Option<u64>) -> bool {
+        let work = &self.antigravity_work;
+        self.background_work == BackgroundWorkPolicy::AntigravityTasks
+            && (last_synced_hook_epoch != Some(work.hook_epoch)
+                || self.background_work_known != Some(true)
+                || self.snapshot.active_prompt.is_some()
+                || self.snapshot.autonomous_harness_turn().is_some()
+                || !work.running_tasks.is_empty()
+                || work.pending_stop_work.is_some()
+                || work.pending_turn_settle.is_some()
+                || (work.hook_idle_gen != Some(work.summary_commit_gen)
+                    && (work.summary_not_fully_idle
+                        || work
+                            .summary_status
+                            .is_some_and(AntigravityRunStatus::is_active)
+                        || work.summary_has_running_subagents)))
+    }
+
+    pub(crate) fn has_handled_command(&self, command_id: &str) -> bool {
+        self.snapshot.handled_commands.contains_key(command_id)
+    }
+
+    pub(crate) fn needs_antigravity_refresh_before_reserve_idle(&self, command_id: &str) -> bool {
+        self.background_work == BackgroundWorkPolicy::AntigravityTasks
+            && !self.has_handled_command(command_id)
+            && self.reviewer_admissions.is_empty()
+            && self.snapshot.native_session_id.is_some()
+            && self
+                .verdict_harness
+                .is_some_and(|harness| self.operational_state().safe_to_replace(harness))
+    }
+
     /// Choose where commands the agent left running are read from.
     pub fn set_background_work_policy(&mut self, policy: BackgroundWorkPolicy) {
         self.background_work = policy;

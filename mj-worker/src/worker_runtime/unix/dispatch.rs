@@ -109,6 +109,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
     task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
+    antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<bool>>>,
 ) -> Result<()> {
     let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
     run_relay_coordinator(
@@ -121,6 +122,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
         verdict,
         capture,
         Some(startup),
+        antigravity_refresh,
     )
     .await
 }
@@ -152,6 +154,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         verdict,
         capture,
         None,
+        None,
     )
     .await
 }
@@ -167,6 +170,7 @@ fn run_relay_coordinator(
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
     capture: Option<crate::work_facts::WorkObserver>,
     mut startup: Option<HarnessStartup>,
+    mut antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<bool>>>,
 ) -> impl std::future::Future<Output = Result<()>> + Send {
     // Capturing a turn's work facts makes this future large. Keep its state
     // on the heap rather than embedding it in every startup/capture wrapper;
@@ -592,6 +596,14 @@ fn run_relay_coordinator(
                         .expect("Kimi poll branch is guarded")
                         .refresh(&relay, false)
                         .await?;
+                }
+                reply = async { antigravity_refresh.as_mut().expect("guarded refresh receiver").recv().await }, if antigravity_refresh.is_some() => {
+                    if let Some(reply) = reply {
+                        let ok = if held { false } else if let Some(monitor) = task_monitors.antigravity.as_mut() {
+                            monitor.refresh_for_idle_reservation(&relay).await?
+                        } else { true };
+                        let _ = reply.send(ok);
+                    } else { antigravity_refresh = None; }
                 }
                 _ = antigravity_poll.tick(), if task_monitors.antigravity.is_some() && !held => {
                     task_monitors.antigravity
@@ -2255,6 +2267,7 @@ mod startup_tests {
                 None,
                 None,
                 Some(startup),
+                None,
             ));
             match arrival {
                 Arrival::AdvancesThenStalls => {
