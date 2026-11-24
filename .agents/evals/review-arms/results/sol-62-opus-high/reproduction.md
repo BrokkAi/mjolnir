@@ -4,6 +4,7 @@ Run from `.agents/evals/review-arms` with the installed Mjolnir CLI and the
 existing default-instance study workspaces.
 
 ```sh
+set -euo pipefail
 export REVIEW_ARMS_DIR=/mnt/optane/review-arms-20261113
 export REVIEW_ARMS_INSTANCE=default
 export REVIEW_ARMS_CORPUS="$REVIEW_ARMS_DIR/corpus/candidates-all.jsonl"
@@ -25,6 +26,7 @@ pin. The first run captured the live user prompt for each canary with
 into `prompt-Q.json` and `prompt-R.json`.
 
 ```sh
+set -euo pipefail
 python3 -B driver.py --jobs "$C/canaries.json" --concurrency 2 --same-image "$C/image.json" --stop-on-failure
 python3 -B "$S/audit_reviewers.py" "$R" --canaries > "$C/canary-audit.json"
 python3 -B driver.py --jobs "$C/jobs.json" --concurrency 16 --same-image "$C/image.json"
@@ -35,56 +37,50 @@ The full driver skips completed jobs, including both canaries. The recovered
 historical cohort is in the campaign's `preflight` directory with its frozen
 job manifest, session manifest and checksums.
 
-```sh
-PREFLIGHT="$C/preflight"
-(cd "$R" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" &&
-  sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256")
-python3 -B "$S/audit_round.py" "$R" ready
-mkdir "$R/verify9"
-cp "$R/verify5/SPEC.md" "$R/verify9/SPEC.md"
-python3 -B build_verify.py verify9 --arms A,B,D,D2,E,G-base,G-plus,H,I,J,K,L,N,O,P,Q,R,S,T \
-  --configs gpt-6.1-terra:high,gpt-6.1-terra:xhigh,gpt-6.1-sol:high,gpt-6.1-sol:medium,gpt-6.1-sol:xhigh,greptile:base,greptile:plus,deepseek-flash:low,muse-ember-1.0:xhigh,gemini-4-hydrogen:high,gemini-4-hydrogen:medium,kimi-code/k3.1-pro:high,gpt-6.2-sol:low,gpt-6.2-sol:medium \
-  --ready-jobs "$C/ready-jobs.json" --bugs-from "$C/jobs.json"
-python3 -B "$S/audit_round.py" "$R" pool "$PREFLIGHT/historical-and-op-sessions.jsonl"
-```
-
-The one-batch Opus verification uses batch 0 in the same round as the full
-driver. Verify the actual provider and effort before launching the remaining
-batches. The full driver reuses the attested batch 0 output.
-
-Use either `bash "$S/run_verification.sh"` after the reviewer driver exits or
-the individual verification commands here. The wrapper prepares and validates
-the ready and reviewer hash manifests. It reuses exact matches already
-prepared, including by the manual flow. Once the verify9 directory exists,
-diagnose any interruption and continue with the corresponding stage commands.
-Keep the original private key and blinded batches.
+After the reviewer driver exits successfully, use the canonical gated
+verification and analysis entrypoints in the same shell:
 
 ```sh
-STORE=~/.local/share/mjolnir/mj.sqlite3
-judge=(python3 -B verify_driver.py verify9 --kind verify --target localhost
-  --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe
-  --model opus --effort high --profiles claude4 --quota-scope claude)
-"${judge[@]}" --concurrency 1 --batch 0
-python3 -B "$S/audit_round.py" "$R" judges "$STORE" --batch 0 > "$C/judge-canary-audit.json"
-"${judge[@]}" --concurrency 16
-python3 -B "$S/audit_round.py" "$R" judges "$STORE" > "$C/judge-audit.json"
-(cd "$R" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" &&
-  sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256")
+set -euo pipefail
+bash "$S/run_verification.sh"
+bash "$S/run_analysis.sh"
 ```
 
-Score from the fresh Opus groups and the complete reviewer session key. Use
-the historical sample caps, with three samples each for the two Sol 6.2
-efforts. DSF/low remains in the judged pool. Its partial diff coverage limits
-the primary 70-diff frontier to the other configurations.
+The verification script prepares or validates the ready and reviewer hash
+manifests, checks the exact cohort and raw-source hashes, builds and audits
+the blinded pool, then runs batch 0. It requires a successful command-specific
+Opus 5.5/high provider audit before launching the remaining batches at 16.
+The full invocation reuses the attested batch 0 output. Every batch and the
+frozen input/pool hashes must pass audit before the script scores the round.
+A failed canary, audit, or verification command stops this sequence before
+later judging, scoring, or analysis.
 
-```sh
-python3 -B score.py verify9
-caps=Sol/medium=2,Terra/xhigh=2,Sol/xhigh=2,Greptile/base=1,Greptile/plus=1,Ember/xhigh=1,Gemini/high=1,Gemini/medium=1,Kimi/high=1,gpt-6.2-sol/low=3,gpt-6.2-sol/medium=3
-for sev in high medium low high,medium high,medium,low; do
-  python3 -B pareto.py verify9 --exclude DSF/low --bootstrap 300 --sessions "$caps" --severities "$sev"
-done
-```
+The analysis script uses the fresh Opus groups and complete session key,
+preserves the historical sample caps, and allows three samples per Sol 6.2
+effort. It computes the frontier and 20,000-resample paired comparisons for
+each impact tier. DSF/low stays in judging but its partial coverage excludes
+it from the primary 70-diff frontier. Outputs are saved under `verify9` and
+`sol-62-repeats`.
 
-`bash "$S/run_analysis.sh"` runs the frontier and 20,000-resample paired
-comparisons for the three-sample mixtures, with the results saved under
-`verify9` and `sol-62-repeats` respectively.
+These scripts own the operational gates. Once verify9 exists, diagnose an
+interruption and resume only the corresponding validated stage, preserving
+the original private key and batches. The ordered recovery commands in the
+[ExecPlan](../../../../plans/review-sol-62-opus-high.md) use shell error exit
+and the same audits; direct judge or score commands are not an alternative
+to those gates.
+
+## Missing capture evidence
+
+`done.json` records a collected stochastic review, while the campaign audit
+separately validates its measurement evidence. Rerunning the reviewer driver
+skips a completed slot and cannot recreate a missed live observation. Preserve
+the slot's handback, reviewer/command IDs, selection, usage and capture files;
+recover only facts supported by the existing authoritative records. Do not
+substitute session creation time for a missing prompt clock or silently run
+another reviewer to manufacture an observation.
+
+If required evidence cannot be recovered, stop before judging and record the
+gap for an explicit methodology decision by the campaign owner. Keep the
+other completed reviews. A missing observation is not an empty finding set,
+and the strict audit never silently drops that sample or accepts a fabricated
+measurement.

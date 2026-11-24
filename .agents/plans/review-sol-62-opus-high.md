@@ -23,6 +23,8 @@ The original Stage 4 Opus/high round was `verify5`. A later user-requested round
 
 The old runner's extra two-creation gate has already been removed. Each new job must have a single reviewer so the 16-worker executor does not silently admit 32 reviewer turns. All builds are outside this task: use installed Mjolnir and the existing pinned reviewer image.
 
+At 2026-11-24 03:30:31 UTC, all 60 completed new slots had observed runtime/image and matched model, effort, handback, sole completed usage turn and prompt clock, including four no-findings reviews. A review request to change generic completion/retry semantics for hypothetical missing observations was declined: completion of a stochastic review and acceptance of its measurement evidence are distinct facts. The strict gate must hold a real gap for recovery from existing authoritative evidence or an explicit methodology ruling, rather than silently rerun or discard completed samples. The reproduction document records this recovery rule.
+
 Review found that the first orchestration version assumed a prepared ready manifest and tried to exclusively recreate a reviewer hash manifest produced by the manual flow. The ready command now owns deriving and creating its manifest, or validates exact existing membership without rewriting it. The reviewer audit creates an absent hash manifest or verifies the exact existing digest/path multiset against the current audited sources, preserving existing bytes and refusing mismatches. Two focused filesystem tests cover cold preparation, reordered matching evidence, and missing/extra/changed membership or digests. The wrapper remains explicitly for a fresh round; after later-stage interruption, resume the diagnosed stage while preserving its private key and batches.
 
 Preflight confirmed 1,306 historical sessions with 1,960 raw findings and 396 empty reports. The historical cohort plus existing O/P comprises 784 jobs and 1,446 sessions; adding 280 new jobs gives 1,064 jobs and 1,726 sessions. Only DSF/low is incomplete, with 35 sessions on 16 diffs. It remains in judging and is excluded from the primary 70-diff frontier. Historical missing token/API-price fields remain unavailable, not zero.
@@ -90,14 +92,16 @@ Commands run from this checkout, with study scripts run from `.agents/evals/revi
 
 After recording exact unused names and a saved interleaved manifest, the reviewer interfaces are:
 
+    set -euo pipefail
     python3 -B driver.py --jobs "$R/sol-62-repeats/canaries.json" --concurrency 2 --same-image "$R/sol-62-repeats/image.json" --stop-on-failure
+    python3 -B "$S/audit_reviewers.py" "$R" --canaries
     python3 -B driver.py --jobs "$R/sol-62-repeats/jobs.json" --concurrency 16 --same-image "$R/sol-62-repeats/image.json"
 
 Run the full driver with durable detached logging and record its PID. Accepted canaries must skip on the full invocation. The canonical judging entrypoint is the checked-in campaign orchestrator:
 
     bash "$S/run_verification.sh"
 
-Run it only after the reviewer driver exits. It enables shell error exit and pipeline error propagation, prepares or validates ready and reviewer hash manifests, checks new reviewer evidence, builds and audits the private pool, runs and attests one Opus canary, then runs and attests the rest before scoring. The ordered commands below are the manual alternative and document its gates for inspection and recovery; do not run both flows. A matching manually prepared manifest is reusable. Once verify9 exists, diagnose any interruption and resume that stage instead of rerunning fresh-round preparation or rebuilding its key and batches:
+Run it only after the reviewer driver exits. It enables shell error exit and pipeline error propagation, prepares or validates ready and reviewer hash manifests, checks new reviewer evidence, builds and audits the private pool, runs and attests one Opus canary, then runs and attests the rest before scoring. The ordered commands below document its gates for inspection and case-specific recovery, with shell error exit required throughout. Normal reproduction uses the canonical scripts; do not run both flows. A matching previously prepared manifest is reusable. Once verify9 exists, diagnose any interruption and resume that stage instead of rerunning fresh-round preparation or rebuilding its key and batches:
 
     set -euo pipefail
     python3 -B "$S/audit_round.py" "$R" ready
