@@ -62,10 +62,18 @@ pub fn validate_candidate(
     if let Some(login) = &manifest.shared_login {
         relative(&login.relative_marker)?;
     }
+    let home = Path::new(&manifest.target_profile_home);
     ensure!(
-        Path::new(&manifest.target_profile_home).is_absolute(),
-        "profile home is not absolute"
+        !home.as_os_str().is_empty()
+            && home.components().all(|part| matches!(
+                part,
+                Component::Normal(_) | Component::RootDir | Component::Prefix(_)
+            )),
+        "unsafe reload profile home"
     );
+    if home.is_relative() {
+        relative(&manifest.target_profile_home)?;
+    }
     Ok(manifest)
 }
 
@@ -166,6 +174,12 @@ pub fn apply_committed_reload(
     )?;
     let candidate = root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id);
     let home = Path::new(&manifest.target_profile_home);
+    let home = if home.is_absolute() {
+        home.to_owned()
+    } else {
+        std::env::current_dir()?.join(home)
+    };
+    let home = home.as_path();
     directory(home)?;
     for clear in &manifest.clear_paths {
         let relative = relative(clear)?;
@@ -306,6 +320,30 @@ mod tests {
             candidate_id: "candidate".into(),
             git_setup_name: Some("harness-git-candidate".into()),
         }
+    }
+
+    #[test]
+    fn reload_commit_resolves_relative_ssh_profile_home_from_startup_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let pending = fixture(dir.path());
+        let path = dir.path().join("reload-candidates/candidate/manifest.json");
+        let mut manifest: ReloadCandidateManifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest.target_profile_home = dir
+            .path()
+            .join("home")
+            .strip_prefix(&cwd)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        commit_pending_reload(dir.path(), &pending).unwrap();
+        roll_forward_pending_reload_if_any(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("home/config.toml")).unwrap(),
+            b"destination"
+        );
     }
 
     #[test]

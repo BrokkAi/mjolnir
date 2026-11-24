@@ -474,6 +474,19 @@ fn in_place_harness_restart_in_flight_blocks_release_and_mutations_until_complet
         .unwrap_err();
     assert_eq!(err.code, RelayErrorCode::InvalidState);
 
+    assert!(
+        matches!(err.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == "move-op-1")
+    );
+    relay
+        .mark_in_place_harness_committed("move-op-1", &store_id)
+        .unwrap();
+    let err = relay
+        .admit_in_place_harness_restart("move-op-1", &store_id)
+        .unwrap_err();
+    assert!(
+        matches!(err.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == "move-op-1")
+    );
+
     // Release, Discard, and SubmitFront are all refused while restart is in flight.
     for (req_id, request) in [
         (

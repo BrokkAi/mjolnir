@@ -20,8 +20,8 @@ A user or test can observe this working in four ways: rejecting an in-place Move
 - [x] (2026-11-24 19:04Z) Milestone 1: Atomic `WorkerLaunchConfig::write` (`0600` temp+rename), Relay Protocol 91 wire types (`RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL`), durable `InPlaceReloadPhase` on `InPlaceMoveHold`, `RelayErrorDetail::ReloadFailedAfterCommit`, and controller protocol capability gate in `mj-controller/src/controller/move_session/in_place.rs`.
 - [x] (2026-11-24 19:04Z) Milestone 2: Private candidate staging (`WorkerFilePreparation::StageCandidate`, shared `profile_clear_spec`, `install_reload_candidate`, `remove_reload_candidate`) in `mj-worker-staging` and `mj-worker-launch` with zero live-path writes (keeping `RestoreProfileOnly` temporarily until Milestone 4 deletes it with `move_session.rs`).
 - [x] (2026-11-24 19:34Z) Milestone 3: Worker-side two-phase reload, atomic `pending-reload.json` WAL + boot roll-forward (before `bootstrap_login_environment` reads `launch.json`), post-retirement overlay + configurator execution inside `HarnessRestarting` (`apply_harness_reload_transition`), and typed post-commit startup failure wiring (`SessionConfiguration::OpeningReload` -> `ReloadFailedAfterCommit` + `WorkerHarnessStartupFailure`).
-- [ ] Milestone 4: Fix relative `target_profile_home` resolution in `reload_commit.rs` for `SshBare`/`AwsEc2`, update controller in-place Move state machine in `mj-controller/src/controller/move_session.rs` (query worker `in_place_move_hold` before staging on retry, send `StageCandidate` + `RestartHarnessInPlace`, delete live `RefreshProfileOnly`/`RestoreProfileOnly`/`rpc_sent`/substring/`source_disk_confirmed_intact` heuristics, settle destination `Error` on post-commit startup failure while keeping credential-sync fenced until DB matches disk), delete `RestoreProfileOnly` from `mj-worker-staging`/`mj-worker-launch`, and run end-to-end integration tests across refusal, success, crash roll-forward, retry idempotence, and post-commit failure.
-- [ ] Milestone 5: Pre-push review, push to `origin/master`, remove `agent-in-progress` on #1673, and file the three follow-up issues noted during design review (Codex harvest timing before A reaped; Kimi/Grok/Muse/Antigravity refreshable grants not harvested; ACP vs controller native-continuity predicate mismatch).
+- [x] (2026-11-24 20:30Z) Milestone 4: Fixed relative `target_profile_home` resolution in `reload_commit.rs` for `SshBare`/`AwsEc2`, moved relay admission ahead of candidate validation/writer acquisition/ACP check with typed `RelayErrorDetail::ReloadInProgress`, updated controller in-place Move state machine in `mj-controller/src/controller/move_session.rs` (query worker `in_place_move_hold` before staging on retry, send `StageCandidate` + `RestartHarnessInPlace`, deleted live `RefreshProfileOnly`/`RestoreProfileOnly`/`rpc_sent`/substring/`source_disk_confirmed_intact` heuristics, settled destination `Error` on post-commit startup failure while keeping credential-sync fenced until DB matches disk, settled cancelled-after-`Started` moves to B with recent-snapshot handoff and no new continuation, preserved hold recovery if `release_in_place_move_dispatch` disconnects), deleted `RestoreProfileOnly` from `mj-worker-staging`/`mj-worker-launch`, and validated all affected crates.
+- [ ] Milestone 5: Pre-push review, push to `origin/master`, and remove `agent-in-progress` on #1673 (the three orthogonal follow-up issues are already filed as #1698, #1699, and #1700).
 
 
 ## Surprises & Discoveries
@@ -43,6 +43,15 @@ A user or test can observe this working in four ways: rejecting an in-place Move
 
 - Observation: `prepare_worker_files_for` previously called `prepare_installed_managed_harness`, which reads live `launch.json`, and the worker runtime library package is `brokk-mj-worker-runtime` while `brokk-mj-worker` is the binary-only package (`mj-worker-bin`).
   Evidence: Milestone 2 skips `prepare_installed_managed_harness` for `StageCandidate` so live `launch.json` is never read/assumed to be B prematurely, letting worker Phase A resolve the candidate harness; Milestone 3/4 tests target `-p brokk-mj-worker-runtime` and `-p brokk-mj-worker`.
+
+- Observation: `SshBare` and `AwsEc2` workers resolve relative `target_profile_home` paths against the worker startup `current_dir` (matching `initialize_launch_environment`), so `reload_commit::validate_candidate` cannot demand `Path::is_absolute()`.
+  Evidence: Milestone 4 relaxed `validate_candidate` to allow safe relative paths (normal components only, no `..`) and resolved them via `std::env::current_dir()?.join(home)` in `apply_committed_reload`.
+
+- Observation: Running candidate validation, `PreparationWriter::try_acquire`, or the missing-ACP check before `admit_in_place_harness_restart` would misreport a retry after commit (when the candidate directory has already been consumed or ACP has exited) as a pre-commit `InvalidState` with `detail: None`.
+  Evidence: Milestone 4 moved `admit_in_place_harness_restart` to the very start of `restart_harness_in_place_response` and added typed `RelayErrorDetail::ReloadInProgress { operation_id }` so retries after commit never look like pre-commit refusals.
+
+- Observation: A cancelled in-place Move recovering after the worker already reached `InPlaceReloadPhase::Started` cannot roll back live disk (B is already running), and releasing the dispatch hold without settling DB or installing cross-harness handoff would leave DB on A and drop conversation context.
+  Evidence: Milestone 4 updated `recover_move_managed_controlled`'s cancellation branch to query the live worker hold first: pre-commit releases the hold and clears the fence; `Committed`/unreachable retains the fence; `FailedAfterCommit` settles B in `Error`; `Started` settles DB to B, installs deterministic `render_recent_snapshot` handoff if cross-harness and not yet installed, releases the hold without submitting a new continuation or discarding queued user prompts, and clears the fence.
 
 
 ## Decision Log
@@ -70,7 +79,7 @@ A user or test can observe this working in four ways: rejecting an in-place Move
 
 ## Outcomes & Retrospective
 
-To be completed after Milestone 4 validation and Milestone 5 push.
+Milestones 1 through 4 are complete and validated across `brokk-mj-core`, `brokk-mj-worker-staging`, `brokk-mj-worker-launch`, `brokk-mj-worker-runtime`, `brokk-mj-worker`, `brokk-mj-session-runtime`, `brokk-mj-controller`, and `brokk-mj-daemon`. All live-path pre-acceptance writes (`RefreshProfileOnly` during live Move, `RestoreProfileOnly`, `rpc_sent`, `"already in progress"` string matching, and `source_disk_confirmed_intact`) have been eliminated in favor of private candidate staging under `<worker_root>/reload-candidates/<candidate_id>/`, atomic `<worker_root>/pending-reload.json` WAL roll-forward, post-retirement overlay and configurator execution inside `HarnessRestarting`, typed relay errors (`ReloadInProgress` and `ReloadFailedAfterCommit`), and durable `InPlaceReloadPhase` recovery settlement. Three orthogonal issues identified during design review were filed separately as #1698, #1699, and #1700. Final pre-push review and push remain in Milestone 5.
 
 
 ## Context and Orientation
@@ -283,6 +292,10 @@ In `mj-core/src/relay/protocol.rs`:
         launch_config: Box<crate::worker_launch::WorkerLaunchConfig>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_id: Option<String>,
+    }
+
+    RelayErrorDetail::ReloadInProgress {
+        operation_id: String,
     }
 
     RelayErrorDetail::ReloadFailedAfterCommit {

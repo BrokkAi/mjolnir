@@ -1014,50 +1014,7 @@ async fn restart_harness_in_place_response(
     else {
         unreachable!("restart_harness_in_place_response only serves RestartHarnessInPlace")
     };
-    let Some(commands) = commands else {
-        return RelayResponseEnvelope {
-            request_id,
-            protocol_version,
-            body: compaction_error(
-                RelayErrorCode::InvalidState,
-                "session is closed; no ACP runtime can restart the harness in place",
-            ),
-        };
-    };
     let staged = protocol_version >= mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL;
-    if staged {
-        let validation = candidate_id
-            .as_deref()
-            .context("staged reload requires candidate_id")
-            .and_then(|candidate| {
-                super::reload_commit::validate_candidate(
-                    relay_root,
-                    candidate,
-                    &operation_id,
-                    &expected_store_id,
-                )
-            });
-        if let Err(error) = validation {
-            return RelayResponseEnvelope {
-                request_id,
-                protocol_version,
-                body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
-            };
-        }
-    }
-    let writer = match PreparationWriter::try_acquire(
-        &relay.preparation_writer,
-        format!("in-place harness restart {operation_id}"),
-    ) {
-        Ok(writer) => writer,
-        Err(error) => {
-            return RelayResponseEnvelope {
-                request_id,
-                protocol_version,
-                body: RelayResponseBody::Error { error: *error },
-            };
-        }
-    };
     let decision = relay
         .lock()
         .expect("relay state lock poisoned")
@@ -1085,6 +1042,49 @@ async fn restart_harness_in_place_response(
             expected_store_id,
             completed: false,
         },
+    };
+    let Some(commands) = commands else {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                "session is closed; no ACP runtime can restart the harness in place",
+            ),
+        };
+    };
+    if staged {
+        let validation = candidate_id
+            .as_deref()
+            .context("staged reload requires candidate_id")
+            .and_then(|candidate| {
+                super::reload_commit::validate_candidate(
+                    relay_root,
+                    candidate,
+                    &restart_guard.operation_id,
+                    &restart_guard.expected_store_id,
+                )
+            });
+        if let Err(error) = validation {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
+            };
+        }
+    }
+    let writer = match PreparationWriter::try_acquire(
+        &relay.preparation_writer,
+        format!("in-place harness restart {}", restart_guard.operation_id),
+    ) {
+        Ok(writer) => writer,
+        Err(error) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: RelayResponseBody::Error { error: *error },
+            };
+        }
     };
     let launch_config = if staged {
         let path = relay_root

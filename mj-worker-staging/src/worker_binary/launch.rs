@@ -24,8 +24,6 @@ pub enum WorkerFilePreparation {
     /// starts, so it starts with the profile's current login (#1547). The
     /// worker binary is the caller's business.
     RefreshProfileOnly,
-    /// Restore a source home after a failed in-place Move, keeping its AWS selection.
-    RestoreProfileOnly,
 }
 
 /// The session history a launch continues. A restore deletes the worker's

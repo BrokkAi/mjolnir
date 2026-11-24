@@ -445,7 +445,7 @@ pub fn serve_latch_relay() {
                 },
             }
         } else if let mj_core::relay::RelayRequest::RestartHarnessInPlace {
-            candidate_id: _,
+            candidate_id,
             operation_id,
             expected_store_id,
             launch_config,
@@ -467,19 +467,80 @@ pub fn serve_latch_relay() {
                         }
                     }
                     Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => {
-                        let _ = launch_config.write(&Path::new(&root).join("launch.json"));
-                        match relay.mark_in_place_harness_restarted(operation_id, expected_store_id)
-                        {
-                            Ok(()) => mj_core::relay::RelayResponseBody::Ok {
-                                payload:
-                                    mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
-                            },
-                            Err(error) => mj_core::relay::relay_error(
-                                mj_core::relay::RelayErrorCode::Internal,
-                                format!("complete in-place harness restart: {error:#}"),
-                                false,
-                                None,
-                            ),
+                        let worker_root =
+                            std::fs::read_to_string(Path::new(&root).join("staged-worker-root"))
+                                .map(PathBuf::from)
+                                .unwrap_or_else(|_| PathBuf::from(&root));
+                        let promoted = (|| -> anyhow::Result<()> {
+                            if let Some(candidate_id) = candidate_id {
+                                use crate::worker_runtime::reload_commit::*;
+                                validate_candidate(
+                                    &worker_root,
+                                    candidate_id,
+                                    operation_id,
+                                    expected_store_id,
+                                )?;
+                                let pending = mj_core::worker_launch::PendingInPlaceReload {
+                                    operation_id: operation_id.clone(),
+                                    expected_store_id: expected_store_id.clone(),
+                                    candidate_id: candidate_id.clone(),
+                                    git_setup_name: None,
+                                };
+                                commit_pending_reload(&worker_root, &pending)?;
+                                relay.mark_in_place_harness_committed(
+                                    operation_id,
+                                    expected_store_id,
+                                )?;
+                                apply_committed_reload(&worker_root, &pending)?;
+                            } else {
+                                launch_config.write(&worker_root.join("launch.json"))?;
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = promoted {
+                            panic!("stand-in candidate promotion failed: {error:#}");
+                        }
+                        if Path::new(&root).join("fail-in-place-after-commit").exists() {
+                            let message = "replacement harness failed after commit".to_owned();
+                            relay
+                                .mark_in_place_harness_failed_after_commit(
+                                    operation_id,
+                                    expected_store_id,
+                                    message.clone(),
+                                )
+                                .unwrap();
+                            std::fs::write(worker_root.join(mj_core::relay::WORKER_EXIT_FILE), serde_json::to_vec(&serde_json::json!({ "reason": message, "harness_startup_failure": { "message": message } })).unwrap()).unwrap();
+                            mj_core::relay::RelayResponseBody::Error {
+                                error: mj_core::relay::relay_protocol_error(
+                                    mj_core::relay::RelayErrorCode::Internal,
+                                    message,
+                                    false,
+                                    Some(
+                                        mj_core::relay::RelayErrorDetail::ReloadFailedAfterCommit {
+                                            operation_id: operation_id.clone(),
+                                        },
+                                    ),
+                                ),
+                            }
+                        } else {
+                            match relay
+                                .mark_in_place_harness_restarted(operation_id, expected_store_id)
+                            {
+                                Ok(()) => {
+                                    let lost = Path::new(&root).join("lose-in-place-restart-reply");
+                                    if lost.exists() {
+                                        std::fs::remove_file(lost).unwrap();
+                                        std::process::exit(0);
+                                    }
+                                    mj_core::relay::RelayResponseBody::Ok { payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace }
+                                }
+                                Err(error) => mj_core::relay::relay_error(
+                                    mj_core::relay::RelayErrorCode::Internal,
+                                    format!("complete in-place harness restart: {error:#}"),
+                                    false,
+                                    None,
+                                ),
+                            }
                         }
                     }
                 }
@@ -1350,6 +1411,11 @@ fn policy_test_options() -> Vec<agent_client_protocol::v1::schema::SessionConfig
 pub fn seed_source_relay(worker_root: &Path) -> PathBuf {
     let source_relay = worker_root.parent().unwrap().join("source-relay");
     std::fs::create_dir_all(&source_relay).unwrap();
+    std::fs::write(
+        source_relay.join("staged-worker-root"),
+        worker_root.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
     let mut seed =
         crate::relay::DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
     seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {

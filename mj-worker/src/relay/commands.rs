@@ -708,7 +708,9 @@ impl DurableRelay {
                     RelayErrorCode::InvalidState,
                     "in-place harness reload already committed and is starting",
                     true,
-                    None,
+                    Some(RelayErrorDetail::ReloadInProgress {
+                        operation_id: operation_id.to_owned(),
+                    }),
                 )));
             }
             Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
@@ -728,7 +730,9 @@ impl DurableRelay {
                 RelayErrorCode::InvalidState,
                 "an in-place harness restart is already in progress",
                 true,
-                None,
+                Some(RelayErrorDetail::ReloadInProgress {
+                    operation_id: operation_id.to_owned(),
+                }),
             )));
         }
         if hold.harness_restarted {

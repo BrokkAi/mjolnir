@@ -2799,6 +2799,64 @@ mod staged_reload_tests {
     }
 
     #[tokio::test]
+    async fn reload_commit_retry_reports_in_progress_after_candidate_was_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (relay, launch, store) = setup(root);
+        hold(&relay, &store);
+        stage(root, &launch, &store);
+        relay
+            .lock()
+            .unwrap()
+            .admit_in_place_harness_restart("move", &store)
+            .unwrap();
+        let pending = mj_core::worker_launch::PendingInPlaceReload {
+            operation_id: "move".into(),
+            expected_store_id: store.clone(),
+            candidate_id: "candidate".into(),
+            git_setup_name: None,
+        };
+        crate::worker_runtime::reload_commit::commit_pending_reload(root, &pending).unwrap();
+        relay
+            .lock()
+            .unwrap()
+            .mark_in_place_harness_committed("move", &store)
+            .unwrap();
+        crate::worker_runtime::reload_commit::apply_committed_reload(root, &pending).unwrap();
+        let _writer =
+            PreparationWriter::try_acquire(&relay.preparation_writer, "accepted reload".into())
+                .unwrap();
+        let before = live_bytes(root);
+        let (commands, mut received) = mpsc::channel(1);
+        for active_commands in [Some(&commands), None] {
+            let response = restart_harness_in_place_response(
+                request(RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move".into(),
+                    expected_store_id: store.clone(),
+                    candidate_id: Some("candidate".into()),
+                    launch_config: Box::new(launch.clone()),
+                }),
+                active_commands,
+                &relay,
+                &SharedCredentials::new(super::super::super::credential_endpoint(&launch)),
+                root,
+                &SharedSubagents::default(),
+                None,
+            )
+            .await;
+            let RelayResponseBody::Error { error } = response.body else {
+                panic!("expected in-progress reload")
+            };
+            assert_eq!(error.code, RelayErrorCode::InvalidState);
+            assert!(
+                matches!(error.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == "move")
+            );
+        }
+        assert_eq!(live_bytes(root), before);
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn reload_commit_session_fault_returns_typed_failure_and_worker_startup_exit() {
         let _ = mj_harness_install::login_environment::initialize_from_parent();
         let dir = tempfile::tempdir().unwrap();

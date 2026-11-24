@@ -207,7 +207,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 )
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
-                    (mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL - u32::from(race == "old-worker"))
+                    (mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL - u32::from(race == "old-worker"))
                         .to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
@@ -457,7 +457,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                 )
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
-                    mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL.to_string(),
+                    mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL.to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
                 .isolated_store(directory.path())
@@ -1046,9 +1046,9 @@ fn in_place_move_checks_active_work_before_staging_and_cancels_when_acknowledged
 }
 
 #[test]
-fn in_place_move_restores_source_profile_files_when_worker_refuses_restart() {
+fn in_place_move_preserves_source_profile_files_when_worker_refuses_restart() {
     if !isolate_in_place_move_dispatch_test(
-        "in_place_move_restores_source_profile_files_when_worker_refuses_restart",
+        "in_place_move_preserves_source_profile_files_when_worker_refuses_restart",
     ) {
         return;
     }
@@ -1084,7 +1084,7 @@ fn in_place_move_restores_source_profile_files_when_worker_refuses_restart() {
                 format!("{error:#}").contains("cannot restart harness in place"),
                 "{error:#}"
             );
-            // Source profile files, ownership.json, and session record were restored.
+            // Source profile files, ownership.json, and the session record stay intact.
             assert_eq!(
                 fixture.controller.state.sessions[LATCH_RELAY_SESSION].last_profile,
                 IN_PLACE_SOURCE_PROFILE
@@ -1101,13 +1101,11 @@ fn in_place_move_restores_source_profile_files_when_worker_refuses_restart() {
             assert_eq!(ownership["profile_id"], IN_PLACE_SOURCE_PROFILE);
             assert!(
                 operation.in_place_expected_store_id.is_none(),
-                "clearing store fence re-admits credential sync after source restoration"
+                "clearing the store fence re-admits credential sync after a pre-commit refusal"
             );
 
-            // On a retry where a prior attempt already held the store (e.g. lost
-            // RestartHarnessInPlace reply while the original restart may still be in
-            // flight), a worker refusal MUST NOT overwrite destination files or clear
-            // the credential fence.
+            // A typed pre-commit refusal remains unambiguous on retry: no
+            // candidate overlay has touched the live source home.
             let live_store_id = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0")
                 .unwrap()
                 .operational_state()
@@ -1137,13 +1135,12 @@ fn in_place_move_restores_source_profile_files_when_worker_refuses_restart() {
             )
             .unwrap();
             assert_eq!(
-                settings_after_retry["profile"], "destination",
-                "retry refusal must leave staged destination files alone in case prior restart is still in flight"
+                settings_after_retry["profile"], "source",
+                "a refused candidate must leave the live source profile alone"
             );
-            assert_eq!(
-                operation.in_place_expected_store_id.as_deref(),
-                Some(live_store_id.as_str()),
-                "retry refusal must keep credential sync fenced"
+            assert!(
+                operation.in_place_expected_store_id.is_none(),
+                "pre-commit refusal must clear the credential fence"
             );
 
             // Clearing the refusal lets a retry succeed cleanly.
@@ -1289,7 +1286,7 @@ fn isolate_in_place_move_dispatch_test(name: &str) -> bool {
         .env("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS", "1")
         .env(
             LATCH_RELAY_MAX_PROTOCOL,
-            mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL.to_string(),
+            mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL.to_string(),
         )
         .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
         .isolated_store(directory.path())

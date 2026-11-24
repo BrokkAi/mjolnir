@@ -231,16 +231,7 @@ pub fn stage_worker_files_for(
         .context("session profile is missing")?;
     profile.ensure_ready(&session.last_profile)?;
     let target_environment = &session.target_runtime_settings(config)?.environment;
-    let aws_source = if preparation == WorkerFilePreparation::RestoreProfileOnly {
-        crate::aws_credentials::source_for_staged_profile(
-            profile,
-            backend,
-            target_environment,
-            session.staged_aws_profile.as_deref(),
-        )?
-    } else {
-        crate::aws_credentials::source(profile, backend, target_environment)?
-    };
+    let aws_source = crate::aws_credentials::source(profile, backend, target_environment)?;
     let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
         config,
         state,

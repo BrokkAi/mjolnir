@@ -1275,6 +1275,9 @@ pub enum RelayErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RelayErrorDetail {
+    ReloadInProgress {
+        operation_id: String,
+    },
     ReloadFailedAfterCommit {
         operation_id: String,
     },

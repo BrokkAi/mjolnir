@@ -23,6 +23,19 @@ pub use crate::session_manager::move_ownership::{
     release_move_queue_hold, worker_subagent_queue_enabled,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InPlaceReloadProgress {
+    BeforeCommit,
+    Unknown,
+    Started,
+    FailedAfterCommit,
+}
+
+struct CommittedReloadFailure {
+    message: String,
+    aws_profile: Option<String>,
+}
+
 /// Static Move safety refusals that may be written to the worker's quota journal.
 pub const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
 
@@ -952,6 +965,174 @@ fn replace_queued_images_with_placeholders(
 }
 
 impl Controller {
+    fn apply_in_place_destination(&mut self, operation: &MoveOperation) -> Result<()> {
+        let profile_id = operation
+            .selection
+            .profile_id
+            .as_ref()
+            .unwrap_or(&operation.source_profile_id);
+        let profile = self.config.named_profile(profile_id)?;
+        let source_kind = self
+            .config
+            .named_profile(&operation.source_profile_id)
+            .map(|p| p.kind)
+            .unwrap_or(
+                self.state
+                    .sessions
+                    .get(&operation.selection.session_id)
+                    .context("Move session missing")?
+                    .harness_kind,
+            );
+        let continuity =
+            self.config
+                .native_continuity(source_kind, &operation.source_profile_id, profile_id)?;
+        let session = self
+            .state
+            .sessions
+            .get_mut(&operation.selection.session_id)
+            .context("Move session missing")?;
+        session.last_profile = profile_id.clone();
+        session.harness_kind = profile.kind;
+        session.target_template_id = operation
+            .selection
+            .target_template_id
+            .clone()
+            .unwrap_or_else(|| operation.source_target_template_id.clone());
+        if let Some(policy) = &operation.selection.subagents {
+            session.subagents = Some(policy.clone());
+        }
+        if let Some(oracle) = operation.selection.oracle {
+            session.oracle = oracle;
+        }
+        if let Some(choice) = &operation.selection.oracle_choice {
+            session.oracle_choice = Some(Box::new(choice.clone()));
+        }
+        if !continuity {
+            session.native_session_id = None;
+        }
+        session.updated_at = now();
+        Ok(())
+    }
+
+    fn settle_in_place_reload_failure(
+        &mut self,
+        operation: &mut MoveOperation,
+        failure: CommittedReloadFailure,
+    ) -> Result<()> {
+        let previous = self
+            .state
+            .sessions
+            .get(&operation.selection.session_id)
+            .context("Move session missing")?
+            .clone();
+        self.apply_in_place_destination(operation)?;
+        let session = self
+            .state
+            .sessions
+            .get_mut(&operation.selection.session_id)
+            .context("Move session missing")?;
+        session.state = SessionState::Error;
+        session.last_error = Some(failure.message.clone());
+        session.staged_aws_profile = failure.aws_profile;
+        if let Err(error) = crate::database::save_resumed_session(session, None) {
+            self.state
+                .sessions
+                .insert(operation.selection.session_id.clone(), previous);
+            return Err(error);
+        }
+        // Unfence only after the row names the same account as committed disk.
+        operation.in_place_expected_store_id = None;
+        operation.in_place_held_command_ids.clear();
+        operation.phase = MovePhase::Failed;
+        operation.error = Some(failure.message);
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)
+    }
+
+    fn committed_in_place_launch(
+        &self,
+        operation: &MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<Option<mj_core::worker_launch::WorkerLaunchConfig>> {
+        use super::lifecycle::origin_delta::read_wire;
+        use mj_core::worker_launch::{
+            PENDING_RELOAD_FILE, PendingInPlaceReload, RELOAD_CANDIDATES_DIR, WorkerLaunchConfig,
+        };
+        let id = &operation.selection.session_id;
+        let session = self
+            .state
+            .sessions
+            .get(id)
+            .context("Move session missing")?;
+        let backend = super::backend_locator(
+            session.target.as_deref().context("Move target missing")?,
+            session,
+            &self.config,
+        )?;
+        let root = crate::targets::worker_root(&backend, id)?;
+        let pending: Option<PendingInPlaceReload> =
+            read_wire(&backend, id, &root, PENDING_RELOAD_FILE, executor)?;
+        if let Some(pending) = pending.filter(|p| p.operation_id == operation.operation_id) {
+            mj_core::worker_launch::validate_candidate_id(&pending.candidate_id)?;
+            return read_wire(
+                &backend,
+                id,
+                &root,
+                &format!(
+                    "{RELOAD_CANDIDATES_DIR}/{}/launch.json",
+                    pending.candidate_id
+                ),
+                executor,
+            );
+        }
+        let launch: Option<WorkerLaunchConfig> =
+            read_wire(&backend, id, &root, "launch.json", executor)?;
+        Ok(launch.filter(|launch| {
+            launch.accepted_reload_operation_id.as_deref() == Some(operation.operation_id.as_str())
+        }))
+    }
+
+    fn committed_in_place_failure(
+        &self,
+        operation: &MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<Option<CommittedReloadFailure>> {
+        use super::lifecycle::origin_delta::read_wire;
+        let id = &operation.selection.session_id;
+        let session = self
+            .state
+            .sessions
+            .get(id)
+            .context("Move session missing")?;
+        let locator = session.target.as_deref().context("Move target missing")?;
+        let backend = super::backend_locator(locator, session, &self.config)?;
+        let root = crate::targets::worker_root(&backend, id)?;
+        let exit: Option<super::worker_binary::WorkerExitRecord> = read_wire(
+            &backend,
+            id,
+            &root,
+            mj_core::relay::WORKER_EXIT_FILE,
+            executor,
+        )?;
+        let Some(failure) = exit.and_then(|exit| exit.harness_startup_failure) else {
+            return Ok(None);
+        };
+        let liveness = super::worker_binary::probe_worker_liveness(executor, &backend, id, &root)?;
+        ensure!(
+            liveness.status == 0,
+            "cannot determine failed reload worker liveness"
+        );
+        if String::from_utf8_lossy(&liveness.stdout).trim() != "dead" {
+            return Ok(None);
+        }
+        Ok(self
+            .committed_in_place_launch(operation, executor)?
+            .map(|launch| CommittedReloadFailure {
+                message: failure.message,
+                aws_profile: launch.environment.get("AWS_PROFILE").cloned(),
+            }))
+    }
+
     /// Close takes over only after the Move owner has actually stopped. A
     /// placement published during cloning is not a destination worker.
     pub fn cleanup_retained_move_source(
@@ -2219,6 +2400,28 @@ impl Controller {
         {
             operation.prepared_destination = saved.prepared_destination;
         }
+        if let Err(error) = &result
+            && operation.in_place
+            && operation.in_place_expected_store_id.is_some()
+            && operation.phase != MovePhase::DispatchReleased
+            && operation.phase != MovePhase::Failed
+        {
+            let message = format!("{error:#}");
+            operation.updated_at = now();
+            operation.error = Some(message.clone());
+            crate::database::save_move_operation(operation)?;
+            return Ok(outcome(
+                &operation.operation_id,
+                &operation.selection,
+                "interrupted",
+                Some(message),
+                Some("Move is awaiting its worker's reload outcome; retry to reconnect".into()),
+            ));
+        }
+        let settled_reload_error = operation.in_place
+            && operation.phase == MovePhase::Failed
+            && self.state.sessions[&operation.selection.session_id].state == SessionState::Error
+            && operation.in_place_expected_store_id.is_none();
         let result = match result {
             Err(error)
                 if !operation.queue_admission_started
@@ -2276,8 +2479,8 @@ impl Controller {
                         "recovering the move"
                     }
                 };
-                let cancelled =
-                    executor.cancellation_requested() || operation.cancellation_requested;
+                let cancelled = !settled_reload_error
+                    && (executor.cancellation_requested() || operation.cancellation_requested);
                 // `DispatchReleased` is post-commit for an in-place Move: keep
                 // its durable phase when the worker is disconnected so later
                 // recovery (and fresh worker attach) retries releasing the hold.
@@ -2310,12 +2513,14 @@ impl Controller {
                     %error,
                     "session move did not finish"
                 );
-                last_error = Some(failed_move_message(
-                    Some(phase),
-                    cancelled,
-                    &recovery,
-                    &operation.operation_id,
-                ));
+                if !settled_reload_error {
+                    last_error = Some(failed_move_message(
+                        Some(phase),
+                        cancelled,
+                        &recovery,
+                        &operation.operation_id,
+                    ));
+                }
                 operation.error = Some(error.clone());
                 (
                     if cancelled { "cancelled" } else { "failed" },
@@ -2519,6 +2724,16 @@ impl Controller {
             // idempotent release handler rather than cross-target
             // `admit_move_queue`.
             if operation.in_place {
+                match self.committed_in_place_failure(&operation, executor) {
+                    Ok(Some(failure)) => {
+                        let message = failure.message.clone();
+                        self.settle_in_place_reload_failure(&mut operation, failure)?;
+                        bail!("{message}");
+                    }
+                    Ok(None) => (),
+                    Err(error) => tracing::warn!(session_id = %id, %error, "could not probe committed in-place reload failure"),
+                }
+
                 if operation.phase == MovePhase::DispatchReleased {
                     let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
                     let conn = relay
@@ -2543,21 +2758,65 @@ impl Controller {
                         }
                     }
                     operation.phase = MovePhase::Completed;
+                    operation.in_place_expected_store_id = None;
+                    operation.in_place_held_command_ids.clear();
                     operation.queue_admission_finished = true;
                     operation.updated_at = now();
                     crate::database::save_move_operation(&operation)?;
                     return Ok(());
                 }
                 if operation.cancellation_requested {
-                    if let Ok(mut relay) = MoveSourceRelay::lease(admission, manager, &id).await
-                        && let Some(conn) = relay.0.as_mut().map(|r| r.connection_mut())
-                        && let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
-                        && conn.snapshot().operational.store_id.as_deref() == Some(expected_store_id.as_str())
-                    {
-                        let _ = conn
-                            .client
-                            .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
-                            .await;
+                    if let Some(expected_store_id) = operation.in_place_expected_store_id.clone() {
+                        let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+                        let conn = relay.0.as_mut().context("in-place Move cancellation requires a live worker connection")?.connection_mut();
+                        let status = conn.client.status().await?;
+                        ensure!(status.store_id.as_deref() == Some(expected_store_id.as_str()), "cannot cancel in-place Move: relay store changed; credential synchronization remains fenced");
+                        let hold = status.in_place_move_hold.filter(|hold| hold.operation_id == operation.operation_id);
+                        use mj_core::relay::InPlaceReloadPhase;
+                        match hold.as_ref().and_then(|hold| hold.reload_phase.as_ref()) {
+                            Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                                let message = message.clone();
+                                let aws_profile = self.committed_in_place_launch(&operation, executor)?.and_then(|launch| launch.environment.get("AWS_PROFILE").cloned());
+                                self.settle_in_place_reload_failure(&mut operation, CommittedReloadFailure { message: message.clone(), aws_profile })?;
+                                bail!("{message}");
+                            }
+                            Some(InPlaceReloadPhase::Committed) => bail!("in-place Move cancellation is waiting for the committed harness reload to start or fail"),
+                            _ => (),
+                        }
+                        let started = hold.is_some_and(|hold| hold.harness_restarted || matches!(hold.reload_phase, Some(InPlaceReloadPhase::Started)));
+                        let reopen_admission = self.source_has_request_queue(&id);
+                        if started {
+                            let destination_id = operation.selection.profile_id.as_ref().unwrap_or(&operation.source_profile_id).clone();
+                            let source_kind = self.config.named_profile(&operation.source_profile_id).map(|profile| profile.kind).unwrap_or(self.state.sessions[&id].harness_kind);
+                            let native_continuity = self.config.native_continuity(source_kind, &operation.source_profile_id, &destination_id)?;
+                            self.apply_in_place_destination(&operation)?;
+                            if let Some(launch) = self.committed_in_place_launch(&operation, executor)? {
+                                self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = launch.environment.get("AWS_PROFILE").cloned();
+                            }
+                            crate::database::save_resumed_session(&self.state.sessions[&id], None)?;
+                            if !native_continuity && !operation.in_place_harness_restarted {
+                                let materialized = crate::database::load_materialized_session(&id)?.context("cancelled cross-harness Move session projection is missing")?;
+                                let snapshot = mj_transcript::projection::canonical_session_from_materialized_owned(materialized)?;
+                                let budget = crate::handoff::profile_handoff_bytes(Some(self.config.named_profile(&destination_id)?));
+                                let handoff = crate::compaction::render_recent_snapshot(&snapshot, budget);
+                                conn.client.install_prompt_context(handoff).await?;
+                            }
+                            operation.in_place_harness_restarted = true;
+                            operation.updated_at = now();
+                            crate::database::save_move_operation(&operation)?;
+                        }
+                        // Cancellation preserves existing queued work. No new
+                        // continuation is admitted and no queued prompt is discarded.
+                        conn.client.release_in_place_move_dispatch(&operation.operation_id, &expected_store_id).await?;
+                        if reopen_admission { conn.set_subagent_admission(true).await?; }
+                        operation.in_place_expected_store_id = None;
+                        operation.in_place_held_command_ids.clear();
+                        operation.queue_admission_finished = true;
+                        operation.updated_at = now();
+                        crate::database::save_move_operation(&operation)?;
+                        if started {
+                            bail!("in-place Move was cancelled after switching to destination profile; destination retained");
+                        }
                     }
                     bail!("in-place Move was cancelled; dispatch hold released");
                 }
@@ -3110,8 +3369,7 @@ impl Controller {
                 operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
             }
             if operation.in_place {
-                // Same-target Move ALWAYS runs in place via Slice 5A (Relay
-                // Protocol 81): never seal the relay, never take a handoff
+                // Same-target Move uses staged reload (Relay Protocol 91): never seal the relay, never take a handoff
                 // archive, and never stop the worker process tree.
                 if !source_relay.is_held() {
                     source_relay = MoveSourceRelay::lease(admission, manager, &id).await?;
@@ -3132,11 +3390,6 @@ impl Controller {
                     .profile_id
                     .clone()
                     .unwrap_or_else(|| operation.source_profile_id.clone());
-                let dest_target_template_id = operation
-                    .selection
-                    .target_template_id
-                    .clone()
-                    .unwrap_or_else(|| operation.source_target_template_id.clone());
                 let dest_profile = self.config.named_profile(&dest_profile_id)?.clone();
                 let source_has_request_queue = self.source_has_request_queue(&id);
                 let destination_subagents = operation
@@ -3288,17 +3541,9 @@ impl Controller {
                         return Err(err);
                     }
                 };
-                // True only when this Move has not touched disk (or has
-                // confirmed source profile files restored after a proved
-                // pre-reload refusal). When false on error, we keep
-                // `in_place_expected_store_id` set so daemon credential sync
-                // stays fenced against mismatched on-disk profile files.
-                let mut source_disk_confirmed_intact =
-                    !had_prior_expected_store_id && !operation.in_place_harness_restarted;
-                // Any failure or cancellation after the dispatch hold is taken
-                // (including persisting `in_place_held_command_ids`) MUST
-                // best-effort release the hold and reopen subagent admission
-                // so the worker is never stranded.
+                let source_session = self.state.sessions[&id].clone();
+                let mut candidate_id = None;
+                let mut reload_progress = if operation.in_place_harness_restarted { InPlaceReloadProgress::Started } else if had_prior_expected_store_id { InPlaceReloadProgress::Unknown } else { InPlaceReloadProgress::BeforeCommit };
                 let post_hold: Result<()> = async {
                     if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
                         operation.in_place_held_command_ids = held_ids;
@@ -3313,7 +3558,26 @@ impl Controller {
                         !executor.shutdown_interrupted(),
                         "in-place Move interrupted by daemon shutdown after holding dispatch"
                     );
+                    if had_prior_expected_store_id && !operation.in_place_harness_restarted {
+                        let status = conn.client.status().await?;
+                        if let Some(hold) = status.in_place_move_hold.filter(|hold| hold.operation_id == operation.operation_id) {
+                            use mj_core::relay::InPlaceReloadPhase;
+                            match hold.reload_phase {
+                                Some(InPlaceReloadPhase::Started) => reload_progress = InPlaceReloadProgress::Started,
+                                Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                                    let aws_profile = self.committed_in_place_launch(operation, executor)?.and_then(|launch| launch.environment.get("AWS_PROFILE").cloned());
+                                    self.settle_in_place_reload_failure(operation, CommittedReloadFailure { message: message.clone(), aws_profile })?;
+                                    reload_progress = InPlaceReloadProgress::FailedAfterCommit;
+                                    bail!("{message}");
+                                }
+                                Some(InPlaceReloadPhase::Committed) => bail!("in-place harness reload already committed and is starting; retry to reconnect"),
+                                None if hold.harness_restarted => reload_progress = InPlaceReloadProgress::Started,
+                                None => reload_progress = InPlaceReloadProgress::BeforeCommit,
+                            }
+                        } else { bail!("in-place Move worker lost its reload hold; keeping credential synchronization fenced"); }
+                    }
                     if !operation.in_place_harness_restarted {
+                        if reload_progress != InPlaceReloadProgress::Started {
                         let source_harness = self
                             .state
                             .sessions
@@ -3403,6 +3667,7 @@ impl Controller {
                             }
                             quiesce_result?;
                         }
+                        }
                         let previous_session = self
                             .state
                             .sessions
@@ -3481,111 +3746,67 @@ impl Controller {
                         } else {
                             None
                         };
-                        {
-                            let session = self
-                                .state
-                                .sessions
-                                .get_mut(&id)
-                                .context("move session missing")?;
-                            session.last_profile = dest_profile_id.clone();
-                            session.harness_kind = dest_profile.kind;
-                            session.target_template_id = dest_target_template_id.clone();
-                            if let Some(policy) = &operation.selection.subagents {
-                                session.subagents = Some(policy.clone());
+                        self.apply_in_place_destination(operation)?;
+                        if reload_progress == InPlaceReloadProgress::Started {
+                            if let Some(launch) = self.committed_in_place_launch(operation, executor)? {
+                                self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = launch.environment.get("AWS_PROFILE").cloned();
                             }
-                            if let Some(oracle) = operation.selection.oracle {
-                                session.oracle = oracle;
-                            }
-                            if let Some(choice) = &operation.selection.oracle_choice {
-                                session.oracle_choice = Some(Box::new(choice.clone()));
-                            }
-                            if !native_continuity {
-                                session.native_session_id = None;
-                            }
-                            session.updated_at = now();
-                        }
-                        source_disk_confirmed_intact = false;
-                        let mut rpc_sent = false;
-                        let restart_result: Result<()> = async {
-                            let session = self
-                                .state
-                                .sessions
-                                .get(&id)
-                                .context("move session missing")?;
-                            let locator = session
-                                .target
-                                .as_deref()
-                                .context("in-place Move session has no target locator")?;
-                            let backend = super::backend_locator(locator, session, &self.config)?;
-                            let worker_root = crate::targets::worker_root(&backend, &id)?;
-                            let staged = self.prepare_worker_files_for(
-                                &id,
-                                &backend,
-                                &worker_root,
-                                executor,
-                                super::worker_binary::launch::WorkerFilePreparation::RefreshProfileOnly,
-                                super::worker_binary::launch::LaunchHistory::Stored,
-                            )?;
-                            self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = staged.aws_profile;
-                            let launch_config = self.current_worker_launch_config(&id, &backend)?;
-                            rpc_sent = true;
-                            conn.client
-                                .restart_harness_in_place(
-                                    &operation.operation_id,
-                                    &expected_store_id,
-                                    Box::new(launch_config),
-                                    None,
-                                )
-                                .await?;
-                            Ok(())
-                        }
-                        .await;
-                        if let Err(err) = restart_result {
-                            self.state.sessions.insert(id.clone(), previous_session);
-                            // Restore source profile files only on a fresh attempt
-                            // where no earlier attempt could have an in-flight
-                            // restart (`!had_prior_expected_store_id`) AND we know
-                            // this call did not start the replacement harness
-                            // (`!rpc_sent`, or a non-Internal worker refusal other
-                            // than an already-in-progress restart). Retries after
-                            // an ambiguous failure and ambiguous transport/Internal
-                            // errors leave disk untouched and keep credential sync
-                            // fenced.
-                            let safe_to_restore_source_files = !had_prior_expected_store_id
-                                && (!rpc_sent
-                                    || err
-                                        .downcast_ref::<crate::worker_client::RelayRejected>()
-                                        .is_some_and(|rejected| {
-                                            rejected.0.code
-                                                != mj_core::relay::RelayErrorCode::Internal
-                                                && !rejected
-                                                    .0
-                                                    .message
-                                                    .contains("already in progress")
-                                        }));
-                            if safe_to_restore_source_files {
-                                match self.prepare_worker_files_for(
-                                    &id,
-                                    &source_backend,
-                                    &source_worker_root,
-                                    executor,
-                                    super::worker_binary::launch::WorkerFilePreparation::RestoreProfileOnly,
-                                    super::worker_binary::launch::LaunchHistory::Stored,
-                                ) {
-                                    Ok(_) => {
-                                        source_disk_confirmed_intact = true;
+                        } else {
+                            let candidate = mj_core::relay::new_command_id("reload-candidate")?;
+                            candidate_id = Some(candidate.clone());
+                            let staged_launch: Result<mj_core::worker_launch::WorkerLaunchConfig> = (|| {
+                                let staged = self.prepare_worker_files_for(
+                                    &id, &source_backend, &source_worker_root, executor,
+                                    super::worker_binary::launch::WorkerFilePreparation::StageCandidate {
+                                        operation_id: operation.operation_id.clone(), expected_store_id: expected_store_id.clone(), candidate_id: candidate.clone(),
+                                    }, super::worker_binary::launch::LaunchHistory::Stored,
+                                )?;
+                                self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = staged.aws_profile;
+                                self.current_worker_launch_config(&id, &source_backend)
+                            })();
+                            let launch_config = match staged_launch {
+                                Ok(launch) => launch,
+                                Err(error) => { self.state.sessions.insert(id.clone(), previous_session); return Err(error); }
+                            };
+                            match conn.client.restart_harness_in_place(&operation.operation_id, &expected_store_id, Box::new(launch_config), Some(candidate)).await {
+                                Ok(()) => reload_progress = InPlaceReloadProgress::Started,
+                                Err(error) => {
+                                    use mj_core::relay::{RelayErrorCode, RelayErrorDetail};
+                                    let rejection = error.downcast_ref::<crate::worker_client::RelayRejected>();
+                                    let committed_failure = rejection.and_then(|rejected| match &rejected.0.detail {
+                                        Some(RelayErrorDetail::ReloadFailedAfterCommit { operation_id }) if operation_id == &operation.operation_id => Some(rejected.0.message.clone()),
+                                        _ => None,
+                                    });
+                                    if let Some(message) = committed_failure {
+                                        // A failed database write cannot turn a worker commit
+                                        // into a pre-commit refusal or lift its store fence.
+                                        reload_progress = InPlaceReloadProgress::Unknown;
+                                        let aws_profile = self.state.sessions[&id].staged_aws_profile.clone();
+                                        self.settle_in_place_reload_failure(operation, CommittedReloadFailure { message, aws_profile })?;
+                                        reload_progress = InPlaceReloadProgress::FailedAfterCommit;
+                                    } else if rejection.is_some_and(|rejected| rejected.0.code == RelayErrorCode::InvalidState && rejected.0.detail.is_none()) {
+                                        reload_progress = InPlaceReloadProgress::BeforeCommit;
+                                        self.state.sessions.insert(id.clone(), previous_session);
+                                    } else if rejection.is_some_and(|rejected| matches!(&rejected.0.detail, Some(RelayErrorDetail::ReloadInProgress { operation_id }) if operation_id == &operation.operation_id)) {
+                                        reload_progress = InPlaceReloadProgress::Unknown;
+                                        self.state.sessions.insert(id.clone(), previous_session);
+                                    } else {
+                                        reload_progress = InPlaceReloadProgress::Unknown;
+                                        match self.committed_in_place_failure(operation, executor) {
+                                            Ok(Some(failure)) => {
+                                                self.settle_in_place_reload_failure(operation, failure)?;
+                                                reload_progress = InPlaceReloadProgress::FailedAfterCommit;
+                                            }
+                                            Ok(None) => { self.state.sessions.insert(id.clone(), previous_session); }
+                                            Err(probe_error) => {
+                                                tracing::warn!(session_id = %id, %probe_error, "could not prove the in-place reload outcome");
+                                                self.state.sessions.insert(id.clone(), previous_session);
+                                            }
+                                        }
                                     }
-                                    Err(restore_err) => {
-                                        tracing::warn!(
-                                            session_id = %id,
-                                            operation_id = %operation.operation_id,
-                                            error = %restore_err,
-                                            "failed to restore source profile files after in-place Move refusal"
-                                        );
-                                    }
+                                    return Err(error);
                                 }
                             }
-                            return Err(err);
                         }
                         crate::database::save_resumed_session(&self.state.sessions[&id], None)?;
                         // Install cross-harness handoff context BEFORE marking
@@ -3662,43 +3883,44 @@ impl Controller {
                 }
                 .await;
                 if let Err(err) = post_hold {
-                    let hold_released = match conn
-                        .client
-                        .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
-                        .await
+                    if matches!(reload_progress, InPlaceReloadProgress::BeforeCommit | InPlaceReloadProgress::FailedAfterCommit)
+                        || (reload_progress == InPlaceReloadProgress::Started && operation.in_place_harness_restarted)
                     {
-                        Ok(()) => true,
-                        Err(release_err) => {
-                            tracing::warn!(
-                                session_id = %id,
-                                operation_id = %operation.operation_id,
-                                error = %release_err,
-                                "failed to release in-place Move dispatch hold after error"
-                            );
-                            false
+                        if reload_progress == InPlaceReloadProgress::BeforeCommit {
+                            self.state.sessions.insert(id.clone(), source_session.clone());
+                            if let Some(candidate) = &candidate_id {
+                                let cleanup = (|| -> Result<()> {
+                                    let backend = super::backend_locator(source_session.target.as_deref().context("Move target missing")?, &source_session, &self.config)?;
+                                    let root = crate::targets::worker_root(&backend, &id)?;
+                                    super::worker_binary::remove_reload_candidate(executor, &backend, &root, candidate)
+                                })();
+                                if let Err(error) = cleanup {
+                                    tracing::warn!(session_id = %id, %error, "could not remove refused reload candidate");
+                                }
+                            }
                         }
-                    };
-                    if closed_subagent_admission {
-                        let _ = conn.set_subagent_admission(true).await;
-                    }
-                    if source_disk_confirmed_intact
-                        && hold_released
-                        && !operation.in_place_harness_restarted
-                    {
-                        operation.in_place_expected_store_id = None;
-                        operation.in_place_held_command_ids.clear();
+                        let hold_released = match conn.client.release_in_place_move_dispatch(&operation.operation_id, &expected_store_id).await {
+                            Ok(()) => true,
+                            Err(error) => {
+                                tracing::warn!(session_id = %id, %error, "could not release in-place Move hold after settlement");
+                                false
+                            }
+                        };
+                        if closed_subagent_admission { let _ = conn.set_subagent_admission(true).await; }
+                        if reload_progress == InPlaceReloadProgress::FailedAfterCommit
+                            || (hold_released && (reload_progress == InPlaceReloadProgress::BeforeCommit
+                                || (reload_progress == InPlaceReloadProgress::Started && operation.in_place_harness_restarted)))
+                        {
+                            operation.in_place_expected_store_id = None;
+                            operation.in_place_held_command_ids.clear();
+                        }
                         operation.updated_at = now();
-                        if let Err(save_err) = crate::database::save_move_operation(operation) {
-                            tracing::warn!(
-                                session_id = %id,
-                                operation_id = %operation.operation_id,
-                                error = %save_err,
-                                "failed to clear in-place Move store fence after restoring source"
-                            );
-                        }
+                        crate::database::save_move_operation(operation)?;
                     }
                     return Err(err);
                 }
+                operation.in_place_expected_store_id = None;
+                operation.in_place_held_command_ids.clear();
                 operation.phase = MovePhase::Completed;
                 operation.queue_admission_finished = true;
                 operation.updated_at = now();
