@@ -707,6 +707,40 @@ async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
     );
 }
 
+/// Automatic reviewer selection that ends with no reviewers names the profiles
+/// that could not be checked, not only the ones that answered.
+#[tokio::test]
+async fn autoconfigure_without_reviewers_names_profiles_that_failed_discovery() {
+    if !isolated_spawn_test("autoconfigure_without_reviewers_names_profiles_that_failed_discovery")
+    {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    // `parent` answers but offers no model to configure a reviewer from; the
+    // others fail discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &[])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let settings = mj_core::config::ReviewConfig {
+        legacy: Some(Default::default()),
+        ..Default::default()
+    };
+
+    let error =
+        crate::review_host::selection::configured_choices(settings, &selection_config(), &backend)
+            .await
+            .map_err(|error| error.to_string())
+            .expect_err("autoconfigure should find no reviewers");
+
+    assert!(error.contains("No reviewers are configured"), "{error}");
+    assert!(
+        error.contains("Could not check:")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+}
+
 /// A close is accepted long before the child is gone: it cancels whatever owned
 /// the session, checkpoints, seals the relay and tears the process tree down,
 /// and the record only says `Closing` once that is under way. A child that had

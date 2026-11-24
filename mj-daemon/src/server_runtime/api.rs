@@ -5659,21 +5659,18 @@ impl SubagentBackend for ApiBackend {
                 }
             }
             drop(pending);
-            if answered.is_empty() {
-                if timed_out {
-                    for (id, _) in &ids {
-                        if !failed.contains(id) {
-                            unavailable
-                                .push((id.clone(), "capability discovery timed out".to_owned()));
-                        }
+            if timed_out {
+                for (id, _) in &ids {
+                    if !answered.contains(id) && !failed.contains(id) {
+                        unavailable.push((id.clone(), "capability discovery timed out".to_owned()));
                     }
                 }
-                if !unavailable.is_empty() {
-                    anyhow::bail!(
-                        "no reviewer profile is available: {}",
-                        format_unavailable_reasons(&unavailable)
-                    );
-                }
+            }
+            if answered.is_empty() && !unavailable.is_empty() {
+                anyhow::bail!(
+                    "no reviewer profile is available: {}",
+                    format_unavailable_reasons(&unavailable)
+                );
             }
             let mut candidates = self
                 .discover_profile_candidates(
