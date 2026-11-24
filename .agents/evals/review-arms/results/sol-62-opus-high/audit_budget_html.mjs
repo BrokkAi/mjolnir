@@ -5,6 +5,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const [artifacts, shots, chrome] = process.argv.slice(2);
 const stem = 'review-opus-high-budget';
@@ -63,8 +64,13 @@ try {
   const evalJs = async expr => { const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true }); if (r.result.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails)); return r.result.result.value; };
   await send('Page.enable'); await send('Runtime.enable'); await send('Network.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 1500, deviceScaleFactor: 1, mobile: false });
-  await send('Page.navigate', { url: 'file://' + path.resolve(artifacts, `${stem}.html`) });
+  const pageUrl = pathToFileURL(path.resolve(artifacts, `${stem}.html`)).href;
+  const nav = await send('Page.navigate', { url: pageUrl });
+  // Fail on a reported navigation error before waiting for a load event that will not come.
+  if (nav.error || nav.result.errorText) throw new Error(`navigation to ${pageUrl} failed: ${nav.error ? JSON.stringify(nav.error) : nav.result.errorText}`);
   await orLost(loaded);
+  const landed = await evalJs('location.href');
+  if (landed !== pageUrl) throw new Error(`navigated to ${landed}, expected ${pageUrl}`);
 
   const brute = (P, T, C) => {
     const feasible = P.options.filter(o => o.t <= T && o.c <= C);
@@ -165,6 +171,45 @@ try {
     // Pointer leaves the plot: tooltip hides.
     const out = await hover(5, 5);
     check(!out.shown, `${P.id}: tooltip hides outside the map`);
+  }
+  // Marker hits snap the crosshair to the selected setup's own latency and cost, so tooltip and crosshair agree.
+  {
+    const tipState = () => evalJs(`({ shown: document.getElementById('tip').style.display === 'block', text: document.getElementById('tip').textContent })`);
+    const crossLines = id => evalJs(`[...document.querySelectorAll('#map-${id} .cross line')].map(l => ['x1', 'y1', 'x2', 'y2'].map(k => +l.getAttribute(k)))`);
+    const snappedAt = (lines, sx, sy) => lines.length === 2 && lines.some(([x1, y1, x2, y2]) => Math.abs(x1 - sx) < 0.01 && Math.abs(x2 - sx) < 0.01) &&
+      lines.some(([x1, y1, x2, y2]) => Math.abs(y1 - sy) < 0.01 && Math.abs(y2 - sy) < 0.01);
+    const press = async (x, y) => {
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    };
+    const esc = () => send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await esc();
+    for (const P of payload.panels) {
+      const first = P.options.find(o => o.name === P.ever_winners[0]), other = P.options.find(o => o.name === P.ever_winners[10]);
+      const cases = [[`first ${first.label}`, first, -4, 0], [`ordinary ${other.label}`, other, 3, 3],
+        ...P.greptile.map(g => [`${g.label} reference`, g, -4, 3])];
+      for (const [label, o, dx, dy] of cases) {
+        const [cx, cy, sx, sy] = await toClient(P.id, o.t, o.c);
+        const got = await hover(cx + dx, cy + dy), lines = await crossLines(P.id);
+        const isRef = !!o.name && o.name.startsWith('Greptile');
+        const tipOk = isRef ? got.text.includes('reference, not optimized') && got.text.includes(`Actual: ${o.f.toFixed(2)} findings`)
+          : got.text.startsWith(`${o.label}: ${o.f.toFixed(2)} findings`) && got.text.includes('Best:') && !got.text.includes('No priced setup fits');
+        check(tipOk && snappedAt(lines, sx, sy), `${P.id}: pointer ${dx},${dy} px from ${label} shows its tooltip with the crosshair snapped to its latency and cost`);
+      }
+      // Click near the marker pins that same snapped selection against later movement.
+      const [cx, cy, sx, sy] = await toClient(P.id, first.t, first.c);
+      await press(cx - 4, cy);
+      const pinnedText = (await tipState()).text;
+      await hover(cx + 200, cy - 100);
+      check((await tipState()).text === pinnedText && pinnedText.startsWith(first.label) && snappedAt(await crossLines(P.id), sx, sy),
+        `${P.id}: a click near ${first.label} pins the snapped selection`);
+      await esc();
+      // Outside the hit radius the pointer stays the budget: infeasible just left of the first marker.
+      const far = await hover(cx - 14, cy), farLines = await crossLines(P.id);
+      check(far.text.includes('No priced setup fits') && !snappedAt(farLines, sx, sy) && farLines.length === 2,
+        `${P.id}: 14 px left of ${first.label} stays an infeasible budget with the crosshair at the pointer`);
+    }
+    await hover(5, 5);
   }
   // A tied cell, hovered for real, lists every tied option.
   {

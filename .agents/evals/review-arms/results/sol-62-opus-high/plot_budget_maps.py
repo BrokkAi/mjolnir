@@ -566,14 +566,16 @@ function setup(P) {
   function show(ev, hit) {
     const {p, T, C} = hit;
     let best = null, bestD = 10;
-    const consider = (kind, id, t, c) => { const d = Math.hypot(px(t) - p.x, py(c) - p.y); if (d < bestD) { bestD = d; best = [kind, id]; } };
+    const consider = (kind, id, t, c) => { const d = Math.hypot(px(t) - p.x, py(c) - p.y); if (d < bestD) { bestD = d; best = [kind, id, t, c]; } };
     P.greptile.forEach((q, i) => consider('g', i, q.t, q.c));
     for (const n of P.ever_winners) { const o = P.options.find(x => x.name === n); consider('o', n, o.t, o.c); }
     clearAll();
     tip.replaceChildren(best ? markerTip(P, best[0], best[1]) : budgetTip(P, T, C));
     tip.style.display = 'block'; place(ev);
+    // A marker hit selects that setup's own latency and cost, so the crosshair snaps to it and agrees with the tooltip.
+    const at = best ? {x: px(best[2]), y: py(best[3])} : p;
     const ns = 'http://www.w3.org/2000/svg';
-    for (const [a, b, c, d] of [[x0, p.y, x0 + w, p.y], [p.x, y0, p.x, y0 + h]]) {
+    for (const [a, b, c, d] of [[x0, at.y, x0 + w, at.y], [at.x, y0, at.x, y0 + h]]) {
       const l = document.createElementNS(ns, 'line');
       l.setAttribute('x1', a); l.setAttribute('y1', b); l.setAttribute('x2', c); l.setAttribute('y2', d);
       l.setAttribute('stroke', '#0b0b0b'); l.setAttribute('stroke-width', '.7'); l.setAttribute('stroke-dasharray', '3 3');
