@@ -127,7 +127,9 @@ def rollout_mcp_calls(paths):
                         conflicts.add(identifier)
     except (OSError, ValueError, AttributeError, TypeError):
         return {}
-    return {identifier: record for identifier, record in calls.items() if identifier not in conflicts}
+    for identifier in conflicts:
+        calls[identifier] = None
+    return calls
 
 
 def rollout_file_changes(paths):
@@ -188,12 +190,13 @@ def is_rql_mcp_call(call, rollout_mcp=None, rollout=None):
         if rollout is not None and identifier in rollout:
             return False
         if rollout_mcp is not None:
-            if rollout_mcp.get(identifier) == ("rql", "rql_query"):
-                return True
+            if identifier in rollout_mcp:
+                return rollout_mcp[identifier] == ("rql", "rql_query")
             # A background Codex JS-exec MCP call still in_progress when the turn finishes
-            # never emits an item_completed McpToolCall in rollout-*.jsonl.
+            # has no item_completed McpToolCall in rollout-*.jsonl.
             meta = call.get("_meta")
-            return (call.get("status") == "in_progress"
+            return (isinstance(identifier, str) and bool(identifier)
+                    and call.get("status") == "in_progress"
                     and isinstance(meta, dict) and meta.get("is_mcp_tool_call") is True
                     and call.get("rawOutput") is None and not (call.get("content") or []))
         return True

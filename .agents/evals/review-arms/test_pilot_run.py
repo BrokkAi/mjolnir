@@ -1304,6 +1304,12 @@ if not (attempt / "recover").exists():
         self.assertTrue(bg_ok["passed"], bg_ok["hits"])
         bg_denied = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=False)
         self.assertFalse(bg_denied["passed"])
+        # A contradictory rollout McpToolCall (or conflicting duplicate) rejects an in_progress card.
+        rollout_file.write_text(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "McpToolCall", "id": "exec-rql-bg", "server": "mj-memory", "tool": "search_sessions",
+        }}}) + "\n")
+        bg_conflict = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_conflict["passed"])
 
 
 if __name__ == "__main__":
