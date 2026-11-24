@@ -2360,6 +2360,139 @@ fn ssh_bare_installs_upload_the_worker_once_per_host_and_link_it_per_session() {
             && line.contains(&destination)));
     }
 }
+// The launch and ownership files reach an SSH container host on the install
+// script's stdin, not in commands of their own or in argv, and the script's
+// first step unpacks them where the later steps copy from.
+#[cfg(unix)]
+#[test]
+fn ssh_container_install_carries_worker_files_on_the_install_script_stdin() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = podman_install_fixture();
+    std::fs::write(&fixture.launch_config, br#"{"launch":"launch-marker-5d1"}"#).unwrap();
+    std::fs::write(&fixture.ownership, br#"{"owner":"ownership-marker-9c2"}"#).unwrap();
+    let executor = SshHostExecutor::default();
+    let session = "fedcba9876543210fedcba9876543210";
+    let root = targets::worker_root(&fixture.locator, session).unwrap();
+    install_worker_files(
+        &executor,
+        &fixture.locator,
+        session,
+        &root,
+        &format!("{root}/profile"),
+        &WorkerInstall::Host(fixture.worker_binary.clone()),
+        &fixture.launch_config,
+        &fixture.ownership,
+        &fixture.profile_stage,
+        None,
+        &[],
+    )
+    .unwrap();
+    let commands = executor.commands.take();
+    let purposes: Vec<_> = commands.iter().map(|c| c.purpose.as_str()).collect();
+    for removed in [
+        "create remote upload staging",
+        "upload remote container worker file",
+    ] {
+        assert!(!purposes.contains(&removed), "{purposes:?}");
+    }
+    let install: Vec<_> = commands
+        .iter()
+        .filter(|command| command.purpose == "install remote container worker")
+        .collect();
+    assert_eq!(install.len(), 1, "{purposes:?}");
+    let install = install[0];
+    for command in &commands {
+        let argv = format!("{} {}", command.program, command.args.join(" "));
+        assert!(
+            !argv.contains("marker-"),
+            "worker file bytes in argv: {argv}"
+        );
+    }
+    let archive = install.sensitive_stdin().expect("worker files on stdin");
+    let files: Vec<_> = tar::Archive::new(archive)
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let mut entry = entry.unwrap();
+            let mode = entry.header().mode().unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            (
+                entry.path().unwrap().to_string_lossy().into_owned(),
+                mode,
+                bytes,
+            )
+        })
+        .collect();
+    assert_eq!(
+        files,
+        [
+            (
+                "launch.json".to_owned(),
+                0o600,
+                std::fs::read(&fixture.launch_config).unwrap()
+            ),
+            (
+                "ownership.json".to_owned(),
+                0o600,
+                std::fs::read(&fixture.ownership).unwrap()
+            ),
+        ]
+    );
+
+    // Run the script as the host's login shell would, against an engine that
+    // records the files it is asked to copy into the container.
+    let home = tempfile::tempdir().unwrap();
+    let shim = home.path().join("shim");
+    std::fs::create_dir(&shim).unwrap();
+    std::fs::write(
+        shim.join("podman"),
+        "#!/bin/sh\nif [ \"$1\" = cp ]; then case \"$2\" in */launch.json|*/ownership.json)\n\
+         cp -- \"$2\" \"$HOME/seen-${2##*/}\"; ls -l \"$2\" | cut -c1-10 > \"$HOME/mode-${2##*/}\";; esac; fi\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(shim.join("podman"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut run = CommandSpec::new("sh", ["-c".into(), install.args.last().unwrap().clone()]);
+    run.cwd = Some(home.path().to_owned());
+    run.env
+        .insert("HOME".into(), home.path().display().to_string());
+    run.env.insert(
+        "PATH".into(),
+        format!("{}:{}", shim.display(), std::env::var("PATH").unwrap()),
+    );
+    let run = run.with_sensitive_stdin(archive.to_vec());
+    let output = mj_core::targets::ProcessExecutor.execute(&run).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (name, original) in [
+        ("launch.json", &fixture.launch_config),
+        ("ownership.json", &fixture.ownership),
+    ] {
+        assert_eq!(
+            std::fs::read(home.path().join(format!("seen-{name}"))).unwrap(),
+            std::fs::read(original).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(format!("mode-{name}")))
+                .unwrap()
+                .trim(),
+            "-rw-------"
+        );
+    }
+    // The staging is gone once the install succeeded.
+    assert!(
+        !home
+            .path()
+            .join(targets::REMOTE_UPLOAD_STAGING)
+            .join(session)
+            .exists()
+    );
+}
+
 // Hard-won: 62a232f: SSH-bare and SSH-container installs duplicated the host worker cache
 #[test]
 fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {

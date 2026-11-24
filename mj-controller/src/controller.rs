@@ -120,8 +120,8 @@ pub use mj_session_runtime::host_git_config::{
 };
 pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
-    recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
-    shared_content_ssh, worker_source_problem,
+    profile_upload_generation, recorded_exit_reason, refresh_target_worker_binary_if_stale,
+    run_control_command, shared_content_ssh, worker_source_problem,
 };
 
 pub use checkpoint::{

@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use Digest::SHA;
 use Fcntl qw(:flock F_SETFD);
+use File::Basename qw(dirname);
 use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
 use File::Temp qw(tempdir);
@@ -34,6 +35,41 @@ die "write profile receiver identity: $!" unless defined($written) && $written =
 # lease in that child until it exits so collection cannot delete its files.
 defined(fcntl($lease, F_SETFD, 0)) or die "share profile lease with tar: $!";
 END { remove_tree($work) if defined $work }
+
+# A copy that crossed filesystems and failed leaves no partial profile behind.
+my $exdev_staging;
+END { remove_tree($exdev_staging) if defined $exdev_staging }
+
+sub copy_profile_entry {
+    my ($source, $target) = @_;
+    my @status = lstat($source) or die "inspect profile entry: $!";
+    my $mode = $status[2] & 07777;
+    if (-l _) {
+        my $link = readlink($source);
+        defined($link) or die "read profile symlink: $!";
+        symlink($link, $target) or die "copy profile symlink: $!";
+    } elsif (-d _) {
+        mkdir($target) or die "copy profile directory: $!";
+        copy_directory_contents($source, $target);
+        chmod($mode, $target) or die "set copied profile directory mode: $!";
+    } elsif (-f _) {
+        copy($source, $target) or die "copy profile file: $!";
+        chmod($mode, $target) or die "set copied profile file mode: $!";
+    } else {
+        die "unsupported profile entry type";
+    }
+}
+
+sub copy_directory_contents {
+    my ($source, $target) = @_;
+    opendir(my $entries, $source) or die "list profile directory: $!";
+    # A file may be named "0", which is false but defined.
+    while (defined(my $entry = readdir($entries))) {
+        next if $entry eq '.' || $entry eq '..';
+        copy_profile_entry("$source/$entry", "$target/$entry");
+    }
+    closedir($entries);
+}
 mkdir "$work/pins" or die "create profile pins: $!";
 flock($metadata, LOCK_UN) or die "unlock profile store: $!";
 
@@ -193,14 +229,27 @@ for my $entry (@$entries) {
         chmod($entry->{mode}, $target) or die "set materialized profile mode: $!";
     }
 }
-if (-f "$work/incoming/private.tar.gz") {
-    system('tar', '-xzf', "$work/incoming/private.tar.gz", '--no-same-owner',
+if (-f "$work/incoming/private.tar") {
+    system('tar', '-xf', "$work/incoming/private.tar", '--no-same-owner',
         '--no-same-permissions', '-C', $tree) == 0 or die "extract private profile bundle";
 }
 for my $directory (reverse @directories) {
     chmod($directory->[1], $directory->[0]) or die "set profile directory mode: $!";
 }
 # The caller uses a session-specific staging destination and only copies it
-# into the home after success. Copying here supports a different filesystem.
+# into the home after success. The tree sits beside the store, so publishing
+# it is one rename; a destination on another filesystem is copied in pure Perl
+# (no cp) into a sibling directory first, so the final rename is still atomic.
+$destination =~ s{(?<=.)/+\z}{};
+make_path(dirname($destination));
 remove_tree($destination);
-system('cp', '-pRP', '--', $tree, $destination) == 0 or die "stage materialized profile";
+if (!rename($tree, $destination)) {
+    die "stage materialized profile: $!" unless $!{EXDEV};
+    my $mode = (stat($tree))[2];
+    defined($mode) or die "inspect materialized profile: $!";
+    $exdev_staging = tempdir('stage-XXXXXXXXXX', DIR => dirname($destination));
+    copy_directory_contents($tree, $exdev_staging);
+    chmod($mode & 07777, $exdev_staging) or die "set staged profile mode: $!";
+    rename($exdev_staging, $destination) or die "stage materialized profile: $!";
+    undef $exdev_staging;
+}
