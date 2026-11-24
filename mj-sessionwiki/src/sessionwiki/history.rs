@@ -200,34 +200,48 @@ pub(super) fn resolve_lookup(
     if let Some(pointer) = ownership.exact_child_pointer(id) {
         return Ok(child_not_indexed(id, pointer));
     }
-    // The native UUID of a Mjolnir session appears nowhere in its indexed path.
-    if let Some(session_id) = ownership.resolve_native_session_id(id) {
-        for row in index::resolve(connection, session_id)? {
-            if row.session_id == session_id && !visibility.is_child_lenient(&row) {
-                return Ok(SessionLookup::Resolved(row));
-            }
-        }
-        return Ok(SessionLookup::UnindexedLive {
-            input: id.to_owned(),
-            session_id: session_id.to_owned(),
-        });
+    let mut candidates = index::resolve(connection, id)?;
+    for session_id in ownership.native_session_ids(id) {
+        candidates.extend(
+            index::resolve(connection, session_id)?
+                .into_iter()
+                .filter(|row| row.session_id == session_id),
+        );
     }
-    let mut visible = Vec::new();
-    for row in index::resolve(connection, id)? {
-        if !visibility.is_child_lenient(&row) {
-            visible.push(row);
-        }
-    }
+    let mut seen = std::collections::HashSet::new();
+    let mut visible: Vec<_> = candidates
+        .into_iter()
+        .filter(|row| !visibility.is_child_lenient(row) && seen.insert(row.session_id.clone()))
+        .collect();
     if let Some(position) = visible.iter().position(|row| row.session_id == id) {
         return Ok(SessionLookup::Resolved(visible.remove(position)));
     }
     // An exact native UUID outranks other rows that merely share its prefix.
     let wanted = Some(id.to_ascii_lowercase());
-    if visible
-        .iter()
-        .any(|row| index::native_id_of(&row.path) == wanted)
+    if visible.iter().any(|row| {
+        index::native_id_of(&row.path) == wanted
+            || ownership.exact_native_session_id(id) == Some(row.session_id.as_str())
+    }) {
+        visible.retain(|row| {
+            index::native_id_of(&row.path) == wanted
+                || ownership.exact_native_session_id(id) == Some(row.session_id.as_str())
+        });
+    }
+    if visible.len() > 1
+        && visible.iter().all(|row| {
+            index::native_id_of(&row.path) == wanted
+                || ownership.exact_native_session_id(id) == Some(row.session_id.as_str())
+        })
     {
-        visible.retain(|row| index::native_id_of(&row.path) == wanted);
+        let preferred: Vec<_> = visible
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.tool == super::TOOL)
+            .map(|(i, _)| i)
+            .collect();
+        if preferred.len() == 1 {
+            return Ok(SessionLookup::Resolved(visible.remove(preferred[0])));
+        }
     }
     match visible.len() {
         0 => {}
@@ -242,15 +256,20 @@ pub(super) fn resolve_lookup(
     if let Some(pointer) = ownership.child_pointer(id) {
         return Ok(child_not_indexed(id, pointer));
     }
-    Ok(match ownership.known_top_level(id) {
-        Some(session_id) => SessionLookup::UnindexedLive {
-            input: id.to_owned(),
-            session_id: session_id.to_owned(),
+    Ok(
+        match ownership
+            .resolve_native_session_id(id)
+            .or_else(|| ownership.known_top_level(id))
+        {
+            Some(session_id) => SessionLookup::UnindexedLive {
+                input: id.to_owned(),
+                session_id: session_id.to_owned(),
+            },
+            None => SessionLookup::NotFound {
+                input: id.to_owned(),
+            },
         },
-        None => SessionLookup::NotFound {
-            input: id.to_owned(),
-        },
-    })
+    )
 }
 
 /// The one visible session `id` names, or an error saying what to do instead.
@@ -783,6 +802,40 @@ mod tests {
             let page = query_in(&connection, &read_request(input)).unwrap();
             assert_eq!(page["session_id"], "ffff0001", "{input}");
             assert_eq!(page["messages"][0]["text"], "hello native");
+        }
+    }
+
+    #[test]
+    fn native_prefix_combines_owned_and_independently_indexed_sessions() {
+        let _held = super::super::tags::testing::lock();
+        let (_dir, connection) = super::super::tags::testing::isolated_index();
+        let ownership = super::super::top_level::Snapshot::for_test_native(
+            "owned",
+            "019a1111-0000-7000-8000-00000000aaaa",
+        );
+        let cache = crate::import::NativeScanCache::new();
+        for id in ["owned", "independent"] {
+            super::super::tags::testing::index_row(&connection, id, "mjolnir");
+        }
+        connection.execute("UPDATE files SET path='/native/019a1111-0000-7000-8000-00000000bbbb.jsonl' WHERE session_id='independent'",[]).unwrap();
+        let lookup = || {
+            resolve_lookup(
+                &connection,
+                "019a1111-0000",
+                &mut QueryVisibility::new(&ownership, &cache),
+            )
+            .unwrap()
+        };
+        match lookup() {
+            SessionLookup::Ambiguous { candidates, .. } => assert_eq!(candidates.len(), 2),
+            _ => panic!("expected both candidates"),
+        }
+        connection
+            .execute("DELETE FROM files WHERE session_id='owned'", [])
+            .unwrap();
+        match lookup() {
+            SessionLookup::Resolved(row) => assert_eq!(row.session_id, "independent"),
+            _ => panic!("expected readable independent session"),
         }
     }
 

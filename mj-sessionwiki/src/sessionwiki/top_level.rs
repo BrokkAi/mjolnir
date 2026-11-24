@@ -120,6 +120,23 @@ impl Snapshot {
             .or_else(|| self.child_pointers.get(&id.to_ascii_lowercase()))
     }
 
+    pub(super) fn exact_native_session_id(&self, id: &str) -> Option<&str> {
+        self.native_to_session
+            .get(&id.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    pub(super) fn native_session_ids(&self, id: &str) -> Vec<&str> {
+        let wanted = id.to_ascii_lowercase();
+        self.native_to_session
+            .iter()
+            .filter(|(native, _)| {
+                **native == wanted || (wanted.contains('-') && native.starts_with(&wanted))
+            })
+            .map(|(_, session)| session.as_str())
+            .collect()
+    }
+
     /// The Mjolnir id of the top-level session whose native id is `id` (or,
     /// for a dashed UUID prefix, uniquely starts with it). A bare hex prefix is
     /// never read as a native id: it may be a prefix of a Mjolnir id.

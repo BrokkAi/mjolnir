@@ -15,6 +15,7 @@ mod indexed_messages;
 #[cfg(test)]
 mod native_tests;
 mod provenance;
+mod search_history;
 mod search_query;
 pub mod tags;
 mod top_level;
