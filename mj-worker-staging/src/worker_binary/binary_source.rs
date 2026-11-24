@@ -265,6 +265,13 @@ impl WorkerBinarySourceSnapshot {
                     let (outcome, pin_elapsed) = &pinned_paths[&path];
                     match outcome {
                         Ok(cached) => {
+                            record_build_pin(
+                                cache_root,
+                                worker_build_id(),
+                                arch,
+                                requirement,
+                                cached,
+                            );
                             tracing::info!(
                                 triple = requirement.triple(arch),
                                 source = source.as_str(),
@@ -394,15 +401,110 @@ fn capture_worker_binary_sources() -> Result<WorkerBinarySourceSnapshot> {
     Ok(WorkerBinarySourceSnapshot::capture(
         &cache_root,
         |arch, requirement| {
-            worker_binary_prerequisite_with_verifier(
+            worker_binary_prerequisite_with_cache(
                 arch,
                 requirement,
                 &current,
                 &|path| path.is_file(),
                 &|path| verify_worker_build_indexed(&cache_root, path),
+                Some(&cache_root),
             )
         },
     ))
+}
+
+fn build_pin_entry(
+    cache_root: &Path,
+    build_id: &str,
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+) -> PathBuf {
+    let mut key = Sha256::new();
+    key.update(b"by-build\0");
+    key.update(build_id.as_bytes());
+    key.update([0]);
+    key.update(arch.as_bytes());
+    key.update([0]);
+    let requirement_key = match requirement {
+        WorkerBinaryRequirement::LocalHost => {
+            key.update(b"local-host\0");
+            std::env::consts::OS
+        }
+        WorkerBinaryRequirement::PortableLinux => "portable-linux",
+        WorkerBinaryRequirement::Darwin => "darwin",
+    };
+    key.update(requirement_key.as_bytes());
+    cache_root.join("index").join(lower_hex(key.finalize()))
+}
+
+fn record_build_pin(
+    cache_root: &Path,
+    build_id: &str,
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+    pinned: &Path,
+) {
+    let write = || -> Result<()> {
+        let digest = pinned
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .context("pinned worker has no digest directory")?;
+        let entry = build_pin_entry(cache_root, build_id, arch, requirement);
+        let directory = entry.parent().expect("index entry parent");
+        std::fs::create_dir_all(directory)?;
+        let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+        staged.write_all(digest.as_bytes())?;
+        staged.persist(entry).map_err(|error| error.error)?;
+        Ok(())
+    };
+    if let Err(error) = write() {
+        tracing::warn!(%error, "could not record build-target worker pin");
+    }
+}
+
+pub(super) fn lookup_build_pinned_worker(
+    cache_root: &Path,
+    build_id: &str,
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+    is_file: &dyn Fn(&Path) -> bool,
+    verify: &dyn Fn(&Path) -> Result<()>,
+) -> Option<PathBuf> {
+    let lookup = || -> Result<Option<PathBuf>> {
+        let digest =
+            match std::fs::read_to_string(build_pin_entry(cache_root, build_id, arch, requirement))
+            {
+                Ok(digest) => digest,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+        let digest = digest.trim();
+        ensure!(
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid build-target worker digest"
+        );
+        let pinned = cache_root.join(digest).join("hel");
+        ensure!(
+            is_file(&pinned),
+            "pinned worker is missing: {}",
+            pinned.display()
+        );
+        verify(&pinned)?;
+        ensure!(
+            mj_core::worker_launch::worker_executable_digest(&pinned)? == digest,
+            "pinned worker checksum mismatch: {}",
+            pinned.display()
+        );
+        Ok(Some(pinned))
+    };
+    match lookup() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%error, build_id, arch, ?requirement, "could not use build-target worker pin");
+            None
+        }
+    }
 }
 
 /// Cached record of a source file this daemon already verified and pinned.
@@ -613,7 +715,15 @@ pub fn worker_binary_for_arch(
         return resolve_worker_source_again(arch, requirement, pinned.err());
     }
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+    let cache_root = data_dir().join("workers").join("pinned");
+    worker_binary_prerequisite_with_cache(
+        arch,
+        requirement,
+        &current,
+        &|path| path.is_file(),
+        &verify_worker_build,
+        Some(&cache_root),
+    )
 }
 
 /// Whether a pinned worker source can still be used as it stands.
@@ -642,13 +752,20 @@ fn resolve_worker_source_again(
     pinned_error: Option<anyhow::Error>,
 ) -> Result<WorkerBinaryAvailability> {
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    let resolved =
-        worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file());
+    let cache_root = data_dir().join("workers").join("pinned");
+    let resolved = worker_binary_prerequisite_with_cache(
+        arch,
+        requirement,
+        &current,
+        &|path| path.is_file(),
+        &verify_worker_build,
+        Some(&cache_root),
+    );
     match resolved {
         Ok(WorkerBinaryAvailability::Local { path, source }) => {
-            let cache_root = data_dir().join("workers").join("pinned");
             let path = copy_worker_source_to_cache(&path, &cache_root)
                 .context("pin the re-resolved worker source")?;
+            record_build_pin(&cache_root, worker_build_id(), arch, requirement, &path);
             tracing::info!(
                 arch,
                 requirement = ?requirement,
@@ -693,6 +810,17 @@ pub fn worker_binary_prerequisite_with_verifier(
     current: &Path,
     is_file: &dyn Fn(&Path) -> bool,
     verify: &dyn Fn(&Path) -> Result<()>,
+) -> Result<WorkerBinaryAvailability> {
+    worker_binary_prerequisite_with_cache(arch, requirement, current, is_file, verify, None)
+}
+
+pub(super) fn worker_binary_prerequisite_with_cache(
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+    current: &Path,
+    is_file: &dyn Fn(&Path) -> bool,
+    verify: &dyn Fn(&Path) -> Result<()>,
+    cache_root: Option<&Path>,
 ) -> Result<WorkerBinaryAvailability> {
     let triple = requirement.triple(arch);
     let rejected = std::cell::RefCell::new(Vec::new());
@@ -763,6 +891,14 @@ pub fn worker_binary_prerequisite_with_verifier(
             source: source.into(),
         });
     }
+    if let Some(path) = cache_root.and_then(|root| {
+        lookup_build_pinned_worker(root, worker_build_id(), arch, requirement, is_file, verify)
+    }) {
+        return Ok(WorkerBinaryAvailability::Local {
+            path,
+            source: "pinned worker cache".into(),
+        });
+    }
     if let Some(template) = mj_core::config::env_override("WORKER_URL") {
         let expected = mj_core::config::env_override("WORKER_SHA256")
             .context("MJ_WORKER_URL requires MJ_WORKER_SHA256")?;
@@ -790,4 +926,184 @@ pub fn worker_binary_prerequisite_with_verifier(
     bail!(
         "no worker for {triple}; install mj-worker-{triple} beside mj, set MJ_WORKER_DIR/MJ_WORKER_BINARY, or configure MJ_WORKER_URL and MJ_WORKER_SHA256"
     )
+}
+
+#[cfg(test)]
+mod build_pin_tests {
+    use super::*;
+
+    #[test]
+    fn build_pin_survives_install_replacement_and_rejects_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("cache");
+        let controller = directory.path().join("mj");
+        let worker = directory.path().join("mj-worker");
+        std::fs::write(&controller, b"controller").unwrap();
+        let stamp = mj_core::worker_build::worker_build_stamp();
+        let a = format!("worker A{stamp}");
+        let b = format!("worker B{stamp}");
+        std::fs::write(&worker, &a).unwrap();
+        let arch = std::env::consts::ARCH;
+        let requirement = WorkerBinaryRequirement::LocalHost;
+        let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |_, req| {
+            ensure!(req == requirement, "unavailable target");
+            Ok(WorkerBinaryAvailability::Local {
+                path: worker.clone(),
+                source: "installed".into(),
+            })
+        });
+        let Ok(WorkerBinaryAvailability::Local { path: pinned, .. }) =
+            &snapshot.entries[&(arch.to_owned(), requirement)]
+        else {
+            panic!("worker not pinned")
+        };
+        std::fs::write(&worker, &b).unwrap();
+        let verify_a = |path: &Path| -> Result<()> {
+            ensure!(std::fs::read(path)? == a.as_bytes(), "different build");
+            Ok(())
+        };
+        let lookup = || {
+            worker_binary_prerequisite_with_cache(
+                arch,
+                requirement,
+                &controller,
+                &|p| p.is_file(),
+                &verify_a,
+                Some(&cache),
+            )
+        };
+        assert_eq!(
+            lookup().unwrap(),
+            WorkerBinaryAvailability::Local {
+                path: pinned.clone(),
+                source: "pinned worker cache".into()
+            }
+        );
+        let fresh = WorkerBinarySourceSnapshot::capture(&cache, |candidate_arch, req| {
+            worker_binary_prerequisite_with_cache(
+                candidate_arch,
+                req,
+                &controller,
+                &|p| p.is_file(),
+                &verify_a,
+                Some(&cache),
+            )
+        });
+        assert_eq!(
+            fresh.entries[&(arch.to_owned(), requirement)],
+            Ok(WorkerBinaryAvailability::Local {
+                path: pinned.clone(),
+                source: "pinned worker cache".into()
+            })
+        );
+        // A daemon with B's verifier prefers the installed B even while A is pinned.
+        let verify_b = |path: &Path| -> Result<()> {
+            ensure!(std::fs::read(path)? == b.as_bytes(), "different build");
+            Ok(())
+        };
+        let newer = worker_binary_prerequisite_with_cache(
+            arch,
+            requirement,
+            &controller,
+            &|p| p.is_file(),
+            &verify_b,
+            Some(&cache),
+        )
+        .unwrap();
+        assert!(matches!(newer, WorkerBinaryAvailability::Local { path, .. } if path == worker));
+        assert!(
+            lookup_build_pinned_worker(
+                &cache,
+                "different-build",
+                arch,
+                requirement,
+                &|p| p.is_file(),
+                &verify_a
+            )
+            .is_none()
+        );
+        assert!(
+            lookup_build_pinned_worker(
+                &cache,
+                worker_build_id(),
+                arch,
+                WorkerBinaryRequirement::PortableLinux,
+                &|p| p.is_file(),
+                &verify_a
+            )
+            .is_none()
+        );
+        let portable_cache = directory.path().join("portable-cache");
+        WorkerBinarySourceSnapshot::capture(&portable_cache, |_, req| {
+            ensure!(
+                req == WorkerBinaryRequirement::PortableLinux,
+                "unavailable target"
+            );
+            Ok(WorkerBinaryAvailability::Local {
+                path: worker.clone(),
+                source: "installed portable".into(),
+            })
+        });
+        assert!(
+            lookup_build_pinned_worker(
+                &portable_cache,
+                worker_build_id(),
+                arch,
+                requirement,
+                &|p| p.is_file(),
+                &verify_b
+            )
+            .is_none()
+        );
+        assert!(
+            lookup_build_pinned_worker(
+                &portable_cache,
+                worker_build_id(),
+                arch,
+                WorkerBinaryRequirement::PortableLinux,
+                &|p| p.is_file(),
+                &verify_b
+            )
+            .is_some()
+        );
+        let portable_pin = lookup_build_pinned_worker(
+            &portable_cache,
+            worker_build_id(),
+            arch,
+            WorkerBinaryRequirement::PortableLinux,
+            &|p| p.is_file(),
+            &verify_b,
+        )
+        .unwrap();
+        std::fs::remove_file(&controller).unwrap();
+        std::fs::write(&worker, &a).unwrap();
+        assert_eq!(
+            worker_binary_prerequisite_with_cache(
+                arch,
+                WorkerBinaryRequirement::PortableLinux,
+                &controller,
+                &|p| p.is_file(),
+                &verify_b,
+                Some(&portable_cache),
+            )
+            .unwrap(),
+            WorkerBinaryAvailability::Local {
+                path: portable_pin,
+                source: "pinned worker cache".into()
+            },
+        );
+        // A stamp verifier can still succeed after unrelated bytes are corrupted.
+        std::fs::write(pinned, format!("corrupted{stamp}")).unwrap();
+        assert!(
+            lookup_build_pinned_worker(
+                &cache,
+                worker_build_id(),
+                arch,
+                requirement,
+                &|p| p.is_file(),
+                &verify_worker_build
+            )
+            .is_none()
+        );
+    }
 }

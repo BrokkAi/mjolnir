@@ -154,6 +154,16 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
         .run();
         return;
     }
+    let cache = data_dir().join("workers").join("pinned");
+    let source = cache.join("source");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(&source, stamped_worker(b"matching cached worker")).unwrap();
+    WorkerBinarySourceSnapshot::capture(&cache, |_, _| {
+        Ok(WorkerBinaryAvailability::Local {
+            path: source.clone(),
+            source: "test".into(),
+        })
+    });
     // A matching worker in MJ_WORKER_DIR must not replace the named override.
     let error = format!(
         "{:#}",
