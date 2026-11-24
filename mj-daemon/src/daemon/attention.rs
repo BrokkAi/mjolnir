@@ -613,7 +613,9 @@ fn project_states(
                 review.filter(|review| !matches!(review.phase, TurnReviewPhase::Resolved(_)))
             {
                 match review.phase {
-                    TurnReviewPhase::Verdict(ReviewVerdict::Findings { .. }) => NeedsInput,
+                    // Findings deliver themselves to the agent's mailbox. They
+                    // do not wait for a person. A real reviewer question is
+                    // already `NeedsInput` above, via `questions.contains(id)`.
                     TurnReviewPhase::Verdict(ReviewVerdict::Clean) => Idle,
                     _ => Working,
                 }
@@ -662,53 +664,6 @@ fn project_states(
             } else {
                 None
             };
-            if let Some(card) = &mut card
-                && card.badge == NotificationKind::NeedsInput
-                && card.form.is_none()
-                && let Some(review) = review.filter(|review| {
-                    review.questions.is_empty()
-                        && matches!(
-                            review.phase,
-                            TurnReviewPhase::Verdict(ReviewVerdict::Findings { .. })
-                        )
-                })
-                && let Some(reviewer) = review
-                    .roles
-                    .iter()
-                    .filter(|role| role.role != mj_core::review::driver::BRIEF_WRITER_ROLE)
-                    .filter_map(|role| role.child_session_id.as_deref())
-                    .chain(review.child_session_id.as_deref())
-                    .min()
-            {
-                // The frozen registration identifies one review even when
-                // several reviewer roles contributed findings.
-                card.holder = Some(review.session_id.clone());
-                card.form = Some(CardForm::review_findings(
-                    reviewer,
-                    committed.map_or(0, |state| {
-                        review
-                            .reviewer_children()
-                            .chain(review.child_session_id.as_deref())
-                            .filter_map(|child| {
-                                state
-                                    .subagent_reports
-                                    .get(child)
-                                    .and_then(|report| report.handback.as_ref())
-                                    .map(|handback| handback.recorded_at_ms)
-                                    .or_else(|| {
-                                        state
-                                            .turns
-                                            .get(child)
-                                            .and_then(|turn| turn.state.2.as_ref())
-                                            .map(|outcome| outcome.completed_at_ms)
-                                    })
-                            })
-                            .max()
-                            .unwrap_or(0)
-                    }),
-                    review.status.clone(),
-                ));
-            }
             if let Some(card) = &mut card {
                 card.since_ms = card
                     .entries
@@ -1192,42 +1147,83 @@ mod tests {
             .insert(id.clone(), NativeAgentSummary::of(&view));
         assert_eq!(project(&runtime)[&id], SessionAttention::Idle);
         assert_ne!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+    }
 
-        let role = |id: &str| mj_core::review::driver::RoleStatus {
-            role: id.to_owned(),
-            label: id.to_owned(),
-            state: mj_core::review::driver::RoleState::Findings,
-            child_session_id: Some(id.to_owned()),
+    // Hard-won: c9867384e: automatic review findings delivery flashed a NeedsInput card while verdict delivery was in flight.
+    #[test]
+    fn findings_verdict_delivery_does_not_flash_needs_input() {
+        use mj_core::attention::NotificationStack;
+        use mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL;
+
+        let findings = || mj_client::review::RuntimeReviewView {
+            review_id: String::new(),
+            roots: Vec::new(),
+            session_id: "parent".into(),
+            child_session_id: Some("reviewer".into()),
+            phase: TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+                synthesis: "Codify the ownership rule".into(),
+                evidence: Default::default(),
+            }),
+            roles: vec![
+                mj_core::review::driver::RoleStatus {
+                    role: "reviewer-b".into(),
+                    label: "reviewer-b".into(),
+                    state: mj_core::review::driver::RoleState::Findings,
+                    child_session_id: Some("reviewer-b".into()),
+                },
+                mj_core::review::driver::RoleStatus {
+                    role: "reviewer-a".into(),
+                    label: "reviewer-a".into(),
+                    state: mj_core::review::driver::RoleState::Findings,
+                    child_session_id: Some("reviewer-a".into()),
+                },
+            ],
+            status: "delivering review verdict".into(),
+            verdict: None,
+            questions: vec![],
         };
-        runtime
-            .metadata
-            .reviews
-            .push(mj_client::review::RuntimeReviewView {
-                review_id: String::new(),
-                roots: Vec::new(),
-                session_id: "parent".into(),
-                child_session_id: None,
-                phase: TurnReviewPhase::Verdict(ReviewVerdict::Findings {
-                    synthesis: "Codify the ownership rule".into(),
-                    evidence: Default::default(),
-                }),
-                roles: vec![role("reviewer-b"), role("reviewer-a")],
-                status: "Review found issues".into(),
-                verdict: None,
-                questions: vec![],
-            });
-        let review = project_states(&runtime, BTreeSet::from(["parent".into()]));
-        let card = &review.cards["parent"];
+
+        let mut runtime = runtime();
+        runtime.metadata.reviews.push(findings());
+        let projection = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        assert_eq!(projection.states["parent"], SessionAttention::Working);
+        assert!(!projection.cards.contains_key("parent"));
+
+        let mut live = mj_core::relay::RelaySnapshot::new("parent".into()).operational_state();
+        live.relay_protocol_version = Some(RELAY_NOTIFICATION_STACK_PROTOCOL);
+        live.notification_stack = NotificationStack {
+            revision: 3,
+            entries: vec![NotificationStackEntry {
+                completed_at_ms: 40,
+                completed_ordinal: 8,
+                kind: NotificationKind::NeedsInput,
+                message: EntryMessage::Found("agent:question".into()),
+            }],
+        }
+        .into();
+        runtime.sessions.get_mut("parent").unwrap().operational = Some(live.into());
+        let projection = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        let card = &projection.cards["parent"];
         assert_eq!(card.badge, NotificationKind::NeedsInput);
-        assert_eq!(card.holder.as_deref(), Some("parent"));
-        assert!(card.entries.is_empty());
-        let form = card.form.as_ref().unwrap();
-        assert_eq!(form.request_id, "review-verdict.reviewer-a.findings");
-        assert!(!form.requires_elicitation());
-        assert_eq!(form.message, "Review found issues");
-        runtime.metadata.reviews[0].roles.reverse();
-        let reordered = project_states(&runtime, BTreeSet::from(["parent".into()]));
-        assert_eq!(&reordered.cards["parent"], card);
+        assert!(card.form.is_none());
+        assert!(card.holder.is_none());
+
+        runtime.sessions.get_mut("parent").unwrap().operational = None;
+        runtime.metadata.reviews[0].questions = vec![mj_client::review::ReviewerQuestion {
+            role: "parent".into(),
+            request: mj_core::elicitation::ElicitationRequest {
+                id: "open-question".into(),
+                message: "Which owner?".into(),
+                title: None,
+                description: None,
+                fields: vec![],
+                tool_permission: None,
+            },
+        }];
+        assert_eq!(
+            project_states(&runtime, BTreeSet::from(["parent".into()])).states["parent"],
+            SessionAttention::NeedsInput
+        );
     }
 
     #[test]
@@ -2485,8 +2481,13 @@ mod tests {
             evidence: Default::default(),
         });
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
-        runtime.metadata.reviews.clear();
         materialized.pending_elicitations.clear();
+        runtime.transcripts.insert(
+            "child".into(),
+            mj_client::runtime_feed::SessionTail::of(&materialized, &window, 12),
+        );
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Working);
+        runtime.metadata.reviews.clear();
         runtime.transcripts.insert(
             "child".into(),
             mj_client::runtime_feed::SessionTail::of(&materialized, &window, 10),
