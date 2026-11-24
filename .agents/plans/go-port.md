@@ -178,6 +178,9 @@ The same commands without `MJ_WORKER_BINARY` and with `--instance go-e2e-rust` g
 The scenario suite (`tests/e2e/go_port_scenarios.py`, taking `--mj`, `--instance` and optionally `--worker-binary`) runs each scenario and compares the outcome with the control: create a session; a prompt that needs a tool call, with the file present in the session's checkout and the transcript showing the tool call; a follow-up prompt in the same session; interrupt a long turn, then prompt again; a question or permission request answered through `mj elicitations`/`mj respond` when the harness raises one; stop and restart the daemon during a turn, the turn finishes and the transcript is complete; suspend then resume, then a prompt; destroy, leaving no processes or files. A milestone is accepted when every scenario passes on the Go configuration of that milestone and on the control.
 
 
+The scenario suite and any test that drives a real model are run by hand only, never in CI: they spend model credits or free-tier quota (OpenCode's free quota ran out after one day of testing) and need a local isolated instance holding credentials. If Go tests are added to CI, add `go test ./...` only (its relay and digest tests replay recorded frames and make no model calls), and keep `tests/e2e/go_port_scenarios.py` and the TUI scripts out of every workflow. Never put a harness credential in the repository: the test Codex home with the DeepSeek token lives at `/home/ryansvihla/.cache/mjolnir/build/go-port-tools/e2e/codex-home`, outside the repository.
+
+
 ## Idempotence and Recovery
 
 Everything is additive under `go/`, `tests/e2e/go_port_scenarios.py` and this plan. Isolated instances can be deleted and recreated (`~/.config/mjolnir/instances/go-e2e*`, `~/.local/share/mjolnir/instances/go-e2e*`). Never point any of this at the default instance.
