@@ -66,6 +66,12 @@ fn upgrade_command(storage: &common::DaemonStorage) -> Command {
     command
 }
 
+fn ordinary_startup_command(storage: &common::DaemonStorage) -> Command {
+    let mut command = upgrade_command(storage);
+    command.args(["daemon", "endpoint", "--json"]);
+    command
+}
+
 // Hard-won: a06334f2e2: redirected bare mj started the daemon and consumed first-launch placement.
 #[test]
 fn redirected_bare_mj_leaves_first_launch_placement_unset() {
@@ -473,7 +479,7 @@ fn assert_upgraded(path: &std::path::Path) {
 fn the_daemon_is_listed_as_mj_daemon_run() {
     let storage = upgrade_storage();
     let output = mj_core::subprocess::run_with_input(
-        upgrade_command(&storage).env("XDG_RUNTIME_DIR", storage.path()),
+        ordinary_startup_command(&storage).env("XDG_RUNTIME_DIR", storage.path()),
         &[],
     )
     .unwrap();
@@ -937,9 +943,11 @@ fn daemon_api_token_override_honors_nonempty_values() {
 #[test]
 fn a_daemon_reports_a_fresh_identity_for_each_start() {
     fn identity(storage: &common::DaemonStorage) -> mj_client::daemon::DaemonIdentity {
+        use mj_client::daemon::{api_endpoint_path_in, read_api_endpoint_from};
+
+        let data = storage.path().join("data");
         let metadata: mj_client::daemon::DaemonMetadata =
-            serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&fs::read(data.join("daemon.json")).unwrap()).unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut client = mj_client::daemon::DaemonClient::connect(metadata.clone())
@@ -950,13 +958,23 @@ fn a_daemon_reports_a_fresh_identity_for_each_start() {
             assert_eq!(identity.placement, mj_client::daemon::DaemonPlacement::Host);
             assert!(!identity.instance_id.is_empty());
             // Stored settings come from the daemon, not the file.
-            assert!(!client.config().await.unwrap().phone.enabled);
+            let endpoint = read_api_endpoint_from(&api_endpoint_path_in(&data))
+                .unwrap()
+                .unwrap();
+            assert_eq!(endpoint.instance_id, identity.instance_id);
+            let http = mj_client::http::HttpDaemonClient::new(
+                format!("http://{}", endpoint.address),
+                &endpoint.token,
+            )
+            .unwrap();
+            assert!(!http.config().await.unwrap().phone.enabled);
             identity
         })
     }
 
     let storage = upgrade_storage();
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output =
+        mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[]).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -992,7 +1010,7 @@ fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
     fs::create_dir(&checkout).unwrap();
     fs::write(home.join(".gitconfig"), "[user]\nname = Test User\n").unwrap();
     let output = mj_core::subprocess::run_with_input(
-        upgrade_command(&storage)
+        ordinary_startup_command(&storage)
             .env("HOME", &home)
             .current_dir(&checkout),
         &[],
@@ -1028,7 +1046,8 @@ fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
 fn ordinary_startup_migrates_an_old_store_without_a_daemon() {
     let storage = upgrade_storage();
     let path = old_store(&storage);
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output =
+        mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[]).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1049,6 +1068,9 @@ fn daemon_cleans_legacy_activity_history_without_removing_session_transcripts() 
          INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
          INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
              VALUES ('kept','Kept transcript','codex','codex','podman','stopped','now');
+         INSERT INTO environments(environment_id,owner_session_id,phase,placement_json)
+             VALUES ('kept','kept','active','{\"target_template_id\":\"podman\",\"bundle_id\":\"project\"}');
+         INSERT INTO environment_bindings(session_id,environment_id) VALUES ('kept','kept');
          INSERT INTO materialized_sessions(session_id) VALUES ('kept');
          INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json)
              VALUES ('kept','user:1',1,1,1,'{\"kind\":\"user\",\"content\":[]}');"
@@ -1066,7 +1088,8 @@ fn daemon_cleans_legacy_activity_history_without_removing_session_transcripts() 
     .unwrap();
     tx.commit().unwrap();
 
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output =
+        mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[]).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1238,7 +1261,8 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     }
     std::thread::scope(|scope| {
         let upgrade = scope.spawn(|| {
-            mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap()
+            mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[])
+                .unwrap()
         });
         while !busy.with_extension("observed").exists() {
             assert!(
@@ -1306,7 +1330,8 @@ fn a_record_whose_daemon_died_does_not_block_the_upgrade() {
         let metadata_path = storage.path().join("data/daemon.json");
         fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         let log = storage.path().join("client.log");
-        let (status, output) = run_client_with_deadline(&mut upgrade_command(&storage), &log);
+        let (status, output) =
+            run_client_with_deadline(&mut ordinary_startup_command(&storage), &log);
         assert!(status.success(), "{version}/{protocol}: {output}");
         let started: mj_client::daemon::DaemonMetadata =
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
@@ -1354,7 +1379,7 @@ fn a_daemon_that_dies_during_the_handoff_wait_is_replaced() {
         serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
     let log = storage.path().join("client.log");
     let (status, output) = std::thread::scope(|scope| {
-        let mut command = upgrade_command(&storage);
+        let mut command = ordinary_startup_command(&storage);
         let log = &log;
         let client = scope.spawn(move || run_client_with_deadline(&mut command, log));
         while !busy.with_extension("observed").exists() {
@@ -1438,7 +1463,7 @@ esac
         .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))
         .collect::<Vec<_>>();
     let log = storage.path().join("client.log");
-    let mut command = upgrade_command(&storage);
+    let mut command = ordinary_startup_command(&storage);
     command
         .env("PATH", std::env::join_paths(path).unwrap())
         .stdin(std::process::Stdio::null())
@@ -1537,7 +1562,7 @@ fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
         let outputs = std::thread::scope(|scope| {
             let clients: Vec<_> = (0..3)
                 .map(|index| {
-                    let mut command = upgrade_command(&storage);
+                    let mut command = ordinary_startup_command(&storage);
                     let log = storage.path().join(format!("client-{index}.log"));
                     scope.spawn(move || run_client_with_deadline(&mut command, &log))
                 })
@@ -1561,7 +1586,8 @@ fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
             metadata.build_version
         );
         let output =
-            mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+            mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[])
+                .unwrap();
         assert!(output.status.success());
         let reused: mj_client::daemon::DaemonMetadata =
             serde_json::from_slice(&fs::read(metadata_path).unwrap()).unwrap();
@@ -1606,7 +1632,7 @@ fn a_different_same_version_build_cannot_replace_an_incompatible_store_owner() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let (status, log) = run_client_with_deadline(
-        &mut upgrade_command(&storage),
+        &mut ordinary_startup_command(&storage),
         &storage.path().join("refusal.log"),
     );
     assert!(!status.success(), "{log}");
@@ -1641,7 +1667,8 @@ fn older_same_release_clients_keep_a_newer_or_unordered_daemon() {
         let storage = upgrade_storage();
         current_store(&storage);
         let output =
-            mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+            mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[])
+                .unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -1658,7 +1685,7 @@ fn older_same_release_clients_keep_a_newer_or_unordered_daemon() {
         let outputs = std::thread::scope(|scope| {
             let clients: Vec<_> = (0..3)
                 .map(|index| {
-                    let mut command = upgrade_command(&storage);
+                    let mut command = ordinary_startup_command(&storage);
                     let log = storage.path().join(format!("older-client-{index}.log"));
                     scope.spawn(move || run_client_with_deadline(&mut command, &log))
                 })
@@ -1702,7 +1729,8 @@ fn older_same_release_clients_keep_a_newer_or_unordered_daemon() {
 fn a_newer_compatible_daemon_and_store_are_reused_without_downgrading() {
     let storage = upgrade_storage();
     let path = current_store(&storage);
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output =
+        mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[]).unwrap();
     assert!(output.status.success());
     let metadata_path = storage.path().join("data/daemon.json");
     let mut metadata: mj_client::daemon::DaemonMetadata =
@@ -1728,7 +1756,8 @@ fn a_newer_compatible_daemon_and_store_are_reused_without_downgrading() {
             revision + 1
         ))
         .unwrap();
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output =
+        mj_core::subprocess::run_with_input(&mut ordinary_startup_command(&storage), &[]).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -2015,7 +2044,7 @@ fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
         .unwrap();
     let mut old_client = Command::new(&old_binary);
     common::own_test_daemons(&mut old_client)
-        .args(["--instance", "upgrade-test"])
+        .args(["--instance", "upgrade-test", "daemon", "endpoint", "--json"])
         .env("MJ_DATA_DIR", storage.path().join("data"))
         .env("MJ_CONFIG_DIR", storage.path().join("config"))
         .env("MJOLNIR_NO_UPDATE_CHECK", "1")
@@ -2038,7 +2067,7 @@ fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
         serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
 
     let started = Instant::now();
-    let mut new_client = upgrade_command(&storage);
+    let mut new_client = ordinary_startup_command(&storage);
     new_client.env("HOME", &home);
     let (status, log) = run_client_with_deadline(&mut new_client, &storage.path().join("new.log"));
     // Store release admits the new daemon before the old runtime finishes
@@ -2110,8 +2139,9 @@ fn every_client_waiting_on_a_handoff_names_what_it_waits_for() {
     let replacing_log = storage.path().join("replacing.log");
     let queued_log = storage.path().join("queued.log");
     let logs = std::thread::scope(|scope| {
-        let replacing = scope
-            .spawn(|| run_client_with_deadline(&mut upgrade_command(&storage), &replacing_log));
+        let replacing = scope.spawn(|| {
+            run_client_with_deadline(&mut ordinary_startup_command(&storage), &replacing_log)
+        });
         while !busy.with_extension("observed").exists() {
             assert!(
                 Instant::now() < deadline,
@@ -2119,8 +2149,9 @@ fn every_client_waiting_on_a_handoff_names_what_it_waits_for() {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let queued =
-            scope.spawn(|| run_client_with_deadline(&mut upgrade_command(&storage), &queued_log));
+        let queued = scope.spawn(|| {
+            run_client_with_deadline(&mut ordinary_startup_command(&storage), &queued_log)
+        });
         // Both print their first notice after the startup notice delay.
         let deadline = Instant::now() + Duration::from_secs(60);
         while ![&replacing_log, &queued_log]
