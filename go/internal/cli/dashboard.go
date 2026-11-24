@@ -394,7 +394,7 @@ type dashboardContext struct {
 	// loopStalls is built here because it reads the scheduler statistics of
 	// the thread that opens the dashboard, which is the thread that runs its
 	// loop.
-	loopStalls meter
+	loopStalls loopStallsMeter
 	// daemonPresence is what the two-second keep-alive last saw. It never
 	// starts a daemon, so a daemon that goes away stays away until the user
 	// asks for it back.
@@ -457,7 +457,7 @@ type dashboardContext struct {
 
 	lifecycleUpdatesTx  *core.Unbounded[dashboardLifecycleUpdate]
 	lifecycle           *daemon.Feed[dashboardLifecycleUpdate]
-	lifecycleOperations map[string]activeLifecycleOperation
+	lifecycleOperations map[string]*activeLifecycleOperation
 
 	importUpdatesTx   chan<- importProfileUpdate
 	importProfiles    *daemon.Feed[importProfileUpdate]
