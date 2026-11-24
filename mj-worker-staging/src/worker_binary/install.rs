@@ -458,10 +458,11 @@ const MBX_CONFIG_SCRIPT: &str = r#"set -eu
 directory=$1
 shift
 mkdir -p -- "$directory"
+chmod 700 -- "$directory"
 temporary=$(mktemp "$directory/.config.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 cat > "$temporary"
-chmod 644 -- "$temporary"
+chmod 600 -- "$temporary"
 mv -f -- "$temporary" "$directory/config.toml"
 trap - EXIT HUP INT TERM
 for root in "$HOME/.config" "$@"; do
@@ -2046,8 +2047,12 @@ mod mbx_shim_tests {
         }
         let file = directory.join("config.toml");
         assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o644
+            0o600
         );
         let leftovers = std::fs::read_dir(&directory).unwrap().count();
         assert_eq!(leftovers, 1, "no temporary snapshot files remain");

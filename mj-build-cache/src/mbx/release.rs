@@ -50,7 +50,8 @@ const FAILURES_MAX_BYTES: u64 = 256 * 1024;
 pub const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// `$1` mode (`native` or `shared`), `$2` the shared cache directory, `$3`
-/// the session's target root (empty in `native` mode), `$4` the
+/// the session's recorded target root (empty in `native` mode, or for a legacy
+/// shared-cache record that predates recording in-cache target roots), `$4` the
 /// old local binary root, `$5` the optional workspace root; the remaining
 /// arguments are workspaces for older mbx versions.
 ///
@@ -113,6 +114,23 @@ if [ -z "$mbx" ]; then
     echo 'no mbx on this host can release the shared build cache' >&2
     exit 3
 fi
+if [ "$mode" = shared ] && [ -z "$target_root" ]; then
+    configured=$(unset MBX_TARGET_ROOT; MBX_CACHE_DIR=$cache "$mbx" settings get target.root 2>/dev/null || true)
+    case "$configured" in
+        ''|..|../*|*/..|*/../*) ;;
+        /*)
+            case "${configured%/}/" in
+                "${cache%/}/"*) target_root=$configured ;;
+            esac
+            ;;
+        *)
+            target_root=${cache%/}/$configured
+            ;;
+    esac
+    if [ -z "$target_root" ]; then
+        target_root=${cache%/}/targets
+    fi
+fi
 run_mbx() {
     if [ "$mode" != shared ]; then
         "$mbx" "$@"
@@ -170,8 +188,9 @@ enum Store {
     /// A bare host's own mbx, with its own configuration.
     Native,
     /// The cache directory a host's containers mount at the same path, and
-    /// the session's recorded target root. A record that holds none predates
-    /// recording the root and used `<directory>/targets`.
+    /// the session's recorded target root. A legacy record with `None` predates
+    /// recording in-cache roots, so the release script resolves any in-cache
+    /// host `target.root` and falls back to `<directory>/targets` otherwise.
     Shared {
         directory: PathBuf,
         target_root: Option<PathBuf>,
@@ -179,19 +198,12 @@ enum Store {
 }
 
 impl Store {
-    /// The target root release passes to mbx, so cleanup reaches the state the
-    /// session wrote even if the host's configuration has changed since.
-    fn release_target_root(&self) -> Option<PathBuf> {
+    /// The recorded target root passed to `RELEASE_SCRIPT`, or `None` for
+    /// native hosts and legacy records that predate recording in-cache roots.
+    fn release_target_root(&self) -> Option<&Path> {
         match self {
             Store::Native => None,
-            Store::Shared {
-                directory,
-                target_root,
-            } => Some(
-                target_root
-                    .clone()
-                    .unwrap_or_else(|| directory.join("targets")),
-            ),
+            Store::Shared { target_root, .. } => target_root.as_deref(),
         }
     }
 }
@@ -450,17 +462,18 @@ impl BuildStateRelease {
     fn remediation(&self) -> String {
         let environment = match &self.store {
             Store::Native => String::new(),
-            Store::Shared { directory, .. } => {
-                let root = self
-                    .store
-                    .release_target_root()
-                    .expect("a shared store has a root");
-                format!(
-                    "MBX_CACHE_DIR={} MBX_TARGET_ROOT={} ",
-                    directory.display(),
-                    root.display()
-                )
-            }
+            Store::Shared {
+                directory,
+                target_root: Some(root),
+            } => format!(
+                "MBX_CACHE_DIR={} MBX_TARGET_ROOT={} ",
+                directory.display(),
+                root.display()
+            ),
+            Store::Shared {
+                directory,
+                target_root: None,
+            } => format!("MBX_CACHE_DIR={} ", directory.display()),
         };
         let fallback = self
             .workspaces
@@ -654,6 +667,7 @@ mod tests {
             let contents = if with_mbx {
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
+                         if [ \"$1\" = settings ]; then exit 0; fi\n\
                          if [ \"$1\" = clean ] && [ \"${{2:-}}\" = --help ]; then\n\
                              {}\n\
                              exit 0\n\
@@ -713,6 +727,7 @@ mod tests {
                 path,
                 format!(
                     "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx 1.19.0'; exit 0; }}\n\
+                     [ \"$1\" = settings ] && exit 0\n\
                      printf '%s|%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{MBX_TARGET_ROOT:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
                     self.path("log").display()
                 ),
@@ -897,6 +912,7 @@ mod tests {
             sandbox.path("bin/mbx"),
             format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 [ \"$1\" = settings ] && exit 0\n\
                  echo 'clean output'\necho 'clean warning' >&2\n"
             ),
         )
@@ -943,6 +959,7 @@ mod tests {
             sandbox.path("bin/mbx"),
             format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 [ \"$1\" = settings ] && exit 0\n\
                  : > '{}'\nwaited=0\n\
                  while [ ! -e '{}' ] && [ \"$waited\" -lt 3000 ]; do sleep 0.02; waited=$((waited + 1)); done\n\
                  printf done > '{}'/completed\nprintf 'mbx output\\n'\nprintf 'mbx warning\\n' >&2\n",
@@ -1084,33 +1101,69 @@ mod tests {
     #[test]
     fn shared_cache_cleanup_always_names_the_sessions_target_root_even_in_the_cache() {
         let sandbox = Sandbox::new(true);
-        // A root recorded inside the cache, and a record that predates recording
-        // the root, both release what the session wrote, wherever the host's
-        // configuration points today.
-        for (recorded, expected) in [
-            (Some("/srv/cache/views"), "/srv/cache/views"),
-            (None, "/srv/cache/targets"),
+        // A root recorded inside the cache releases what the session wrote,
+        // wherever the host's configuration points today.
+        let mut release = shared(&["/workspace/abc/app"]);
+        release.store = Store::Shared {
+            directory: "/srv/cache".into(),
+            target_root: Some("/srv/cache/views".into()),
+        };
+        let output = sandbox.run(&release);
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/views|/host/xdg\n"
+        );
+        assert!(
+            release
+                .remediation()
+                .contains("MBX_TARGET_ROOT=/srv/cache/views mbx clean"),
+            "{}",
+            release.remediation()
+        );
+
+        // A legacy record (`target_root: None`) honors a configured host
+        // `target.root` inside the cache (such as `views`) and falls back to
+        // `<cache>/targets` when the host root is unset or escapes the cache.
+        for (configured, expected) in [
+            ("", "/srv/cache/targets"),
+            ("views", "/srv/cache/views"),
+            ("/srv/cache/views", "/srv/cache/views"),
+            ("/mnt/new-targets", "/srv/cache/targets"),
+            ("../outside", "/srv/cache/targets"),
+            ("/srv/cache/../outside", "/srv/cache/targets"),
         ] {
-            let mut release = shared(&["/workspace/abc/app"]);
-            release.store = Store::Shared {
-                directory: "/srv/cache".into(),
-                target_root: recorded.map(PathBuf::from),
-            };
-            let output = sandbox.run(&release);
-            assert_eq!(output.status, 0, "{output:?}");
-            let log = sandbox.log();
-            assert!(
-                log.ends_with(&format!(
-                    "clean /workspace/abc/app|/srv/cache|{expected}|/host/xdg\n"
-                )),
-                "{log}"
+            let legacy_sandbox = Sandbox::new(true);
+            std::fs::write(
+                legacy_sandbox.path("bin/mbx"),
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
+                     if [ \"$1\" = settings ] && [ \"$2\" = get ] && [ \"$3\" = target.root ]; then printf '%s\\n' '{configured}'; exit 0; fi\n\
+                     printf '%s|%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{MBX_TARGET_ROOT:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                    legacy_sandbox.path("log").display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                legacy_sandbox.path("bin/mbx"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let legacy = shared(&["/workspace/abc/app"]);
+            let output = legacy_sandbox.run(&legacy);
+            assert_eq!(output.status, 0, "configured={configured:?}: {output:?}");
+            assert_eq!(
+                legacy_sandbox.log(),
+                format!("clean /workspace/abc/app|/srv/cache|{expected}|/host/xdg\n"),
+                "configured={configured:?}"
             );
             assert!(
-                release
+                legacy
                     .remediation()
-                    .contains(&format!("MBX_TARGET_ROOT={expected} mbx clean")),
+                    .contains("MBX_CACHE_DIR=/srv/cache mbx clean"),
                 "{}",
-                release.remediation()
+                legacy.remediation()
             );
         }
     }
