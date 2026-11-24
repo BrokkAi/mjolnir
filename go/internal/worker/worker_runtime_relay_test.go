@@ -8045,7 +8045,19 @@ func TestAReadyBarrierKeepsDrainingRuntimeEventsPastTheChannelCapacity(t *testin
 			t.Fatal("the coordinator stopped draining runtime events behind the barrier")
 		}
 	}
-	waitUntil(t, func() bool { return len(events) == 0 }, "the coordinator never drained the channel")
+	// Rust waits for the channel's capacity to return. Its single-threaded
+	// test runtime finishes handling a received event before yielding, so a
+	// drained channel there means every notice is held. A goroutine receives
+	// first and takes the relay after, so here wait for the relay to hold
+	// all of them too.
+	waitUntil(t, func() bool {
+		if len(events) != 0 {
+			return false
+		}
+		observed := relay.Observe()
+		defer observed.Unlock()
+		return len(observed.heldWrites) == len(sent)
+	}, "the coordinator never drained the channel")
 	if got := runtimeRelayOperationalState(relay).LatestOrdinal; got != cut.Ordinal {
 		t.Fatalf("latest ordinal = %d, cut at %d", got, cut.Ordinal)
 	}
