@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -70,6 +71,23 @@ func installStderrLogging() error {
 	}
 	return nil
 }
+
+// NewTracingHandler is the handler installStderrLogging installs, for the
+// other Mjolnir processes that log through tracing-subscriber's fmt layer
+// (the mj CLI's ControllerLog in mj-cli/src/logging.rs): records spec lets
+// through, an EnvFilter directive string, written to writer as lines
+// without ANSI. An invalid spec is the error EnvFilter::try_new reports.
+func NewTracingHandler(spec string, writer io.Writer) (slog.Handler, error) {
+	filter, err := parseLogFilter(spec)
+	if err != nil {
+		return nil, err
+	}
+	return &stderrLogHandler{filter: filter, writer: writer}, nil
+}
+
+// RustOsStrDebug is rustOsStrDebug, for callers that report a variable that
+// is not Unicode as Rust's VarError::NotUnicode does.
+func RustOsStrDebug(text string) string { return rustOsStrDebug(text) }
 
 // rustOsStrDebug is Rust's Debug for an OsStr on Unix: a quoted string with
 // the valid UTF-8 escaped as Rust escapes it and each invalid byte as
@@ -343,7 +361,7 @@ func (f logFilter) maxLevel() slog.Level {
 // to 5> <target>: <message> <key>=<value>...`, written to writer.
 type stderrLogHandler struct {
 	filter logFilter
-	writer core.ResilientWriter
+	writer io.Writer
 	// attrs are the attributes from WithAttrs, already qualified by the
 	// groups open when they were added.
 	attrs []slog.Attr

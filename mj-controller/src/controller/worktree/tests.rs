@@ -3802,6 +3802,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         &upgraded_clone,
         &archive_path,
         &verified.manifest,
+        None,
     )
     .unwrap();
 
@@ -3861,6 +3862,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         &upgraded_originless,
         &originless_archive,
         &verified_originless.manifest,
+        None,
     )
     .unwrap();
     assert!(notices_originless.is_empty());
@@ -4019,6 +4021,7 @@ fn legacy_clone_restore_repairs_nested_linked_worktree_after_publish_and_preserv
         &clone_record,
         &archive_path,
         &verified.manifest,
+        None,
     )
     .unwrap();
 

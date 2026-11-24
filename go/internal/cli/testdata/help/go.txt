@@ -1,0 +1,14 @@
+Work in a folder using remembered account and target settings
+
+Usage: mj go [OPTIONS] [FOLDER]
+
+Arguments:
+  [FOLDER]  Source folder (defaults to the current directory)
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --path <PATH>      Explicit project path on the daemon host
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --setup            Change the remembered setup for this folder
+      --global-default   Choose a setup and also make it the default for other new projects
+  -h, --help             Print help

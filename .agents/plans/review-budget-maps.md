@@ -1,0 +1,124 @@
+# Deliver data-derived review budget maps
+
+This living ExecPlan follows `.agents/PLANS.md`. Keep Progress, Surprises & Discoveries, Decision Log and Outcomes & Retrospective current.
+
+## Purpose / Big Picture
+
+The user wants to see which reviewer combinations deliver the most confirmed findings while staying within both a time allowance and an API cost allowance. Deliver separate all-findings and medium/high PNGs, plus a self-contained interactive HTML with exact setup details on hover, to Minastirith's Downloads folder. The region boundaries must come from measured setup thresholds rather than handpicked round budgets or a chosen number of clusters.
+
+## Progress
+
+- [x] (2026-11-24 16:38Z) Confirmed the existing Opus result data, filtering rules, cached plotting runtime and working Minastirith transfer route.
+- [x] (2026-11-24 16:38Z) Chose the complete attainable-findings surface, preserving ties and avoiding cluster or regret tolerances.
+- [x] (2026-11-24 16:57:01Z) Implemented the result-local renderer and offline HTML; generated both PNG/SVG pairs and the external caption.
+- [x] (2026-11-24 16:57:01Z) Independent oracle matched every observed cell and tie set; inspected both plots. Python audit: 45 ok, 0 FAIL. Chrome interaction audit: initially 19 ok, 0 FAIL; final corrected version 52 ok, 0 FAIL.
+- [x] (2026-11-24 16:57:01Z) Copied both PNGs, HTML and caption to Minastirith Downloads; all four remote SHA-256 values match.
+- [x] (2026-11-24 17:00:09Z) Committed the delivered source checkpoint as 7b2df406e and merged upstream as 4a5b2d123.
+- [x] (2026-11-24 17:05:37Z) Completed all four review corrections. Browser audit: 33 ok, 0 FAIL; failure injections leave no browser or profile; optimum data is unchanged.
+- [x] (2026-11-24 17:08:03Z) Committed the first four corrections as ec16a1d71 and requested re-review.
+- [x] (2026-11-24 17:10:51Z) Completed responsive HTML and shared durable browser/socket loss handling. Browser audit:36 ok,0 FAIL; four ack-before-load disconnect injections clean up correctly. Updated HTML delivered and verified.
+- [x] (2026-11-24 17:13:02Z) Committed the responsive/load-wait corrections as 7bfec1e14.
+- [x] (2026-11-24 17:15:41Z) Completed marker/crosshair snapping and encoded local-file navigation with explicit error handling. Browser audit:48 ok,0 FAIL, including odd-path navigation and missing-file cleanup; HTML delivered and verified.
+- [x] (2026-11-24 17:18:22Z) Committed the third-pass corrections as 8a684544a and re-reviewed.
+- [x] (2026-11-24 17:32:59Z) Replaced marker takeover with budget-first primary results and a separate nearby reference. Dense 92,226-point scan and pinned narrow-cell cases pass. Browser audit:52 ok,0 FAIL. Latest HTML synced and verified.
+- [x] (2026-11-24 17:37:32Z) Recorded explicit overrides for three audit-only follow-ups, merged upstream with a zero-change clean review, and published source checkpoint de9404183 to origin/master. Downloads are complete and verified.
+
+## Surprises & Discoveries
+
+The exported CSV coordinates are rounded. Newly computed joint efficiency must be described as conditional on those coordinates, not as an audited full-precision frontier. An option is jointly dominated when another uses no more time, costs no more, and yields at least as many findings, with at least one strict improvement. A dominated option with equal findings can still tie for the maximum once both options fit a budget; the numeric surface and tie records therefore use all eligible options.
+
+Prior analysis found 116 priced non-Greptile setups and 196 otherwise eligible setups with unknown prices. Unknown prices are not zero. The existing two-dimensional frontier flags do not define the joint time/cost/findings surface. The main instance and raw reviewer/judge artifacts need no further work.
+
+## Decision Log
+
+- Decision: Compute the maximum findings under both budget constraints at every observed threshold, without clustering or a regret tolerance. Rationale: this answers the user's decision directly without inventing a weighting between seconds and dollars. Date/Author: 2026-11-24, parent.
+- Decision: Retain all equal-value winners and distinguish infeasible budgets from zero findings. Rationale: resource ties and rounded counts must not become unsupported unique recommendations. Date/Author: 2026-11-24, parent.
+- Decision: Use shared logarithmic resource axes and the same absolute findings color scale across the two panels; provide individual PNGs and one offline interactive HTML. Rationale: the views remain comparable and dense regions can be read through hover rather than tiny labels. Date/Author: 2026-11-24, parent.
+- Decision: Exclude Greptile combinations and retain Base/Plus only as standalone reference diamonds outside optimization. Rationale: this preserves the user's chart preference and distinguishes reference performance from the optimized background. Date/Author: 2026-11-24, parent.
+- Decision: Place methods and limitations in an external caption, README and surrounding HTML prose. Rationale: the image should contain readable axes, essential scope and data marks, following the visualization skill. Date/Author: 2026-11-24, parent.
+
+## Outcomes & Retrospective
+
+Both static maps and the interactive page are delivered and remote-hash-verified. The independent oracle checked every observed cell and tie set with zero numeric mismatches; the established numeric/image audit remains 45 ok, 0 FAIL. The current browser audit is 52 ok, 0 FAIL, including a dense 92,226-pointer scan and pinned narrow-cell cases with no near-marker exclusions. Every primary result and crosshair now derives only from the actual pointer budget; markers append separately labelled reference information. Static maps, input CSVs and score JSON have not changed during the interaction fixes. No model or judge calls were run. All requested deliverables and reproducible sources are published. Three optional audit-utility hardening items are explicitly documented as follow-ups; no delivery work remains.
+
+## Context and Orientation
+
+The repository root is the session checkout. All new implementation lives in `.agents/evals/review-arms/results/sol-62-opus-high/`, abbreviated below as the result directory. Its `pareto.csv` contains all confirmed expected findings and resource estimates for each raw setup name; `pareto-sev-high-medium.csv` contains the matching medium/high counts. Existing `plot_frontiers.py` provides display naming and Greptile filtering examples. Keep those source CSVs and the existing latency/cost charts unchanged.
+
+A finding count is the expected union of confirmed groups over valid assignments of recorded reviewer sessions, summed across 70 historical diffs. The joint Opus 5.5/high round supplies the judgments. Time is a simulated simultaneous-start median using the slowest sampled reviewer, excluding startup and contention. Cost is estimated reviewer-turn USD per diff, excluding carrier work, judging and subscriptions. Cohorts were collected at different times. Greptile's historical repository context was not pinned to each diff's commit. These limits belong in the caption.
+
+For a time allowance T and cost allowance C, the displayed function is the maximum findings among setups with latency <= T and cost <= C. No eligible setup means an infeasible cell, not zero findings. Each threshold is closed on its lower edge. Observed setup times and prices give the candidate boundaries; adjacent cells can be merged only when doing so preserves the displayed value and hover answers. Color must be a step function, not smoothly interpolated performance. The HTML must show the allowance separately from each winning setup's actual resource use.
+
+The raw campaign figure directory is `/mnt/optane/review-arms-20261113/sol-62-repeats/figure/`. Its existing `render_frontiers_offline.sh` uses cached Matplotlib 3.11.2 without installation. Node 24 is available. Although no browser executable is on PATH, an existing cached headless Chrome is available at /home/jonathan/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell. It was used without installing packages for real hover and pin checks.
+
+## Plan of Work
+
+The implementation child owns `plot_budget_maps.py` and its supporting result-local files, the new generated assets, external caption and README links. Its CLI is a positional output directory with optional `--results`, defaulting to the renderer's own directory. Generate `review-opus-high-budget-all.png` and `.svg`, `review-opus-high-budget-medium-high.png` and `.svg`, `review-opus-high-budget.html`, and `review-opus-high-budget-caption.txt`. Refresh the same friendly files in the raw figure directory for transfer. HTML must work offline with no external scripts, requests or storage.
+
+The independent auditor reuses the previous breakpoint investigation but checks actual generated data against all eligible CSV rows, especially closed thresholds, ties, infeasible regions, final padded display cells and the difference between optimized background values and Greptile's own reference values. The parent alone maintains this plan, accepts the integrated result, transfers files, commits, requests review and pushes. No Rust/Go build, installation, daemon operation or model call is part of this work.
+
+## Concrete Steps
+
+Run the renderer from the repository root using the cached plotting environment:
+
+    budget_result_dir=.agents/evals/review-arms/results/sol-62-opus-high
+    budget_figure_dir=/mnt/optane/review-arms-20261113/sol-62-repeats/figure
+    bash "$budget_figure_dir/render_frontiers_offline.sh" "$budget_result_dir/plot_budget_maps.py" "$budget_result_dir"
+
+The renderer must produce both PNGs, both SVGs, the HTML and caption. The accepted validation commands, from the repository root, are:
+
+    budget_chrome=/home/jonathan/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell
+    budget_audit_dir=/tmp/review-budget-audit
+    mkdir -p "$budget_audit_dir"
+    bash "$budget_figure_dir/render_frontiers_offline.sh" "$budget_result_dir/audit_budget_maps.py" "$budget_result_dir" --chrome "$budget_chrome" --scratch "$budget_audit_dir"
+    node "$budget_result_dir/audit_budget_html.mjs" "$budget_result_dir" "$budget_audit_dir" "$budget_chrome"
+
+The Python command reports 45 ok and 0 FAIL; the browser command reports 52 ok and 0 FAIL. Run `git diff --check`. Compare each observed threshold-cell maximum and complete tie set with an independent brute-force enumeration of all eligible CSV rows. Exercise the JavaScript lookup with the actual serialized thresholds and data, including exact boundaries and infeasible points. Inspect full images and any dense label areas with the local image viewer.
+
+After acceptance, copy the two friendly PNGs, HTML and caption with existing SSH credentials:
+
+    scp -F /home/jonathan/.ssh/config -o BatchMode=yes /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget-all.png /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget-medium-high.png /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget.html /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget-caption.txt jbell@minastirith:Downloads/
+
+The established remote home is `C:\Users\jbell`; use remote PowerShell `Get-FileHash -Algorithm SHA256 -LiteralPath` on each of the four Downloads files and compare with local `sha256sum`. Do not change SSH configuration or open a remote GUI. Commit only this work's files on the current branch, call `request_review`, and push only after a clean final verdict or explicit reasoned overrides for every unfixed finding. If upstream moved, fetch and merge `origin/master`, preserve the reviewed baseline, obtain the required merge review and retry the push.
+
+## Validation and Acceptance
+
+A user opening either PNG sees that panel's expected findings across 70 diffs under both resource limits, with clear units and a readable shared scale. Each image uses data-derived step boundaries. The HTML opens without a server, switches or shows both metrics, and displays every winning real setup with its actual time/cost when a region is inspected. Unknown prices never appear as free choices. Greptile combinations appear nowhere; its two solo reference diamonds expose their own findings and do not pretend to be the optimized background winner.
+
+Actual-data checks must cover every cell, all ties, exact thresholds and infeasible values. The two source CSVs must remain byte-unchanged. Images, SVGs and HTML must agree numerically; rendering must be repeatable. The independent audit must either pass or name a precise unresolved limitation. Remote SHA-256 values must match the accepted local artifacts. Before publication, review must be clean or each unfixed finding must have a recorded reasoned override. The final working tree must be clean after the push.
+
+## Idempotence and Recovery
+
+Rendering overwrites only the named generated result assets and raw friendly exports. Rerun it safely after an edit; keep source CSVs frozen. A failed transfer can be repeated after checking hashes. An interrupted review or push does not require regenerating or rejudging data. Do not clean raw campaign directories or start another verifier. This work adds no package dependency and needs no service to stop.
+
+## Artifacts and Notes
+
+The implementation evidence is .mj/agents/ae051a20723abc356c5f404e636b5fe5/{summary.md,audit-python.txt,audit-html.txt,shots/}. The independent evidence is .mj/agents/0f197302f2fbc342dcedefb987a1bf1d/verify/{report.md,expected.py,check_data.py,check_html.mjs,check_png.py}. Its numeric oracle and page lookup matched every cell. Its coarse PNG sampler has isolated overlay-pixel ambiguities; the exact implementation pixel audit passes, and the parent inspected the visible marks. The final pin fix changes only interaction, not data or static images.
+
+Remote and local SHA-256 values agree: all PNG 87e07909596cd6b569e94102419e1670b03993f7222cc9f72c973bdd792b7ad8; medium/high PNG 3c17139e4833baad501ea2951522a315c4b9744b1073d21ca4c2b9c300d31845; HTML 1174bd2ea12a2a39844a46fe48f8cd968b739ee8711a380ee4d8b44e68dcacc9; caption 9ba2a27b94d9c7d8baf0e9df43c12d4e5b5cfb5bd2d74276ea3d683ffac9f115. A prior read-only report is `.mj/agents/0f197302f2fbc342dcedefb987a1bf1d/report.md`; it informs the design but does not substitute for the actual-data artifact audit.
+
+## Interfaces and Dependencies
+
+Use Python standard-library CSV/JSON and cached Matplotlib for rendering. Use self-contained HTML, SVG and plain JavaScript for interaction. Export the same setup identifiers and metric values to static and interactive views. The implementation may organize local functions naturally; it must have a renderer CLI as specified and a deterministic surface calculation that the independent auditor can compare with brute force. Node is a validation dependency already present, not a new runtime requirement for the user.
+
+Revision note (2026-11-24): Created the execution plan after the user requested both maps in Downloads, recording the full-surface choice and delivery/acceptance steps before accepting implementation.
+
+Revision note (2026-11-24 16:57:01Z): Recorded completed generation, independent numeric validation, existing-browser integration checks, cross-panel pin ownership correction and verified delivery. Source publication remains pending.
+
+Revision note (2026-11-24 17:00:09Z): Final review returned four accepted findings. The renderer will describe simulated median latency accurately, display observed-threshold budget intervals rather than misleading rounded pointer limits, preserve a pinned selection on outside clicks, and terminate browser-audit processes before removing profiles on every exit. Model data and all optimum scores remain frozen.
+
+Revision note (2026-11-24 17:05:37Z): Accepted all four review fixes after actual Chrome boundary/pin checks and cleanup failure injections. Synced and verified the final four Downloads files; no scores, input CSVs or model judgments changed.
+
+Revision note (2026-11-24 17:08:03Z): Second review identified two accepted defects in the offline HTML/audit: a 520px minimum map track overflows phones, and the load-event await must fail on the already-recorded process/socket termination. The focused fixes preserve numeric data and static maps. Downloads remain available.
+
+Revision note (2026-11-24 17:10:51Z): Accepted the focused second-pass corrections. The page fits 320/375/1400px viewports with tables open; page-load and command waits observe one durable browser/socket loss signal, including a loss before the wait starts. Static maps, numeric data and caption stayed byte-identical. The latest HTML was synced and remote-hash-verified.
+
+Revision note (2026-11-24 17:13:02Z): Third review identified a misleading near-marker crosshair and unencoded audit file URLs. The focused corrections snap the crosshair to an explicitly selected marker and encode local paths/check reported navigation errors. These affect only HTML interaction and the audit runner; static maps and numeric data remain unchanged. Both accepted findings are being fixed without expanding functionality.
+
+Revision note (2026-11-24 17:15:41Z): Accepted the final focused interaction/navigation pass after real marker-hover and click-pin checks, an artifact path containing spaces, #, ?, Unicode and %, and a missing-file cleanup check. Only HTML/source-audit files changed. Both PNGs, SVGs, caption and score JSON remain byte-identical. Latest HTML was synced and verified in Downloads.
+
+Revision note (2026-11-24 17:18:22Z): A fourth review found that snapping still hides whole narrow regions behind marker hit radii. This supersedes the earlier marker-selection design: pointer budgets now exclusively own the primary result and crosshair; nearby markers may append separately labelled reference details but never replace the selected budget. Clicking pins the same actual pointer budget. This corrects the interaction ownership instead of narrowing a hit radius. Static maps and all numerical results remain unchanged.
+
+Revision note (2026-11-24 17:32:59Z): Accepted the root interaction correction. Primary tooltip and crosshair share the pointer budget as their sole authority; nearby marker cards never substitute their own budgets. The exact 54.7s/$0.198 case returns156.83, including after click-pin. The latest HTML is delivered and hash-verified; static assets and numerical data remain byte-identical.
+
+Revision note (2026-11-24 17:37:32Z): Completed publication at de9404183. Remaining findings concern only interruption of the optional audit runner, concurrent syntax-check scratch input, and SVG-audit URL encoding. They were explicitly overridden and documented as follow-ups after multiple review rounds, preserving the user's requested prompt artifact delivery. The accepted validation ran serially and uninterrupted at the canonical path, with no leftover browser processes. The execution plan is complete.

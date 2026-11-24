@@ -1,0 +1,14 @@
+Page through a session's transcript
+
+Usage: mj transcript [OPTIONS] --session <SESSION>
+
+Options:
+  -i, --instance <NAME>        Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>      Session id, as `mj sessions` lists it
+      --after-seq <AFTER_SEQ>  Start after this sequence; use next_after_seq to resume after a page
+      --no-splash              Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --limit <LIMIT>          Target number of matching entries in a page; sequence ties stay together
+      --role <ROLE>            Return only items with this role; repeat to select several roles
+      --finished-only          Return finished agent messages only, with a cursor held before open messages
+      --json                   Print the response as JSON instead of text
+  -h, --help                   Print help

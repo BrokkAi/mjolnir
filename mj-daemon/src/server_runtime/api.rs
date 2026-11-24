@@ -23,9 +23,9 @@ use mj_core::subagent::{ReportState, bounded_report};
 use mj_controller::quota::ProfileQuota;
 
 use crate::server::api::{
-    ApiFailure, BundleExport, ExportError, PurgeUntrackedFailure, PurgeUntrackedRequest,
-    PurgeUntrackedResponse, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
-    TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
+    ApiFailure, BundleExport, ExportError, ExportPatch, PurgeUntrackedFailure,
+    PurgeUntrackedRequest, PurgeUntrackedResponse, PushedBranch, StartFollowup, StartStatus,
+    SubagentBackend, TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
 };
 use crate::server::{
     ActionOutcome, BackgroundTaskStopFailure, BundleFailure, CreateBundleResponse,
@@ -1147,12 +1147,7 @@ impl ApiBackend {
         if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
             bail!(
                 "no {candidate_kind} profile is available: {}",
-                candidates
-                    .unavailable
-                    .iter()
-                    .map(|(id, reason)| format!("{id} ({reason})"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                format_unavailable_reasons(&candidates.unavailable)
             );
         }
         Ok(candidates)
@@ -3275,7 +3270,7 @@ impl ApiBackend {
         match record.target {
             Some(_) => Ok(()),
             None => Err(ExportError::Refused(format!(
-                "session {session_id} has no live target; export its checkpoint bundle instead"
+                "session {session_id} has no live target; resume it first"
             ))),
         }
     }
@@ -3368,6 +3363,15 @@ pub(crate) fn liveness_of(
         }
         None => mj_core::subagent::Liveness::Unknown,
     }
+}
+
+/// Lists profiles that could not be checked, each with its reason.
+fn format_unavailable_reasons(unavailable: &[(String, String)]) -> String {
+    unavailable
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Whether the parent turn that received a child's report has ended: the
@@ -4370,6 +4374,42 @@ fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, Expor
     ))
 }
 
+/// The arguments of `worker diff` for a live session: the repository it works
+/// in and the base to compare against.
+fn session_diff_arguments(
+    layout: &SessionExportLayout,
+    options: crate::server::api::DiffOptions,
+) -> Result<Vec<String>, ExportError> {
+    let repository = agent_working_directory(layout)?;
+    let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
+    if let Some(base) = options.base {
+        arguments.push(format!("--base={base}"));
+    } else if let Some(worktree) = &layout.managed_worktree {
+        match &worktree.base_commit {
+            Some(base) => {
+                arguments.push("--base".to_owned());
+                arguments.push(base.clone());
+            }
+            // Sessions created before the base was recorded still name
+            // their branch, whose reflog says where it started.
+            None => {
+                arguments.push("--branch".to_owned());
+                arguments.push(worktree.branch.clone());
+            }
+        }
+    }
+    if options.json {
+        arguments.push("--json".to_owned());
+    }
+    arguments.extend(
+        options
+            .paths
+            .into_iter()
+            .map(|path| format!("--path={path}")),
+    );
+    Ok(arguments)
+}
+
 fn primary_repository(
     layout: &SessionExportLayout,
 ) -> Result<&mj_checkpoint::checkpoint::CheckpointRepositorySpec, ExportError> {
@@ -4633,12 +4673,18 @@ async fn worker_command_with_input(
     purpose: &'static str,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
+    // Dropping this future (the client left, or the server is stopping)
+    // cancels the target command instead of leaving it to run to its timeout.
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancel = token.clone().drop_guard();
     let output: CommandOutput = export_blocking(purpose, move || {
         let mut command = worker_command_spec(layout, &session_id, arguments, purpose)?;
         if let Some(input) = input {
             command = command.with_sensitive_stdin(input);
         }
-        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).execute(&command)
+        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT)
+            .with_cancellation(token)
+            .execute(&command)
     })
     .await?;
     worker_output(output, purpose)
@@ -5533,31 +5579,63 @@ impl SubagentBackend for ApiBackend {
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
             use futures::StreamExt;
+            let mut ids = self.profile_catalog.candidates()?;
+            ids.retain(|(id, _)| !tried.contains(id));
+            let config = self.profile_catalog.live()?;
+            // Refused logins and missing login files fail at launch, so they
+            // are reported instead of probed.
+            let (ids, mut unavailable) = self.filter_eligible_profiles(ids, &config).await?;
             let mut pending = futures::stream::FuturesUnordered::new();
-            for (id, _) in self.profile_catalog.candidates()? {
+            for (id, _) in ids {
                 let catalog = &self.profile_catalog;
                 pending.push(async move {
                     let result = catalog.capabilities(std::slice::from_ref(&id)).await;
                     (id, result)
                 });
             }
+            let mut checked_without_match = false;
             while let Some((id, result)) = pending.next().await {
-                if !tried.contains(&id)
-                    && let Ok(choices) = result
-                    && choices.iter().any(|choice| {
-                        mj_core::model_catalog::resolve(&choice.models, &model).is_some()
-                    })
-                {
-                    drop(pending);
-                    let mut candidates = self.reviewer_ready_candidates(model).await?;
-                    candidates
-                        .offered
-                        .retain(|candidate| !tried.contains(&candidate.profile_id));
-                    candidates.unavailable.retain(|(id, _)| !tried.contains(id));
-                    return Ok(candidates);
+                match result {
+                    Ok(choices)
+                        if choices.iter().any(|choice| {
+                            mj_core::model_catalog::resolve(&choice.models, &model).is_some()
+                        }) =>
+                    {
+                        drop(pending);
+                        let mut candidates = self.reviewer_ready_candidates(model).await?;
+                        candidates
+                            .offered
+                            .retain(|candidate| !tried.contains(&candidate.profile_id));
+                        candidates.unavailable.retain(|(id, _)| !tried.contains(id));
+                        return Ok(candidates);
+                    }
+                    Ok(choices) if choices.is_empty() => {
+                        unavailable.push((id, "its discovery returned nothing".to_owned()));
+                    }
+                    Ok(_) => checked_without_match = true,
+                    Err(error) => {
+                        tracing::warn!(
+                            profile_id = %id,
+                            %error,
+                            "reviewer profile left out of model selection"
+                        );
+                        unavailable.push((id, format!("{error:#}")));
+                    }
                 }
             }
-            anyhow::bail!("no further enabled reviewer profile offers model {model:?}")
+            if unavailable.is_empty() {
+                anyhow::bail!("no further enabled reviewer profile offers model {model:?}");
+            }
+            if tried.is_empty() && !checked_without_match {
+                anyhow::bail!(
+                    "no reviewer profile is available: {}",
+                    format_unavailable_reasons(&unavailable)
+                );
+            }
+            Ok(crate::server::api::SubagentCandidates {
+                offered: Vec::new(),
+                unavailable,
+            })
         })
     }
 
@@ -5567,6 +5645,8 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             use futures::StreamExt;
             let ids = self.profile_catalog.candidates()?;
+            let config = self.profile_catalog.live()?;
+            let (ids, mut unavailable) = self.filter_eligible_profiles(ids, &config).await?;
             let mut pending = futures::stream::FuturesUnordered::new();
             for (id, _) in &ids {
                 let id = id.clone();
@@ -5578,33 +5658,76 @@ impl SubagentBackend for ApiBackend {
             }
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
             let mut answered = Vec::new();
+            let mut failed = Vec::new();
             let mut models = Vec::new();
-            while let Ok(Some((id, result))) =
-                tokio::time::timeout_at(deadline, pending.next()).await
-            {
-                if let Ok(choices) = result {
-                    for choice in choices {
-                        models.extend(choice.models);
-                    }
-                    answered.push(id);
-                    if mj_core::review::autoconfigure::autoconfigure(
-                        &mj_core::review::autoconfigure::merged_model_offers(&models),
-                        |_| None,
-                    )
-                    .is_some()
-                    {
+            let mut timed_out = false;
+            loop {
+                let (id, result) = match tokio::time::timeout_at(deadline, pending.next()).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(_) => {
+                        timed_out = true;
                         break;
+                    }
+                };
+                match result {
+                    Ok(choices) if choices.is_empty() => {
+                        failed.push(id.clone());
+                        unavailable.push((id, "its discovery returned nothing".to_owned()));
+                    }
+                    Ok(choices) => {
+                        for choice in choices {
+                            models.extend(choice.models);
+                        }
+                        answered.push(id);
+                        if mj_core::review::autoconfigure::autoconfigure(
+                            &mj_core::review::autoconfigure::merged_model_offers(&models),
+                            |_| None,
+                        )
+                        .is_some()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            profile_id = %id,
+                            %error,
+                            "reviewer profile left out of autoconfigure"
+                        );
+                        failed.push(id.clone());
+                        unavailable.push((id, format!("{error:#}")));
                     }
                 }
             }
             drop(pending);
-            self.discover_profile_candidates(
-                ids.into_iter()
-                    .filter(|(id, _)| answered.contains(id))
-                    .collect(),
-                "reviewer",
-            )
-            .await
+            if timed_out {
+                for (id, _) in &ids {
+                    if !answered.contains(id) && !failed.contains(id) {
+                        unavailable.push((id.clone(), "capability discovery timed out".to_owned()));
+                    }
+                }
+            }
+            if answered.is_empty() && !unavailable.is_empty() {
+                anyhow::bail!(
+                    "no reviewer profile is available: {}",
+                    format_unavailable_reasons(&unavailable)
+                );
+            }
+            let mut candidates = self
+                .discover_profile_candidates(
+                    ids.into_iter()
+                        .filter(|(id, _)| answered.contains(id))
+                        .collect(),
+                    "reviewer",
+                )
+                .await?;
+            for (id, reason) in unavailable {
+                if !candidates.unavailable.iter().any(|(known, _)| *known == id) {
+                    candidates.unavailable.push((id, reason));
+                }
+            }
+            Ok(candidates)
         })
     }
 
@@ -5972,39 +6095,41 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let repository = agent_working_directory(&layout)?;
-            let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
-            if let Some(base) = options.base {
-                arguments.push(format!("--base={base}"));
-            } else if let Some(worktree) = &layout.managed_worktree {
-                match &worktree.base_commit {
-                    Some(base) => {
-                        arguments.push("--base".to_owned());
-                        arguments.push(base.clone());
-                    }
-                    // Sessions created before the base was recorded still name
-                    // their branch, whose reflog says where it started.
-                    None => {
-                        arguments.push("--branch".to_owned());
-                        arguments.push(worktree.branch.clone());
-                    }
-                }
-            }
-            if options.json {
-                arguments.push("--json".to_owned());
-            }
-            arguments.extend(
-                options
-                    .paths
-                    .into_iter()
-                    .map(|path| format!("--path={path}")),
-            );
-            if options.full_patch {
-                arguments.push("--patch".to_owned());
-            }
+            let arguments = session_diff_arguments(&layout, options)?;
             let stdout = worker_command(layout, session_id, arguments, "session diff").await?;
             String::from_utf8(stdout).map_err(|error| {
                 ExportError::Failed(anyhow!("the session diff was not UTF-8: {error}"))
+            })
+        })
+    }
+
+    fn export_patch(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, std::result::Result<ExportPatch, ExportError>> {
+        Box::pin(async move {
+            let record = self
+                .exports
+                .session_record(&session_id)
+                .ok_or_else(|| ExportError::Refused(format!("unknown session {session_id}")))?;
+            if !mj_controller::controller::export_reads_checkpoint(&record) {
+                let layout = export_layout(session_id.clone()).await?;
+                let mut arguments =
+                    session_diff_arguments(&layout, crate::server::api::DiffOptions::default())?;
+                arguments.push("--patch".to_owned());
+                let bytes = worker_command(layout, session_id, arguments, "session diff").await?;
+                return Ok(ExportPatch {
+                    bytes,
+                    notice: None,
+                });
+            }
+            let patch = export_from_checkpoint(record, |record, executor| {
+                mj_controller::controller::checkpoint_patch(record, executor)
+            })
+            .await?;
+            Ok(ExportPatch {
+                bytes: patch.bytes,
+                notice: patch.notice,
             })
         })
     }
@@ -6149,13 +6274,15 @@ impl SubagentBackend for ApiBackend {
                 .exports
                 .session_record(&session_id)
                 .ok_or_else(|| ExportError::Refused(format!("unknown session {session_id}")))?;
+            // A session with no checkout has only its stored checkpoint, which
+            // is rebuilt into a scratch checkout and bundled from there.
+            if mj_controller::controller::export_reads_checkpoint(&record) {
+                return bundle_from_stored_checkpoint(record).await;
+            }
             // A live session's work is only in the archive once it has been
-            // checkpointed, so take a fresh checkpoint; a stopped session's
-            // last checkpoint already holds everything it did.
-            let archive_path = match record.target {
-                Some(_) => match supervised_checkpoint(self.exports.clone(), session_id.clone())
-                    .await
-                {
+            // checkpointed, so take a fresh checkpoint.
+            let archive_path =
+                match supervised_checkpoint(self.exports.clone(), session_id.clone()).await {
                     Ok(checkpoint) => checkpoint.archive_path,
                     // The session has its own lifecycle operation in flight
                     // (resume/close/move); a fresh checkpoint would fight it, so
@@ -6166,28 +6293,15 @@ impl SubagentBackend for ApiBackend {
                             .downcast_ref::<crate::daemon::SessionLifecycleBusy>()
                             .is_some() =>
                     {
-                        record
-                            .checkpoint
-                            .ok_or_else(|| {
-                                ExportError::Refused(format!(
-                                    "{error}, and has no earlier checkpoint to export a bundle from"
-                                ))
-                            })?
-                            .archive_path
+                        if record.checkpoint.is_none() {
+                            return Err(ExportError::Refused(format!(
+                                "{error}, and has no earlier checkpoint to export a bundle from"
+                            )));
+                        }
+                        return bundle_from_stored_checkpoint(record).await;
                     }
                     Err(error) => return Err(checkpoint_export_error(error)),
-                },
-                None => {
-                    record
-                        .checkpoint
-                        .ok_or_else(|| {
-                            ExportError::Refused(
-                                "this session has no checkpoint to export a bundle from".into(),
-                            )
-                        })?
-                        .archive_path
-                }
-            };
+                };
             let bundles = export_blocking("verify the checkpoint bundles", move || {
                 mj_checkpoint::archive::verify_repository_bundles_streaming(&archive_path)
             })
@@ -6213,6 +6327,53 @@ impl SubagentBackend for ApiBackend {
             })
         })
     }
+}
+
+/// Rebuild a stopped session's work from its stored checkpoint in a scratch
+/// checkout, which can take minutes for a large repository. It is blocking
+/// work that owns nothing the daemon must wait for at handoff, so it holds no
+/// admission; dropping this future (the client left, or the server is
+/// stopping) cancels its archive reads and Git processes.
+async fn export_from_checkpoint<T: Send + 'static>(
+    record: mj_core::state::SessionRecord,
+    export: impl FnOnce(
+        &mj_core::state::SessionRecord,
+        &CancellableProcessExecutor,
+    ) -> std::result::Result<T, mj_controller::controller::CheckpointExportError>
+    + Send
+    + 'static,
+) -> std::result::Result<T, ExportError> {
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancel = token.clone().drop_guard();
+    let exported = mj_core::runtime::spawn_blocking(move || {
+        let executor = CancellableProcessExecutor::new(Default::default()).with_cancellation(token);
+        export(&record, &executor)
+    })
+    .await
+    .map_err(|error| {
+        ExportError::Failed(anyhow!("the checkpoint export task panicked: {error}"))
+    })?;
+    exported.map_err(|error| match error {
+        mj_controller::controller::CheckpointExportError::Refused(reason) => {
+            ExportError::Refused(reason)
+        }
+        mj_controller::controller::CheckpointExportError::Failed(error) => {
+            ExportError::Failed(error)
+        }
+    })
+}
+
+async fn bundle_from_stored_checkpoint(
+    record: mj_core::state::SessionRecord,
+) -> std::result::Result<BundleExport, ExportError> {
+    let bundle = export_from_checkpoint(record, |record, executor| {
+        mj_controller::controller::checkpoint_bundle(record, executor)
+    })
+    .await?;
+    Ok(BundleExport {
+        repository: bundle.repository,
+        bytes: bundle.bytes,
+    })
 }
 
 // Refresh the default before selecting a model, so the exemption belongs to

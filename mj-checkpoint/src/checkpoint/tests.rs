@@ -5671,6 +5671,63 @@ fn origin_delta_cutoff_export_and_restore_round_trips_without_origin() {
 }
 
 #[test]
+fn origin_delta_capture_records_the_managed_launch_base_and_restore_puts_it_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    let cutoff = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["remote", "remove", "origin"]);
+    git(&checkout, &["config", "mj.remoteWorkspace", "true"]);
+    git(&checkout, &["config", "mj.baseCommit", &cutoff]);
+
+    // Provisioning marks the fresh workspace with its own HEAD as the base,
+    // which after a restore is not the base the session started from.
+    let restore_root = temp.path().join("restore-workspace");
+    let restore_checkout = restore_root.join(&spec.repositories[0].relative_destination);
+    fs::create_dir_all(&restore_checkout).unwrap();
+    git(&restore_checkout, &["init", "-b", "main"]);
+    git(
+        &restore_checkout,
+        &["fetch", checkout.to_str().unwrap(), &cutoff],
+    );
+    git(&restore_checkout, &["checkout", "-B", "main", "FETCH_HEAD"]);
+    git(&checkout, &["checkout", "-b", "later"]);
+    fs::write(checkout.join("later.txt"), "later\n").unwrap();
+    git(&checkout, &["add", "later.txt"]);
+    git(&checkout, &["commit", "-m", "later"]);
+    git(&restore_checkout, &["config", "mj.remoteWorkspace", "true"]);
+    git(
+        &restore_checkout,
+        &["config", "mj.baseCommit", &"1".repeat(40)],
+    );
+
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaCutoff {
+        exclude_commits: vec![cutoff.clone()],
+    };
+    spec.repositories[0].origin_override = None;
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let metadata = &archive.manifest.repositories[0].metadata;
+    assert_eq!(metadata.base_commit, cutoff);
+    assert!(!metadata.remote_workspace);
+
+    restore_repositories(&spec.output_path, &restore_root, &SystemGit).unwrap();
+    assert_eq!(git(&restore_checkout, &["config", "mj.baseCommit"]), cutoff);
+    assert_eq!(
+        git(&restore_checkout, &["rev-parse", "refs/mj/base"]),
+        cutoff
+    );
+    assert_eq!(
+        git(&restore_checkout, &["config", "mj.remoteWorkspace"]),
+        "true"
+    );
+}
+
+#[test]
 fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
     let temp = tempfile::tempdir().unwrap();
     let (mut spec, _) = fixture(temp.path());
@@ -5692,6 +5749,9 @@ fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
     let repository = &archive.manifest.repositories[0];
     assert!(repository.origin_delta_pack_path.is_none());
     assert!(repository.metadata.origin.is_empty());
+    // A checkout that is not a managed workspace records no base, as every
+    // archive written before the base was recorded does.
+    assert!(repository.metadata.base_commit.is_empty());
     let delta = repository
         .metadata
         .origin_delta

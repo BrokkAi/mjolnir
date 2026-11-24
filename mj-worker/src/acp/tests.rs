@@ -9666,6 +9666,8 @@ for line in sys.stdin:
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
+            subagent_mcp_socket: None,
+            managed_subagent: false,
             environment: bad_launch.environment.clone(),
             launch_config: Box::new(bad_launch),
             command: None,
@@ -9757,6 +9759,8 @@ for line in sys.stdin:
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
+            subagent_mcp_socket: None,
+            managed_subagent: false,
             environment: next_launch.environment.clone(),
             command: Some(next_command),
             args: Some(next_args),
@@ -9833,6 +9837,137 @@ for line in sys.stdin:
     assert!(spawned.exists());
     shutdown.cancel();
     let _ = runtime.await;
+}
+
+#[cfg(unix)]
+// Hard-won: d796c7d91: harness reload retained profile registration and omitted ACP tools.
+#[tokio::test]
+async fn reload_launch_config_refreshes_subagent_mcp_registration() {
+    let _ = mj_harness_install::login_environment::initialize_from_parent();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("agy");
+    let project = home.join("config/projects/default-cli-project.json");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(
+        &project,
+        r#"{"permissionGrants":{"permissionGrants":{"allow":[]}}}"#,
+    )
+    .unwrap();
+    let script = r#"
+import json, sys
+from pathlib import Path
+for line in sys.stdin:
+    req = json.loads(line)
+    if "id" not in req or "method" not in req:
+        continue
+    if req["method"] == "initialize":
+        res = {"protocolVersion": 1}
+    elif req["method"] == "session/new":
+        Path("mcp.json").write_text(json.dumps(req["params"]["mcpServers"]))
+        res = {"sessionId": "reload-tools", "modes": {"currentModeId": "agent", "availableModes": [{"id": "auto", "name": "Auto"}, {"id": "agent", "name": "Agent"}, {"id": "default", "name": "Default"}, {"id": "bypassPermissions", "name": "Bypass"}]}}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+"#;
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.cwd = temp.path().into();
+    spec.command = "python3".into();
+    spec.args = vec!["-u".into(), "-c".into(), script.into()];
+    spec.harness = HarnessKind::Claude;
+    let mut socket = worker_socket(SubagentMcpRole::Parent);
+    socket.review_tools = true;
+    socket.profile_registration = true;
+    spec.subagent_mcp_socket = Some(socket.clone());
+    let (commands, receiver) = mpsc::channel(8);
+    let (events, mut event_rx) = mpsc::channel(32);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let runtime =
+        mj_core::runtime::spawn(run_with_shutdown(spec, receiver, events, shutdown.clone()));
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Antigravity,
+        HarnessKind::Codex,
+    ] {
+        if harness != HarnessKind::Claude {
+            let mut config =
+                crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
+            config.cwd = temp.path().to_path_buf();
+            config.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            config.harness = harness;
+            config
+                .environment
+                .insert("MJ_ANTIGRAVITY_HOME".into(), home.to_str().unwrap().into());
+            socket.profile_registration = harness == HarnessKind::Codex;
+            let (resolved, resolution) = oneshot::channel();
+            commands
+                .send(CommandRequest::ReloadLaunchConfig {
+                    launch_config: Box::new(config),
+                    subagent_mcp_socket: Some(socket.clone()),
+                    managed_subagent: false,
+                    environment: BTreeMap::from([(
+                        "MJ_ANTIGRAVITY_HOME".into(),
+                        home.to_str().unwrap().into(),
+                    )]),
+                    command: None,
+                    args: None,
+                    additional_directories: vec![],
+                    supervisor_spec: None,
+                    leases: None,
+                    on_restart: None,
+                    resolved,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(crate::test_support::IO_TIMEOUT, resolution)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        loop {
+            let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+                break;
+            }
+        }
+        let servers: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(temp.path().join("mcp.json")).unwrap())
+                .unwrap();
+        for name in ["mj-agents", "mj-review"] {
+            let server = servers
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == name);
+            assert_eq!(
+                server.is_some(),
+                harness == HarnessKind::Antigravity,
+                "{servers}"
+            );
+            if harness == HarnessKind::Antigravity {
+                let grants = std::fs::read_to_string(&project).unwrap();
+                assert!(grants.contains(&format!("mcp({name}/*)")), "{grants}");
+                if name == "mj-agents" {
+                    let args = server.unwrap()["args"].as_array().unwrap();
+                    for pair in [["--harness", "antigravity"], ["--role", "parent"]] {
+                        assert!(
+                            args.windows(2)
+                                .any(|args| args[0] == pair[0] && args[1] == pair[1]),
+                            "{args:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    shutdown.cancel();
+    runtime.await.unwrap().unwrap();
 }
 
 #[cfg(unix)]

@@ -1279,6 +1279,7 @@ impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ProcessExecutor;
 
 /// Run one `ssh` invocation, retrying it
