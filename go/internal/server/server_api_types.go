@@ -4,6 +4,8 @@
 package server
 
 import (
+	"strings"
+
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/sessionruntime"
@@ -402,7 +404,17 @@ type RelayHealth struct {
 
 // RelayHealthFrom is Rust's `From<&ManagedSessionView>`.
 func RelayHealthFrom(view *client.ManagedSessionView) RelayHealth {
-	panic("unported: mj-server/src/server/api/types.rs RelayHealth::from")
+	state := RelayStateOf(view.Connected, view.Error)
+	var detail *string
+	switch {
+	case view.Error != nil:
+		text := view.Error.Detail()
+		detail = &text
+	case view.Connected && view.Snapshot != nil && view.Snapshot.SubagentQueueError != nil:
+		text := *view.Snapshot.SubagentQueueError
+		detail = &text
+	}
+	return RelayHealth{State: state, Detail: detail}
 }
 
 // WaitResponse answers `POST /sessions/{id}/wait`.
@@ -691,7 +703,44 @@ func ResolveLaunchChoices(
 	profiles, targets []string,
 	saved *LaunchDefault,
 ) (profileID *string, targetID string, open []string) {
-	panic("unported: mj-server/src/server/api/types.rs resolve_launch_choices")
+	choose := func(field string, named, saved *string, candidates []string) *string {
+		if named != nil {
+			value := *named
+			return &value
+		}
+		if saved != nil {
+			value := *saved
+			return &value
+		}
+		if len(candidates) == 1 {
+			only := candidates[0]
+			return &only
+		}
+		if len(candidates) == 0 {
+			open = append(open, "a "+field+" (none is configured)")
+		} else {
+			open = append(open, "a "+field+" (one of: "+strings.Join(candidates, ", ")+")")
+		}
+		return nil
+	}
+	var savedProfile, savedTarget *string
+	if saved != nil {
+		savedProfile, savedTarget = &saved.ProfileID, &saved.TargetID
+	}
+	if needProfile {
+		profileID = choose("profile_id", profile, savedProfile, profiles)
+	} else if profile != nil {
+		value := *profile
+		profileID = &value
+	} else if savedProfile != nil {
+		value := *savedProfile
+		profileID = &value
+	}
+	chosen := choose("target_id", target, savedTarget, targets)
+	if chosen != nil && len(open) == 0 {
+		return profileID, *chosen, nil
+	}
+	return nil, "", open
 }
 
 // LaunchDefault is the pair a caller may leave unnamed when it starts a

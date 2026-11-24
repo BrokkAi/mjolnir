@@ -23,6 +23,17 @@ func NewFileLock(file *os.File) *FileLock {
 	return &FileLock{file: file}
 }
 
+// TryLockFile is Rust's File::try_lock (shared false) or
+// File::try_lock_shared (shared true): the lock without waiting, false when
+// another holder excludes it (TryLockError::WouldBlock). A successful caller
+// hands file to NewFileLock.
+func TryLockFile(file *os.File, shared bool) (bool, error) {
+	if shared {
+		return tryLockFileShared(file)
+	}
+	return tryLockFile(file)
+}
+
 // AcquireFileLockCancellable waits for an exclusive lock on file, checking
 // cancellation between attempts (Rust FileLock::acquire_cancellable).
 func AcquireFileLockCancellable(file *os.File, cancelled func() bool) (*FileLock, error) {

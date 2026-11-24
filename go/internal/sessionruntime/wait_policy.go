@@ -20,7 +20,10 @@ type ApiBackgroundWork struct {
 
 // ApiBackgroundWorkFrom is Rust's `From<&RelayOperationalState>`.
 func ApiBackgroundWorkFrom(state *core.RelayOperationalState) ApiBackgroundWork {
-	panic("unported: mj-session-runtime/src/wait_policy.rs ApiBackgroundWork::from")
+	// A cloned Vec is never absent: an empty one still writes `[]`.
+	tasks := make([]core.BackgroundCommand, len(state.BackgroundCommands))
+	copy(tasks, state.BackgroundCommands)
+	return ApiBackgroundWork{Known: state.BackgroundWorkKnown, Tasks: tasks}
 }
 
 // WaitRequest is the body of `POST /sessions/{id}/wait`. Rust:

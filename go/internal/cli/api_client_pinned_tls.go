@@ -16,6 +16,10 @@ package cli
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
+	"strings"
+
+	"github.com/BrokkAi/mjolnir/go/internal/server"
 )
 
 // pinnedCertificate accepts only the certificate whose DER SHA-256 is
@@ -24,15 +28,40 @@ type pinnedCertificate struct {
 	sha256 string
 }
 
+// errPinMismatch is rustls's
+// `InvalidCertificate(ApplicationVerificationFailure)`.
+var errPinMismatch = errors.New("invalid peer certificate: ApplicationVerificationFailure")
+
 // verifyServerCert is the tls.Config VerifyPeerCertificate hook. The pin
 // names one exact certificate, so the host name, chain, and validity window
 // add nothing: the daemon vouches for these bytes.
 func (p pinnedCertificate) verifyServerCert(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-	panic("unported: mj-cli/src/api_client/pinned_tls.rs PinnedCertificate::verify_server_cert")
+	if len(rawCerts) == 0 {
+		return errPinMismatch
+	}
+	if server.CertificateDerSha256(rawCerts[0]) == p.sha256 {
+		return nil
+	}
+	return errPinMismatch
 }
 
 // pinnedClientConfig is a TLS client configuration that accepts only the
 // certificate whose DER SHA-256 is sha256 (hex, either case).
+//
+// InsecureSkipVerify turns off only the chain and host name checks, which
+// verifyServerCert replaces; the handshake still proves the server holds the
+// certificate's key. TLS 1.2 and 1.3 are rustls's safe defaults.
 func pinnedClientConfig(sha256 string) (*tls.Config, error) {
-	panic("unported: mj-cli/src/api_client/pinned_tls.rs pinned_client_config")
+	// to_ascii_lowercase: only ASCII letters change.
+	pin := pinnedCertificate{sha256: strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, sha256)}
+	return &tls.Config{
+		MinVersion:            tls.VersionTLS12,
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: pin.verifyServerCert,
+	}, nil
 }
