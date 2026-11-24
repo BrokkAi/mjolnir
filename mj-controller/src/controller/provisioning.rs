@@ -53,46 +53,64 @@ fn provisioned_resource_name(session_id: &str) -> Result<(String, bool)> {
     Ok((targets::resource_name(session_id)?, false))
 }
 
-/// How long the deferred Git cache cleanup may run. A daemon handoff waits for
-/// the cleanup while it runs, so it needs a bound; the cleanup is safe to
-/// abandon, because the next launch repeats it. It took 350 ms in the
-/// measured SSH Podman launches (221 ms listing live containers, 117 ms
-/// sweeping the cache).
-const GIT_CACHE_GC_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Run the container host's Git cache cleanup in the background, after the
 /// launch that owes it has prepared its own snapshot. The launch does not wait
 /// for the cleanup or learn its result; failures are logged.
 ///
-/// The cleanup is daemon-owned work that a handoff waits for, so it holds
-/// upgrade admission while it runs. Once a handoff is draining it does not
-/// start: it is optional and the next launch, under the next daemon, owes it
-/// again. Returns the task for a caller that wants to wait for it.
+/// The cleanup is safe to stop and the next launch repeats it, so it does not
+/// hold daemon handoff admission. Instead the handoff cancels it: once the
+/// gate is draining or closed the cleanup's processes are stopped, and one that
+/// has not started does not start. `make_executor` builds the executor from the
+/// cancellation token when the work begins, never while it is queued. Returns
+/// the task for a caller that wants to wait for it.
 fn defer_git_cache_gc<E>(
     gate: &Arc<mj_core::upgrade::Gate>,
     gc: git_cache::PendingCloneCacheGc,
-    executor: E,
+    make_executor: impl FnOnce(tokio_util::sync::CancellationToken) -> E + Send + 'static,
 ) -> Option<tokio::task::JoinHandle<()>>
 where
-    E: CommandExecutor + Send + 'static,
+    E: CommandExecutor,
 {
-    let admission = match gate.enter_unless_draining("container Git cache GC") {
-        Ok(admission) => admission,
-        Err(error) => {
-            tracing::debug!(
-                error = format!("{error:#}"),
-                "container Git cache GC deferred to a later launch while the daemon hands off"
-            );
-            return None;
-        }
-    };
-    Some(mj_core::runtime::spawn_blocking(move || {
-        let _admission = admission;
-        if let Err(error) = gc.run(&executor) {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "container Git cache GC failed; a later launch will repeat it"
-            );
+    if gate.is_draining() {
+        tracing::debug!(
+            "container Git cache GC deferred to a later launch while the daemon hands off"
+        );
+        return None;
+    }
+    let gate = Arc::clone(gate);
+    Some(mj_core::runtime::spawn(async move {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut work = mj_core::runtime::spawn_blocking({
+            let cancel = cancel.clone();
+            move || {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let executor = make_executor(cancel.clone());
+                if let Err(error) = gc.run(&executor) {
+                    if cancel.is_cancelled() {
+                        tracing::debug!(
+                            error = format!("{error:#}"),
+                            "container Git cache GC stopped for the daemon handoff"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "container Git cache GC failed; a later launch will repeat it"
+                        );
+                    }
+                }
+            }
+        });
+        let joined = tokio::select! {
+            joined = &mut work => joined,
+            () = gate.wait_until_draining() => {
+                cancel.cancel();
+                work.await
+            }
+        };
+        if let Err(error) = joined {
+            tracing::warn!(%error, "container Git cache GC task panicked");
         }
     }))
 }
@@ -954,11 +972,10 @@ impl Controller {
                 .as_mut()
                 .and_then(|cache| cache.pending_gc.take())
             {
-                defer_git_cache_gc(
-                    crate::upgrade::gate(),
-                    gc,
-                    mj_core::targets::CancellableProcessExecutor::with_timeout(GIT_CACHE_GC_LIMIT),
-                );
+                defer_git_cache_gc(crate::upgrade::gate(), gc, |cancel| {
+                    mj_core::targets::CancellableProcessExecutor::new(Default::default())
+                        .with_cancellation(cancel)
+                });
             }
             // Mounts are fixed when the container is created, so the build
             // cache is decided here, before the provisioning plan is built.

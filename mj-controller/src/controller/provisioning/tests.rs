@@ -2654,12 +2654,14 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
     );
 }
 
-/// Answers every command with success and a home directory, and holds the
-/// cache cleanup's container listing until the test lets it go.
+/// Answers every command with success and a home directory. Like the real
+/// executor, it refuses to start a command once cancelled and stops a running
+/// one; it holds the cache cleanup's container listing until released.
 struct GitCacheGcExecutor {
     purposes: std::sync::Arc<Mutex<Vec<String>>>,
     listing_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     release_listing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl CommandExecutor for GitCacheGcExecutor {
@@ -2668,7 +2670,7 @@ impl CommandExecutor for GitCacheGcExecutor {
     }
 
     fn cancellation_requested_without_deadline(&self) -> bool {
-        self.cancellation_requested()
+        self.cancel.is_cancelled()
     }
 
     fn execute_without_deadline(
@@ -2688,10 +2690,16 @@ impl CommandExecutor for GitCacheGcExecutor {
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         use std::sync::atomic::Ordering;
+        if self.cancel.is_cancelled() {
+            bail!("operation cancelled");
+        }
         self.purposes.lock().unwrap().push(command.purpose.clone());
         if command.purpose == "find live container Git cache snapshots" {
             self.listing_started.store(true, Ordering::Release);
             while !self.release_listing.load(Ordering::Acquire) {
+                if self.cancel.is_cancelled() {
+                    bail!("operation cancelled");
+                }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
@@ -2703,19 +2711,27 @@ impl CommandExecutor for GitCacheGcExecutor {
     }
 }
 
-/// The deferred cleanup is daemon-owned work: a handoff waits for it while it
-/// runs, and once a handoff is draining it is not started at all, because the
-/// next launch owes the same cleanup.
+/// The deferred cleanup is restartable background work: it holds no handoff
+/// admission, a handoff cancels it at once, and a handoff already draining
+/// does not start it.
 #[tokio::test]
-async fn the_git_cache_cleanup_holds_handoff_admission_and_yields_to_a_draining_handoff() {
+async fn the_git_cache_cleanup_holds_no_admission_and_a_handoff_cancels_it() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let purposes = Arc::new(Mutex::new(Vec::new()));
     let listing_started = Arc::new(AtomicBool::new(false));
     let release_listing = Arc::new(AtomicBool::new(false));
-    let executor = || GitCacheGcExecutor {
-        purposes: purposes.clone(),
-        listing_started: listing_started.clone(),
-        release_listing: release_listing.clone(),
+    let executor = {
+        let (purposes, started, release) = (
+            purposes.clone(),
+            listing_started.clone(),
+            release_listing.clone(),
+        );
+        move |cancel| GitCacheGcExecutor {
+            purposes: purposes.clone(),
+            listing_started: started.clone(),
+            release_listing: release.clone(),
+            cancel,
+        }
     };
     let target = targets::TargetTemplate::LocalPodman(ContainerTemplate {
         build_cache: None,
@@ -2742,29 +2758,30 @@ async fn the_git_cache_cleanup_holds_handoff_admission_and_yields_to_a_draining_
         &mut Vec::new(),
         None,
         None,
-        &executor(),
+        &executor(tokio_util::sync::CancellationToken::new()),
     )
     .unwrap()
     .expect("the fake host has Git");
     let gc = prepared.pending_gc.take().unwrap();
-    purposes.lock().unwrap().clear();
+    let wait_for_listing = || async {
+        while !listing_started.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    let reset = || {
+        purposes.lock().unwrap().clear();
+        listing_started.store(false, Ordering::Release);
+        release_listing.store(false, Ordering::Release);
+    };
 
+    // Running to completion: holds no admission, so a handoff is not delayed.
+    reset();
     let gate = Arc::new(mj_core::upgrade::Gate::default());
-    let task = defer_git_cache_gc(&gate, gc.clone(), executor()).expect("an open gate admits it");
-    while !listing_started.load(Ordering::Acquire) {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert_eq!(gate.active_labels(), ["container Git cache GC"]);
-    assert!(!gate.try_close(), "a handoff waits for the running cleanup");
-
-    gate.begin_draining();
-    assert!(
-        defer_git_cache_gc(&gate, gc, executor()).is_none(),
-        "a draining handoff must not start more cleanup"
-    );
+    let task = defer_git_cache_gc(&gate, gc.clone(), executor.clone()).expect("an open gate");
+    wait_for_listing().await;
+    assert!(gate.active_labels().is_empty());
     release_listing.store(true, Ordering::Release);
     task.await.unwrap();
-    assert!(gate.active_labels().is_empty());
     assert_eq!(
         *purposes.lock().unwrap(),
         [
@@ -2772,5 +2789,35 @@ async fn the_git_cache_cleanup_holds_handoff_admission_and_yields_to_a_draining_
             "prune the container host Git cache"
         ]
     );
-    assert!(gate.try_close());
+
+    // A handoff cancels the running cleanup before its second command,
+    // whether it is waiting (draining) or has closed admission, and closing
+    // is not held back by the cleanup.
+    for close in [false, true] {
+        reset();
+        let gate = Arc::new(mj_core::upgrade::Gate::default());
+        let task = defer_git_cache_gc(&gate, gc.clone(), executor.clone()).unwrap();
+        wait_for_listing().await;
+        if close {
+            assert!(
+                gate.try_close(),
+                "the cleanup does not hold the handoff back"
+            );
+        } else {
+            gate.begin_draining();
+        }
+        task.await.unwrap();
+        assert_eq!(
+            *purposes.lock().unwrap(),
+            ["find live container Git cache snapshots"],
+            "the cancelled cleanup must not reach the prune"
+        );
+    }
+
+    // A handoff already draining does not start it at all.
+    reset();
+    let gate = Arc::new(mj_core::upgrade::Gate::default());
+    gate.begin_draining();
+    assert!(defer_git_cache_gc(&gate, gc, executor).is_none());
+    assert!(purposes.lock().unwrap().is_empty());
 }

@@ -435,6 +435,16 @@ pub enum LaunchImageGate {
 
 /// The gate a launch of `target` takes. Only Podman targets whose pull policy
 /// does not ask for a registry check can use a shared hold.
+///
+/// Two kinds of run arguments keep a launch on the exclusive path, where
+/// `podman run` itself decides whether to download:
+/// - An explicit `--pull` overrides the policy the shared path relies on.
+/// - A platform selection (`--platform`, `--arch`, `--os`, `--variant`) with
+///   the `Missing` policy. `podman image exists` and the image id lookup match
+///   a tag without looking at its OS, architecture or variant, and the
+///   download on a miss names no platform, so only `podman run`'s own
+///   platform-aware pull is correct. `Never` never checks or downloads, so a
+///   platform argument does not change what it does.
 pub fn launch_image_gate(target: &TargetTemplate) -> LaunchImageGate {
     let Some((host, container)) = target.image_host() else {
         return LaunchImageGate::Exclusive;
@@ -442,7 +452,23 @@ pub fn launch_image_gate(target: &TargetTemplate) -> LaunchImageGate {
     if !matches!(host, ImageHost::LocalPodman | ImageHost::SshPodman(_)) {
         return LaunchImageGate::Exclusive;
     }
+    let sets = |flags: &[&str]| {
+        container.extra_run_args.iter().any(|arg| {
+            flags.iter().any(|flag| {
+                arg == flag
+                    || arg
+                        .strip_prefix(flag)
+                        .is_some_and(|rest| rest.starts_with('='))
+            })
+        })
+    };
+    if sets(&["--pull"]) {
+        return LaunchImageGate::Exclusive;
+    }
     match container.pull_policy.at_launch(&container.image) {
+        ImagePullPolicy::Missing if sets(&["--platform", "--arch", "--os", "--variant"]) => {
+            LaunchImageGate::Exclusive
+        }
         ImagePullPolicy::Missing => LaunchImageGate::SharedPullOnMiss,
         ImagePullPolicy::Never => LaunchImageGate::Shared,
         _ => LaunchImageGate::Exclusive,
@@ -916,6 +942,49 @@ mod tests {
                 .count(),
             MAX_LAUNCH_PULLS,
             "{commands:?}"
+        );
+    }
+
+    /// Arguments that change which image `podman run` wants, or how it pulls,
+    /// keep the launch on the path where `podman run` decides.
+    #[test]
+    fn platform_and_pull_arguments_keep_a_launch_on_the_exclusive_path() {
+        let gate = |policy: ImagePullPolicy, args: &[&str]| {
+            launch_image_gate(&TargetTemplate::LocalPodman(
+                mj_core::targets::ContainerTemplate {
+                    build_cache: None,
+                    image: "example.test/gate:1".to_owned(),
+                    pull_policy: policy,
+                    extra_run_args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                    workspace_storage: Default::default(),
+                },
+            ))
+        };
+        use LaunchImageGate::{Exclusive, Shared, SharedPullOnMiss};
+        assert_eq!(gate(ImagePullPolicy::Missing, &[]), SharedPullOnMiss);
+        assert_eq!(gate(ImagePullPolicy::Never, &[]), Shared);
+        for args in [
+            &["--platform=linux/amd64"][..],
+            &["--platform", "linux/amd64"],
+            &["--arch=amd64"],
+            &["--os", "linux"],
+            &["--variant=v8"],
+        ] {
+            assert_eq!(gate(ImagePullPolicy::Missing, args), Exclusive, "{args:?}");
+            assert_eq!(gate(ImagePullPolicy::Never, args), Shared, "{args:?}");
+        }
+        for args in [&["--pull=always"][..], &["--pull", "never"]] {
+            for policy in [ImagePullPolicy::Missing, ImagePullPolicy::Never] {
+                assert_eq!(gate(policy, args), Exclusive, "{policy:?} {args:?}");
+            }
+        }
+        // A flag that only shares a prefix is not the flag.
+        assert_eq!(
+            gate(
+                ImagePullPolicy::Missing,
+                &["--platformish=1", "--pull-extra"]
+            ),
+            SharedPullOnMiss
         );
     }
 }

@@ -6046,8 +6046,8 @@ fn an_ssh_podman_creation_initializes_home_and_reports_mounts_in_one_command() {
     };
     assert_eq!(
         counted("volume inspect"),
-        2,
-        "one identity check per volume"
+        4,
+        "an identity check before and after each volume is created"
     );
     assert_eq!(counted("volume create"), 2);
     assert!(position("run ") < position("exec --user 0"));
@@ -6109,6 +6109,48 @@ fn an_ssh_podman_creation_refuses_a_foreign_workspace_volume() {
         format!("{foreign}\n"),
         "the foreign volume survives; only the volume this script made is removed"
     );
+}
+
+/// Another process can create a volume of the same name between the script's
+/// failed `volume inspect` and its `volume create`; the engine then succeeds
+/// without applying the labels. The script must read the identity back, for the
+/// workspace volume and the temporary volume alike.
+#[cfg(unix)]
+#[test]
+fn an_ssh_podman_creation_refuses_a_volume_created_by_someone_else_during_the_race() {
+    let name = resource_name(SESSION).unwrap();
+    for (volume, message) in [
+        (
+            format!("{name}-workspace"),
+            "Podman volume {volume} does not carry the expected Mjolnir identity",
+        ),
+        (
+            format!("{name}-tmp"),
+            "refusing foreign podman temporary volume {volume}",
+        ),
+    ] {
+        let environment = fake_ssh_podman_environment();
+        // The volume is absent when the script first looks, and carries
+        // someone else's labels once the script's `volume create` returns.
+        let output = run_ssh_podman_creation(
+            &environment,
+            &name,
+            crate::image_pull_gate::LaunchImageGate::Exclusive,
+            &[("FAKE_FOREIGN_VOLUME", volume.as_str())],
+        );
+        assert_ne!(output.status, 0, "{volume}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&message.replace("{volume}", &volume)),
+            "{stderr}"
+        );
+        assert!(
+            !fake_podman_invocations(&environment)
+                .iter()
+                .any(|line| line.starts_with("run ")),
+            "no container may start on {volume}"
+        );
+    }
 }
 
 /// HOME initialization is part of creation: when it fails, the container and

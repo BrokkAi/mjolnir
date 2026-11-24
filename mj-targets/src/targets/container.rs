@@ -197,14 +197,16 @@ pub fn inspect_container_storage_observed(
 pub(super) const TEMPORARY_VOLUME_FUNCTIONS: &str = r#"
 prepare_temporary_volume() {
     [ -n "$temporary_volume" ] || return 0
-    if identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume" 2>/dev/null); then
-        [ "$identity" = "true|$session" ] || {
-            echo "refusing foreign $engine temporary volume $temporary_volume" >&2
-            return 1
-        }
-    else
+    if ! identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume" 2>/dev/null); then
         "$engine" volume create --driver local --label "dev.mj.managed=true" --label "dev.mj.session=$session" "$temporary_volume" >/dev/null
+        # Another process may have created the name between the two commands;
+        # the engine then succeeds without applying these labels.
+        identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume")
     fi
+    [ "$identity" = "true|$session" ] || {
+        echo "refusing foreign $engine temporary volume $temporary_volume" >&2
+        return 1
+    }
 }
 remove_temporary_volume() {
     [ -n "$temporary_volume" ] || return 0
@@ -376,6 +378,13 @@ elif identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"
     }
 else
     podman volume create --label "dev.mj.managed=true" --label "dev.mj.session=$session" "$volume" >/dev/null
+    # Another process may have created the name between the two commands; the
+    # engine then succeeds without applying these labels.
+    identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume")
+    [ "$identity" = "true|$session" ] || {
+        echo "Podman volume $volume does not carry the expected Mjolnir identity" >&2
+        exit 1
+    }
 fi
 start_container "$@"
 "#;
