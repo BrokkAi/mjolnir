@@ -358,10 +358,12 @@ synchronized between hosts, and Mjolnir never runs mbx garbage collection: the
 host's own mbx and the automatic collection inside containers are the only
 collectors.
 
-Containers read a snapshot of the host's mbx configuration, taken each time the
-session's worker is launched and stored under the session's worker directory.
-Edit the host configuration as usual; sessions pick the change up at their next
-restart.
+Containers read a snapshot of the host's mbx configuration, taken each time a
+session's worker is launched and stored in the container's own control
+directory (`/var/lib/hel/mbx-config`), which the shared mount does not cover.
+The snapshot keeps `cache_dir` and `[target] root` at the values the container
+was created with, because only those paths are mounted. Edit the rest of the
+host configuration as usual; sessions pick the change up at their next restart.
 
 Leave the linker out of the host configuration: any mbx linker selection, managed (`mold@<version>`) or `path:`, makes rustc
 link through `clang`, so every image on the host would need clang, and a

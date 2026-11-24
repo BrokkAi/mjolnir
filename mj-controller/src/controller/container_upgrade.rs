@@ -259,8 +259,8 @@ impl Controller {
         };
         if let Some(cache) = &record.build_cache {
             retain(cache.directory.clone(), cache.directory.clone())?;
-            if let Some(root) = &cache.target_root {
-                retain(root.clone(), root.clone())?;
+            if let Some(root) = cache.mounted_target_root() {
+                retain(root.to_path_buf(), root.to_path_buf())?;
             }
         }
         if let Some(cache) = record

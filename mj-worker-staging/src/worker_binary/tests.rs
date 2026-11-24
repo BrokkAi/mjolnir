@@ -4475,6 +4475,67 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
 }
 
 #[test]
+fn a_cached_container_launch_pins_the_recorded_target_root_and_container_policy() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(session_id).unwrap();
+    let docker = mj_core::config::TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
+            build_cache: None,
+            image: mj_core::config::DEFAULT_SESSION_IMAGE.to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    // The root lies in the cache directory, so nothing extra is mounted, yet
+    // the container still names it.
+    for target_root in ["/srv/cache/views", "/mnt/slow/targets"] {
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(session_id);
+        session.project_directory = None;
+        session.container_workspace = Some(workspace.clone());
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "local".into(),
+            directory: "/srv/cache".into(),
+            max_size: None,
+            target_root: Some(target_root.into()),
+        });
+        let launch = worker_launch_config(
+            &session,
+            &profile,
+            Some(&crate::database::test_fixtures::local_bundle(Path::new(
+                "/src/project",
+            ))),
+            &targets::TargetLocator::LocalDocker {
+                container_id: targets::resource_name(session_id).unwrap(),
+                borrowed_from: None,
+            },
+            LaunchWorkspace {
+                session_id,
+                container: Some(&workspace),
+                parent_worktree: None,
+                owner: None,
+                working_directories: &[],
+            },
+            &mj_core::state::TargetRuntimeSettings::from(&docker),
+            &mj_core::config::Config::default(),
+        )
+        .unwrap()
+        .0;
+        let environment = &launch.target_environment;
+        assert_eq!(environment["MBX_TARGET_ROOT"], target_root);
+        assert_eq!(environment["MBX_CACHE_DIR"], "/srv/cache");
+        // One container-scoped snapshot, never a worker directory's.
+        assert_eq!(environment["MJ_MBX_CONFIG_DIR"], "/var/lib/hel/mbx-config");
+    }
+}
+
+#[test]
 fn only_localhost_harnesses_receive_the_owning_daemons_configuration_paths() {
     let home = tempfile::tempdir().unwrap();
     let profile = codex_login_profile(home.path(), "chatgpt");

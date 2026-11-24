@@ -688,23 +688,24 @@ pub fn session_mbx_path(worker_root: &str) -> PathBuf {
     mj_core::target_path::join(Path::new(worker_root), Path::new("mbx"))
 }
 
-/// Where a session keeps its private mbx policy snapshot directory.
-pub fn session_mbx_configuration_directory(worker_root: &str) -> PathBuf {
-    mj_core::target_path::join(Path::new(worker_root), Path::new("mbx-config"))
-}
+/// Where a container keeps its private mbx policy snapshot: in the
+/// container's own control root, which no shared mount covers. It belongs to
+/// the container, not to one worker. A sub-agent that borrows its parent's
+/// container shares `$HOME`, so a link into a worker directory would dangle
+/// once that worker's directory is removed.
+pub const CONTAINER_MBX_CONFIG_DIRECTORY: &str = "/var/lib/hel/mbx-config";
 
-/// Write `configuration` as the session's mbx policy snapshot, and link the
+/// Write `configuration` as the container's mbx policy snapshot, and link the
 /// container's `$HOME/.config` and every `config_roots` entry to it. Nothing is
 /// written into the shared cache mount.
 pub fn stage_mbx_configuration(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
-    worker_root: &str,
     configuration: &str,
     config_roots: &[PathBuf],
 ) -> Result<PathBuf> {
     mbx_container(locator)?;
-    let directory = session_mbx_configuration_directory(worker_root);
+    let directory = PathBuf::from(CONTAINER_MBX_CONFIG_DIRECTORY);
     let mut args = vec![
         "sh".to_owned(),
         "-c".to_owned(),

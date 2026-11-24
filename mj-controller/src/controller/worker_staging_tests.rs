@@ -362,18 +362,21 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
 }
 
 /// Runs a podman container's commands in a local directory standing for its
-/// worker root, and answers the container host's mbx probe and configuration
-/// read with fixed values.
+/// `/var/lib/hel` control root, and answers the container host's mbx probe and
+/// configuration read with fixed values.
 #[cfg(target_os = "linux")]
 struct LocalContainerExecutor {
     commands: std::cell::RefCell<Vec<CommandSpec>>,
-    /// The worker root as the container names it, and the directory standing
+    /// The control root as the container names it, and the directory standing
     /// for it.
     container_root: String,
     local_root: PathBuf,
     home: PathBuf,
     host_mbx: PathBuf,
+    /// Whether the container host has an mbx at all.
+    host_mbx_present: bool,
     host_config: String,
+    notices: std::cell::RefCell<Vec<String>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -393,6 +396,10 @@ impl LocalContainerExecutor {
 
 #[cfg(target_os = "linux")]
 impl CommandExecutor for LocalContainerExecutor {
+    fn notify_notice(&self, notice: &str) {
+        self.notices.borrow_mut().push(notice.to_owned());
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         mj_core::targets::DeadlinePause::none()
     }
@@ -423,6 +430,13 @@ impl CommandExecutor for LocalContainerExecutor {
             // The container host's own commands: the mbx probe and the read of
             // its configuration file.
             let script = command.args.get(1).map(String::as_str).unwrap_or_default();
+            if script.contains("command -v mbx") && !self.host_mbx_present {
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
             let stdout = if script.contains("command -v mbx") {
                 format!(
                     "{}\nmbx {}",
@@ -527,6 +541,9 @@ fn cache_test_launch(
 struct CachedSessionFixture {
     directory: tempfile::TempDir,
     shared_cache: PathBuf,
+    /// The directory standing for `/var/lib/hel`, and this session's worker
+    /// root inside it.
+    hel_root: PathBuf,
     local_root: PathBuf,
     home: PathBuf,
     reviewer_config_root: PathBuf,
@@ -546,7 +563,8 @@ impl CachedSessionFixture {
 
         let directory = tempfile::tempdir().unwrap();
         let shared_cache = directory.path().join("shared cache");
-        let local_root = directory.path().join("worker");
+        let hel_root = directory.path().join("hel");
+        let local_root = hel_root.join("workers").join(id);
         std::fs::create_dir_all(local_root.join("bin")).unwrap();
         let home = directory.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -581,15 +599,18 @@ impl CachedSessionFixture {
         );
         let executor = LocalContainerExecutor {
             commands: Default::default(),
-            container_root: targets::worker_root(&backend, &session.id).unwrap(),
-            local_root: local_root.clone(),
+            container_root: "/var/lib/hel".into(),
+            local_root: hel_root.clone(),
             home: home.clone(),
             host_mbx,
+            host_mbx_present: true,
             host_config: HOST_MBX_CONFIG.to_owned(),
+            notices: Default::default(),
         };
         Self {
             directory,
             shared_cache,
+            hel_root,
             local_root,
             home,
             reviewer_config_root,
@@ -648,7 +669,7 @@ fn legacy_worker_upgrade_links_the_private_policy_snapshot_and_keeps_its_own_mbx
         std::fs::read(&legacy_binary).unwrap(),
         b"legacy copied mbx executable"
     );
-    let snapshot = fixture.local_root.join("mbx-config/config.toml");
+    let snapshot = fixture.hel_root.join("mbx-config/config.toml");
     assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), HOST_MBX_CONFIG);
     assert_eq!(
         std::fs::read_link(fixture.home.join(".config/mbx/config.toml")).unwrap(),
@@ -704,7 +725,7 @@ fn a_retained_session_moves_off_its_in_cache_launcher_with_no_shared_cache_files
         );
         assert!(!launcher.contains(".mjolnir"), "{launcher}");
     }
-    let snapshot = fixture.local_root.join("mbx-config/config.toml");
+    let snapshot = fixture.hel_root.join("mbx-config/config.toml");
     assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), HOST_MBX_CONFIG);
     // The container's own lookup and a late reviewer home both follow it.
     for link in [
@@ -729,6 +750,90 @@ fn a_retained_session_moves_off_its_in_cache_launcher_with_no_shared_cache_files
         "no staging file remains"
     );
     drop(fixture.directory);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_borrowed_child_and_its_parent_share_one_container_policy_snapshot() {
+    const PARENT: &str = "0123456789abcdef0123456789abcdef";
+    const CHILD: &str = "fedcba9876543210fedcba9876543210";
+    let parent = CachedSessionFixture::new(PARENT);
+    let controller = parent.controller();
+    controller
+        .prepare_build_cache_links(
+            &parent.session,
+            &parent.backend,
+            &parent.launch,
+            &parent.executor,
+        )
+        .unwrap();
+
+    // The child runs in its parent's container and has its own worker root.
+    let mut child = parent.session.clone();
+    child.id = CHILD.into();
+    let backend = targets::TargetLocator::LocalPodman {
+        container_id: targets::resource_name(PARENT).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: Some(PARENT.into()),
+    };
+    let child_root = parent.hel_root.join("workers").join(CHILD);
+    std::fs::create_dir_all(child_root.join("bin")).unwrap();
+    controller
+        .prepare_build_cache_links(&child, &backend, &parent.launch, &parent.executor)
+        .unwrap();
+
+    let snapshot = parent.hel_root.join("mbx-config/config.toml");
+    let link = parent.home.join(".config/mbx/config.toml");
+    assert_eq!(std::fs::read_link(&link).unwrap(), snapshot);
+    assert!(
+        !child_root.join("mbx-config").exists() && !parent.local_root.join("mbx-config").exists(),
+        "no worker directory holds the snapshot"
+    );
+    assert!(child_root.join("mbx").exists() && parent.local_root.join("mbx").exists());
+
+    std::fs::remove_dir_all(&child_root).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&link).unwrap(), HOST_MBX_CONFIG);
+    assert!(parent.local_root.join("mbx").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unreadable_host_policy_turns_the_cache_off_instead_of_blocking_the_worker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (host_mbx_present, host_config) in [(true, "token = \"hunter2\"\n["), (false, "[")] {
+        let mut fixture = CachedSessionFixture::new("unreadable-policy");
+        fixture.executor.host_mbx_present = host_mbx_present;
+        fixture.executor.host_config = host_config.into();
+        // Launchers an earlier release left are removed, not kept.
+        let launcher = fixture.local_root.join("bin/mbx");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\n# mjolnir-mbx-shim\nexec /cache/mbx\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        fixture
+            .controller()
+            .prepare_build_cache_links(
+                &fixture.session,
+                &fixture.backend,
+                &fixture.launch,
+                &fixture.executor,
+            )
+            .expect("the worker still starts");
+
+        assert!(!launcher.exists(), "the marked launcher was removed");
+        assert!(!fixture.local_root.join("mbx").exists());
+        let notices = fixture.executor.notices.borrow().join("\n");
+        assert!(notices.contains("build cache is unavailable"), "{notices}");
+        assert!(
+            !notices.contains("hunter2"),
+            "the notice quotes the config: {notices}"
+        );
+    }
 }
 
 #[cfg(unix)]

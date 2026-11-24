@@ -93,9 +93,10 @@ fn platform_limit(
 pub struct ResolvedBuildCache {
     /// Cache directory on the host, mounted at the same path in the container.
     pub directory: PathBuf,
-    /// A `[target] root` the host configuration relocates outside the cache
-    /// directory, which the container needs mounted at the same path too.
-    pub target_root: Option<PathBuf>,
+    /// The effective `[target] root` of the host's mbx, absolute and
+    /// normalized: its configured root, or `<directory>/targets`. A root
+    /// outside the cache directory is mounted at the same path too.
+    pub target_root: PathBuf,
 }
 
 /// Cached host inspections, keyed by host and per-target settings. An
@@ -425,9 +426,7 @@ fn inspect_host(
         Some(size) => BuildCacheLimit::HostConfiguration(Some(size)),
         None => BuildCacheLimit::MbxDefault(None),
     };
-    let target_root = text
-        .as_deref()
-        .and_then(|text| relocated_target_root(text, &directory));
+    let target_root = effective_target_root(text.as_deref().unwrap_or_default(), &directory);
     // Read before the checks below, so a host that cannot share the cache
     // right now still reports what the cache did while it could.
     let stats = read_stats(host, &directory, executor);
@@ -477,12 +476,12 @@ fn inspect_host(
     // and much slower, and mbx's materializer falls back to it without saying
     // so, which makes this the only place it can be noticed. It is reported
     // rather than disqualifying: a slow cache still beats no cache.
-    if let Some(root) = &target_root {
-        let root_volume = nearest_existing_ancestor(host, root, executor)?;
+    if !mj_core::target_path::is_within(&target_root, &directory) {
+        let root_volume = nearest_existing_ancestor(host, &target_root, executor)?;
         if !cross_reflinks_supported(host, &volume, &root_volume, executor)? {
             tracing::warn!(
                 cache = %directory.display(),
-                target_root = %root.display(),
+                target_root = %target_root.display(),
                 "the host's mbx target root does not share a mount with the build cache, \
                  so restoring a cached output copies every byte instead of cloning it"
             );
@@ -647,14 +646,18 @@ pub fn native_mbx_for_container(
     )
 }
 
-/// The container host's own `mbx/config.toml`, or an empty document when it
-/// has none. Each session stages this text as its private policy snapshot.
+/// The container host's own `mbx/config.toml` as `cache`'s container must see
+/// it (see [`configuration::reconcile_container_config`]); an empty document
+/// when the host has none. Each session stages this text as its private policy
+/// snapshot.
 pub fn native_config_for_container(
     target: &targets::TargetLocator,
+    cache: &SessionBuildCache,
     executor: &impl CommandExecutor,
 ) -> Result<String> {
     let host = host_for_locator(target).context("build cache has no container host")?;
-    Ok(host_config_file(&host, executor)?.unwrap_or_default())
+    let text = host_config_file(&host, executor)?.unwrap_or_default();
+    configuration::reconcile_container_config(&text, cache)
 }
 
 /// The available column of a `df -P` report (the third field of its data row).
@@ -827,15 +830,20 @@ fn resolve_local_storage_paths(
     Ok(vec![cache, target_root])
 }
 
-/// The `[target] root` a host configuration sets, when it lies outside the
-/// cache directory and therefore needs its own mount.
-fn relocated_target_root(config_file: &str, directory: &Path) -> Option<PathBuf> {
-    let config = parse_storage_config(config_file)
+/// The `[target] root` mbx uses under a host configuration: the configured
+/// root (relative to the cache directory unless absolute), or
+/// `<directory>/targets`, normalized so `..` cannot hide where it points. An
+/// unreadable configuration is reported and takes the default, as mbx would
+/// refuse to start on it anyway.
+pub fn effective_target_root(config_file: &str, directory: &Path) -> PathBuf {
+    let configured = parse_storage_config(config_file)
         .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error:#}"))
-        .ok()?;
-    let root = config.target_root?;
-    let root = directory.join(root);
-    (!root.starts_with(directory)).then_some(root)
+        .ok()
+        .and_then(|config| config.target_root);
+    mj_core::target_path::normalize(&match configured {
+        Some(root) => mj_core::target_path::join(directory, &root),
+        None => directory.join("targets"),
+    })
 }
 
 const NEAREST_ANCESTOR_SCRIPT: &str = r#"d=$1
@@ -1002,12 +1010,12 @@ pub fn prepare(
         host: host.key(),
         directory: resolved.directory,
         max_size: None,
-        target_root: resolved.target_root,
+        target_root: Some(resolved.target_root),
     };
     attach_mounts(&build_cache, mounts).then_some(build_cache)
 }
 
-/// Mount the cache, and a relocated target root, read-write at the same
+/// Mount the cache, and a target root outside it, read-write at the same
 /// absolute paths the host uses. An attached directory that already covers one
 /// of those paths wins, and the session runs without the cache.
 fn attach_mounts(
@@ -1015,7 +1023,7 @@ fn attach_mounts(
     mounts: &mut Vec<targets::AdditionalMount>,
 ) -> bool {
     let mut wanted = vec![build_cache.directory.clone()];
-    wanted.extend(build_cache.target_root.iter().cloned());
+    wanted.extend(build_cache.mounted_target_root().map(Path::to_path_buf));
     for destination in &wanted {
         if mounts.iter().any(|mount| {
             mount.destination.starts_with(destination)
@@ -1028,7 +1036,7 @@ fn attach_mounts(
             return false;
         }
     }
-    for directory in std::iter::once(&build_cache.directory).chain(build_cache.target_root.iter()) {
+    for directory in &wanted {
         mounts.push(targets::AdditionalMount {
             source: directory.clone(),
             destination: directory.clone(),
@@ -1394,7 +1402,12 @@ mod tests {
         ]);
         let resolved = resolve(&podman(None), &executor).unwrap();
         assert_eq!(resolved.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        assert_eq!(resolved.target_root, None);
+        // Recorded even though it lies in the cache directory, so the session
+        // keeps it if the host's configuration changes.
+        assert_eq!(
+            resolved.target_root,
+            PathBuf::from("/mnt/fast/mbx-cache/targets")
+        );
         assert!(
             !executor
                 .ran()
@@ -1469,10 +1482,7 @@ mod tests {
         ]);
         let resolved = resolve(&podman(None), &executor)
             .expect("a target root that copies instead of cloning is slower, not unusable");
-        assert_eq!(
-            resolved.target_root,
-            Some(PathBuf::from("/mnt/slow/mbx-targets"))
-        );
+        assert_eq!(resolved.target_root, PathBuf::from("/mnt/slow/mbx-targets"));
         assert!(
             executor.ran().iter().any(|line| line.contains("src=$1")),
             "the store and the target root are probed as a pair: {:?}",
@@ -1481,14 +1491,48 @@ mod tests {
     }
 
     #[test]
-    fn a_target_root_inside_the_cache_directory_needs_no_second_mount() {
+    fn the_effective_target_root_is_normalized_so_dot_dot_cannot_hide_an_outside_root() {
+        let effective = |config: &str| effective_target_root(config, Path::new("/cache"));
+        assert_eq!(effective(""), PathBuf::from("/cache/targets"));
         assert_eq!(
-            relocated_target_root("[target]\nroot = \"targets\"\n", Path::new("/cache")),
-            None
+            effective("[target]\nroot = \"views\"\n"),
+            PathBuf::from("/cache/views")
         );
         assert_eq!(
-            relocated_target_root("[target]\nroot = \"/cache/targets\"\n", Path::new("/cache")),
-            None
+            effective("[target]\nroot = \"/cache/./targets\"\n"),
+            PathBuf::from("/cache/targets")
+        );
+        let escaping = effective("[target]\nroot = \"../outside\"\n");
+        assert_eq!(escaping, PathBuf::from("/outside"));
+        assert!(!mj_core::target_path::is_within(
+            &escaping,
+            Path::new("/cache")
+        ));
+    }
+
+    #[test]
+    fn a_target_root_inside_the_cache_is_recorded_without_a_second_mount() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&native_host());
+        let mut mounts = Vec::new();
+        let build_cache = prepare(
+            &podman(None),
+            &session(Some("/workspace/session-1")),
+            &mut mounts,
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(
+            build_cache.target_root,
+            Some(PathBuf::from("/mnt/fast/mbx-cache/targets"))
+        );
+        assert_eq!(build_cache.mounted_target_root(), None);
+        assert_eq!(
+            mounts
+                .iter()
+                .map(|mount| mount.destination.clone())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("/mnt/fast/mbx-cache")]
         );
     }
 
@@ -1920,7 +1964,10 @@ mod tests {
 
         assert_eq!(build_cache.host, "local");
         assert_eq!(build_cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));
-        assert_eq!(build_cache.target_root, None);
+        assert_eq!(
+            build_cache.target_root,
+            Some(PathBuf::from("/mnt/fast/mbx-cache/targets"))
+        );
         assert_eq!(
             mounts
                 .iter()

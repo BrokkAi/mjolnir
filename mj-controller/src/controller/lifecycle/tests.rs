@@ -2462,8 +2462,12 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         executor.commands.lock().unwrap().clone()
     );
     let arguments = release_arguments(&releases[0]);
-    // Mode, the recorded store, and no relocated target root.
-    assert_eq!(&arguments[..3], ["shared", "/srv/mbx-cache", ""]);
+    // Mode, the recorded store, and its target root: a record that never
+    // recorded one used `<store>/targets`.
+    assert_eq!(
+        &arguments[..3],
+        ["shared", "/srv/mbx-cache", "/srv/mbx-cache/targets"]
+    );
     assert_eq!(
         arguments[3],
         mj_core::config::data_dir()

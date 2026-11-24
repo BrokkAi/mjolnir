@@ -963,8 +963,8 @@ launchers use `mbx exec`, including the CMake configuration step.
 For Autoconf projects, run `mbx exec ./configure` so configuration records the
 cached compiler launchers before running `make`.
 Each session copies the host executable to `mbx` under its own worker directory
-and takes a snapshot of the host's mbx configuration there; the shared cache
-mount holds neither. Mjolnir checks the copy in the container before adding its
+and the container takes a snapshot of the host's mbx configuration in its own
+control directory; the shared cache mount holds neither. Mjolnir checks the copy in the container before adding its
 marked Cargo and `mbx` launchers. Both are refreshed when the session's worker is
 launched, upgraded or restored, without interrupting running processes.
 In Settings, open **Machines → [machine] → Build caches**, or search for

@@ -50,7 +50,7 @@ const FAILURES_MAX_BYTES: u64 = 256 * 1024;
 pub const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// `$1` mode (`native` or `shared`), `$2` the shared cache directory, `$3`
-/// its relocated target root (empty when the root lies in the cache), `$4` the
+/// the session's target root (empty in `native` mode), `$4` the
 /// old local binary root, `$5` the optional workspace root; the remaining
 /// arguments are workspaces for older mbx versions.
 ///
@@ -170,11 +170,30 @@ enum Store {
     /// A bare host's own mbx, with its own configuration.
     Native,
     /// The cache directory a host's containers mount at the same path, and
-    /// the target root the host relocated outside it, which they mounted too.
+    /// the session's recorded target root. A record that holds none predates
+    /// recording the root and used `<directory>/targets`.
     Shared {
         directory: PathBuf,
         target_root: Option<PathBuf>,
     },
+}
+
+impl Store {
+    /// The target root release passes to mbx, so cleanup reaches the state the
+    /// session wrote even if the host's configuration has changed since.
+    fn release_target_root(&self) -> Option<PathBuf> {
+        match self {
+            Store::Native => None,
+            Store::Shared {
+                directory,
+                target_root,
+            } => Some(
+                target_root
+                    .clone()
+                    .unwrap_or_else(|| directory.join("targets")),
+            ),
+        }
+    }
 }
 
 /// The build state of workspaces Mjolnir has removed, and where it lives.
@@ -387,19 +406,14 @@ impl BuildStateRelease {
     }
 
     fn command(&self) -> targets::CommandSpec {
-        let (mode, directory, target_root) = match &self.store {
-            Store::Native => ("native", String::new(), String::new()),
-            Store::Shared {
-                directory,
-                target_root,
-            } => (
-                "shared",
-                directory.to_string_lossy().into_owned(),
-                target_root
-                    .as_ref()
-                    .map(|root| root.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
+        let target_root = self
+            .store
+            .release_target_root()
+            .map(|root| root.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (mode, directory) = match &self.store {
+            Store::Native => ("native", String::new()),
+            Store::Shared { directory, .. } => ("shared", directory.to_string_lossy().into_owned()),
         };
         let arguments = [
             mode.to_owned(),
@@ -436,15 +450,16 @@ impl BuildStateRelease {
     fn remediation(&self) -> String {
         let environment = match &self.store {
             Store::Native => String::new(),
-            Store::Shared {
-                directory,
-                target_root,
-            } => {
-                let mut environment = format!("MBX_CACHE_DIR={} ", directory.display());
-                if let Some(root) = target_root {
-                    environment.push_str(&format!("MBX_TARGET_ROOT={} ", root.display()));
-                }
-                environment
+            Store::Shared { directory, .. } => {
+                let root = self
+                    .store
+                    .release_target_root()
+                    .expect("a shared store has a root");
+                format!(
+                    "MBX_CACHE_DIR={} MBX_TARGET_ROOT={} ",
+                    directory.display(),
+                    root.display()
+                )
             }
         };
         let fallback = self
@@ -991,8 +1006,8 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache||/host/xdg\n\
-             clean /workspace/abc/lib|/srv/cache||/host/xdg\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n\
+             clean /workspace/abc/lib|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1009,7 +1024,7 @@ mod tests {
         assert_eq!(
             sandbox.log(),
             format!(
-                "clean --under {}|/srv/cache||/host/xdg\n",
+                "clean --under {}|/srv/cache|/srv/cache/targets|/host/xdg\n",
                 session.container_workspace.as_ref().unwrap().display()
             )
         );
@@ -1037,8 +1052,8 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache||/host/xdg\n\
-             clean /workspace/abc/nested/lib|/srv/cache||/host/xdg\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n\
+             clean /workspace/abc/nested/lib|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1067,6 +1082,40 @@ mod tests {
     }
 
     #[test]
+    fn shared_cache_cleanup_always_names_the_sessions_target_root_even_in_the_cache() {
+        let sandbox = Sandbox::new(true);
+        // A root recorded inside the cache, and a record that predates recording
+        // the root, both release what the session wrote, wherever the host's
+        // configuration points today.
+        for (recorded, expected) in [
+            (Some("/srv/cache/views"), "/srv/cache/views"),
+            (None, "/srv/cache/targets"),
+        ] {
+            let mut release = shared(&["/workspace/abc/app"]);
+            release.store = Store::Shared {
+                directory: "/srv/cache".into(),
+                target_root: recorded.map(PathBuf::from),
+            };
+            let output = sandbox.run(&release);
+            assert_eq!(output.status, 0, "{output:?}");
+            let log = sandbox.log();
+            assert!(
+                log.ends_with(&format!(
+                    "clean /workspace/abc/app|/srv/cache|{expected}|/host/xdg\n"
+                )),
+                "{log}"
+            );
+            assert!(
+                release
+                    .remediation()
+                    .contains(&format!("MBX_TARGET_ROOT={expected} mbx clean")),
+                "{}",
+                release.remediation()
+            );
+        }
+    }
+
+    #[test]
     fn legacy_local_cleanup_finds_any_versioned_private_binary() {
         let sandbox = Sandbox::new(false);
         let legacy_root = sandbox.path("data/mbx");
@@ -1079,7 +1128,7 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache||/host/xdg\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1094,7 +1143,7 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache||/host/xdg\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1224,7 +1273,7 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/other/lib|/srv/cache||/host/xdg\n"
+            "clean /workspace/other/lib|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 

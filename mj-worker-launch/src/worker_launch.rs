@@ -501,35 +501,34 @@ pub fn install_build_cache_shim(
             }
         };
     }
+    let cache = session
+        .build_cache
+        .as_ref()
+        .expect("checked above that the session has a build cache");
     let config_roots = build_cache_config_roots(launch);
-    // The policy snapshot goes first: an older private mbx, which keeps its
-    // own executable, is linked to it below. A host whose policy cannot be read
-    // or staged fails the launch rather than starting with stale policy.
-    let configuration = mj_build_cache::mbx::native_config_for_container(backend, executor)
-        .context("read the container host's mbx configuration")?;
-    let configuration_directory = stage_mbx_configuration(
-        executor,
-        backend,
-        &worker_root,
-        &configuration,
-        &config_roots,
-    )?;
-    if link_legacy_mbx_configuration(
-        executor,
-        backend,
-        &worker_root,
-        &configuration_directory,
-        &config_roots,
-    )? {
-        return Ok(());
-    }
+    // The build cache is optional: whatever keeps the host's policy or
+    // executable from reaching the container turns the cache off for this
+    // session, with a notice, instead of blocking the session from starting.
     let staged = (|| -> Result<Option<PathBuf>> {
+        // The policy snapshot goes first: an older private mbx, which keeps its
+        // own executable, is linked to it below.
+        let configuration =
+            mj_build_cache::mbx::native_config_for_container(backend, cache, executor)
+                .context("read the container host's mbx configuration")?;
+        let configuration_directory =
+            stage_mbx_configuration(executor, backend, &configuration, &config_roots)?;
+        if link_legacy_mbx_configuration(
+            executor,
+            backend,
+            &worker_root,
+            &configuration_directory,
+            &config_roots,
+        )? {
+            return Ok(None);
+        }
         let native = match mj_build_cache::mbx::native_mbx_for_container(backend, executor)? {
             mj_build_cache::mbx::NativeMbxLookup::Ready(native) => native,
-            mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => {
-                disable_mbx_cache_shims(&session.id, backend, &worker_root, executor, &reason);
-                return Ok(None);
-            }
+            mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => bail!("{reason}"),
         };
         stage_container_mbx(
             executor,
@@ -541,7 +540,19 @@ pub fn install_build_cache_shim(
         .map(Some)
     })();
     match staged {
-        Ok(Some(binary)) => install_mbx_shims(executor, backend, &worker_root, &binary),
+        Ok(Some(binary)) => {
+            install_mbx_shims(executor, backend, &worker_root, &binary).or_else(|error| {
+                disable_mbx_cache_shims(
+                    &session.id,
+                    backend,
+                    &worker_root,
+                    executor,
+                    &format!("{error:#}"),
+                );
+                Ok(())
+            })
+        }
+        // An older private mbx keeps its executable and now has its policy.
         Ok(None) => Ok(()),
         Err(error) => {
             disable_mbx_cache_shims(

@@ -352,11 +352,14 @@ pub fn worker_launch_config_with_checkout(
             // A private snapshot of the host's policy, staged before launch.
             target_environment.insert(
                 "MJ_MBX_CONFIG_DIR".into(),
-                mj_core::target_path::text(&mj_core::target_path::join(
-                    Path::new(&targets::worker_root(backend, session_id)?),
-                    Path::new("mbx-config"),
-                )),
+                super::install::CONTAINER_MBX_CONFIG_DIRECTORY.into(),
             );
+            // The root the container was created with, whatever the host's
+            // configuration says now.
+            if let Some(root) = &build_cache.target_root {
+                target_environment
+                    .insert("MBX_TARGET_ROOT".into(), mj_core::target_path::text(root));
+            }
         }
         // Compiler symlinks name this worker's private executable. Sharing
         // them lets another container replace them with an unreachable path.
