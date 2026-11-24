@@ -19,7 +19,6 @@
 package core
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -1745,13 +1744,7 @@ func (l *PlanLine) UnmarshalJSON(data []byte) error {
 // transcriptMarshal encodes v as serde_json does: compact, without Go's HTML
 // escaping of <, > and &.
 func transcriptMarshal(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return SerdeJSON(v)
 }
 
 // transcriptMarshalTagged encodes fields as an object that starts with

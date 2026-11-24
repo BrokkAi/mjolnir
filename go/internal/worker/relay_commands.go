@@ -81,7 +81,10 @@ func relayStagedSnapshot(snapshot *core.RelaySnapshot) core.RelaySnapshot {
 	next := *snapshot
 	next.PendingElicitations = maps.Clone(snapshot.PendingElicitations)
 	next.NativeAgents = maps.Clone(snapshot.NativeAgents)
-	next.NativeAgentReplay = maps.Clone(snapshot.NativeAgentReplay)
+	if snapshot.NativeAgentReplay != nil {
+		replay := maps.Clone(*snapshot.NativeAgentReplay)
+		next.NativeAgentReplay = &replay
+	}
 	next.CommandRetention = maps.Clone(snapshot.CommandRetention)
 	next.Config = maps.Clone(snapshot.Config)
 	next.DeliveredMailboxEventKeys = maps.Clone(snapshot.DeliveredMailboxEventKeys)
