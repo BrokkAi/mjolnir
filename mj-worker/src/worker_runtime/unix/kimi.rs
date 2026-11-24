@@ -50,10 +50,11 @@ impl KimiTaskMonitor {
         native_session_id: String,
         relay: &Arc<RelayCell>,
     ) -> Result<()> {
+        if self.native_session_id.as_ref() == Some(&native_session_id) {
+            return Ok(());
+        }
+        self.detach();
         self.native_session_id = Some(native_session_id);
-        self.follower = None;
-        self.consecutive_failures = 0;
-        self.retry_at = tokio::time::Instant::now();
         self.refresh(relay, true).await
     }
 
@@ -179,7 +180,20 @@ pub(crate) async fn prepare_kimi_runtime_event(
         RuntimeEvent::SessionStarted {
             native_session_id, ..
         } => monitor.attach(native_session_id.clone(), relay).await,
-        RuntimeEvent::SessionConfigured { .. } => monitor.refresh(relay, true).await,
+        RuntimeEvent::SessionConfigured { .. } => {
+            if monitor.native_session_id.is_none() {
+                let id = relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .operational_state()
+                    .native_session_id;
+                if let Some(id) = id {
+                    return monitor.attach(id, relay).await;
+                }
+            }
+            monitor.refresh(relay, true).await
+        }
+
         // The ACP runtime says this before it finishes a prompt that ended
         // with no session updates. When Kimi journalled a failure for that
         // turn, the failure is what happened, and it is what the person and

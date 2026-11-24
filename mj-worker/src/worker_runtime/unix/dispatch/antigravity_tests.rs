@@ -153,22 +153,38 @@ fn stop(relay: &mut DurableRelay, id: Option<&str>, fully_idle: Option<bool>, re
     ));
 }
 
-async fn stop_over_socket(home: &Path, relay: &Arc<RelayCell>, reason: &str) {
+fn credential_endpoint(harness: HarnessKind, home: &Path) -> CredentialEndpoint {
+    CredentialEndpoint {
+        no_github_credentials: true,
+        harness,
+        home: home.to_owned(),
+        marker: mj_core::config::harness_authentication_marker(harness, home),
+    }
+}
+
+fn stop_connection(
+    relay: &Arc<RelayCell>,
+    credentials: SharedCredentials,
+) -> (
+    tokio::task::JoinHandle<Result<()>>,
+    BufReader<UnixStream>,
+    mpsc::Receiver<()>,
+) {
     let (server, client) = UnixStream::pair().unwrap();
-    let (wake, _wakes) = mpsc::channel(1);
+    let (wake, wakes) = mpsc::channel(1);
     let (fatal, _errors) = mpsc::channel(1);
-    let task = mj_core::runtime::spawn(serve_client_with_memory(
+    let task = mj_core::runtime::spawn(serve_client_with_shared_credentials(
         server,
         relay.clone(),
         wake,
-        Err("fixture has no credentials".into()),
-        ConnectionRuntime {
-            antigravity_home: Some(home.to_owned()),
-            ..Default::default()
-        },
+        credentials,
+        ConnectionRuntime::default(),
         fatal,
     ));
-    let mut client = BufReader::new(client);
+    (task, BufReader::new(client), wakes)
+}
+
+async fn send_stop(client: &mut BufReader<UnixStream>, reason: &str) {
     let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
         request_id: "stop-hook".into(),
         protocol_version: RELAY_PROTOCOL_VERSION,
@@ -194,6 +210,15 @@ async fn stop_over_socket(home: &Path, relay: &Arc<RelayCell>, reason: &str) {
             payload: RelayResponsePayload::AntigravityStopObserved,
         },
     ));
+}
+
+async fn stop_over_socket(home: &Path, relay: &Arc<RelayCell>, reason: &str) {
+    let credentials = SharedCredentials::new(
+        HarnessKind::Antigravity,
+        Ok(credential_endpoint(HarnessKind::Antigravity, home)),
+    );
+    let (task, mut client, _wakes) = stop_connection(relay, credentials);
+    send_stop(&mut client, reason).await;
     drop(client);
     task.await.unwrap().unwrap();
 }
@@ -273,8 +298,8 @@ async fn antigravity_coordinator_orders_stop_after_buffered_output_and_preserves
         commands,
         shells,
         TaskMonitors {
-            kimi: None,
             antigravity: Some(AntigravityTaskMonitor::new(Ok(temp.path().to_owned()))),
+            ..TaskMonitors::default()
         },
         None,
         None,
@@ -818,4 +843,201 @@ async fn antigravity_broken_database_refuses_idle_reservation_until_recovery() {
     let _databases = Databases::create(temp.path());
     monitor.refresh(&relay, true).await.unwrap();
     assert!(reserve_idle(&mut relay.lock().unwrap()));
+}
+
+fn switch_policies(relay: &Arc<RelayCell>, harness: HarnessKind) {
+    let mut state = relay.lock().unwrap();
+    state.set_turn_verdict_harness(harness);
+    state.set_harness_turn_policy(harness_turn_policy_for(harness));
+    state.set_background_work_policy(background_work_policy_for(harness));
+    state.retire_harness_process_state().unwrap();
+}
+
+async fn switch_to_antigravity(configured_before_target: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(
+            temp.path().join("relay"),
+            crate::relay::test_support::SESSION,
+            "test",
+        )
+        .unwrap(),
+    ));
+    switch_policies(&relay, HarnessKind::Claude);
+    let claude = credential_endpoint(HarnessKind::Claude, &temp.path().join("claude"));
+    let credentials = SharedCredentials::new(HarnessKind::Claude, Ok(claude.clone()));
+    let (event_tx, events) = mpsc::channel(8);
+    let (_wake, wakes) = mpsc::channel(1);
+    let (commands, _command_rx) = mpsc::channel(1);
+    let (shell_events, _shell_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().to_owned(),
+        BTreeMap::new(),
+        shell_events,
+    );
+    event_tx
+        .try_send(RuntimeEvent::SessionStarted {
+            native_session_id: "old-claude-conversation".into(),
+            resumed: true,
+            execution_mode: None,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    event_tx.try_send(configured_event()).unwrap();
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
+        relay.clone(),
+        events,
+        wakes,
+        commands,
+        shells,
+        TaskMonitors::new(credentials.subscribe_task_monitors()),
+        None,
+        None,
+        None,
+    ));
+    wait_state(&relay, |state| state.native_session_is_ready()).await;
+
+    switch_policies(&relay, HarnessKind::Antigravity);
+    let antigravity = credential_endpoint(HarnessKind::Antigravity, temp.path());
+    if !configured_before_target {
+        credentials
+            .set(HarnessKind::Antigravity, Ok(antigravity.clone()))
+            .await;
+    }
+    event_tx
+        .try_send(RuntimeEvent::HarnessRestarting {
+            message: "switch harness".into(),
+        })
+        .unwrap();
+    event_tx.try_send(opened_event()).unwrap();
+    event_tx.try_send(configured_event()).unwrap();
+    wait_state(&relay, |state| {
+        state.native_session_id.as_deref() == Some(NATIVE) && state.native_session_is_ready()
+    })
+    .await;
+    if configured_before_target {
+        {
+            let mut state = relay.lock().unwrap();
+            assert_eq!(state.operational_state().background_work_known, Some(false));
+            pre_invocation(&mut state, Some(NATIVE));
+            assert!(state.operational_state().harness_turn.is_some());
+        }
+        databases.set_summary(RUNNING, false);
+        credentials
+            .set(HarnessKind::Antigravity, Ok(antigravity))
+            .await;
+        wait_state(&relay, |state| state.background_work_known == Some(true)).await;
+        databases.set_summary(IDLE, false);
+        wait_state(&relay, |state| state.harness_turn.is_none()).await;
+    } else {
+        wait_state(&relay, |state| state.background_work_known == Some(true)).await;
+    }
+
+    // Switching away retires the previous database's work and removes its monitor.
+    let mut monitors = TaskMonitors::new(credentials.subscribe_task_monitors());
+    assert!(monitors.antigravity.is_some());
+    switch_policies(&relay, HarnessKind::Claude);
+    credentials.set(HarnessKind::Claude, Ok(claude)).await;
+    assert!(monitors.sync_target());
+    assert!(monitors.antigravity.is_none());
+    assert_eq!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_work_known,
+        None
+    );
+
+    drop(event_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+// Hard-won: a5eed662d: configuring Antigravity before the target update left its autonomous turns without SQLite recovery.
+#[tokio::test]
+async fn antigravity_in_place_configured_before_target_recovers_autonomous_turn() {
+    switch_to_antigravity(true).await;
+}
+
+// Hard-won: a5eed662d: switching in place left the monitor bound to the startup harness.
+#[tokio::test]
+async fn antigravity_in_place_target_before_restart_attaches_new_conversation() {
+    switch_to_antigravity(false).await;
+}
+
+// Hard-won: a5eed662d: existing control connections kept the startup Stop-hook home after a switch.
+#[tokio::test]
+async fn antigravity_stop_samples_live_home_on_existing_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    let claude = credential_endpoint(HarnessKind::Claude, &temp.path().join("claude"));
+    let credentials = SharedCredentials::new(HarnessKind::Claude, Ok(claude.clone()));
+    let (task, mut client, _wakes) = stop_connection(&relay, credentials.clone());
+
+    credentials
+        .set(
+            HarnessKind::Antigravity,
+            Ok(credential_endpoint(HarnessKind::Antigravity, temp.path())),
+        )
+        .await;
+    databases.set_step_count(1);
+    pre_invocation(&mut relay.lock().unwrap(), Some(NATIVE));
+    send_stop(&mut client, "NO_TOOL_CALL").await;
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .settle_pending_antigravity_harness_turn()
+            .unwrap()
+    );
+    monitor.refresh(&relay, true).await.unwrap();
+    // This row was first seen by Stop, so the same row cannot clear its pending work.
+    assert!(
+        !relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_commands
+            .is_empty()
+    );
+    databases.set_step_count(2);
+    monitor.refresh(&relay, true).await.unwrap();
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_commands
+            .is_empty()
+    );
+
+    // Keep the relay policy accepting Stop here to isolate the home lookup.
+    credentials.set(HarnessKind::Claude, Ok(claude)).await;
+    databases.set_step_count(3);
+    pre_invocation(&mut relay.lock().unwrap(), Some(NATIVE));
+    send_stop(&mut client, "NO_TOOL_CALL").await;
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .settle_pending_antigravity_harness_turn()
+            .unwrap()
+    );
+    monitor.refresh(&relay, true).await.unwrap();
+    // Stop cannot sample the latest row, so the monitor's next scan clears pending work.
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_commands
+            .is_empty()
+    );
+
+    drop(client);
+    task.await.unwrap().unwrap();
 }

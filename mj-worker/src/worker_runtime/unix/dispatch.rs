@@ -63,14 +63,96 @@ impl HarnessStartup {
 struct TaskMonitors {
     kimi: Option<KimiTaskMonitor>,
     antigravity: Option<AntigravityTaskMonitor>,
+    target_rx: Option<watch::Receiver<(u64, TaskMonitorTarget)>>,
+    applied_generation: u64,
 }
 
 impl TaskMonitors {
+    fn new(mut target_rx: watch::Receiver<(u64, TaskMonitorTarget)>) -> Self {
+        let (generation, target) = target_rx.borrow_and_update().clone();
+        let mut monitors = Self {
+            target_rx: Some(target_rx),
+            ..Self::default()
+        };
+        monitors.apply_target(generation, target);
+        monitors
+    }
+
+    fn apply_target(&mut self, generation: u64, target: TaskMonitorTarget) {
+        self.applied_generation = generation;
+        (self.kimi, self.antigravity) = match target {
+            TaskMonitorTarget::None => (None, None),
+            TaskMonitorTarget::Kimi(home) => (Some(KimiTaskMonitor::new(home)), None),
+            TaskMonitorTarget::Antigravity(home) => (None, Some(AntigravityTaskMonitor::new(home))),
+        };
+    }
+
+    fn sync_target(&mut self) -> bool {
+        let Some(target_rx) = &mut self.target_rx else {
+            return false;
+        };
+        if target_rx.borrow().0 == self.applied_generation {
+            return false;
+        }
+        let (generation, target) = target_rx.borrow_and_update().clone();
+        self.apply_target(generation, target);
+        true
+    }
+
+    fn has_target_rx(&self) -> bool {
+        self.target_rx.is_some()
+    }
+
+    async fn target_changed(&mut self) -> bool {
+        let Some(target_rx) = &mut self.target_rx else {
+            return false;
+        };
+        if target_rx.changed().await.is_ok() {
+            true
+        } else {
+            self.target_rx = None;
+            false
+        }
+    }
+
+    async fn reconcile_and_attach(
+        &mut self,
+        relay: &Arc<RelayCell>,
+        session_configured: bool,
+    ) -> Result<()> {
+        self.sync_target();
+        if !session_configured {
+            return Ok(());
+        }
+        let id = relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .operational_state()
+            .native_session_id;
+        if let Some(id) = id {
+            if let Some(monitor) = self.antigravity.as_mut() {
+                monitor.attach(id.clone(), relay).await?;
+            }
+            if let Some(monitor) = self.kimi.as_mut() {
+                // Attaching a new conversation also refreshes its journal.
+                monitor.attach(id, relay).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn prepare_event(
         &mut self,
         relay: &Arc<RelayCell>,
         event: &mut RuntimeEvent,
     ) -> Result<()> {
+        if self.sync_target()
+            && let Some(target_rx) = &mut self.target_rx
+        {
+            // An unrelated event may see the update after SessionConfigured.
+            // Preserve the wake that attaches the replacement after the batch.
+            target_rx.mark_changed();
+        }
         prepare_kimi_runtime_event(&mut self.kimi, relay, event).await?;
         prepare_antigravity_runtime_event(&mut self.antigravity, relay, event).await
     }
@@ -83,8 +165,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
     dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
-    kimi_tasks: Option<KimiTaskMonitor>,
-    antigravity_tasks: Option<AntigravityTaskMonitor>,
+    task_monitor_targets: watch::Receiver<(u64, TaskMonitorTarget)>,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
 ) -> Result<()> {
@@ -95,10 +176,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
         dispatch_wakes,
         commands,
         user_shells,
-        TaskMonitors {
-            kimi: kimi_tasks,
-            antigravity: antigravity_tasks,
-        },
+        TaskMonitors::new(task_monitor_targets),
         verdict,
         capture,
         Some(startup),
@@ -505,6 +583,39 @@ fn run_relay_coordinator(
                         session_configuration.is_ready(),
                         &mut user_shells,
                     )?;
+                }
+                changed = task_monitors.target_changed(), if task_monitors.has_target_rx() && !held => {
+                    if changed {
+                        // A queued restart invalidates readiness for the old conversation.
+                        let queued = events.len();
+                        let mut capturing = capture.as_ref().map(|observer| Capture {
+                            observer,
+                            wakes: &mut dispatch_wakes,
+                        });
+                        if record_queued_runtime_events(
+                            &relay,
+                            &mut in_flight,
+                            &mut events,
+                            &mut session_configuration,
+                            &mut user_shells,
+                            &mut task_monitors,
+                            queued,
+                            capturing.as_mut(),
+                            startup.as_mut(),
+                        ).await? {
+                            verdict_tasks.shutdown().await;
+                            return Ok(());
+                        }
+                        task_monitors.reconcile_and_attach(&relay, session_configuration.is_ready()).await?;
+                        recover_authentication(&relay)?;
+                        dispatch_pending(
+                            &relay,
+                            &commands,
+                            &mut in_flight,
+                            session_configuration.is_ready(),
+                            &mut user_shells,
+                        )?;
+                    }
                 }
                 _ = tokio::time::sleep_until(mailbox_lease_wake_at), if mailbox_lease_deadline.is_some() && !held => {
                     let deadline = mailbox_lease_deadline.expect("guarded mailbox lease timer");

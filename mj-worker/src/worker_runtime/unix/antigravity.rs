@@ -81,7 +81,11 @@ impl AntigravityTaskMonitor {
         self.last_warning = None;
     }
 
-    async fn attach(&mut self, native_session_id: String, relay: &Arc<RelayCell>) -> Result<()> {
+    pub(super) async fn attach(
+        &mut self,
+        native_session_id: String,
+        relay: &Arc<RelayCell>,
+    ) -> Result<()> {
         if self.native_session_id.as_ref() == Some(&native_session_id) {
             return Ok(());
         }

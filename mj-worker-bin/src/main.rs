@@ -240,7 +240,7 @@ enum WorkerCommand {
     MailboxHook {
         #[arg(long)]
         socket: PathBuf,
-        #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
+        #[arg(long, value_parser = ["PostToolUse", "PostToolBatch", "Stop"])]
         event: String,
         #[arg(long, default_value = "standard", value_parser = ["standard", "antigravity"])]
         format: String,
