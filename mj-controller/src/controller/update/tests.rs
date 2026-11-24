@@ -222,11 +222,55 @@ fn release_newer_than_current_requires_checksum_asset() {
 }
 
 #[test]
-fn prompt_eof_declines_but_enter_accepts() {
-    assert!(!read_update_answer(&mut Cursor::new(b"")).expect("read EOF"));
-    assert!(read_update_answer(&mut Cursor::new(b"\n")).expect("read Enter"));
-    assert!(read_update_answer(&mut Cursor::new(b"yes\n")).expect("read yes"));
-    assert!(!read_update_answer(&mut Cursor::new(b"n\n")).expect("read no"));
+fn update_prompt_answer_respects_the_default_and_declines_on_eof() {
+    for default_yes in [false, true] {
+        assert!(!read_update_answer(&mut Cursor::new(b""), default_yes).expect("read EOF"));
+        assert_eq!(
+            read_update_answer(&mut Cursor::new(b"\n"), default_yes).expect("read Enter"),
+            default_yes
+        );
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n"] {
+            assert!(read_update_answer(&mut Cursor::new(answer), default_yes).expect("read yes"));
+        }
+        assert!(!read_update_answer(&mut Cursor::new(b"n\n"), default_yes).expect("read no"));
+    }
+}
+
+#[test]
+fn update_prompt_warns_about_the_ssh_daemon_and_defaults_to_no() {
+    let version = Version::parse("2.5.0").expect("version");
+    let method = InstallMethod::Direct;
+    assert_eq!(
+        update_prompt(&version, &method, "2.4.0", Some("dev@linuxbox")),
+        concat!(
+            "mj 2.5.0 is available through GitHub Releases; current version is 2.4.0.\n",
+            "Your daemon runs over SSH on dev@linuxbox, which must also be updated to 2.5.0 to connect.\n",
+            "Upgrade this client now? [y/N] "
+        )
+    );
+    assert_eq!(
+        update_prompt(&version, &method, "2.4.0", None),
+        "mj 2.5.0 is available through GitHub Releases; current version is 2.4.0. Upgrade now? [Y/n] "
+    );
+}
+
+#[test]
+fn notice_only_update_names_the_ssh_daemon_and_required_version() {
+    let version = Version::parse("2.5.0").expect("version");
+    for method in [
+        InstallMethod::Npx,
+        InstallMethod::Cargo {
+            voice_worker: false,
+        },
+    ] {
+        let local = managed_update_notice(&version, &method, "2.4.0", None).expect("local notice");
+        let remote = managed_update_notice(&version, &method, "2.4.0", Some("dev@linuxbox"))
+            .expect("SSH notice");
+        assert_eq!(
+            remote,
+            format!("{local} (your SSH daemon on dev@linuxbox must also run 2.5.0)")
+        );
+    }
 }
 
 #[test]
@@ -242,7 +286,8 @@ fn golden_mj_update_output() {
             },
         ),
     ] {
-        let notice = managed_update_notice(&version, &method, "2.4.0").expect("update notice");
+        let notice =
+            managed_update_notice(&version, &method, "2.4.0", None).expect("update notice");
         output.push_str(&format!(
             "=== {label} update notice (stdout) ===\n{notice}\n\n"
         ));

@@ -2471,6 +2471,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
+        suspend_capture: None,
         review_capture: false,
         review_trigger: Default::default(),
         session_id: SESSION.into(),
@@ -5363,6 +5364,69 @@ fn missing_sqlite_recovery_publishes_a_complete_wal_snapshot_before_other_artifa
                 .get::<_, String>(0))
             .unwrap(),
         "newer conversation"
+    );
+}
+
+#[test]
+fn origin_delta_export_accepts_a_preserved_legacy_capture_launch() {
+    use mj_core::worker_suspend as wire;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec.workspace_root.join("app");
+    let origin = temp.path().join("origin.git");
+    let origin = origin.to_str().unwrap();
+    git(&checkout, &["clone", "--bare", ".", origin]);
+    git(&checkout, &["remote", "set-url", "origin", origin]);
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDelta;
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    let legacy_launch = json!({
+        "run_mode": "checkpoint_only",
+        "session_id": spec.session.id,
+        "harness": "codex",
+        "bridge_command": "codex-acp",
+        "bridge_args": [],
+        "environment": {},
+        "cwd": checkout,
+        "force_unrestricted_mode": true
+    });
+    wire::write(&spec.relay_root, "launch.json", &legacy_launch).unwrap();
+    wire::write(
+        &spec.relay_root,
+        wire::REQUEST,
+        &json!({
+            "operation": "origin-delta-suspend-legacy",
+            "worker": {"pid": 42, "start": 0},
+            "checkout": checkout
+        }),
+    )
+    .unwrap();
+    wire::write(
+        &spec.relay_root,
+        wire::RECEIPT,
+        &json!({"operation": "other-suspend", "error": null}),
+    )
+    .unwrap();
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(
+        error.to_string().contains("successful quiescence receipt"),
+        "{error:#}"
+    );
+
+    wire::write(
+        &spec.relay_root,
+        wire::RECEIPT,
+        &json!({"operation": "origin-delta-suspend-legacy", "error": null}),
+    )
+    .unwrap();
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    assert!(
+        archive.manifest.repositories[0]
+            .metadata
+            .origin_delta
+            .is_some()
     );
 }
 

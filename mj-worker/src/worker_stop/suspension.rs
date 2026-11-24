@@ -1,6 +1,5 @@
-//! The live worker owns the stop and reports its result even across daemon
-//! replacement. A receipt is published only after the harness and every
-//! attributable descendant have exited.
+//! Process quiescence for the live worker's cooperative stop and for the
+//! checkpoint-only worker before it opens the journal.
 
 use std::io;
 #[cfg(target_os = "linux")]
@@ -8,7 +7,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+use mj_core::refusal::Refusal;
+use mj_core::worker_suspend::{
+    self as wire, SuspendCapture, SuspendReceipt, SuspendRequest, WorkerIdentity,
+};
 use tokio::signal::unix::{Signal, SignalKind};
 
 use super::process_table::{ProcessEntry, lookup, table};
@@ -230,19 +232,32 @@ fn marked_process(pid: u32, session_id: &str) -> bool {
     darwin_environment::has_marker(pid, format!("MJ_SESSION_ID={session_id}").as_bytes())
 }
 
-fn terminate_session_processes(
+pub(crate) fn terminate_session_processes(
     root: &Path,
     session_id: &str,
-    request: &SuspendRequest,
+    capture: &SuspendCapture,
+    cooperative: bool,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     use mj_core::subprocess::orphans::{has_children, reap_adopted_children};
 
     let worker_pid = std::process::id();
+    let mut excluded = vec![worker_pid];
+    if !cooperative {
+        // A launcher can pass its session marker to the capture worker.
+        // Protect its ancestry from signals, but still check checkout holders.
+        let mut pid = worker_pid;
+        while let Some(entry) = lookup(pid)? {
+            if entry.ppid == 0 || excluded.contains(&entry.ppid) {
+                break;
+            }
+            pid = entry.ppid;
+            excluded.push(pid);
+        }
+    }
     let session_ids = std::iter::once(session_id)
-        .chain(request.child_sessions.iter().map(String::as_str))
+        .chain(capture.child_sessions.iter().map(String::as_str))
         .collect::<Vec<_>>();
-    let marked = |pid| session_ids.iter().any(|id| marked_process(pid, id));
     let tree_contains = |process: &ProcessEntry| {
         // Walk to this worker while validating each live parent. A descendant
         // reparented mid-scan is found on the next pass.
@@ -261,37 +276,38 @@ fn terminate_session_processes(
         }
         false
     };
+    let owns = |entry: &ProcessEntry| {
+        session_ids.iter().any(|id| marked_process(entry.pid, id))
+            || (cooperative && tree_contains(entry))
+    };
 
     let mut waiting_for = Vec::new();
     loop {
         #[cfg(target_os = "linux")]
-        let no_children = {
+        let no_children = if cooperative {
             reap_adopted_children()?;
             !has_children()?
+        } else {
+            true
         };
         #[cfg(target_os = "macos")]
         let no_children = true;
         let mut survivors = Vec::new();
         for entry in table()? {
-            if entry.pid == worker_pid
-                || entry.zombie
-                || !(marked(entry.pid) || tree_contains(&entry))
-            {
+            if excluded.contains(&entry.pid) || entry.zombie || !owns(&entry) {
                 continue;
             }
-            signal_verified(&entry, libc::SIGKILL, |entry| {
-                marked(entry.pid) || tree_contains(entry)
-            })
-            .with_context(|| format!("terminate session process {}", entry.pid))?;
+            signal_verified(&entry, libc::SIGKILL, owns)
+                .with_context(|| format!("terminate session process {}", entry.pid))?;
             survivors.push(entry.pid);
         }
         if no_children && survivors.is_empty() {
             break;
         }
         survivors.sort_unstable();
-        if waiting_for != survivors {
+        if cooperative && waiting_for != survivors {
             let progress = wire::SuspendProgress {
-                operation: request.operation.clone(),
+                operation: capture.operation.clone(),
                 remaining_pids: survivors,
             };
             wire::write(root, wire::PROGRESS, &progress)?;
@@ -299,12 +315,14 @@ fn terminate_session_processes(
         }
         std::thread::sleep(super::POLL_INTERVAL);
     }
-    let holders = checkout_holders(&request.checkout)?;
-    ensure!(
-        holders.is_empty(),
-        "Mjolnir cannot prove these processes belong to this session; stop them, then retry: {}",
-        holders.join("; ")
-    );
+    let holders = checkout_holders(&capture.checkout)?;
+    if !holders.is_empty() {
+        return Err(Refusal::precondition(format!(
+            "Mjolnir cannot prove these processes belong to this session; stop them, then retry: {}",
+            holders.join("; ")
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -319,9 +337,14 @@ pub async fn finish(root: PathBuf, session_id: String, request: SuspendRequest) 
     #[cfg(target_os = "linux")]
     mj_core::subprocess::orphans::seal_spawns();
     mj_core::runtime::spawn_blocking(move || {
-        let outcome = terminate_session_processes(&root, &session_id, &request);
-        let receipt = SuspendReceipt {
+        let capture = SuspendCapture {
             operation: request.operation,
+            checkout: request.checkout,
+            child_sessions: request.child_sessions,
+        };
+        let outcome = terminate_session_processes(&root, &session_id, &capture, true);
+        let receipt = SuspendReceipt {
+            operation: capture.operation,
             error: outcome.err().map(|error| format!("{error:#}")),
         };
         wire::write(&root, wire::RECEIPT, &receipt)

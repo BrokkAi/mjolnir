@@ -8,7 +8,7 @@ use mj_core::subagent::SubagentKind;
 type Children<'a> = BTreeMap<String, Vec<(&'a str, Option<SubagentKind>)>>;
 
 fn is_active_member(record: &SessionRecord) -> bool {
-    record.state.has_live_worker() && !record.archived
+    !record.archived
 }
 
 fn children(runtime: &RuntimeProjection) -> Children<'_> {
@@ -22,9 +22,6 @@ fn children(runtime: &RuntimeProjection) -> Children<'_> {
         }
     }
     for (id, child) in &runtime.native_agents {
-        if child.agent.state != NativeAgentState::Running {
-            continue;
-        }
         let parent = child.agent.parent_view_id();
         children.entry(parent).or_default().push((id, None));
     }
@@ -35,7 +32,7 @@ fn interrupt_targets<'a>(
     root: &'a str,
     runtime: &RuntimeProjection,
     children: &Children<'a>,
-    verdict: impl Fn(&str) -> Option<SessionVerdict>,
+    mut verdict: impl FnMut(&str) -> Option<SessionVerdict>,
 ) -> Vec<&'a str> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
@@ -210,6 +207,16 @@ pub(crate) fn projected_activity(
     )
 }
 
+fn review_working(runtime: &RuntimeProjection, id: &str) -> bool {
+    mj_client::review::any_working(
+        runtime
+            .metadata
+            .reviews
+            .iter()
+            .filter(|review| review.session_id == id),
+    )
+}
+
 fn own_verdict(
     runtime: &RuntimeProjection,
     committed: Option<&mj_controller::database::CommittedState>,
@@ -245,25 +252,23 @@ fn own_verdict(
     let view = runtime.sessions.get(id);
     let live = view.and_then(|v| v.operational.as_deref());
     let form = has_waiting_form(view);
-    let attention = runtime.metadata.session_attention.get(id);
     let running = live.is_some_and(|live| {
-        live.active_prompt.is_some()
-            || live.harness_turn.is_some()
-            || live.goal.running()
-            || live
-                .capacity_retry
-                .as_ref()
-                .is_some_and(|retry| !retry.submitted)
-            || live
-                .continuation
-                .quota_recovery
-                .as_ref()
-                .is_some_and(|retry| !retry.submitted)
+        live.has_running_turn_or_retry()
             || runtime
                 .transcripts
                 .get(id)
                 .is_some_and(|tail| tail.header.active_turn.is_some())
     });
+    let connected_worker = state == SessionState::Running && view.is_some_and(|v| v.connected);
+    let held = connected_worker && subagent_waiting_for_background(runtime, committed, id, live);
+    let launching = matches!(
+        transition,
+        Some(
+            SessionTransitionKind::Starting
+                | SessionTransitionKind::Resuming
+                | SessionTransitionKind::Moving
+        )
+    ) || state == SessionState::Checkpointing;
     let question = !form && super::attention::semantic_question(runtime, id).is_some();
     let unfinished_turn =
         state.has_live_worker() && live.is_some() && (running || form || question);
@@ -296,22 +301,22 @@ fn own_verdict(
     } else {
         NoRecoveryCopy
     };
+    let review_working = review_working(runtime, id);
     SessionVerdict {
         transition,
         transition_failure,
         live_dashboard: !record.archived && (state.is_active() || transition.is_some()),
-        needs_person: needs_person(attention),
         move_queue_held: queue_held,
         idle: transition.is_none()
             && (state == SessionState::Parked
                 || state == SessionState::Running && projected_activity(view).is_idle()),
-        working: state == SessionState::Running
-            && view.is_some_and(|v| v.connected)
-            && (live.is_some_and(|live| {
-                mj_client::usage_format::SessionActivity::of(live).is_working(None, form)
-            }) || subagent_waiting_for_background(runtime, committed, id, live)),
+        working: (connected_worker && live.is_some_and(|live| live.is_computing(form)))
+            || held
+            || launching
+            || review_working,
+        review_working,
         active_work,
-        unfinished: unfinished_turn || active_work,
+        unfinished: unfinished_turn || active_work || held || launching,
         interrupt: turn_targetable,
         interrupt_shell: can_interrupt
             && live.is_some_and(|live| !live.active_user_shells.is_empty()),
@@ -354,9 +359,48 @@ fn own_verdict(
     }
 }
 
-/// Revisit only changed inputs. A child can affect every ancestor's Interrupt
-/// All offer, and a reparent can affect both its old and new family.
+#[cfg(test)]
 pub(crate) fn project(
+    runtime: &mut RuntimeProjection,
+    previous: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
+    previous_committed: Option<&mj_controller::database::CommittedState>,
+) {
+    project_activity(runtime, previous, committed, previous_committed);
+    stamp_needs_person(runtime, previous);
+}
+
+pub(crate) fn stamp_needs_person(runtime: &mut RuntimeProjection, previous: &RuntimeProjection) {
+    let attention = &runtime.metadata.session_attention;
+    let ids: BTreeSet<_> = previous
+        .metadata
+        .session_attention
+        .changes(attention)
+        .map(|(id, _)| id)
+        .chain(
+            previous
+                .verdicts
+                .changes(&runtime.verdicts)
+                .map(|(id, _)| id),
+        )
+        .filter(|id| {
+            runtime.verdicts.get(id.as_str()).is_some_and(|verdict| {
+                verdict.needs_person != needs_person(attention.get(id.as_str()))
+            })
+        })
+        .cloned()
+        .collect();
+    for id in ids {
+        runtime
+            .verdicts
+            .get_mut(&id)
+            .expect("existing verdict")
+            .needs_person = needs_person(attention.get(&id));
+    }
+}
+
+/// Revisit only changed inputs and their ancestors in both snapshots.
+pub(crate) fn project_activity(
     runtime: &mut RuntimeProjection,
     previous: &RuntimeProjection,
     committed: Option<&mj_controller::database::CommittedState>,
@@ -402,20 +446,6 @@ pub(crate) fn project(
                 .changes(&runtime.transcripts)
                 .map(|(id, _)| id.as_str()),
         )
-        .chain(
-            previous
-                .metadata
-                .session_attention
-                .changes(&runtime.metadata.session_attention)
-                .map(|(id, _)| id.as_str()),
-        )
-        .chain(
-            previous
-                .metadata
-                .notification_dismissals
-                .changes(&runtime.metadata.notification_dismissals)
-                .map(|(id, _)| id.as_str()),
-        )
         .collect();
     if previous.metadata.lifecycles != runtime.metadata.lifecycles {
         changed.extend(
@@ -431,6 +461,31 @@ pub(crate) fn project(
         || previous.metadata.workspaces.len() != runtime.metadata.workspaces.len()
     {
         changed.extend(runtime.records.keys().map(String::as_str));
+    }
+    if previous.metadata.reviews != runtime.metadata.reviews {
+        fn reviews_by_session(
+            reviews: &[mj_client::review::RuntimeReviewView],
+        ) -> BTreeMap<&str, Vec<&mj_client::review::RuntimeReviewView>> {
+            let mut grouped = BTreeMap::<_, Vec<_>>::new();
+            for review in reviews {
+                grouped
+                    .entry(review.session_id.as_str())
+                    .or_default()
+                    .push(review);
+            }
+            grouped
+        }
+        let before = reviews_by_session(&previous.metadata.reviews);
+        let after = reviews_by_session(&runtime.metadata.reviews);
+        changed.extend(
+            previous
+                .metadata
+                .reviews
+                .iter()
+                .chain(&runtime.metadata.reviews)
+                .map(|review| review.session_id.as_str())
+                .filter(|id| before.get(*id) != after.get(*id)),
+        );
     }
     match (previous_committed, committed) {
         (Some(prev), Some(curr)) => {
@@ -452,71 +507,39 @@ pub(crate) fn project(
         runtime.verdicts = verdicts;
         return;
     }
+    // Keep the worker's own state separate from the published family verdict.
+    // Unchanged descendants may still have busy descendants of their own.
+    let mut own = BTreeMap::new();
+    let mut own_of = |id: &str| {
+        *own.entry(id.to_owned()).or_insert_with(|| {
+            if let Some(record) = runtime.records.get(id) {
+                Some(own_verdict(
+                    runtime,
+                    committed,
+                    id,
+                    record,
+                    lifecycles.get(id).copied(),
+                ))
+            } else {
+                runtime.native_agents.get(id).map(|native| {
+                    let running = native.agent.state == NativeAgentState::Running;
+                    SessionVerdict {
+                        working: running,
+                        unfinished: running,
+                        interrupt_member: running && native.agent.capabilities.cancel,
+                        ..Default::default()
+                    }
+                })
+            }
+        })
+    };
+
     let mut families = BTreeSet::new();
     for id in changed {
-        let verdict = if let Some(record) = runtime.records.get(id) {
-            Some(own_verdict(
-                runtime,
-                committed,
-                id,
-                record,
-                lifecycles.get(id).copied(),
-            ))
-        } else {
-            runtime.native_agents.get(id).map(|native| {
-                let running = native.agent.state == NativeAgentState::Running;
-                SessionVerdict {
-                    working: running,
-                    unfinished: running,
-                    interrupt_member: running && native.agent.capabilities.cancel,
-                    needs_person: needs_person(runtime.metadata.session_attention.get(id)),
-                    ..Default::default()
-                }
-            })
-        };
-        let before = previous.verdicts.get(id).copied();
-        let rollup_changed = match (before, verdict) {
-            (Some(old), Some(new)) => {
-                (
-                    old.working,
-                    old.unfinished,
-                    old.interrupt_member,
-                    old.move_queue_held,
-                ) != (
-                    new.working,
-                    new.unfinished,
-                    new.interrupt_member,
-                    new.move_queue_held,
-                )
-            }
-            (None, None) => false,
-            _ => true,
-        };
-        let parent_changed = previous.subagents.get(id) != runtime.subagents.get(id)
-            || previous.native_agents.get(id).map(|view| &view.agent)
-                != runtime.native_agents.get(id).map(|view| &view.agent)
-            || previous.records.get(id).map(is_active_member)
-                != runtime.records.get(id).map(is_active_member);
-        match verdict {
-            Some(mut verdict) => {
-                if let Some(old) = before {
-                    verdict.working_children = old.working_children;
-                    verdict.unfinished_children = old.unfinished_children;
-                    verdict.interrupt_count = old.interrupt_count;
-                    verdict.interrupt_all = old.interrupt_all;
-                }
-                if before != Some(verdict) {
-                    verdicts.insert(id.to_owned(), verdict);
-                }
-            }
-            None => {
-                verdicts.remove(id);
-            }
-        }
-        if !rollup_changed && !parent_changed {
-            continue;
-        }
-        if before.is_some_and(|v| v.move_queue_held) != verdict.is_some_and(|v| v.move_queue_held) {
+        let before = previous.verdicts.get(id);
+        if before.is_some_and(|v| v.move_queue_held)
+            != own_of(id).is_some_and(|v| v.move_queue_held)
+        {
             let prefix = mj_core::native_agent::owner_view_id_prefix(id);
             families.extend(runtime.native_agents.keys_with_prefix(&prefix).cloned());
         }
@@ -542,44 +565,65 @@ pub(crate) fn project(
         }
     }
 
-    if families.is_empty() {
-        runtime.verdicts = verdicts;
-        return;
-    }
     let children = children(runtime);
-    let own = verdicts.clone();
     for id in families {
-        let Some(mut verdict) = own.get(&id).copied() else {
+        let Some(mut verdict) = own_of(&id) else {
+            verdicts.remove(&id);
             continue;
         };
-        verdict.working_children = 0;
-        verdict.unfinished_children = 0;
+        let mut seen = BTreeSet::from([id.as_str()]);
         let mut native_working = BTreeSet::new();
+        let mut direct_native_working = BTreeSet::new();
         for &(child, kind) in children.get(&id).into_iter().flatten() {
-            let Some(child_verdict) = own.get(child) else {
-                continue;
-            };
-            match kind {
-                Some(kind) => {
-                    verdict.unfinished_children += usize::from(child_verdict.unfinished);
-                    verdict.working_children +=
-                        usize::from(kind == SubagentKind::Worker && child_verdict.working);
+            let mut pending = vec![child];
+            let mut branch_working = false;
+            let mut branch_unfinished = false;
+            while let Some(descendant) = pending.pop() {
+                if !seen.insert(descendant) {
+                    continue;
                 }
-                None if child_verdict.working => {
-                    let agent = &runtime.native_agents[child].agent;
-                    native_working.insert(agent.stable_id.as_ref().unwrap_or(&agent.session_id));
+                if let Some(own) = own_of(descendant) {
+                    branch_working |= own.working;
+                    branch_unfinished |= own.unfinished;
+                    if own.working {
+                        if let Some(native) = runtime.native_agents.get(descendant) {
+                            let agent = &native.agent;
+                            let stable_id = agent.stable_id.as_ref().unwrap_or(&agent.session_id);
+                            native_working.insert((&agent.owner_session_id, stable_id));
+                        } else {
+                            verdict.working_descendants += 1;
+                        }
+                    }
                 }
-                None => {}
+                pending.extend(
+                    children
+                        .get(descendant)
+                        .into_iter()
+                        .flatten()
+                        .map(|(id, _)| *id),
+                );
+            }
+            if let Some(kind) = kind {
+                verdict.unfinished_children += usize::from(branch_unfinished);
+                verdict.working_children += usize::from(
+                    matches!(kind, SubagentKind::Worker | SubagentKind::Oracle) && branch_working,
+                );
+            } else if branch_working && let Some(native) = runtime.native_agents.get(child) {
+                // Count the branch once, even if its root has already settled.
+                let agent = &native.agent;
+                let stable_id = agent.stable_id.as_ref().unwrap_or(&agent.session_id);
+                direct_native_working.insert((&agent.owner_session_id, stable_id));
             }
         }
-        verdict.working_children += native_working.len();
-        verdict.unfinished_children += native_working.len();
-        verdict.interrupt_count =
-            interrupt_targets(&id, runtime, &children, |id| own.get(id).copied()).len();
+        verdict.working_descendants += native_working.len();
+        verdict.working_children += direct_native_working.len();
+        verdict.unfinished_children += direct_native_working.len();
+        verdict.working |= verdict.working_descendants > 0;
+        verdict.interrupt_count = interrupt_targets(&id, runtime, &children, &mut own_of).len();
         verdict.interrupt_all = verdict.interrupt_count != 0;
-        if previous.verdicts.get(&id) == Some(&verdict) {
-            verdicts.copy_entry(&previous.verdicts, &id, true);
-        } else {
+        let before = previous.verdicts.get(&id);
+        verdict.needs_person = before.is_some_and(|previous| previous.needs_person);
+        if before != Some(&verdict) {
             verdicts.insert(id, verdict);
         }
     }
@@ -947,6 +991,106 @@ mod tests {
         active.agent.availability = mj_core::native_agent::NativeAgentAvailability::Available;
         project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
+    }
+
+    #[test]
+    fn native_descendant_aliases_are_deduplicated_within_each_owner() {
+        let mut capture = RuntimeProjection::default();
+        insert_running_session(&mut capture, "parent");
+        insert_managed_child(&mut capture);
+        capture.subagents.get_mut("child").unwrap().kind = SubagentKind::Oracle;
+        for (id, owner, parent) in [
+            ("direct", "parent", None),
+            ("direct-alias", "parent", None),
+            ("nested-alias", "parent", Some("direct")),
+            ("another-owner", "child", None),
+        ] {
+            let mut agent = native(id, true, NativeAgentState::Running);
+            agent.agent.owner_session_id = owner.into();
+            agent.agent.parent_session_id = parent.map(str::to_owned);
+            agent.agent.stable_id = Some("shared".into());
+            capture.native_agents.insert(agent.agent.view_id(), agent);
+        }
+
+        project(&mut capture, &Default::default(), None, None);
+        assert_eq!(capture.verdicts["parent"].working_descendants, 2);
+        assert_eq!(capture.verdicts["parent"].working_children, 2);
+        assert_eq!(capture.verdicts["parent"].unfinished_children, 2);
+
+        let previous = capture.clone();
+        let id = mj_core::native_agent::view_id("parent", "direct-alias");
+        capture.native_agents.remove(&id);
+        project(&mut capture, &previous, None, None);
+        assert_eq!(capture.verdicts["parent"].working_descendants, 2);
+        assert_eq!(capture.verdicts["parent"].working_children, 2);
+    }
+
+    #[test]
+    fn a_parked_intermediate_rolls_up_only_current_descendant_work() {
+        use mj_client::runtime_feed::SessionTail;
+        use mj_core::state::{MaterializedSession, ProjectionWindow};
+
+        let mut capture = RuntimeProjection::default();
+        capture.metadata.config = super::super::tests::runtime_test_config().into();
+        for id in ["parent", "child", "grandchild"] {
+            insert_running_session(&mut capture, id);
+            let view = capture.sessions.get_mut(id).unwrap();
+            view.connected = true;
+            view.operational.as_mut().unwrap().harness_turn = None;
+        }
+        capture.records.get_mut("child").unwrap().state = SessionState::Parked;
+        insert_subagent_link(&mut capture, "parent", "child");
+        insert_subagent_link(&mut capture, "child", "grandchild");
+        capture.subagents.get_mut("grandchild").unwrap().kind = SubagentKind::Reviewer;
+        capture.transcripts.insert(
+            "parent".into(),
+            SessionTail::of(
+                &MaterializedSession::empty("parent"),
+                &ProjectionWindow {
+                    latest_unread_event_ordinal: Some(10),
+                    ..Default::default()
+                },
+                0,
+            ),
+        );
+
+        let mut previous = RuntimeProjection::default();
+        for busy in [false, true, false] {
+            capture
+                .sessions
+                .get_mut("grandchild")
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap()
+                .harness_turn = busy.then_some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+            project_activity(&mut capture, &previous, None, None);
+            super::super::attention::update(&previous, &mut capture, None);
+            stamp_needs_person(&mut capture, &previous);
+
+            let count = usize::from(busy);
+            for id in ["parent", "child"] {
+                let verdict = capture.verdicts[id];
+                assert!(verdict.idle);
+                assert_eq!(verdict.working, busy);
+                assert_eq!(verdict.working_descendants, count);
+                assert_eq!(verdict.unfinished_children, count);
+                assert_eq!(
+                    capture.metadata.session_attention[id],
+                    if busy {
+                        SessionAttention::Working
+                    } else if id == "parent" {
+                        SessionAttention::Unread
+                    } else {
+                        SessionAttention::Idle
+                    }
+                );
+            }
+            assert_eq!(capture.verdicts["parent"].working_children, count);
+            assert_eq!(capture.verdicts["child"].working_children, 0);
+            assert_eq!(capture.verdicts["parent"].needs_person, !busy);
+            previous = capture.clone();
+        }
     }
 
     #[tokio::test]
@@ -1765,10 +1909,8 @@ mod tests {
         );
 
         project(&mut capture, &Default::default(), Some(&committed), None);
-        assert!(
-            !capture.verdicts["parent"].working,
-            "a top-level session with leftover work_liveness is not held"
-        );
+        assert!(capture.verdicts["parent"].working);
+        assert_eq!(capture.verdicts["parent"].working_descendants, 1);
         assert!(capture.verdicts["child"].working);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
 
@@ -1794,6 +1936,11 @@ mod tests {
         );
         assert!(!capture.verdicts["child"].working);
         assert_eq!(capture.verdicts["parent"].working_children, 0);
+
+        assert!(
+            !capture.verdicts["parent"].working,
+            "a top-level session with leftover work_liveness is not held"
+        );
 
         // Re-entering held state and then clearing work_liveness drops the count back to 0.
         let before = capture.clone();

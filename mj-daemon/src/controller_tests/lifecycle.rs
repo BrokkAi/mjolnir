@@ -230,7 +230,7 @@ fn failed_suspension_replaces_stale_internal_error_and_preserves_recovery_data()
         "{}; see reference suspension-test",
         mj_core::state::CLOSE_FAILURE_PREFIX
     );
-    assert!(controller.record_failed_close(id, &reason).unwrap());
+    assert!(controller.record_failed_close(id, &reason, None).unwrap());
     let restored = mj_controller::database::load_state().unwrap();
     let record = &restored.sessions[id];
     assert_eq!(record.public_error(), Some(reason.as_str()));

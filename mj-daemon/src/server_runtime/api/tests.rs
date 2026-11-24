@@ -9477,6 +9477,8 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
     assert_eq!(agents[2]["active_children"], 1);
 }
 
+// The managed clone fixture runs Unix mkdir and mv commands.
+#[cfg(unix)]
 #[tokio::test]
 async fn session_checkout_probes_read_the_registered_target_during_drain() {
     if !isolated_subagent_test(

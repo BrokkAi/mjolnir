@@ -865,6 +865,7 @@ dependencies = [
  "anyhow",
  "axum-server",
  "brokk-anvil-client",
+ "brokk-mj-chat",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-controller",

@@ -1,0 +1,12 @@
+{
+  "stored_prompt_model": "gemini-4-neon",
+  "configured_effort": "medium",
+  "accepted_by_profile": {
+    "gemini": 17,
+    "gemini2": 17
+  },
+  "prompt_sent_to_saved_output_s": {
+    "count": 34,
+    "median": 421.8217600355
+  }
+}

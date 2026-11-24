@@ -122,7 +122,7 @@ pub use transcript::{
 };
 pub use turn_review::TurnReviewIntent as TurnReviewRequest;
 
-pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
+pub use attachments::{AttachedFile, CHAT_DRAFT_PREFIX, PromptFile, PromptImage, PromptPayload};
 
 /// What `/review status` reports, on every surface.
 ///
@@ -340,11 +340,11 @@ pub enum ChatAction {
         path: pasted_paths::PastedPath,
         command: String,
     },
-    /// A paste made only of image paths: attach each path in `images` and
+    /// A paste made only of file paths: attach each path in `paths` and
     /// keep the rest of `text`, the whitespace between them, as typed.
     AttachPaste {
         text: String,
-        images: Vec<pasted_paths::PastedImagePath>,
+        paths: Vec<pasted_paths::PastedFilePath>,
     },
     ToggleVoice,
     /// Tab or Shift-Tab with no completion popup open.
@@ -360,6 +360,7 @@ struct QueuedPrompt {
     text: String,
     kind: QueuedCommandKind,
     images: Vec<PromptImage>,
+    files: Vec<PromptFile>,
     /// The durable queue contained an image we cannot safely materialize for
     /// terminal editing. Keep the entry visible and refuse an edit instead of
     /// silently dropping that content.
@@ -434,6 +435,8 @@ impl QueuedPrompt {
     fn queue_label(&self) -> &'static str {
         if self.kind.is_prompt() && self.attachments_unsupported {
             "queued attachments"
+        } else if self.kind.is_prompt() && !self.files.is_empty() {
+            "queued file"
         } else if self.kind.is_prompt() && !self.images.is_empty() {
             "queued image"
         } else if self.kind.is_prompt() {
@@ -530,13 +533,16 @@ pub struct ChatState {
     input_cursor: usize,
     /// Image bytes belong to tracked marker ranges in the composer text.
     input_images: Vec<PromptImage>,
+    input_files: Vec<PromptFile>,
     next_image_number: u64,
+    next_file_number: u64,
     /// Moved out of `input_images` while the remote submit is in flight, so a
     /// failed submission can restore the images alongside their text.
     submitting_images: Vec<PromptImage>,
+    submitting_files: Vec<PromptFile>,
     /// Sequence numbers map background jobs to their tracked marker. If the
     /// user removes a pending marker, the late result has nowhere to land.
-    pending_attachment_markers: BTreeMap<u64, u64>,
+    pending_attachment_markers: BTreeMap<u64, composer::PendingMarker>,
     /// Changes whenever the composer text or tracked images change. Clipboard
     /// reads capture this value so a slow native read cannot paste into a new
     /// draft after the user has continued editing.
@@ -551,8 +557,10 @@ pub struct ChatState {
     history_index: Option<usize>,
     history_draft: String,
     history_draft_images: Vec<PromptImage>,
+    history_draft_files: Vec<PromptFile>,
     kill_buffer: String,
     kill_images: Vec<PromptImage>,
+    kill_files: Vec<PromptFile>,
     /// Set by Ctrl-K so the next Ctrl-K appends instead of replacing.
     chain_kill: bool,
     preferred_column: Option<usize>,
@@ -569,6 +577,7 @@ pub struct ChatState {
     /// Images peeled back from queued prompts while their removal command is
     /// still in flight. Keeping them by queue id makes a failed removal exact.
     pending_queue_images: BTreeMap<String, Vec<PromptImage>>,
+    pending_queue_files: BTreeMap<String, Vec<PromptFile>>,
     active_user_shells: Vec<String>,
     active_agent_terminals: Vec<ActiveAgentTerminal>,
     claimed_agent_terminals: BTreeMap<String, i64>,
@@ -751,8 +760,11 @@ impl ChatState {
             input: String::new(),
             input_cursor: 0,
             input_images: Vec::new(),
+            input_files: Vec::new(),
             next_image_number: 1,
+            next_file_number: 1,
             submitting_images: Vec::new(),
+            submitting_files: Vec::new(),
             pending_attachment_markers: BTreeMap::new(),
             input_generation: 0,
             session_history: Vec::new(),
@@ -762,8 +774,10 @@ impl ChatState {
             history_index: None,
             history_draft: String::new(),
             history_draft_images: Vec::new(),
+            history_draft_files: Vec::new(),
             kill_buffer: String::new(),
             kill_images: Vec::new(),
+            kill_files: Vec::new(),
             chain_kill: false,
             preferred_column: None,
             history_search: None,
@@ -774,6 +788,7 @@ impl ChatState {
             submission_renders: Vec::new(),
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
+            pending_queue_files: BTreeMap::new(),
             active_user_shells: Vec::new(),
             active_agent_terminals: Vec::new(),
             claimed_agent_terminals: BTreeMap::new(),
@@ -889,6 +904,7 @@ impl ChatState {
                 text: prompt.text.clone(),
                 kind: QueuedCommandKind::Prompt,
                 images: Vec::new(),
+                files: Vec::new(),
                 attachments_unsupported: false,
             })
             .collect();
@@ -1144,6 +1160,8 @@ impl ChatState {
             .retain(|id| projected_queue_ids.contains(id.as_str()));
         self.pending_queue_images
             .retain(|id, _| projected_queue_ids.contains(id.as_str()));
+        self.pending_queue_files
+            .retain(|id, _| projected_queue_ids.contains(id.as_str()));
         let queued_prompts = session
             .queued_prompts
             .iter()
@@ -1156,6 +1174,7 @@ impl ChatState {
                     text: payload.text,
                     kind: prompt.kind.clone(),
                     images: payload.images,
+                    files: payload.files,
                     attachments_unsupported,
                 }
             })
@@ -1509,12 +1528,32 @@ fn materialized_content_prompt(content: &[serde_json::Value]) -> (PromptPayload,
                         attachments::insert_image(
                             &mut payload.text,
                             &mut payload.images,
+                            &mut payload.files,
                             end,
                             number,
                             image,
                         );
                     }
                     Err(_) => unsupported = true,
+                }
+            }
+            Ok(ContentBlock::ResourceLink(link)) => {
+                match mj_core::attachment::file_reference(&link)
+                    .and_then(|reference| reference.map(AttachedFile::from_reference).transpose())
+                {
+                    Ok(Some(file)) => {
+                        let number = payload.files.len() as u64 + 1;
+                        let end = payload.text.len();
+                        attachments::insert_file(
+                            &mut payload.text,
+                            &mut payload.images,
+                            &mut payload.files,
+                            end,
+                            number,
+                            file,
+                        );
+                    }
+                    _ => unsupported = true,
                 }
             }
             Ok(ContentBlock::Text(content)) => payload.text.push_str(&content.text),
@@ -1525,10 +1564,15 @@ fn materialized_content_prompt(content: &[serde_json::Value]) -> (PromptPayload,
     (payload, unsupported)
 }
 
-fn prompt_content_blocks(text: &str, images: &[PromptImage]) -> Vec<serde_json::Value> {
+fn prompt_content_blocks(
+    text: &str,
+    images: &[PromptImage],
+    files: &[PromptFile],
+) -> Vec<serde_json::Value> {
     PromptPayload {
         text: text.to_owned(),
         images: images.to_vec(),
+        files: files.to_vec(),
     }
     .content_blocks()
     .into_iter()

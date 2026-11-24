@@ -70,6 +70,7 @@ impl PendingSubmission {
     fn is_context_clear(&self) -> bool {
         self.kind == SubmissionKind::Prompt
             && self.payload.images.is_empty()
+            && self.payload.files.is_empty()
             && self.payload.text.trim() == "/clear"
     }
 }
@@ -245,11 +246,8 @@ impl ChatState {
             let result = async {
                 for image in &mut payload.images {
                     if image.image.reference.is_none() {
-                        image.image = composer::prepare_attachment(
-                            &session_id,
-                            composer::AttachmentSource::Clipboard(image.image.clone()),
-                        )
-                        .await?;
+                        image.image =
+                            composer::prepare_attachment(&session_id, image.image.clone()).await?;
                     }
                 }
                 Ok(payload)
@@ -305,6 +303,7 @@ impl ChatState {
                 command_id: pending.id.clone(),
                 text: pending.payload.text.clone(),
                 images: pending.payload.images.clone(),
+                files: pending.payload.files.clone(),
             },
             SubmissionKind::Shell => remote::ChatRemoteOperation::RunShell {
                 command_id: pending.id.clone(),
@@ -494,6 +493,7 @@ mod tests {
                 command_id: id.into(),
                 text: text.into(),
                 images: Vec::new(),
+                files: Vec::new(),
             },
             chat,
         );
@@ -506,6 +506,7 @@ mod tests {
                 command_id: id.into(),
                 text: "hello".into(),
                 images: Vec::new(),
+                files: Vec::new(),
                 result,
             },
         );
@@ -533,6 +534,7 @@ mod tests {
                 command_id: "original".into(),
                 text: "hello".into(),
                 images: Vec::new(),
+                files: Vec::new(),
             },
             &mut chat,
         );
@@ -740,6 +742,7 @@ mod tests {
                 command_id: "clear".into(),
                 text: "/clear".into(),
                 images: Vec::new(),
+                files: Vec::new(),
                 result: Err("/clear requires an idle session".into()),
             },
         );
@@ -819,6 +822,7 @@ mod tests {
                 command_id: "image".into(),
                 text: payload.text.clone(),
                 images: payload.images.clone(),
+                files: Vec::new(),
                 result: Err("refused".into()),
             },
         );

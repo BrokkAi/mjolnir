@@ -1345,7 +1345,10 @@ pub fn load_closing_consent(
         .transpose()
 }
 
-pub fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
+pub fn save_failed_close(
+    session: &SessionRecord,
+    preserve_close_intent: bool,
+) -> Result<SessionRecord> {
     let mut session = session.clone();
     submit_database_write("save failed close", move |connection| {
         validate_session_record(&session)?;
@@ -1356,34 +1359,36 @@ pub fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
             |row| row.get(0),
         )?;
         session.state = stored_session_state(&current);
-        let operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
-        let close_intent: Option<(String, Option<String>)> = tx.query_row(
-            "SELECT operation_id, close_requested_operation_id FROM session_moves WHERE session_id=?1",
-            [&session.id], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
-        let accepted_move_close = operation
-            .as_ref()
-            .filter(|operation| !operation.is_resolved())
-            .zip(close_intent.as_ref())
-            .is_some_and(|(operation, (row_id, close_id))| {
-                super::session_move::exact_move_close_intent(
-                    &operation.operation_id,
-                    row_id,
-                    close_id.as_deref(),
-                )
-            });
-        let unresolved_move = operation
-            .as_ref()
-            .is_some_and(|operation| !operation.is_resolved());
-        if (session.state == SessionState::Closing && (!unresolved_move || accepted_move_close))
-            || (session.state == SessionState::Provisioning && accepted_move_close)
-        {
-            session.state = SessionState::Error;
+        if !preserve_close_intent {
+            let operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
+            let close_intent: Option<(String, Option<String>)> = tx.query_row(
+                "SELECT operation_id, close_requested_operation_id FROM session_moves WHERE session_id=?1",
+                [&session.id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            let accepted_move_close = operation
+                .as_ref()
+                .filter(|operation| !operation.is_resolved())
+                .zip(close_intent.as_ref())
+                .is_some_and(|(operation, (row_id, close_id))| {
+                    super::session_move::exact_move_close_intent(
+                        &operation.operation_id,
+                        row_id,
+                        close_id.as_deref(),
+                    )
+                });
+            let unresolved_move = operation
+                .as_ref()
+                .is_some_and(|operation| !operation.is_resolved());
+            if (session.state == SessionState::Closing && (!unresolved_move || accepted_move_close))
+                || (session.state == SessionState::Provisioning && accepted_move_close)
+            {
+                session.state = SessionState::Error;
+            }
         }
         update_lifecycle_fields(&tx, &session)?;
-        // Destroying is still an owned, verified teardown, not a terminal
-        // failure. Its request must survive until startup finishes cleanup.
-        if session.state != SessionState::Destroying {
+        // Verified teardown and an accepted worker stop both remain owned
+        // until cleanup or stop observation settles them.
+        if !preserve_close_intent && session.state != SessionState::Destroying {
             tx.execute(
                 "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
                 [&session.id],

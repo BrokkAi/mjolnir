@@ -132,7 +132,7 @@
     "needs_person": false,
     "move_queue_held": false,
     "idle": true,
-    "working": false,
+    "working": true,
     "active_work": false,
     "unfinished": false,
     "interrupt": false,
@@ -146,6 +146,7 @@
     "container_settings": "ready",
     "resume": "active",
     "working_children": 1,
+    "working_descendants": 1,
     "unfinished_children": 1
   },
   "latest_event_ordinal": 0,
@@ -264,7 +265,7 @@
       "needs_person": false,
       "move_queue_held": false,
       "idle": true,
-      "working": false,
+      "working": true,
       "active_work": false,
       "unfinished": false,
       "interrupt": false,
@@ -278,6 +279,7 @@
       "container_settings": "ready",
       "resume": "active",
       "working_children": 1,
+      "working_descendants": 1,
       "unfinished_children": 1
     },
     "latest_event_ordinal": 0,
@@ -401,6 +403,7 @@
     "container_settings": "ready",
     "resume": "active",
     "working_children": 0,
+    "working_descendants": 0,
     "unfinished_children": 0
   },
   "latest_event_ordinal": 0,
@@ -518,6 +521,7 @@
         "container_settings": "ready",
         "resume": "active",
         "working_children": 0,
+        "working_descendants": 0,
         "unfinished_children": 0
       },
       "latest_event_ordinal": 0,
@@ -646,6 +650,7 @@
         "container_settings": "ready",
         "resume": "active",
         "working_children": 0,
+        "working_descendants": 0,
         "unfinished_children": 0
       },
       "latest_event_ordinal": 0,
@@ -759,7 +764,7 @@
       "needs_person": false,
       "move_queue_held": false,
       "idle": true,
-      "working": false,
+      "working": true,
       "active_work": false,
       "unfinished": false,
       "interrupt": false,
@@ -773,6 +778,7 @@
       "container_settings": "ready",
       "resume": "active",
       "working_children": 1,
+      "working_descendants": 1,
       "unfinished_children": 1
     },
     "latest_event_ordinal": 0,
@@ -886,6 +892,7 @@
       "container_settings": "ready",
       "resume": "active",
       "working_children": 0,
+      "working_descendants": 0,
       "unfinished_children": 0
     },
     "latest_event_ordinal": 0,
@@ -1005,6 +1012,7 @@
     "container_settings": "hidden",
     "resume": "active",
     "working_children": 0,
+    "working_descendants": 0,
     "unfinished_children": 0
   },
   "latest_event_ordinal": 0,
@@ -1138,6 +1146,7 @@
     "container_settings": "hidden",
     "resume": "no_recovery_copy",
     "working_children": 0,
+    "working_descendants": 0,
     "unfinished_children": 0
   },
   "latest_event_ordinal": 0,
@@ -1232,6 +1241,7 @@
       "container_settings": "hidden",
       "resume": "no_recovery_copy",
       "working_children": 0,
+      "working_descendants": 0,
       "unfinished_children": 0
     },
     "activity_details": {
@@ -1332,6 +1342,7 @@
     "container_settings": "hidden",
     "resume": "active",
     "working_children": 0,
+    "working_descendants": 0,
     "unfinished_children": 0
   },
   "latest_event_ordinal": 0,
@@ -1440,6 +1451,7 @@
     "container_settings": "hidden",
     "resume": "active",
     "working_children": 0,
+    "working_descendants": 0,
     "unfinished_children": 0
   },
   "latest_event_ordinal": 0,
@@ -1543,6 +1555,7 @@
     "container_settings": "hidden",
     "resume": "active",
     "working_children": 0,
+    "working_descendants": 0,
     "unfinished_children": 0
   },
   "latest_event_ordinal": 0,
@@ -1633,9 +1646,9 @@
       "needs_person": false,
       "move_queue_held": false,
       "idle": false,
-      "working": false,
+      "working": true,
       "active_work": false,
-      "unfinished": false,
+      "unfinished": true,
       "interrupt": false,
       "interrupt_member": false,
       "interrupt_all": false,
@@ -1647,6 +1660,7 @@
       "container_settings": "hidden",
       "resume": "transitioning",
       "working_children": 0,
+      "working_descendants": 0,
       "unfinished_children": 0
     },
     "latest_event_ordinal": 0,

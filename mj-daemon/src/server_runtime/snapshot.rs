@@ -986,6 +986,58 @@ pub(super) fn now_seconds() -> u64 {
 }
 
 #[cfg(test)]
+pub(crate) fn turn_status_corpus_viewer(
+    capture: &mj_client::runtime_feed::RuntimeProjection,
+    committed: &mj_controller::database::CommittedState,
+) -> ViewerSnapshot {
+    let mut controller = config_only_controller((*capture.metadata.config).clone());
+    controller.state = committed.state.clone();
+    let mut children = crate::server::ViewerChildren::default();
+    for relation in capture.subagents.values() {
+        children
+            .entry(relation.parent_session_id.clone())
+            .or_insert_with(Default::default)
+            .insert(relation.child_session_id.clone(), relation.kind);
+    }
+    let mut native_agents = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for native in capture.native_agents.values() {
+        native_agents
+            .entry(native.agent.owner_session_id.clone())
+            .or_default()
+            .push(native.agent.clone());
+    }
+    let views = PhoneSessionViews {
+        native_agents: &native_agents,
+        conversations: &Default::default(),
+        sessions: &capture.sessions,
+        project_sources: &Default::default(),
+        operations: &capture
+            .metadata
+            .lifecycles
+            .iter()
+            .map(|view| (view.session_id.clone(), viewer_operation(view)))
+            .collect(),
+        move_recoveries: &Default::default(),
+        capacity: &[],
+        launch_failures: &[],
+        reviews: &viewer_reviews(&capture.metadata.reviews),
+    };
+    viewer_snapshot_selected(
+        &controller,
+        &[],
+        &Default::default(),
+        &views,
+        (1, 1),
+        ViewerRecordSelection {
+            ids: &capture.records.keys().cloned().collect(),
+            children: &children,
+            failed_launch_retries: None,
+        },
+        capture,
+    )
+}
+
+#[cfg(test)]
 mod question_message_tests {
     use super::question_message;
 

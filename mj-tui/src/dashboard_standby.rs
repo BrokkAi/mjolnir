@@ -448,7 +448,9 @@ impl DashboardState {
                     .recalled_startup_prompt(&id, &text);
                 return Some(DashboardAction::WithdrawStartupPrompt { session_id, prompt });
             }
-            action @ (ChatAction::PasteFromClipboard | ChatAction::AttachPaste { .. }) => {
+            action @ (ChatAction::PasteFromClipboard
+            | ChatAction::AttachPaste { .. }
+            | ChatAction::Attach { .. }) => {
                 self.standby_prompt_mut(&session_id)
                     .dispatch_composer_action(action);
             }

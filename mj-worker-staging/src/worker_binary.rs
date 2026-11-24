@@ -15,7 +15,7 @@ use crate::targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
 };
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use mj_core::harness_runtime::CODEX_ACP_VERSION;
 use mj_core::project_memory::ProjectMemoryIdentity;
 use mj_core::worker_build::{verify_worker_build, worker_build_id};

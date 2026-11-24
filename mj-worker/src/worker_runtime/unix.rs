@@ -1605,6 +1605,37 @@ pub async fn run_daemon_owned(
             &config.initial_commands,
         )?
     };
+    // A sealed relay only finishes its accepted close. An unsealed capture
+    // must drain writers before it can admit a checkpoint barrier.
+    if checkpoint_only
+        && !durable_relay.sealed_by_close()
+        && let Some(capture) = config.suspend_capture.take()
+    {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            super::record_startup_step(&root, "checkout-quiescence");
+            let root = root.clone();
+            let session_id = config.session_id.clone();
+            mj_core::runtime::spawn_blocking(move || {
+                crate::worker_stop::suspension::terminate_session_processes(
+                    &root,
+                    &session_id,
+                    &capture,
+                    false,
+                )
+            })
+            .await
+            .context("join checkpoint checkout quiescence")??;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            drop(capture);
+            return Err(mj_core::refusal::Refusal::precondition(
+                "Managed checkout quiescence requires Linux or macOS",
+            )
+            .into());
+        }
+    }
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.

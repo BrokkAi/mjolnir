@@ -457,9 +457,38 @@ pub(crate) fn render_composer_band(
             theme::muted(),
         ))]
     } else {
+        let mut line_start = 0;
+        let mut files = chat.input_files.iter().peekable();
         chat.input
             .split('\n')
-            .map(|line| Line::raw(line.to_owned()))
+            .map(|line| {
+                let line_end = line_start + line.len();
+                let mut cursor = line_start;
+                let mut spans = Vec::new();
+                while files.peek().is_some_and(|file| file.range.start < line_end) {
+                    let file = files.next().expect("peeked file marker");
+                    if cursor < file.range.start {
+                        spans.push(Span::raw(chat.input[cursor..file.range.start].to_owned()));
+                    }
+                    let style = if file.file.is_failed() {
+                        Style::default().fg(theme::palette().warning)
+                    } else if file.file.is_pending() {
+                        theme::muted()
+                    } else {
+                        Style::default().fg(theme::palette().accent)
+                    };
+                    spans.push(Span::styled(
+                        chat.input[file.range.clone()].to_owned(),
+                        style,
+                    ));
+                    cursor = file.range.end;
+                }
+                if cursor < line_end {
+                    spans.push(Span::raw(chat.input[cursor..line_end].to_owned()));
+                }
+                line_start = line_end + 1;
+                Line::from(spans)
+            })
             .collect()
     });
     let cursor_row =

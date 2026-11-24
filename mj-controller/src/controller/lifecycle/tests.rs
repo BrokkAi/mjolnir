@@ -4216,6 +4216,334 @@ fn attach_local_managed_clone(session: &mut SessionRecord, clone: PathBuf, origi
     }));
 }
 
+#[cfg(unix)]
+fn interrupted_local_suspend_fixture(
+    directory: &std::path::Path,
+    session_id: &str,
+) -> (Controller, PathBuf) {
+    let worker_root = directory.join("workers").join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Closing;
+    session.target_template_id = "local".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    (controller, worker_root)
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct CancelOnWorkerProbe(std::sync::atomic::AtomicBool);
+
+#[cfg(unix)]
+impl CommandExecutor for CancelOnWorkerProbe {
+    fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        if command.purpose == "probe Mjolnir worker daemon liveness" {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("cancelled during worker observation");
+        }
+        ProcessExecutor.execute(command)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin_without_deadline(command, input)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn pause_deadline(&self) -> targets::DeadlinePause {
+        targets::DeadlinePause::none()
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() {
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt};
+
+    const NAME: &str = "interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel";
+    const SESSION_ID: &str = "interrupted-parked-raw-suspend";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (mut controller, worker_root) =
+        interrupted_local_suspend_fixture(directory.path(), SESSION_ID);
+    let checkout = directory.path().join("attached");
+    std::fs::create_dir(&checkout).unwrap();
+    controller
+        .state
+        .sessions
+        .get_mut(SESSION_ID)
+        .unwrap()
+        .project_directory = Some(checkout.clone());
+    controller.config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            directory.path().join("profile"),
+        ),
+    );
+    persist_controller_fixture(&mut controller);
+    let mut attempt = OriginDeltaSuspend::load(&controller, SESSION_ID, &ProcessExecutor).unwrap();
+    attempt.accept(&ProcessExecutor, true).unwrap();
+    assert_eq!(
+        controller
+            .explicit_suspend_export_policy(SESSION_ID)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDeltaRaw
+    );
+
+    // A parked session has no relay for the old close-recovery path to lease.
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let startup = CancelOnWorkerProbe::default();
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &startup,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    assert!(startup.cancellation_requested(), "{error:#}");
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending)
+    );
+    let accepted: String = wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap();
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, accepted);
+    assert_eq!(
+        restart.error.as_deref(),
+        Some("operation cancelled before parked capture")
+    );
+    controller
+        .record_failed_close(
+            SESSION_ID,
+            "Suspend was interrupted during capture startup.",
+            error.downcast_ref::<LifecycleFailureReason>().copied(),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::database::read_durable_session_record(SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Closing
+    );
+
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &ProcessExecutor,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    manager.shutdown.shutdown().await.unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("cancelled before parked capture"),
+        "{error:#}"
+    );
+    let record = crate::database::read_durable_session_record(SESSION_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, SessionState::Parked);
+    assert!(checkout.is_dir());
+    assert!(!worker_root.join(wire::ACCEPTED).exists());
+    assert!(!worker_root.join(wire::RESTART).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    const NAME: &str = "interrupted_suspend_honors_dead_workers_refusal_receipt";
+    const SESSION_ID: &str = "refused-dead-suspend";
+    const REFUSAL: &str = "checkout was still held when the original worker stopped";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (mut controller, worker_root) =
+        interrupted_local_suspend_fixture(directory.path(), SESSION_ID);
+    let (origin, checkout) = init_managed_clone_with_origin(directory.path(), SESSION_ID);
+    attach_local_managed_clone(
+        controller.state.sessions.get_mut(SESSION_ID).unwrap(),
+        checkout.clone(),
+        origin,
+    );
+    persist_controller_fixture(&mut controller);
+    let operation = "origin-delta-suspend-refused".to_owned();
+    wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let consent = mj_core::suspend_consent::SuspendConsent::default();
+    crate::database::save_suspension_intent(
+        &controller.state.sessions[SESSION_ID],
+        None,
+        Some(&consent),
+    )
+    .unwrap();
+
+    // Cancellation during the initial live-worker check is before REQUEST.
+    // Only the controller can persist the cancellation in this phase.
+    let startup = CancelOnWorkerProbe::default();
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &startup,
+            &manager.control,
+            &consent,
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
+    assert_eq!(
+        reason,
+        Some(LifecycleFailureReason::SuspendPending),
+        "{error:#}"
+    );
+    assert!(startup.cancellation_requested());
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, operation);
+    assert_eq!(restart.error.as_deref(), Some("suspend was cancelled"));
+    assert!(!worker_root.join(wire::REQUEST).exists());
+    controller
+        .record_failed_close(SESSION_ID, "cancelled suspend is pending", reason)
+        .unwrap();
+    let retained = crate::database::read_durable_session_record(SESSION_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.state, SessionState::Closing);
+    assert_eq!(
+        crate::database::load_closing_consent(SESSION_ID).unwrap(),
+        Some(consent.clone())
+    );
+    std::fs::remove_file(worker_root.join(wire::RESTART)).unwrap();
+
+    wire::write(
+        &worker_root,
+        wire::REQUEST,
+        &SuspendRequest {
+            operation: operation.clone(),
+            worker: WorkerIdentity {
+                pid: std::process::id(),
+                start: 0,
+            },
+            checkout: checkout.clone(),
+            child_sessions: Vec::new(),
+        },
+    )
+    .unwrap();
+    let cancelled = targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)));
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &cancelled,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("suspend was cancelled"));
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, operation);
+    assert_eq!(restart.error.as_deref(), Some("suspend was cancelled"));
+    std::fs::remove_file(worker_root.join(wire::RESTART)).unwrap();
+
+    wire::write(
+        &worker_root,
+        wire::RECEIPT,
+        &SuspendReceipt {
+            operation: operation.clone(),
+            error: Some(REFUSAL.into()),
+        },
+    )
+    .unwrap();
+
+    // An empty worker root has no lock holder. The fixture leaves the launch
+    // profile absent so rollback records its durable intent before booting.
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &ProcessExecutor,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("refused suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    manager.shutdown.shutdown().await.unwrap();
+    assert_eq!(
+        mj_core::refusal::Refusal::of(&error).unwrap().message(),
+        REFUSAL
+    );
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, operation);
+    assert_eq!(restart.error.as_deref(), Some(REFUSAL));
+    assert!(checkout.is_dir());
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn failed_move_keep_lookup_recovers_the_accepted_suspend() {
@@ -4598,6 +4926,12 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
         attach_local_managed_clone(session, clone, origin);
     }
     persist_controller_fixture(&mut controller);
+    let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+    controller
+        .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+        .unwrap()
+        .write(&worker_root.join("launch.json"))
+        .unwrap();
 
     struct SkipHarnessPrepExecutor;
     impl CommandExecutor for SkipHarnessPrepExecutor {
@@ -4625,6 +4959,14 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
                 command.purpose, "export target checkpoint",
                 "older worker suspend must not fall back to version-2 export"
             );
+            if command.purpose == "probe Mjolnir worker daemon liveness" {
+                // The stand-in relay represents an older worker that is still live.
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"alive\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
             if command.purpose.contains("harness")
                 || command.purpose.contains("prepare")
                 || command.purpose.contains("runtime")
@@ -4676,107 +5018,6 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
         !worker_root.join(mj_core::worker_suspend::ACCEPTED).exists(),
         "failed upgrade must clear suspend-operation.json"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn older_worker_swap_failure_attempts_one_in_place_recovery_before_recording_error() {
-    const NAME: &str =
-        "older_worker_swap_failure_attempts_one_in_place_recovery_before_recording_error";
-    const CHILD: &str = "MJ_TEST_OLDER_WORKER_SWAP_FAILURE";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(crate::controller::test_support::test_name(
-            module_path!(),
-            NAME,
-        ))
-        .env(CHILD, "1")
-        .env("MJ_INSTANCE", "older-worker-swap-failure")
-        .isolated_store(directory.path())
-        .run();
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let temp = tempfile::tempdir().unwrap();
-    let session_id = "older-worker-swap-failure";
-    let (origin, clone) = init_managed_clone_with_origin(temp.path(), session_id);
-    let worker_root = temp.path().join("workers").join(session_id);
-    std::fs::create_dir_all(&worker_root).unwrap();
-    let target = mj_core::state::TargetLocator::LocalBare {
-        worker_root: worker_root.clone(),
-    };
-    let mut session = checkpoint_test_session(session_id);
-    session.state = SessionState::Running;
-    session.target_template_id = "local-bare".into();
-    session.target = Some(Box::new(target.clone()));
-    attach_local_managed_clone(&mut session, clone.clone(), origin);
-    let mut config = Config::default();
-    config
-        .targets
-        .insert("local-bare".into(), TargetTemplate::LocalBare);
-    let mut controller = Controller {
-        config,
-        state: State {
-            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
-            ..State::default()
-        },
-    };
-    persist_controller_fixture(&mut controller);
-    let previous = session;
-
-    // Verify no leftover worker_restart intent remains after retiring on successful in-place recovery.
-    let admission = crate::controller::test_support::session_admission(session_id);
-    crate::worker_lifecycle::run_admitted(&admission, session_id, async {
-        crate::database::begin_worker_restart(
-            session_id,
-            &crate::database::WorkerRestartIntent {
-                operation_id: "swap-recovery-op".into(),
-                target: target.clone(),
-                desired_build: "test-build".into(),
-            },
-        )
-        .unwrap();
-        assert!(
-            crate::database::load_worker_restart(session_id)
-                .unwrap()
-                .is_some()
-        );
-        retire_worker_restart_intent(session_id).unwrap();
-        assert!(
-            crate::database::load_worker_restart(session_id)
-                .unwrap()
-                .is_none(),
-            "worker_restart intent must be cleared after successful in-place recovery"
-        );
-        anyhow::Ok(())
-    })
-    .await
-    .unwrap();
-
-    // Case A: recovery succeeded -> marker stripped -> session stays Running, checkout intact.
-    let swap_error = anyhow::anyhow!("start replacement worker failed")
-        .context(crate::controller::worker_restart::WorkerRestartLeftNoWorker);
-    let recovered_error = anyhow::anyhow!("{swap_error:#}");
-    let mut record_a = previous.clone();
-    apply_close_checkpoint_failure(&mut record_a, &previous, &recovered_error, now(), None);
-    assert_eq!(record_a.state, SessionState::Running);
-    assert!(clone.exists());
-
-    // Case B: recovery also failed -> WorkerRestartLeftNoWorker preserved -> Error with --without-checkpoint, checkout intact.
-    let unrecovered_error = swap_error
-        .context("in-place worker recovery also failed; retry suspend or use --without-checkpoint: spawn failed")
-        .context(crate::controller::worker_restart::WorkerRestartLeftNoWorker);
-    let mut record_b = previous.clone();
-    apply_close_checkpoint_failure(&mut record_b, &previous, &unrecovered_error, now(), None);
-    assert_eq!(record_b.state, SessionState::Error);
-    assert!(
-        record_b.last_error.as_deref().is_some_and(
-            |msg| msg.contains("--without-checkpoint") && msg.contains("without a live worker")
-        ),
-        "expected no-worker error mentioning --without-checkpoint, got: {:?}",
-        record_b.last_error
-    );
-    assert!(clone.exists());
 }
 
 #[cfg(unix)]
@@ -5252,9 +5493,18 @@ async fn legacy_closing_and_destroying_subagent_routes_through_archive_free_comp
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator() {
+    use mj_core::suspend_consent::{SuspendConsent, UntrackedConsent};
     use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    const NAME: &str =
+        "ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator";
+    const READ_REQUEST: &str = "read suspend record suspend-request.json";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
 
     type RecordedCommands = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
@@ -5263,6 +5513,8 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         commands: RecordedCommands,
         worker_alive: Arc<Mutex<bool>>,
+        lose_stop_reply: bool,
+        failed_stop_observation: Option<&'static str>,
     }
 
     impl CommandExecutor for TargetWireFake {
@@ -5289,7 +5541,14 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     stderr: Vec::new(),
                 });
             }
-            if joined.contains("identity-alive") {
+            if self.failed_stop_observation == Some(command.purpose.as_str())
+                && (!self.lose_stop_reply || self.files.lock().unwrap().contains_key(wire::REQUEST))
+            {
+                anyhow::bail!("SSH failed during {}", command.purpose);
+            }
+            if joined.contains("identity-alive")
+                || command.purpose == "probe Mjolnir worker daemon liveness"
+            {
                 let alive = *self.worker_alive.lock().unwrap();
                 return Ok(mj_core::targets::CommandOutput {
                     status: 0,
@@ -5333,6 +5592,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     })
                     .unwrap(),
                 );
+                if self.lose_stop_reply {
+                    anyhow::bail!("SSH lost the worker's stop reply");
+                }
                 files.insert(
                     wire::RECEIPT.to_owned(),
                     serde_json::to_vec(&SuspendReceipt {
@@ -5375,6 +5637,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                 wire::RECEIPT,
                 wire::PROGRESS,
                 wire::RESTART,
+                "launch.json",
             ] {
                 if joined.contains(name) {
                     if let Some(stdin) = command.sensitive_stdin() {
@@ -5423,19 +5686,21 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     }
 
     let session_id = "0123456789abcdef0123456789abcde1";
+    let source = PathBuf::from("/remote/repo");
+    let checkout = source.join(".mj").join("clones").join(session_id);
     let mut session = checkpoint_test_session(session_id);
     session.target_template_id = "ssh-bare".into();
     session.target = Some(Box::new(TargetLocator::SshBare {
         host: "remote.example".into(),
-        workspace: PathBuf::from("/remote/clones/ssh-origin-delta"),
+        workspace: checkout.clone(),
         worker_id: Some(session_id.into()),
     }));
-    session.project_directory = Some(PathBuf::from("/remote/clones/ssh-origin-delta"));
+    session.project_directory = Some(checkout.clone());
     session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
-        source_project_directory: PathBuf::from("/remote/repo"),
-        source_repository: PathBuf::from("/remote/repo"),
-        worktree_root: PathBuf::from("/remote/clones/ssh-origin-delta"),
+        source_project_directory: source.clone(),
+        source_repository: source,
+        worktree_root: checkout.clone(),
         branch: "mj/ssh-origin-delta".into(),
         target: mj_core::state::ManagedWorktreeTarget::Ssh {
             destination: "user@remote.example".into(),
@@ -5457,7 +5722,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
             workspace_prefix: ".local/share/hel/workspaces".into(),
         },
     );
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             environment_owners: [(session_id.into(), session_id.into())]
@@ -5496,8 +5761,48 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     attempt.request_stop(&fake).unwrap();
     assert!(attempt.request_recorded());
 
-    let receipt = attempt.wait_for_stop(&fake).await.unwrap();
-    assert!(receipt.error.is_none());
+    attempt.wait_for_stop(&fake).await.unwrap();
+    assert!(attempt.receipt(&fake).unwrap().unwrap().error.is_none());
+
+    // The original stop recorded borrowers before their live bindings vanished.
+    // Its scope must feed the replacement launch, even after a daemon reload.
+    let mut persisted: SuspendRequest = {
+        let files = fake.files.lock().unwrap();
+        serde_json::from_slice(&files[wire::REQUEST]).unwrap()
+    };
+    let original_operation = persisted.operation.clone();
+    let store_request = |request: &SuspendRequest| {
+        fake.files
+            .lock()
+            .unwrap()
+            .insert(wire::REQUEST.into(), serde_json::to_vec(request).unwrap());
+    };
+    persisted.child_sessions = vec!["stopped-borrower".into()];
+    store_request(&persisted);
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert_eq!(
+        reloaded.capture_scope().child_sessions,
+        persisted.child_sessions
+    );
+    assert_eq!(reloaded.capture_scope().checkout, checkout);
+    assert_eq!(reloaded.capture_scope().operation, original_operation);
+
+    persisted.operation = "older-suspend".into();
+    store_request(&persisted);
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!reloaded.request_recorded());
+    assert!(reloaded.capture_scope().child_sessions.is_empty());
+
+    persisted.operation = original_operation;
+    persisted.checkout = checkout.join("wrong");
+    store_request(&persisted);
+    let error = OriginDeltaSuspend::load(&controller, session_id, &fake)
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("different checkout"),
+        "{error:#}"
+    );
 
     attempt
         .record_restart(&anyhow::anyhow!("cancelled"), &fake)
@@ -5509,19 +5814,252 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     attempt.clear_after_restart(&fake).unwrap();
 
     // Every single command must have been dispatched via `ssh`, never host-local.
-    let commands = fake.commands.lock().unwrap();
-    assert!(!commands.is_empty());
-    assert!(
-        commands.iter().all(|(program, _)| program == "ssh"),
-        "expected all commands via ssh, got: {commands:?}"
+    {
+        let commands = fake.commands.lock().unwrap();
+        assert!(!commands.is_empty());
+        assert!(
+            commands.iter().all(|(program, _)| program == "ssh"),
+            "expected all commands via ssh, got: {commands:?}"
+        );
+        // CAPABILITY file must be preserved while the 5 suspend wire files are removed.
+        let files = fake.files.lock().unwrap();
+        assert!(files.contains_key(wire::CAPABILITY));
+        assert!(!files.contains_key(wire::ACCEPTED));
+        assert!(!files.contains_key(wire::REQUEST));
+        assert!(!files.contains_key(wire::RECEIPT));
+        assert!(!files.contains_key(wire::RESTART));
+    }
+
+    // Simulate a handoff after borrower teardown and before the dead
+    // original worker could write REQUEST. A stopped borrower can still
+    // have detached writers in the parent's checkout.
+    persist_controller_fixture(&mut controller);
+    let borrower_id = "bound-stopped-borrower";
+    let mut borrower = checkpoint_test_session(borrower_id);
+    borrower.target_template_id = "ssh-bare".into();
+    borrower.project_directory = Some(checkout.clone());
+    borrower.target = Some(Box::new(TargetLocator::SshBare {
+        host: "remote.example".into(),
+        workspace: checkout.clone(),
+        worker_id: Some(borrower_id.into()),
+    }));
+    let mut relation = failed_subagent_relation(borrower_id);
+    relation.parent_session_id = session_id.into();
+    crate::database::save_subagent_session(&borrower, &relation).unwrap();
+    borrower.state = SessionState::Stopped;
+    borrower.target = None;
+    crate::database::save_lifecycle_session(&borrower).unwrap();
+
+    let parent = controller.state.sessions.get_mut(session_id).unwrap();
+    parent.state = SessionState::Closing;
+    crate::database::save_lifecycle_session(parent).unwrap();
+    let mut controller = Controller {
+        config: controller.config,
+        state: crate::database::load_state().unwrap(),
+    };
+    assert_eq!(
+        controller.state.sessions[borrower_id].state,
+        SessionState::Stopped
     );
-    // CAPABILITY file must be preserved while the 5 suspend wire files are removed.
-    let files = fake.files.lock().unwrap();
-    assert!(files.contains_key(wire::CAPABILITY));
-    assert!(!files.contains_key(wire::ACCEPTED));
-    assert!(!files.contains_key(wire::REQUEST));
-    assert!(!files.contains_key(wire::RECEIPT));
-    assert!(!files.contains_key(wire::RESTART));
+    assert!(controller.state.active_borrowers(session_id).is_empty());
+
+    let consent = SuspendConsent {
+        discard_untracked: UntrackedConsent::Any,
+        ..Default::default()
+    };
+    let session = &controller.state.sessions[session_id];
+    crate::database::save_suspension_intent(session, None, Some(&consent)).unwrap();
+    let target = session.target.clone();
+    let mut fake = fake;
+    let operation = "origin-delta-suspend-interrupted-wait".to_owned();
+    let request = SuspendRequest {
+        operation: operation.clone(),
+        worker: WorkerIdentity {
+            pid: 4242,
+            start: 99,
+        },
+        checkout,
+        child_sessions: Vec::new(),
+    };
+    controller.config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            PathBuf::from("/remote/profile"),
+        ),
+    );
+    let (backend, _) = controller.worker_placement(session_id).unwrap();
+    let launch = controller
+        .current_worker_launch_config(session_id, &backend)
+        .unwrap();
+    fake.files.lock().unwrap().extend([
+        (
+            wire::ACCEPTED.into(),
+            serde_json::to_vec(&operation).unwrap(),
+        ),
+        ("launch.json".into(), serde_json::to_vec(&launch).unwrap()),
+    ]);
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!reloaded.request_recorded());
+    assert_eq!(reloaded.live_worker_mode(&fake).unwrap(), None);
+    assert_eq!(reloaded.capture_scope().child_sessions, [borrower_id]);
+
+    // StopSubagent can delete the operational row and binding. Teardown
+    // retains the worker lease so recovery can still find detached writers.
+    let environment = crate::database::session_environment(session_id)
+        .unwrap()
+        .unwrap();
+    crate::database::delete_session(borrower_id).unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    assert!(!controller.state.sessions.contains_key(borrower_id));
+    assert!(
+        crate::database::session_environment(borrower_id)
+            .unwrap()
+            .is_none()
+    );
+    let workers = crate::database::environment_workers(&environment.id).unwrap();
+    assert!(
+        workers
+            .iter()
+            .any(|worker| worker.session_id == borrower_id)
+    );
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!reloaded.request_recorded());
+    assert_eq!(reloaded.capture_scope().child_sessions, [borrower_id]);
+
+    // The worker can accept a stop while SSH loses both its reply and the
+    // readback. Lost observations during stop and capture also keep Closing.
+    *fake.worker_alive.lock().unwrap() = true;
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(session_id);
+    for (worker_alive, command, lose_stop_reply) in [
+        (false, "read suspend record suspend-operation.json", false),
+        (false, READ_REQUEST, false),
+        (true, READ_REQUEST, true),
+        (true, "read suspend record suspend-progress.json", false),
+        (false, "probe Mjolnir worker daemon liveness", false),
+    ] {
+        *fake.worker_alive.lock().unwrap() = worker_alive;
+        fake.lose_stop_reply = lose_stop_reply;
+        fake.failed_stop_observation = Some(command);
+        let before_close: BeforeClose = Box::pin(async { panic!("pending stop entered teardown") });
+        let error = if fake.lose_stop_reply {
+            controller
+                .suspend_session_controlled_with_manager(
+                    &admission,
+                    session_id,
+                    &fake,
+                    None,
+                    None,
+                    SourceTargetDisposition::Destroy,
+                    CheckpointExportPolicy::OriginDelta,
+                    &consent,
+                    Some(before_close),
+                    None,
+                    LatchExclusivity::HoldThroughClose,
+                    None,
+                    SuspendSettlement::Suspend,
+                )
+                .await
+        } else {
+            controller
+                .recover_interrupted_close_managed(
+                    &admission,
+                    session_id,
+                    &fake,
+                    &manager.control,
+                    &consent,
+                    Some(before_close),
+                    SuspendSettlement::Suspend,
+                )
+                .await
+        }
+        .unwrap_err();
+        let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
+        assert_eq!(
+            reason,
+            Some(LifecycleFailureReason::SuspendPending),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains(&format!("SSH failed during {command}")));
+        if fake.lose_stop_reply {
+            assert!(format!("{error:#}").contains("SSH lost the worker's stop reply"));
+        }
+        assert_eq!(
+            controller.state.sessions[session_id].state,
+            SessionState::Closing
+        );
+
+        let public = format!(
+            "{}: {} Reference lifecycle-test.",
+            mj_core::state::CLOSE_FAILURE_PREFIX,
+            reason.unwrap()
+        );
+        controller
+            .record_failed_close(session_id, &public, reason)
+            .unwrap();
+        let retained = crate::database::read_durable_session_record(session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.state, SessionState::Closing);
+        assert_eq!(retained.target, target);
+        assert_eq!(retained.public_error(), Some(public.as_str()));
+        assert_eq!(
+            crate::database::load_closing_consent(session_id).unwrap(),
+            Some(consent.clone())
+        );
+        let files = fake.files.lock().unwrap();
+        assert_eq!(
+            files[wire::ACCEPTED],
+            serde_json::to_vec(&operation).unwrap()
+        );
+        if let Some(recorded) = files.get(wire::REQUEST) {
+            assert_eq!(recorded, &serde_json::to_vec(&request).unwrap());
+        } else {
+            assert!(
+                matches!(
+                    command,
+                    "read suspend record suspend-operation.json" | READ_REQUEST
+                ) && !lose_stop_reply,
+                "the recorded stop disappeared during {command}"
+            );
+        }
+    }
+    fake.failed_stop_observation = None;
+
+    // Let the same worker finish. Retry must see its actual refusal and run
+    // the existing rollback, which this fixture stops before harness launch.
+    *fake.worker_alive.lock().unwrap() = false;
+    controller.config.profiles.clear();
+    let refusal = "worker could not drain a checkout holder";
+    fake.files.lock().unwrap().insert(
+        wire::RECEIPT.into(),
+        serde_json::to_vec(&SuspendReceipt {
+            operation: operation.clone(),
+            error: Some(refusal.into()),
+        })
+        .unwrap(),
+    );
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            session_id,
+            &fake,
+            &manager.control,
+            &consent,
+            Some(Box::pin(async { panic!("refused stop entered teardown") })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    manager.shutdown.shutdown().await.unwrap();
+    assert_eq!(
+        mj_core::refusal::Refusal::of(&error).unwrap().message(),
+        refusal
+    );
+    let restart: SuspendReceipt =
+        serde_json::from_slice(&fake.files.lock().unwrap()[wire::RESTART]).unwrap();
+    assert_eq!(restart.operation, operation);
 }
 
 #[cfg(unix)]
@@ -5732,16 +6270,10 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     assert!(attempt.worker_capable(&fake).unwrap());
     attempt.accept(&fake, false).unwrap();
     attempt.request_stop(&fake).unwrap();
-    // Worker exited without writing a receipt: wait_for_stop must report an error
-    // rather than silently succeeding over potentially live writers.
-    let receipt = attempt.wait_for_stop(&fake).await.unwrap();
-    assert!(
-        receipt
-            .error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("exited without confirming checkout quiescence")),
-        "expected missing-receipt error, got: {receipt:?}"
-    );
+    // The worker exited without proving quiescence. The capture worker,
+    // which holds the root lock, owns that proof.
+    attempt.wait_for_stop(&fake).await.unwrap();
+    assert!(attempt.receipt(&fake).unwrap().is_none());
 
     let commands = fake.commands.lock().unwrap();
     assert!(!commands.is_empty());
@@ -6094,11 +6626,18 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let attempt =
         origin_delta::OriginDeltaSuspend::load(&controller, session_id, &target_fake).unwrap();
-    let receipt = attempt
+    attempt
         .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
         .await
         .unwrap();
-    assert!(receipt.error.is_none());
+    assert!(
+        attempt
+            .receipt(&target_fake)
+            .unwrap()
+            .unwrap()
+            .error
+            .is_none()
+    );
     assert_eq!(target_fake.alive_polls.load(Ordering::SeqCst), 2);
     assert_eq!(
         attempt.restart_reason(&target_fake).unwrap().as_deref(),

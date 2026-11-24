@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 """Suspend and resume an independent clone using real mj, daemon and worker.
 
-Build mj with test-hooks for the post-preflight timing cases. Build the worker
+Build mj with test-hooks for the interruption cases. Build the worker
 separately from the same checkout using its normal features.
 """
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
+from urllib.request import Request, urlopen
 import zipfile
 
 import reliability_lab
 
 WAIT = 120
+CLOSE_FAILURE_PREFIX = "the suspension did not finish"
+RECOVERY_HOOKS = {
+    "dead-worker-live": "origin_delta_before_live_stop",
+    "dead-worker-startup": "origin_delta_after_preflight",
+    "dead-worker-error": "origin_delta_after_preflight",
+    "verified-before-destroy": "origin_delta_after_close_ack",
+    "verified-before-destroy-dead-capture": "origin_delta_after_close_ack",
+}
 
 
 def wait_for(predicate, description):
@@ -32,7 +44,11 @@ def main():
     parser.add_argument("--mj", required=True, type=Path)
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--instance", required=True)
-    parser.add_argument("--case", choices=["round-trip", "untracked", "detached", "late-file", "git-error", "raw"], required=True)
+    parser.add_argument(
+        "--case",
+        choices=["round-trip", "untracked", "detached", "late-file", "git-error", "raw", *RECOVERY_HOOKS],
+        required=True,
+    )
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named instance")
@@ -41,13 +57,17 @@ def main():
     git_server = None
     session = None
     writer = None
+    holder = None
     checkpoint_hook = None
     try:
-        lab.prepare()
+        lab.prepare(fake_acp_prompt_delay_ms=60_000 if args.case == "dead-worker-live" else 0)
         with (lab.config / "config.toml").open("a") as config:
             config.write("\n[jev]\nenabled = false\n[github.watch]\nenabled = false\n")
         if args.case in {"late-file", "git-error"}:
             lab.hook_name = "origin_delta_after_preflight"
+        else:
+            lab.hook_name = RECOVERY_HOOKS.get(args.case)
+        if lab.hook_name is not None:
             checkpoint_hook = lab.hooks / f"{lab.hook_name}.continue"
         env = dict(lab.environment(), MJ_INSTANCE=args.instance,
                    MJ_WORKER_BINARY=str(args.worker.resolve()))
@@ -70,11 +90,37 @@ def main():
                 assert result.returncode == 0, (arguments, result.stdout, result.stderr)
             return result
 
+        def terminal_request(method, path, body=None):
+            endpoint = json.loads((lab.data / "api-endpoint.json").read_text())
+            request = Request(
+                f"http://{endpoint['address']}/api/v1{path}",
+                data=None if body is None else json.dumps(body).encode(),
+                headers={
+                    "Authorization": f"Bearer {endpoint['token']}",
+                    "Content-Type": "application/json",
+                },
+                method=method,
+            )
+            with urlopen(request, timeout=WAIT) as response:
+                payload = response.read()
+                return json.loads(payload) if payload else None
+
         def record():
-            reply = lab.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
-            assert reply["value"] is not None, reply
-            value = reply["value"]
-            return value["record"] if isinstance(value, dict) and "record" in value else value
+            return terminal_request("GET", f"/sessions/{session}/record")["record"]
+
+        open_fault = lab.runtime_root / "fail-harness-load"
+        if args.case == "dead-worker-error":
+            bridge = lab.runtime_root / "fake_acp.py"
+            script = bridge.read_text()
+            load = '    elif method in ("session/new", "session/load"):\n'
+            assert script.count(load) == 1
+            bridge.write_text(script.replace(load, load + f"""
+        if method == "session/load" and os.path.exists({str(open_fault)!r}):
+            send({{"jsonrpc": "2.0", "id": ident, "error": {{
+                "code": -32603, "message": "injected Suspend fixture load failure"
+            }}}})
+            continue
+"""))
 
         repos = lab.runtime_root / "origins"
         repos.mkdir()
@@ -111,30 +157,23 @@ def main():
             (lab.project / "README.md").write_text("pre-launch stash\n")
             git(lab.project, "stash", "push", "-m", "pre-launch stash")
 
-            created = lab.daemon_request({
-                "action": "start_create_session",
-                "arguments": {
-                    "workspace_id": workspace,
-                    "profile_id": "fake",
-                    "bundle_id": "",
-                    "target_template_id": "localhost",
-                    "title": "raw-origin-delta",
-                    "project_directory": str(lab.project),
-                    "create_managed_worktree": False,
-                    "subagents": {"mode": "none"},
-                    "no_project_memory": False,
-                    "no_github_events": False,
-                    "remember_launch_choices": False,
-                    "remember_container_size": False,
-                    "additional_mounts": [],
-                },
+            created = terminal_request("POST", "/sessions/create", {
+                "workspace_id": workspace,
+                "profile_id": "fake",
+                "bundle_id": "",
+                "target_template_id": "localhost",
+                "title": "raw-origin-delta",
+                "project_directory": str(lab.project),
+                "create_managed_worktree": False,
+                "subagents": {"mode": "none"},
+                "no_project_memory": False,
+                "no_github_events": False,
+                "remember_launch_choices": False,
+                "remember_container_size": False,
+                "additional_mounts": [],
             })
-            session = created["value"]["session"]["id"]
-            wait_res = lab.daemon_request({
-                "action": "wait_create_session",
-                "arguments": {"session_id": session},
-            }, timeout=WAIT)
-            assert wait_res.get("reply") == "done", (created, wait_res)
+            session = created["session"]["id"]
+            terminal_request("POST", f"/sessions/{session}/create/wait")
             before = wait_for(lambda: row if (row := record())["state"] == "running" else None,
                               "raw session worker ready")
             assert before.get("managed_worktree") is None, before
@@ -188,6 +227,268 @@ def main():
         checkout = Path(before["managed_worktree"]["worktree_root"])
         pid_path = Path(before["target"]["worker_root"]) / "worker.pid"
         worker_before = pid_path.read_text()
+
+        # Hard-won: #1676: a retained clone could not suspend after its original worker was lost
+        if args.case in RECOVERY_HOOKS:
+            root = pid_path.parent
+            tracked = checkout / "README.md"
+            tracked.write_text("staged before interrupted Suspend\n")
+            git(checkout, "add", tracked.name)
+            tracked.write_text("unstaged before interrupted Suspend\n")
+
+            def patches():
+                return (
+                    git(checkout, "diff", "--cached", "--binary", "--", tracked.name).stdout,
+                    git(checkout, "diff", "--binary", "--", tracked.name).stdout,
+                )
+
+            def acp_requests(methods):
+                log = lab.runtime_root / "fake-acp.log"
+                if not log.exists():
+                    return []
+                requests = (json.loads(line) for line in log.read_text().splitlines(keepends=True)
+                            if line.endswith("\n"))
+                return [request for request in requests if request.get("method") in methods]
+
+            def harness_opens():
+                # A daemon boot also probes harness capabilities in a scratch
+                # workspace. Count only opens of this session's checkout.
+                return [request for request in acp_requests({"session/new", "session/load"})
+                        if Path(request["params"]["cwd"]) == checkout]
+
+            prompt = "durable Suspend fixture prompt"
+
+            def transcript():
+                return run("transcript", "--session", session, "--json").stdout
+
+            def worker_pid():
+                return int(pid_path.read_text())
+
+            def daemon_pid():
+                return json.loads((lab.data / "daemon.json").read_text())["pid"]
+
+            def kill_owned(pid):
+                assert pid in lab.owned_pids(), f"refusing to signal unowned PID {pid}"
+                os.kill(pid, signal.SIGKILL)
+                wait_for(lambda: not reliability_lab.process_is_running(pid), f"PID {pid} to exit")
+
+            def start_checkout_holder():
+                return subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(3600)", str(lab.runtime_root)],
+                    cwd=checkout, env=env, start_new_session=True,
+                )
+
+            def start_writer():
+                ready = lab.runtime_root / "writer-started"
+                ready.unlink(missing_ok=True)
+                process = subprocess.Popen(
+                    [sys.executable, "-c", """
+from pathlib import Path
+import sys
+import time
+
+with open(sys.argv[2], "r+b", buffering=0) as tracked:
+    first = tracked.read(1)
+    Path(sys.argv[1]).touch()
+    while True:
+        tracked.seek(0)
+        tracked.write(first)
+        time.sleep(0.02)
+""", str(ready), tracked.name],
+                    cwd=checkout, env=dict(env, MJ_SESSION_ID=session), start_new_session=True,
+                )
+                return process, ready
+
+            hook_reached = lab.hooks / f"{lab.hook_name}.reached"
+
+            def pause_suspend():
+                checkpoint_hook.unlink(missing_ok=True)
+                hook_reached.unlink(missing_ok=True)
+                run("suspend", "--session", session)
+                wait_for(hook_reached.exists, lab.hook_name)
+                assert hook_reached.read_text().strip() == f"pid={daemon_pid()}"
+                row = record()
+                assert row["state"] == "closing", row
+                return row
+
+            def restart_daemon(pid):
+                checkpoint_hook.touch()
+                run("workspaces", "list", "--json")
+                assert daemon_pid() != pid
+
+            live_race = args.case == "dead-worker-live"
+            retry_error = args.case == "dead-worker-error"
+            if not live_race:
+                run("prompt", "--session", session, prompt)
+            if retry_error:
+                # Publish a real retained-target Error via the existing failed
+                # harness startup path, with the lab daemon offline during the boot.
+                run("daemon", "stop")
+                subprocess.run(
+                    [str(args.worker.resolve()), "worker", "stop", "--root", str(root)],
+                    env=env, check=True, timeout=WAIT,
+                )
+                open_fault.touch()
+                result = subprocess.run(
+                    [str(root / "hel"), "worker", "run", "--root", str(root),
+                     "--config", str(root / "launch.json")],
+                    env=env, capture_output=True, text=True, timeout=WAIT,
+                )
+                assert result.returncode != 0, result
+                exit_record = json.loads((root / "worker-exit.json").read_bytes())
+                assert "injected Suspend fixture load failure" in exit_record["harness_startup_failure"]["message"], exit_record
+                open_fault.unlink()
+                run("workspaces", "list", "--json")
+                failed = wait_for(lambda: row if (row := record())["state"] == "error" else None,
+                                  "typed harness failure to leave the session in Error")
+                assert failed["target"]["worker_root"] == str(root), failed
+                assert not reliability_lab.process_is_running(worker_pid())
+
+            if live_race or retry_error:
+                # An independently launched checkout holder lacks session
+                # ownership. Suspension must leave it alive and report its PID.
+                holder = start_checkout_holder()
+                writer, ready = start_writer()
+                wait_for(ready.exists, "marked writer to start before refusal")
+                expected = patches()
+                before_refusal = harness_opens()
+                before_error = record().get("last_error")
+                old_worker = worker_pid() if live_race else None
+                assert pause_suspend().get("checkpoint") is None
+                if old_worker is not None:
+                    kill_owned(old_worker)
+                checkpoint_hook.touch()
+
+                def settled_refusal():
+                    row = record()
+                    diagnostic = row.get("last_checkpoint_error") or ""
+                    public_error = row.get("last_error") or ""
+                    # The API projects Closing until the operation completes,
+                    # even after the rollback and its failure are persisted.
+                    if (row["state"] != "closing"
+                            and public_error != before_error
+                            and public_error.startswith(CLOSE_FAILURE_PREFIX)
+                            and "cannot prove these processes belong to this session" in diagnostic):
+                        return row
+                    return None
+
+                after = wait_for(
+                    settled_refusal,
+                    "unknown-holder refusal to be recorded",
+                )
+                assert after["state"] == ("error" if retry_error else "running"), after
+                assert str(holder.pid) in after["last_checkpoint_error"], after
+                assert after.get("checkpoint") is None, after
+                assert after["target"]["worker_root"] == str(root), after
+                assert patches() == expected
+                assert holder.poll() is None, "capture signalled the unknown holder"
+                assert writer.wait(timeout=WAIT) < 0, "capture left the marked writer running"
+                wait_for(lambda: len(harness_opens()) > len(before_refusal),
+                         "refusal rollback to restart Harness")
+                holder.terminate()
+                holder.wait(timeout=WAIT)
+                if retry_error:
+                    # The rollback starts a Harness even as the published state
+                    # stays Error. Exercise the next retry with no live worker.
+                    kill_owned(worker_pid())
+
+            if live_race:
+                run("message", "--session", session, prompt)
+                wait_for(lambda: any(prompt in json.dumps(request)
+                                    for request in acp_requests({"session/prompt"})),
+                         "active prompt to reach the harness")
+
+            journal_marker = "checking deterministic fixture" if live_race else f"reliability reply: {prompt}"
+            wait_for(lambda: journal_marker in transcript(), "durable relay transcript before capture")
+            writer, ready = start_writer()
+            wait_for(ready.exists, "marked writer to start before capture")
+            expected = patches()
+            opens = harness_opens()
+            old_daemon = daemon_pid()
+            old_worker = worker_pid() if not retry_error else None
+            closing = pause_suspend()
+            checkpoint = closing.get("checkpoint")
+            dead_capture = args.case == "verified-before-destroy-dead-capture"
+            if dead_capture or args.case == "verified-before-destroy":
+                assert checkpoint is not None, closing
+                archive = Path(checkpoint["archive_path"])
+                assert hashlib.sha256(archive.read_bytes()).hexdigest() == checkpoint["sha256"]
+                capture_pid = worker_pid()
+                assert capture_pid != old_worker
+                assert json.loads((root / "launch.json").read_text())["run_mode"] == "checkpoint_only"
+                relay = json.loads((root / "relay-state.json").read_text())
+                assert relay["execution"] in {"closing", "closed"}, relay["execution"]
+                if dead_capture:
+                    kill_owned(capture_pid)
+                kill_owned(old_daemon)
+                if dead_capture:
+                    # A recovered cancellation may still have a durable restart
+                    # intent, but the relay has already committed Close.
+                    operation = json.loads((root / "suspend-operation.json").read_text())
+                    (root / "suspend-restart.json").write_text(json.dumps({
+                        "operation": operation,
+                        "error": "suspend was cancelled",
+                    }))
+                    # This process gained access after Close was acknowledged.
+                    # Teardown must leave it alone.
+                    holder = start_checkout_holder()
+                    assert holder.poll() is None
+                restart_daemon(old_daemon)
+            else:
+                assert checkpoint is None, closing
+                if old_worker is not None:
+                    kill_owned(old_worker)
+                if args.case == "dead-worker-startup":
+                    kill_owned(old_daemon)
+                    restart_daemon(old_daemon)
+                else:
+                    checkpoint_hook.touch()
+                    assert daemon_pid() == old_daemon
+
+            def stopped_record():
+                row = record()
+                assert row["state"] != "error" and not row.get("last_checkpoint_error"), row
+                return row if row["state"] == "stopped" else None
+
+            stopped = wait_for(stopped_record, "interrupted Suspend to complete")
+            assert not stopped.get("last_error") and not stopped.get("last_checkpoint_error"), stopped
+            assert not checkout.exists(), checkout
+            if dead_capture:
+                assert holder.poll() is None, "sealed cleanup signalled the unrelated holder"
+                assert not root.exists(), root
+            assert writer.wait(timeout=WAIT) < 0, "capture left the marked writer running"
+            assert harness_opens() == opens, harness_opens()
+            saved = stopped["checkpoint"]
+            archive = Path(saved["archive_path"])
+            assert hashlib.sha256(archive.read_bytes()).hexdigest() == saved["sha256"]
+            assert set(archive.parent.glob("*.zip")) == {archive}
+            with zipfile.ZipFile(archive) as bundle:
+                canonical = json.loads(bundle.read("canonical/session.json"))
+            assert canonical["event_frontier"] == saved["event_frontier"]
+            assert journal_marker in json.dumps(canonical["transcript"])
+            if checkpoint is not None:
+                assert saved == checkpoint, (saved, checkpoint)
+                daemon_logs = lab.data / "logs"
+                exports = [line for log in daemon_logs.glob("mj-daemon-*.log")
+                           for line in log.read_text().splitlines()
+                           if session in line and "checkpoint archive exported on the target" in line]
+                assert len(exports) == 1, exports
+                if not dead_capture:
+                    replacement_log, = daemon_logs.glob(f"mj-daemon-*-{daemon_pid()}.log")
+                    starts = [line for line in replacement_log.read_text().splitlines()
+                              if session in line and "start detached Mjolnir worker" in line]
+                    assert not starts, starts
+            if live_race:
+                assert not acp_requests({"session/cancel"}), "dead prompt was treated as a live CancelTurn"
+            run("resume", "--session", session, "--queue", "start", "--json")
+            wait_for(lambda: record()["state"] == "running", "resumed worker ready")
+            assert patches() == expected
+            assert journal_marker in transcript()
+            if live_race:
+                wait_for(lambda: any("interrupted turn recovery" in json.dumps(request)
+                                    for request in acp_requests({"session/prompt"})),
+                         "resumed harness to receive the existing restart continuation")
+            return
 
         if args.case == "untracked":
             untracked = checkout / "untracked.txt"
@@ -330,6 +631,9 @@ while True:
         if writer is not None and writer.poll() is None:
             writer.terminate()
             writer.wait(timeout=WAIT)
+        if holder is not None and holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=WAIT)
         if git_server is not None:
             git_server.terminate()
             git_server.wait(timeout=WAIT)
