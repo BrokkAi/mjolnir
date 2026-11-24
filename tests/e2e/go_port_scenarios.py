@@ -84,6 +84,11 @@ def product_directory(kind: str) -> Path:
 
 class Suite:
     def __init__(self, args: argparse.Namespace):
+        # Tool processes are found by their command line, which is visible
+        # host-wide, so each run gives its markers a number of its own:
+        # another run's `sleep` (a concurrent suite, the Rust control) can
+        # then never satisfy this run's checks.
+        self.nonce = str(int.from_bytes(os.urandom(4), "big") % 1_000_000).zfill(6)
         self.args = args
         self.mj = args.mj.resolve()
         self.instance = args.instance
@@ -287,18 +292,18 @@ class Suite:
         self.passed(3, "read-back", f"reply {outcome['final_message'].strip()!r} after a tool call")
 
     def interrupt(self, session: str) -> None:
-        marker = "sleep 117"
+        marker = f"sleep 117.{self.nonce}"
         self.cli("message", "--session", session,
                  f"Use the shell tool to run exactly this command: {marker} && echo slept . "
                  "After it finishes, reply SLEPT.")
-        self.wait_for("the tool to start", lambda: self.process_running(rf"(^|\s){marker}(\s|$)"),
+        self.wait_for("the tool to start", lambda: self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"),
                       self.args.turn_seconds)
         self.cli("interrupt-turn", "--session", session)
         outcome = self.turn("wait", "--session", session)
         if outcome["outcome"] != "cancelled":
             raise ScenarioFailure(f"interrupted turn ended as {json.dumps(outcome)[:2000]}")
         self.wait_for("the interrupted tool to stop",
-                      lambda: not self.process_running(rf"(^|\s){marker}(\s|$)"), 30)
+                      lambda: not self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"), 30)
         outcome = self.turn("prompt", "--session", session,
                             "Reply with the single word READY and do not use any tools.")
         if outcome["outcome"] != "finished" or "READY" not in outcome.get("final_message", ""):
@@ -352,17 +357,17 @@ class Suite:
 
     def daemon_restart(self, session: str) -> None:
         before = self.latest_seq(session)
-        marker = "sleep 31"
+        marker = f"sleep 31.{self.nonce}"
         self.cli("message", "--session", session,
                  f"Use the shell tool to run exactly this command: {marker} && echo done-thirty-one . "
                  "When it finishes, reply with FINISHED followed by the command output.")
-        self.wait_for("the tool to start", lambda: self.process_running(rf"(^|\s){marker}(\s|$)"),
+        self.wait_for("the tool to start", lambda: self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"),
                       self.args.turn_seconds)
         self.cli("daemon", "stop")
         worker = self.worker_directory(session)
         if not any(" worker run " in line for line in self.processes_under(worker)):
             raise ScenarioFailure("the worker stopped with the daemon")
-        if not self.process_running(rf"(^|\s){marker}(\s|$)"):
+        if not self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"):
             raise ScenarioFailure("the turn's tool stopped with the daemon")
         self.cli("sessions")  # starts the next daemon
         outcome = self.turn("wait", "--session", session)

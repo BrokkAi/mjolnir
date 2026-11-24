@@ -186,8 +186,9 @@ func TestRelayWireWritesEmptyCollectionsAsSerdeDoes(t *testing.T) {
 		}
 		written, err := relayMarshalJSON(reflect.New(typ).Elem().Interface())
 		if err != nil {
-			// A type that refuses its zero value never reaches the wire
-			// empty.
+			// A type that cannot encode its zero value would otherwise
+			// drop out of this check unnoticed.
+			t.Errorf("%v cannot encode its zero value, so its collections go unchecked: %v", typ, err)
 			continue
 		}
 		checked++
