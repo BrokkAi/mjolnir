@@ -100,8 +100,12 @@ latency frontier and stay outside the cost frontier.
 Both charts use Opus 5.5/high verification across 70 diffs. Greptile Base and
 Plus are solo reference diamonds. Greptile's repository context could not be
 pinned to each diff's commit. The frontiers and cost cloud omit all Greptile
-combinations. The cost chart includes fully priced setups. The latency key
-rounds to whole seconds and findings.
+combinations. Both keys show reviewer setup, time in seconds, estimated cost
+in USD per diff, and findings for all, medium-plus and high impact. Times are
+shown to one decimal place, costs to three decimals, and unknown prices use an
+em dash in the latency key. Severity cells appear for audited frontier marks
+and Greptile solo references; blanks mean the option is not on that tier's
+frontier. The cost chart includes only priced options.
 
 [Latency SVG](review-pareto-latency-findings.svg) · [Cost SVG](review-pareto-cost-findings.svg)
 
