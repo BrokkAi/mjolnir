@@ -463,16 +463,16 @@ font:15px/1.45 -apple-system,"Segoe UI",Roboto,"DejaVu Sans",sans-serif}
 main{max-width:1320px;margin:0 auto;padding:24px 20px 48px}
 h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:0 0 4px}
 .sub{color:#52514e;margin:0 0 14px}.panels{display:grid;gap:20px;
-grid-template-columns:repeat(auto-fit,minmax(520px,1fr))}
+grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr))}
 figure{margin:0}svg.map{width:100%;height:auto;display:block;cursor:crosshair}
 svg text{font-family:inherit;fill:#52514e}.tl{font-size:12px}.al{font-size:13px;fill:#0b0b0b}
 .tick{stroke:#52514e}.bar{width:min(440px,100%);display:block;margin:8px 0}
 #tip{position:fixed;display:none;pointer-events:none;background:#fff;border:1px solid #b9b8b2;
-border-radius:4px;padding:8px 10px;max-width:380px;font-size:13px;line-height:1.35;
+border-radius:4px;padding:8px 10px;max-width:min(380px,calc(100vw - 16px));font-size:13px;line-height:1.35;
 box-shadow:0 2px 8px rgba(0,0,0,.18);z-index:9}
 #tip b{font-weight:600}#tip .m{color:#52514e}#tip ul{margin:4px 0 0;padding-left:16px}
 .legend{color:#52514e;font-size:13px;margin:4px 0 16px}
-details{margin:12px 0}summary{cursor:pointer;font-weight:600}
+.scroll{overflow-x:auto}details{margin:12px 0}summary{cursor:pointer;font-weight:600}
 table{border-collapse:collapse;font-size:13px;margin-top:8px}td,th{padding:2px 10px 2px 0;text-align:left}
 td.n{text-align:right;font-variant-numeric:tabular-nums}.notes li{margin:4px 0;color:#262522}
 """
@@ -607,8 +607,8 @@ def winners_table(panel):
         f'<td class="n">{by_name[n]["c"]:.3f}</td><td class="n">{by_name[n]["f"]:.2f}</td></tr>'
         for n in panel["ever_winners"])
     return (f'<details><summary>{html.escape(panel["title"])}: {len(panel["ever_winners"])} setups '
-            'that are best at some budget</summary><table><tr><th>Setup</th><th>Latency (s)</th>'
-            f'<th>Cost (USD)</th><th>Findings</th></tr>{rows}</table></details>')
+            'that are best at some budget</summary><div class="scroll"><table><tr><th>Setup</th><th>Latency (s)</th>'
+            f'<th>Cost (USD)</th><th>Findings</th></tr>{rows}</table></div></details>')
 
 
 def notes(payload):

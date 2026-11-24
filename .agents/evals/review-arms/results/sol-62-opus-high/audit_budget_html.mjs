@@ -15,7 +15,16 @@ const check = (ok, msg) => { console.log((ok ? 'ok   ' : 'FAIL ') + msg); if (!o
 
 const profile = fs.mkdtempSync(path.join(shots, 'profile-'));
 const pending = new Map();
-const failPending = err => { for (const p of pending.values()) p.reject(err); pending.clear(); };
+// First loss of the browser or its DevTools socket, recorded durably. `lostSignal` only ever resolves,
+// so it cannot raise an unhandled rejection; every wait races against it and then rethrows `lost`.
+let lost = null, onLost;
+const lostSignal = new Promise(resolve => { onLost = resolve; });
+const lose = err => {
+  if (!lost) { lost = err; onLost(err); }
+  for (const p of pending.values()) p.reject(err);
+  pending.clear();
+};
+const orLost = async promise => { const value = await Promise.race([promise, lostSignal]); if (lost) throw lost; return value; };
 let proc = null, ws = null, exited = null, failure = null;
 const cleanupErrors = [];
 try {
@@ -24,7 +33,7 @@ try {
     { stdio: ['ignore', 'ignore', 'pipe'], detached: true });  // own process group, killed as a unit
   // Observe exit from the first moment, so an early exit cannot be missed.
   exited = new Promise(resolve => proc.once('exit', (code, signal) => {
-    failPending(new Error(`chrome exited (${code ?? signal}) during the audit`));
+    lose(new Error(`chrome exited (${code ?? signal}) during the audit`));
     resolve({ code, signal });
   }));
   await new Promise((resolve, reject) => { proc.once('spawn', resolve); proc.once('error', reject); });
@@ -36,7 +45,7 @@ try {
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   ws = new WebSocket(targets.find(t => t.type === 'page').webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { ws.addEventListener('open', resolve); ws.addEventListener('error', () => reject(new Error('devtools socket error'))); });
-  ws.addEventListener('close', () => failPending(new Error('devtools socket closed')));
+  ws.addEventListener('close', () => lose(new Error('devtools socket closed')));
   let nextId = 1; const consoleErrors = [];
   let onLoad; const loaded = new Promise(resolve => { onLoad = resolve; });
   ws.addEventListener('message', ev => {
@@ -48,13 +57,14 @@ try {
     else if (m.method === 'Network.requestWillBeSent' && !m.params.request.url.startsWith('file:')) consoleErrors.push('network: ' + m.params.request.url);
   });
   const send = (method, params = {}) => new Promise((resolve, reject) => {
+    if (lost) { reject(lost); return; }
     const id = nextId++; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params }));
   });
   const evalJs = async expr => { const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true }); if (r.result.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails)); return r.result.result.value; };
   await send('Page.enable'); await send('Runtime.enable'); await send('Network.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 1500, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: 'file://' + path.resolve(artifacts, `${stem}.html`) });
-  await loaded;
+  await orLost(loaded);
 
   const brute = (P, T, C) => {
     const feasible = P.options.filter(o => o.t <= T && o.c <= C);
@@ -226,6 +236,24 @@ try {
     await hover(ax, ay);
     check((await tipState()).shown, 'hover still works after an unpinned outside click');
   }
+  // Layout: each map, the color scale and the page fit the viewport, from phone width to desktop.
+  for (const [width, height] of [[375, 900], [320, 900], [1400, 1500]]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    await evalJs(`document.querySelectorAll('details').forEach(d => { d.open = true; })`);
+    const m = await evalJs(`(() => { const rect = e => { const r = e.getBoundingClientRect(); return [r.left, r.right, r.top, r.width]; };
+      const doc = document.documentElement;
+      return { scroll: doc.scrollWidth, body: document.body.scrollWidth, inner: innerWidth,
+        maps: [...document.querySelectorAll('svg.map, svg.bar')].map(rect), tables: [...document.querySelectorAll('.scroll')].map(e => [e.scrollWidth, e.clientWidth]) }; })()`);
+    const fits = m.scroll <= m.inner && m.body <= m.inner && m.maps.every(([l, r]) => l >= -0.5 && r <= m.inner + 0.5);
+    const sideBySide = m.maps.length >= 3 && Math.abs(m.maps[1][2] - m.maps[2][2]) < 1;
+    check(fits && m.maps.every(r => r[3] > 100) && (width < 1000 ? !sideBySide : sideBySide),
+      `${width}px viewport: page ${m.scroll}px, maps ${m.maps.map(r => Math.round(r[3])).join('/')}px wide, no horizontal overflow, ${sideBySide ? 'two columns' : 'stacked'}`);
+    if (width === 375) {
+      const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+      fs.writeFileSync(path.join(shots, 'html-375.png'), Buffer.from(shot.result.data, 'base64'));
+    }
+  }
+  await send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 1500, deviceScaleFactor: 1, mobile: false });
   check(consoleErrors.length === 0, `no console errors or network requests ${consoleErrors.join(' ').slice(0, 300)}`);
   {
     const m = await send('Page.getLayoutMetrics'); const height = Math.ceil(m.result.cssContentSize.height);

@@ -11,11 +11,13 @@ The user wants to see which reviewer combinations deliver the most confirmed fin
 - [x] (2026-11-24 16:38Z) Confirmed the existing Opus result data, filtering rules, cached plotting runtime and working Minastirith transfer route.
 - [x] (2026-11-24 16:38Z) Chose the complete attainable-findings surface, preserving ties and avoiding cluster or regret tolerances.
 - [x] (2026-11-24 16:57:01Z) Implemented the result-local renderer and offline HTML; generated both PNG/SVG pairs and the external caption.
-- [x] (2026-11-24 16:57:01Z) Independent oracle matched every observed cell and tie set; inspected both plots. Python audit: 45 ok, 0 FAIL. Chrome interaction audit: initially 19 ok, 0 FAIL; final corrected version 33 ok, 0 FAIL.
+- [x] (2026-11-24 16:57:01Z) Independent oracle matched every observed cell and tie set; inspected both plots. Python audit: 45 ok, 0 FAIL. Chrome interaction audit: initially 19 ok, 0 FAIL; final corrected version 36 ok, 0 FAIL.
 - [x] (2026-11-24 16:57:01Z) Copied both PNGs, HTML and caption to Minastirith Downloads; all four remote SHA-256 values match.
 - [x] (2026-11-24 17:00:09Z) Committed the delivered source checkpoint as 7b2df406e and merged upstream as 4a5b2d123.
 - [x] (2026-11-24 17:05:37Z) Completed all four review corrections. Browser audit: 33 ok, 0 FAIL; failure injections leave no browser or profile; optimum data is unchanged.
-- [ ] Obtain a clean review of the corrections and push the reproducible sources.
+- [x] (2026-11-24 17:08:03Z) Committed the first four corrections as ec16a1d71 and requested re-review.
+- [x] (2026-11-24 17:10:51Z) Completed responsive HTML and shared durable browser/socket loss handling. Browser audit:36 ok,0 FAIL; four ack-before-load disconnect injections clean up correctly. Updated HTML delivered and verified.
+- [ ] Obtain a clean final review and push the reproducible sources.
 
 ## Surprises & Discoveries
 
@@ -67,7 +69,7 @@ The renderer must produce both PNGs, both SVGs, the HTML and caption. The accept
     bash "$budget_figure_dir/render_frontiers_offline.sh" "$budget_result_dir/audit_budget_maps.py" "$budget_result_dir" --chrome "$budget_chrome" --scratch "$budget_audit_dir"
     node "$budget_result_dir/audit_budget_html.mjs" "$budget_result_dir" "$budget_audit_dir" "$budget_chrome"
 
-The Python command reports 45 ok and 0 FAIL; the browser command reports 33 ok and 0 FAIL. Run `git diff --check`. Compare each observed threshold-cell maximum and complete tie set with an independent brute-force enumeration of all eligible CSV rows. Exercise the JavaScript lookup with the actual serialized thresholds and data, including exact boundaries and infeasible points. Inspect full images and any dense label areas with the local image viewer.
+The Python command reports 45 ok and 0 FAIL; the browser command reports 36 ok and 0 FAIL. Run `git diff --check`. Compare each observed threshold-cell maximum and complete tie set with an independent brute-force enumeration of all eligible CSV rows. Exercise the JavaScript lookup with the actual serialized thresholds and data, including exact boundaries and infeasible points. Inspect full images and any dense label areas with the local image viewer.
 
 After acceptance, copy the two friendly PNGs, HTML and caption with existing SSH credentials:
 
@@ -89,7 +91,7 @@ Rendering overwrites only the named generated result assets and raw friendly exp
 
 The implementation evidence is .mj/agents/ae051a20723abc356c5f404e636b5fe5/{summary.md,audit-python.txt,audit-html.txt,shots/}. The independent evidence is .mj/agents/0f197302f2fbc342dcedefb987a1bf1d/verify/{report.md,expected.py,check_data.py,check_html.mjs,check_png.py}. Its numeric oracle and page lookup matched every cell. Its coarse PNG sampler has isolated overlay-pixel ambiguities; the exact implementation pixel audit passes, and the parent inspected the visible marks. The final pin fix changes only interaction, not data or static images.
 
-Remote and local SHA-256 values agree: all PNG 87e07909596cd6b569e94102419e1670b03993f7222cc9f72c973bdd792b7ad8; medium/high PNG 3c17139e4833baad501ea2951522a315c4b9744b1073d21ca4c2b9c300d31845; HTML 0a39e01e1f1edaf8b714acd9d4c5b0e9bc97082461fafbc847305593772fe448; caption 9ba2a27b94d9c7d8baf0e9df43c12d4e5b5cfb5bd2d74276ea3d683ffac9f115. A prior read-only report is `.mj/agents/0f197302f2fbc342dcedefb987a1bf1d/report.md`; it informs the design but does not substitute for the actual-data artifact audit.
+Remote and local SHA-256 values agree: all PNG 87e07909596cd6b569e94102419e1670b03993f7222cc9f72c973bdd792b7ad8; medium/high PNG 3c17139e4833baad501ea2951522a315c4b9744b1073d21ca4c2b9c300d31845; HTML 17d8f3c5b264cadb149c71d3e0b0cefe413c284736a6e02e2537c09a7523d840; caption 9ba2a27b94d9c7d8baf0e9df43c12d4e5b5cfb5bd2d74276ea3d683ffac9f115. A prior read-only report is `.mj/agents/0f197302f2fbc342dcedefb987a1bf1d/report.md`; it informs the design but does not substitute for the actual-data artifact audit.
 
 ## Interfaces and Dependencies
 
@@ -102,3 +104,7 @@ Revision note (2026-11-24 16:57:01Z): Recorded completed generation, independent
 Revision note (2026-11-24 17:00:09Z): Final review returned four accepted findings. The renderer will describe simulated median latency accurately, display observed-threshold budget intervals rather than misleading rounded pointer limits, preserve a pinned selection on outside clicks, and terminate browser-audit processes before removing profiles on every exit. Model data and all optimum scores remain frozen.
 
 Revision note (2026-11-24 17:05:37Z): Accepted all four review fixes after actual Chrome boundary/pin checks and cleanup failure injections. Synced and verified the final four Downloads files; no scores, input CSVs or model judgments changed.
+
+Revision note (2026-11-24 17:08:03Z): Second review identified two accepted defects in the offline HTML/audit: a 520px minimum map track overflows phones, and the load-event await must fail on the already-recorded process/socket termination. The focused fixes preserve numeric data and static maps. Downloads remain available.
+
+Revision note (2026-11-24 17:10:51Z): Accepted the focused second-pass corrections. The page fits 320/375/1400px viewports with tables open; page-load and command waits observe one durable browser/socket loss signal, including a loss before the wait starts. Static maps, numeric data and caption stayed byte-identical. The latest HTML was synced and remote-hash-verified.
