@@ -1633,7 +1633,8 @@ def _entry_may_shadow_import(rest, protected):
 
 def _python_imports_unshadowed(modules, scripts, cwd, written):
     if (scripts is None or scripts.opaque or scripts.tracked is None or scripts.symlinks is None
-            or not scripts.checkout or not isinstance(cwd, str) or not cwd):
+            or not scripts.checkout or not isinstance(cwd, str) or not cwd
+            or ".." in cwd.split("/") or ".." in scripts.checkout.split("/")):
         return False
     root = posixpath.normpath(scripts.checkout).rstrip("/")
     current = posixpath.normpath(cwd)

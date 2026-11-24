@@ -1533,3 +1533,13 @@ def test_shadowed_python_import_blocks_subsequent_structured_edit(tmp_path, trac
     report = audit_calls(tmp_path, calls, cwd=cwd, allow_in_place_edits=True)
     assert not report["passed"]
     assert any(hit["seq"] == len(calls) and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]
+
+
+def test_python_cwd_with_parent_traversal_blocks_subsequent_structured_edit(tmp_path):
+    cwd = clean_writer_inventory(tmp_path, tracked_paths=("nested/re.py",), tracked_symlinks=("alias",))
+    py = {"name": "exec_command", "kind": "execute",
+          "rawInput": {"command": "python3 -c 'import re; print(1)'", "cwd": f"{cwd}/alias/.."}}
+    edit = {"name": "Edit", "kind": "edit", "rawInput": {"file_path": "brief.md", "old_string": "a", "new_string": "b"}}
+    report = audit_calls(tmp_path, [py, edit], cwd=cwd, allow_in_place_edits=True)
+    assert not report["passed"]
+    assert any(hit["seq"] == 2 and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]
