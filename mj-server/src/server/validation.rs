@@ -1,9 +1,7 @@
 use super::*;
 
-/// Check attached images without decoding megabytes of base64 on the task that
-/// serves the request. Everything else about an action is cheap enough to
-/// check inline; a full multi-image prompt is not.
-pub(super) async fn decode_prompt_images_off_task(
+/// Verify staged blobs and normalize inline images off the request task.
+pub(super) async fn decode_prompt_attachments_off_task(
     action: ControllerAction,
 ) -> Result<ControllerAction, ApiError> {
     if let ControllerAction::Prompt {
@@ -17,10 +15,10 @@ pub(super) async fn decode_prompt_images_off_task(
     {
         validate_public_id(id)?;
     }
-    let ControllerAction::Prompt { images, .. } = &action else {
+    let ControllerAction::Prompt { images, files, .. } = &action else {
         return Ok(action);
     };
-    if images.is_empty() {
+    if images.is_empty() && files.is_empty() {
         return Ok(action);
     }
     mj_core::runtime::spawn_blocking(move || {
@@ -29,18 +27,25 @@ pub(super) async fn decode_prompt_images_off_task(
             session_id,
             text,
             images,
+            files,
             ..
         } = &mut action
         else {
-            unreachable!("only prompt actions carry images")
+            unreachable!("only prompt actions carry attachments")
         };
         validate_prompt_images(images)?;
+        validate_prompt_files(files)?;
         let store = AttachmentStore::controller(session_id).map_err(|_| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "could not open the image attachment store",
+                "could not open the attachment store",
             )
         })?;
+        for file in files.iter() {
+            store
+                .read_file(file)
+                .map_err(|_| ApiError::bad_request("the file attachment is unavailable"))?;
+        }
         let mut pending_blobs = Vec::new();
         for image in images.iter_mut() {
             if let Some(reference) = image.attachment.clone() {
@@ -80,7 +85,7 @@ pub(super) async fn decode_prompt_images_off_task(
         }
         // Every image is now the reference the worker will receive, so the
         // whole prompt is measured as its command.
-        ensure_prompt_command_fits(text, images)?;
+        ensure_prompt_command_fits(text, images, files)?;
         for (reference, bytes) in pending_blobs {
             store.install(&reference, &bytes).map_err(|_| {
                 ApiError::new(
@@ -95,9 +100,22 @@ pub(super) async fn decode_prompt_images_off_task(
     .map_err(|_| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "the server could not check the attached images",
+            "the server could not check the prompt attachments",
         )
     })?
+}
+
+fn validate_prompt_files(files: &[FileAttachmentRef]) -> Result<(), ApiError> {
+    if files.len() > MAX_FILES {
+        return Err(ApiError::bad_request(
+            "a prompt may contain at most 10 files",
+        ));
+    }
+    for file in files {
+        file.validate()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+    Ok(())
 }
 
 pub(super) fn validate_prompt_images(images: &[ViewerPromptImage]) -> Result<(), ApiError> {
@@ -303,7 +321,7 @@ pub(super) fn validate_move_request(
 /// Session creation carries a first prompt before any session record exists,
 /// so this is separate from [`validate_action`]'s prompt arm rather than being
 /// restated there: both must refuse the same text.
-pub(super) fn validate_prompt_text(text: &str, has_images: bool) -> Result<(), ApiError> {
+pub(super) fn validate_prompt_text(text: &str, has_attachments: bool) -> Result<(), ApiError> {
     if text.starts_with('!') {
         return Err(ApiError::bad_request(
             "leading ! is reserved for shell commands",
@@ -312,16 +330,16 @@ pub(super) fn validate_prompt_text(text: &str, has_images: bool) -> Result<(), A
     // The worker refuses a relay command over its budget, so a prompt is
     // held to that budget here, measured as the command the worker receives
     // and with the worker's own limit (#1556). Images are measured once they
-    // are attachment references, in `decode_prompt_images_off_task`.
+    // are attachment references, in `decode_prompt_attachments_off_task`.
     mj_core::relay::ensure_byte_budget(
         text_prompt_command_bytes(text),
         mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
         "prompt",
     )
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if text.trim().is_empty() && !has_images {
+    if text.trim().is_empty() && !has_attachments {
         return Err(ApiError::bad_request(
-            "prompt must contain text or an image",
+            "prompt must contain text or an attachment",
         ));
     }
     Ok(())
@@ -357,9 +375,13 @@ fn serialized_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
 
 /// The relay command a phone prompt becomes, once its images are attachment
 /// references, held to the worker's budget.
-fn ensure_prompt_command_fits(text: &str, images: &[ViewerPromptImage]) -> Result<(), ApiError> {
+fn ensure_prompt_command_fits(
+    text: &str,
+    images: &[ViewerPromptImage],
+    files: &[FileAttachmentRef],
+) -> Result<(), ApiError> {
     let command = mj_core::relay::RelayCommand::Prompt {
-        prompt: phone_prompt_blocks(text.to_owned(), images.to_vec()),
+        prompt: phone_prompt_blocks(text.to_owned(), images.to_vec(), files.to_vec()),
     };
     mj_core::relay::ensure_serialized_budget(
         &command,
@@ -912,6 +934,7 @@ fn validate_action_against(
             session_id,
             text,
             images,
+            files,
             ..
         } => {
             validate_public_id(session_id)?;
@@ -921,7 +944,8 @@ fn validate_action_against(
                     "a prompt may contain at most 10 images",
                 ));
             }
-            validate_prompt_text(text, !images.is_empty())?;
+            validate_prompt_files(files)?;
+            validate_prompt_text(text, !images.is_empty() || !files.is_empty())?;
             if !images.is_empty() && !session.prompt_images_supported {
                 return Err(ApiError::bad_request(
                     "this session does not support image prompts",
@@ -1136,10 +1160,11 @@ pub(super) fn require_bundle(snapshot: &ViewerSnapshot, id: &str) -> Result<(), 
 pub fn phone_prompt_blocks(
     text: String,
     images: Vec<ViewerPromptImage>,
+    files: Vec<FileAttachmentRef>,
 ) -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
     use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 
-    let mut prompt = Vec::with_capacity(images.len() + 1);
+    let mut prompt = Vec::with_capacity(images.len() + files.len() + 1);
     if !text.is_empty() {
         prompt.push(ContentBlock::Text(TextContent::new(text)));
     }
@@ -1147,5 +1172,6 @@ pub fn phone_prompt_blocks(
         Some(reference) => reference.content_block(),
         None => ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type)),
     }));
+    prompt.extend(files.iter().map(FileAttachmentRef::content_block));
     prompt
 }

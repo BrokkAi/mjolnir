@@ -733,6 +733,21 @@ pre.entry-body {
   overflow-wrap: anywhere;
 }
 
+.attachment > .attachment-file-badge {
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 3px 5px;
+  font-size: 0.7rem;
+}
+
+.attachment > .attachment-file-caption {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .attachment img {
   width: 44px;
   height: 44px;
@@ -2398,6 +2413,30 @@ body[data-connection='reconnecting'] .connection {
 
   #prompt-form.composer-has-intent .composer-actions {
     display: flex;
+  }
+
+  #prompt-form:not(.composer-has-intent) .composer-actions:has(#attach-image:not([hidden])) {
+    display: flex;
+    position: absolute;
+    inset-inline-end: 1px;
+    transform: translateY(-100%);
+  }
+
+  #prompt-form:not(.composer-has-intent) #send-button {
+    display: none;
+  }
+
+  #prompt-form:not(.composer-has-intent):has(#attach-image:not([hidden])) #prompt-text {
+    padding-inline-end: calc(var(--touch) + 8px);
+  }
+
+  @media (min-width: 360px) {
+    #prompt-form:not(.composer-has-intent):has(#attach-image:not([hidden])) #prompt-text:empty::before {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   }
 
   #attachments:empty {
