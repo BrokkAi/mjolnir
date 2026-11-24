@@ -1610,6 +1610,27 @@ READ_ONLY_SUBPROCESS_PROGRAMS = frozenset({
 })
 
 
+PYTHON_MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".so", ".pyd")
+SHADOWABLE_STDLIB_MODULES = frozenset(
+    getattr(sys, "stdlib_module_names", frozenset())
+    | {
+        "sitecustomize", "usercustomize", "sre_compile", "sre_constants", "sre_parse",
+        "pipes", "imp", "distutils", "pkg_resources", "apport_python_hook",
+    }
+)
+
+
+def _is_python_module_filename(name):
+    return name.endswith(PYTHON_MODULE_SUFFIXES) or ".so." in name
+
+
+def _entry_may_shadow_import(rest, protected):
+    head, sep, _ = rest.partition("/")
+    if not sep and _is_python_module_filename(head):
+        return True
+    return head.startswith("_") or head in protected or head.split(".", 1)[0] in protected
+
+
 def _python_imports_unshadowed(modules, scripts, cwd, written):
     if (scripts is None or scripts.opaque or scripts.tracked is None or scripts.symlinks is None
             or not scripts.checkout or not isinstance(cwd, str) or not cwd):
@@ -1623,31 +1644,27 @@ def _python_imports_unshadowed(modules, scripts, cwd, written):
         rel_path = pathlib.PurePosixPath(rel_dir.rstrip("/"))
         if str(rel_path) in scripts.symlinks or any(str(parent) in scripts.symlinks for parent in rel_path.parents):
             return False
+    # Any direct, transitive, or lazy stdlib import resolves against sys.path[0] == cwd.
+    # Reject if cwd contains any Python module file, any private '_'-prefixed entry,
+    # or any directory/entry matching an imported or standard-library module name.
+    protected = set(modules) | SHADOWABLE_STDLIB_MODULES
     known = scripts.tracked | scripts.symlinks
-    written_names = written or ()
-    for mod in modules:
-        if mod in sys.builtin_module_names:
-            continue
-        for path in known:
-            if not path.startswith(rel_dir):
-                continue
-            head = path.removeprefix(rel_dir).split("/", 1)[0]
-            if head == mod or head.startswith(mod + "."):
-                return False
-        mod_path = posixpath.join(current, mod)
-        mod_prefix = mod_path + "/"
-        mod_dot = mod_path + "."
-        for path in scripts.opaque_paths:
-            if path == mod_path or path.startswith(mod_prefix) or path.startswith(mod_dot):
-                return False
-        for name in written_names:
-            if name == mod or name.startswith(mod + "."):
-                return False
-        for key in scripts:
-            if not isinstance(key, str):
-                return False
-            if key == mod_path or key.startswith(mod_prefix) or key.startswith(mod_dot):
-                return False
+    for path in known:
+        if path.startswith(rel_dir) and _entry_may_shadow_import(path.removeprefix(rel_dir), protected):
+            return False
+    cwd_prefix = current.rstrip("/") + "/"
+    for path in scripts.opaque_paths:
+        if path.startswith(cwd_prefix) and _entry_may_shadow_import(path.removeprefix(cwd_prefix), protected):
+            return False
+    for name in written or ():
+        if (_is_python_module_filename(name) or name.startswith("_")
+                or name in protected or name.split(".", 1)[0] in protected):
+            return False
+    for key in scripts:
+        if not isinstance(key, str):
+            return False
+        if key.startswith(cwd_prefix) and _entry_may_shadow_import(key.removeprefix(cwd_prefix), protected):
+            return False
     return True
 
 

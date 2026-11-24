@@ -1513,15 +1513,22 @@ def test_non_read_only_inline_python_still_blocks_subsequent_structured_edit(tmp
     assert any(hit["seq"] == 2 and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]
 
 
-@pytest.mark.parametrize(("tracked_paths", "setup_calls"), [
-    (("re.py",), ()),
-    (("re/__init__.py",), ()),
-    (("src/lib.rs",), (shell("cat > re.py <<'EOF'\nprint(1)\nEOF"),)),
+@pytest.mark.parametrize(("tracked_paths", "setup_calls", "snippet"), [
+    (("re.py",), (), "import re; print(re.escape('a'))"),
+    (("re/__init__.py",), (), "import re; print(re.escape('a'))"),
+    (("src/lib.rs",), (shell("cat > re.py <<'EOF'\nprint(1)\nEOF"),), "import re; print(re.escape('a'))"),
+    # Transitive stdlib imports (pathlib->fnmatch, subprocess->selectors, json->re, lazy encodings).
+    (("fnmatch.py",), (), "import pathlib; print(pathlib.Path('brief.md').exists())"),
+    (("selectors.py",), (), "import subprocess; print(subprocess.PIPE)"),
+    (("re.py",), (), "import json; print(json.loads('{}'))"),
+    (("encodings/__init__.py",), (), "print(b'a'.decode('ascii'))"),
+    (("_internal.py",), (), "import pathlib; print(pathlib.Path('brief.md').exists())"),
+    (("src/lib.rs",), (shell("cat > selectors.py <<'EOF'\nprint(1)\nEOF"),), "import subprocess; print(subprocess.PIPE)"),
 ])
-def test_shadowed_python_import_blocks_subsequent_structured_edit(tmp_path, tracked_paths, setup_calls):
+def test_shadowed_python_import_blocks_subsequent_structured_edit(tmp_path, tracked_paths, setup_calls, snippet):
     cwd = clean_writer_inventory(tmp_path, tracked_paths=tracked_paths)
     edit = {"name": "Edit", "kind": "edit", "rawInput": {"file_path": "brief.md", "old_string": "a", "new_string": "b"}}
-    calls = [*setup_calls, shell("python3 -c 'import re; print(re.escape(\"a\"))'"), edit]
+    calls = [*setup_calls, shell(f"python3 -c {snippet!r}"), edit]
     report = audit_calls(tmp_path, calls, cwd=cwd, allow_in_place_edits=True)
     assert not report["passed"]
     assert any(hit["seq"] == len(calls) and "link handling" in hit["snippet"] for hit in report["hits"]), report["hits"]
