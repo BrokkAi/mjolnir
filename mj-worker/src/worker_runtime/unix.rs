@@ -692,7 +692,10 @@ pub(crate) async fn wait_for_change(
     // A finished preparation closes its channel but keeps its last value,
     // which an attach still reads; keep reading it, stop awaiting it.
     let mut preparation_open = preparation.is_some();
-    let mut generations = subagents.map(super::subagents::SubagentEndpoint::generations);
+    let mut subagents = subagents.cloned();
+    let mut generations = subagents
+        .as_ref()
+        .map(super::subagents::SubagentEndpoint::generations);
     let deadline = tokio::time::Instant::now() + mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
     loop {
         // Mark each signal seen before looking, so a change while looking
@@ -701,13 +704,23 @@ pub(crate) async fn wait_for_change(
         if let Some(releases) = &mut releases {
             releases.borrow_and_update();
         }
+        let prep_snapshot = preparation
+            .as_mut()
+            .map(|receiver| receiver.borrow_and_update().clone());
+        if subagents.is_none()
+            && let Some(endpoint) = prep_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.services.as_ref())
+                .and_then(|services| services.subagents.clone())
+        {
+            generations = Some(endpoint.generations());
+            subagents = Some(endpoint);
+        }
         if let Some(generations) = &mut generations {
             generations.borrow_and_update();
         }
         jev.borrow_and_update();
-        let harness_preparation = preparation
-            .as_mut()
-            .and_then(|receiver| receiver.borrow_and_update().state.clone());
+        let harness_preparation = prep_snapshot.and_then(|snapshot| snapshot.state);
         let mut state = relay
             .observe()
             .expect("relay state lock poisoned")
@@ -715,7 +728,9 @@ pub(crate) async fn wait_for_change(
         state.harness_preparation = harness_preparation;
         let latest_ordinal = state.latest_ordinal;
         let digest = mj_core::relay::relay_state_digest(&state)?;
-        let subagent_queue_changed = subagents.is_some_and(|endpoint| feed.has_unpolled(endpoint));
+        let subagent_queue_changed = subagents
+            .as_ref()
+            .is_some_and(|endpoint| feed.has_unpolled(endpoint));
         let generation = *guardian.borrow_and_update();
         let guardian_queue_changed = generation != *guardian_generation;
         *guardian_generation = generation;
@@ -1049,7 +1064,7 @@ async fn restart_harness_in_place_response(
             request_id,
             protocol_version,
             body: compaction_error(
-                RelayErrorCode::Internal,
+                RelayErrorCode::InvalidState,
                 &format!("start sub-agent socket: {error:#}"),
             ),
         };
@@ -5808,6 +5823,99 @@ mod preparation_tests {
         accepted.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn wait_for_change_subscribes_to_lazily_started_subagents() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let (commands, _receiver) = mpsc::channel(1);
+        let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
+            services: Some(Arc::new(PreparedConnectionServices {
+                commands,
+                reviewer: Arc::new(ReviewCapture {
+                    session_id: "session-1".into(),
+                    cwd: root.path().into(),
+                    additional_directories: vec![],
+                    primary_relay: relay.clone(),
+                    operation: tokio::sync::Mutex::new(()),
+                }),
+                subagents: None,
+            })),
+            ..Default::default()
+        });
+        let mut state = relay.observe().unwrap().operational_state();
+        state.harness_preparation = None;
+        let digest = mj_core::relay::relay_state_digest(&state).unwrap();
+        let mut feed = super::super::subagents::SubagentFeed::default();
+        // Acknowledge the durable queue's empty generation without starting
+        // a listener, so publication alone does not complete this wait.
+        let empty = super::super::subagents::SubagentEndpoint::open(root.path()).unwrap();
+        let page = feed.poll(Some(&empty), None).unwrap();
+        feed.poll(Some(&empty), Some(page.sequence)).unwrap();
+        assert!(!feed.has_unpolled(&empty));
+        drop(empty);
+        let mut guardian_generation = 0;
+        let wait = wait_for_change(
+            &relay,
+            Some(&preparation_rx),
+            None,
+            &feed,
+            &mut guardian_generation,
+            state.latest_ordinal,
+            Some(&digest),
+        );
+        tokio::pin!(wait);
+        tokio::select! {
+            biased;
+            result = &mut wait => panic!("wait returned before socket creation: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        let owner = SharedSubagents::default();
+        let _shutdown = SharedSubagentsShutdownGuard(owner.clone());
+        let endpoint = owner
+            .ensure_serving(
+                &tokio::runtime::Handle::current(),
+                root.path(),
+                relay.clone(),
+                HarnessKind::Antigravity,
+                None,
+                Some(&preparation_tx),
+            )
+            .unwrap();
+        // Consume the publication without a queued request: the existing wait
+        // must subscribe to the new endpoint's generation changes.
+        tokio::select! {
+            biased;
+            result = &mut wait => panic!("empty socket publication changed state: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        endpoint
+            .enqueue(mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "lazy-queue".into(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            })
+            .unwrap();
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), wait)
+            .await
+            .expect("new endpoint queue must wake the active wait promptly")
+            .unwrap();
+        assert!(
+            matches!(
+                observed,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ChangeObserved {
+                        subagent_queue_changed: true,
+                        ..
+                    }
+                }
+            ),
+            "{observed:?}"
+        );
+    }
+
     // Hard-won: d796c7d91: in-place reload discarded the new MCP registration mode.
     #[tokio::test]
     async fn restart_harness_in_place_lazily_starts_subagent_socket() {
@@ -5904,6 +6012,25 @@ mod preparation_tests {
         assert!(shared_subagents.endpoint().is_none());
         assert!(receiver.try_recv().is_err());
         std::fs::write(root.path().join(".claude.json"), b"{}").unwrap();
+        let closed = SharedSubagents::default();
+        closed.stop();
+        let refused = restart_harness_in_place_response(
+            request(),
+            Some(&commands),
+            &relay,
+            &credentials,
+            root.path(),
+            &closed,
+            Some(&preparation_tx),
+        )
+        .await;
+        let RelayResponseBody::Error { error } = refused.body else {
+            panic!("expected closed owner refusal")
+        };
+        assert_eq!(error.code, RelayErrorCode::InvalidState);
+        assert!(error.message.contains("worker is closing"), "{error:?}");
+        assert!(receiver.try_recv().is_err());
+        assert!(!socket_path.exists());
         let acceptor = mj_core::runtime::spawn(async move {
             let Some(CommandRequest::ReloadLaunchConfig {
                 subagent_mcp_socket,
