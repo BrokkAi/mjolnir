@@ -323,7 +323,10 @@ fn muse_summary_from_records(path: &Path, records: &[MuseRecord]) -> Result<Muse
         .next_back()
         .context("Muse session does not declare payload.record.workspace_root")?;
     validate_id("Muse session", &native_session_id)?;
-    ensure!(cwd.is_absolute(), "Muse workspace root is not absolute");
+    ensure!(
+        mj_core::target_path::is_absolute_on_host_or_target(&cwd),
+        "Muse workspace root is not absolute"
+    );
     ensure!(
         records.iter().all(|record| {
             record.value.pointer("/stream/id").and_then(Value::as_str)

@@ -248,7 +248,7 @@ pub(super) fn grok_listing_metadata(session_path: &Path) -> (Option<String>, Opt
         .pointer("/info/cwd")
         .and_then(Value::as_str)
         .map(PathBuf::from)
-        .filter(|cwd| cwd.is_absolute());
+        .filter(|cwd| mj_core::target_path::is_absolute_on_host_or_target(cwd));
     (title, cwd)
 }
 

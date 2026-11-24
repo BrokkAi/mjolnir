@@ -888,15 +888,15 @@ pull_policy = "never"
         last = ""
         while time.monotonic() < deadline:
             try:
-                access = self.daemon_request({"action": "web_viewer_access"})["value"]
+                status = self.daemon_request({"action": "status"})["value"]
+                viewer = status["phone_status"]
             except (OSError, ValueError, ScenarioFailure) as error:
                 last = str(error)
                 time.sleep(0.1)
                 continue
-            last = str(access) if not isinstance(access, dict) or "Ready" not in access else "Ready"
-            if isinstance(access, dict) and "Ready" in access:
-                ready = access["Ready"]
-                url = urllib.parse.urlsplit(ready["viewer_url"])
+            last = str(viewer)
+            if viewer.get("state") == "ready":
+                url = urllib.parse.urlsplit(viewer["viewer_url"])
                 if url.hostname != "127.0.0.1" or not url.port or port not in (0, url.port):
                     raise ScenarioFailure(f"viewer bound an unexpected address: {url.hostname}:{url.port}")
                 self.base_url = urllib.parse.urlunsplit((url.scheme, url.netloc, "", "", ""))
@@ -904,9 +904,9 @@ pull_policy = "never"
                 metadata = json.loads((self.data / "daemon.json").read_text())
                 self.daemon_pid = int(metadata["pid"])
                 self.record_process("observed", "daemon", self.daemon_pid)
-                return ready["viewer_code"], self.daemon_pid
-            if isinstance(access, dict) and ("Failed" in access or "Unavailable" in access):
-                raise ScenarioFailure(f"web viewer startup failed: {access}")
+                return viewer["viewer_code"], self.daemon_pid
+            if viewer.get("state") in ("error", "stopped"):
+                raise ScenarioFailure(f"web viewer startup failed: {viewer}")
             time.sleep(0.1)
         raise ScenarioFailure(f"daemon/web viewer did not become ready: {last[-4000:]}")
 

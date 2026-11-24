@@ -28,6 +28,7 @@ OVER_BUDGET = {
     'brokk-mj-tui',
     'brokk-mj-core',
     'brokk-mj-chat',
+    'brokk-mj-store',  # Tool-detail retention crossed 50k; transcript persistence is the next split.
 }
 
 

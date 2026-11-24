@@ -1537,6 +1537,10 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     assert!(failure.to_string().contains("cleanup"));
 }
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "local Podman is unavailable on macOS; Linux provides the target proof"
+)]
 fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in an
     // exact child test instead of racing unrelated tests in this process.
@@ -2029,6 +2033,10 @@ const RAW_CONVERSION_TEST_CHILD: &str = "MJ_RAW_CONVERSION_TEST_CHILD";
 #[cfg_attr(
     windows,
     ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "local Podman is unavailable on macOS; Linux provides the target proof"
 )]
 fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     // MJ_DATA_DIR and MJ_CONFIG_DIR are process-global, so run the half

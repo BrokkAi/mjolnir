@@ -6072,8 +6072,10 @@ mod reader_tests {
         stamp_schema_version(&path, 154);
         let previous = Connection::open(&path).unwrap();
         previous
-            .execute_batch("ALTER TABLE sessions DROP COLUMN staged_aws_profile;
-                            ALTER TABLE worker_restart_intents DROP COLUMN staged_aws_profile;")
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN staged_aws_profile;
+                            ALTER TABLE worker_restart_intents DROP COLUMN staged_aws_profile;",
+            )
             .unwrap();
         read_schema_state(&previous)
             .unwrap()
@@ -6082,12 +6084,14 @@ mod reader_tests {
         assert!(
             !legacy_schema::table_has_column(&previous, "sessions", "staged_aws_profile").unwrap()
         );
-        assert!(!legacy_schema::table_has_column(
-            &previous,
-            "worker_restart_intents",
-            "staged_aws_profile"
-        )
-        .unwrap());
+        assert!(
+            !legacy_schema::table_has_column(
+                &previous,
+                "worker_restart_intents",
+                "staged_aws_profile"
+            )
+            .unwrap()
+        );
         drop(previous);
 
         let upgraded = open_writer(&path).unwrap();
@@ -6265,7 +6269,9 @@ mod reader_tests {
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-        state.ensure_supported_by(MINIMUM_COMPATIBLE_VERSION).unwrap();
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .unwrap();
         let mut statement = upgraded
             .prepare("SELECT draft_id FROM detached_drafts ORDER BY draft_id")
             .unwrap();

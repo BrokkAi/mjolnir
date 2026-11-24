@@ -2203,7 +2203,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
-    let group_id = format!("subagent-spawn-{}", child.request_key);
+    let group_id = child.startup_group_id();
     let initial = crate::database::load_startup_group(&child_id, &group_id).unwrap();
     assert!(matches!(
         serde_json::from_str::<crate::database::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
@@ -2364,7 +2364,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
-    let prompt_id = format!("subagent-spawn-{}-prompt", child.request_key);
+    let prompt_id = crate::database::startup_step_id(&child.startup_group_id(), "prompt");
     let backend = targets::TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir()
             .join("workers")
