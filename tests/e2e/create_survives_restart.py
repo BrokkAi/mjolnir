@@ -7,21 +7,23 @@ instance; no host instance is touched. The daemon holds the create at the
 before its worker starts, which makes the restart land in the middle of the
 create every time. The test then checks that the restart does not wait for the
 create, that the next daemon retires the partial attempt and provisions again,
-and that the session ends up running with no error. A `mj wait` started before
-the restart follows the session's turns, not the create wait; it only shows
-that the session settles without error across the restart. The dashboard's
-create wait is covered by `create_wait_tests` in mj-cli.
+and that the session runs and settles without error on the replacement daemon.
+The dashboard's create wait is covered by `create_wait_tests` in mj-cli.
 With --failed-launch-retry the same hook fails the first launch and
-holds its accepted retry across the restart.
+holds its accepted retry across the restart. With --after-worker, crash
+after the worker serves and seed the projection an older daemon could leave.
 """
 import argparse
 import json
 import os
 import shlex
+import signal
 import sqlite3
 from pathlib import Path
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 import reliability_lab
 
@@ -59,10 +61,18 @@ def failed_launch_retry(lab, cli, record, run, command, environment, instance):
                              "--title", "Retry this launch", "--subagents", "none",
                              "--json", "--prompt-file", str(original_prompt)))["session_id"]
     wait_for(reached.exists, "the first attempt to reach its target")
-    lab.daemon_request({"action": "persist_terminal_draft", "arguments": {
-        "client_id": "retry-lab", "session_id": session, "owner_pid": os.getpid(),
-        "revision": 1, "draft": {"text": draft, "inherited_input": None},
-    }})
+    endpoint = json.loads((lab.data / "api-endpoint.json").read_text())
+    session_url = f"http://{endpoint['address']}/api/v1/sessions/{session}"
+    headers = {"Authorization": f"Bearer {endpoint['token']}",
+               "Content-Type": "application/json"}
+    persist_draft = urllib.request.Request(
+        session_url + "/terminal-draft", method="PUT", headers=headers, data=json.dumps({
+            "client_id": "retry-lab", "owner_pid": os.getpid(), "revision": 1,
+            "draft": {"text": draft, "inherited_input": None},
+        }).encode(),
+    )
+    with urllib.request.urlopen(persist_draft, timeout=5) as response:
+        assert response.status == 204
     continuation.touch()
 
     def failed():
@@ -100,20 +110,22 @@ def failed_launch_retry(lab, cli, record, run, command, environment, instance):
 
     restart = subprocess.Popen(command("daemon", "restart"), env=environment(),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    # A stopping daemon refuses ordinary IPC. Keep the old attempt held
+    # A stopping daemon refuses API requests. Keep the old attempt held
     # until we observe that refusal and require the new daemon to reach again.
     attempt = reached.read_text()
 
     def stopping():
         try:
-            lab.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
-        except reliability_lab.ScenarioFailure as error:
-            if "daemon is shutting down" in str(error):
+            with urllib.request.urlopen(
+                urllib.request.Request(session_url, headers=headers), timeout=5
+            ):
+                return False
+        except urllib.error.HTTPError as error:
+            if error.code == 503 and b"daemon is shutting down" in error.read():
                 return True
             raise
-        except (ConnectionError, FileNotFoundError):
+        except (ConnectionError, urllib.error.URLError):
             return True
-        return False
 
     try:
         wait_for(stopping, "old daemon to stop serving while the retry is held")
@@ -195,12 +207,94 @@ def failed_launch_retry(lab, cli, record, run, command, environment, instance):
     print(json.dumps({"session": session, "race_session": doomed, "artifacts": str(lab.root)}))
 
 
+# Hard-won: #1675: a replacement Create worker could not attach to the retained projection
+def interrupted_after_worker(lab, cli, record):
+    reached = lab.hooks / f"{lab.hook_name}.reached"
+    continuation = lab.hooks / f"{lab.hook_name}.continue"
+
+    def reached_by(pid):
+        try:
+            return reached.read_text().strip() == f"pid={pid}"
+        except FileNotFoundError:
+            return False
+
+    prompt = "complete this startup prompt after Create recovery"
+    prompt_file = lab.runtime_root / "startup-prompt"
+    prompt_file.write_text(prompt)
+    session = json.loads(cli(
+        "new", "--workspace", "Create restart", "--profile", "fake",
+        "--target", "localhost", "--project-directory", str(lab.project),
+        "--subagents", "none", "--prompt-file", str(prompt_file), "--json",
+    ))["session_id"]
+    pid = json.loads((lab.data / "daemon.json").read_text())["pid"]
+    wait_for(lambda: reached_by(pid), "the first worker to serve before Create commits")
+    assert record(session)["state"] != "running"
+    assert durable_rows(lab, """
+        SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?
+    """, (session,)) == [(0,)], "Create readiness applied worker events before commit"
+
+    os.kill(pid, signal.SIGKILL)
+    wait_for(lambda: not reliability_lab.process_is_running(pid), "the crashed daemon to exit")
+    reached.unlink()
+
+    # Simulate an older daemon that attached and persisted a relay frontier
+    # before Create committed. The worker and Create intent are still live.
+    with sqlite3.connect(lab.data / "mj.sqlite3") as database:
+        assert database.execute(
+            "UPDATE sessions SET state='disconnected' WHERE session_id=?", (session,)
+        ).rowcount == 1
+        assert database.execute("""
+            UPDATE materialized_sessions SET applied_event_ordinal=1000,
+                applied_event_digest=?, session_title='retired worker'
+            WHERE session_id=?
+        """, ("a" * 64, session)).rowcount == 1
+
+    cli("sessions", "--session", session, "--json")
+    replacement_pid = json.loads((lab.data / "daemon.json").read_text())["pid"]
+    assert replacement_pid != pid
+    wait_for(lambda: reached_by(replacement_pid), "the replacement worker to serve before Create commits")
+
+    def first_target_publication():
+        for log in (lab.data / "logs").glob(f"mj-daemon-*-{replacement_pid}.log"):
+            for line in log.read_text().splitlines():
+                if "daemon startup: session relay actors launched" in line:
+                    return line
+        return None
+
+    published = wait_for(first_target_publication, "the first worker target publication")
+    assert "actors=0" in published, published
+    assert durable_rows(lab, """
+        SELECT applied_event_ordinal,session_title FROM materialized_sessions WHERE session_id=?
+    """, (session,)) == [(0, None)], "retired worker projection survived the retry"
+    assert durable_rows(lab, """
+        SELECT command_id FROM startup_steps WHERE session_id=?
+    """, (session,)), "the retry lost the original startup prompt"
+    continuation.touch()
+
+    def running():
+        current = record(session)
+        assert not current.get("has_error"), current
+        return current["state"] == "running"
+
+    wait_for(running, "the recovered Create to commit")
+    waited = json.loads(cli("wait", "--session", session, "--json", "--timeout", str(WAIT)))
+    assert waited["outcome"] == "finished", waited
+    assert not durable_rows(lab, "SELECT 1 FROM session_create_intents WHERE session_id=?", (session,))
+    harness = [json.loads(line) for line in (lab.runtime_root / "fake-acp.log").read_text().splitlines()]
+    prompts = [request for request in harness if request.get("method") == "session/prompt"]
+    assert len(prompts) == 1 and prompt in json.dumps(prompts[0]), prompts
+    assert running()
+    print(json.dumps({"session": session, "artifacts": str(lab.root)}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--instance", required=True)
-    parser.add_argument("--failed-launch-retry", action="store_true")
+    scenario = parser.add_mutually_exclusive_group()
+    scenario.add_argument("--failed-launch-retry", action="store_true")
+    scenario.add_argument("--after-worker", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named instance")
@@ -209,7 +303,8 @@ def main():
         lab.prepare()
         with (lab.config / "config.toml").open("a") as config:
             config.write("\n[jev]\nenabled = false\n[github.watch]\nenabled = false\n")
-        lab.hook_name = "create_after_target_provisioned"
+        lab.hook_name = ("create_before_running_commit" if args.after_worker
+                         else "create_after_target_provisioned")
 
         def environment():
             return {**lab.environment(), "MJ_INSTANCE": args.instance,
@@ -231,6 +326,9 @@ def main():
             return json.loads(cli("sessions", "--session", session, "--json"))
 
         cli("workspaces", "create", "Create restart")
+        if args.after_worker:
+            interrupted_after_worker(lab, cli, record)
+            return
         if args.failed_launch_retry:
             failed_launch_retry(lab, cli, record, run, command, environment, args.instance)
             return
@@ -242,13 +340,6 @@ def main():
         before = record(session)
         assert before["state"] != "running", before
 
-        # `mj wait` uses the turn-wait API, not WaitCreateSession. Started
-        # before the restart, it shows only that the session settles without
-        # error across the restart.
-        waiter = subprocess.Popen([str(args.mj.resolve()), "--instance", args.instance,
-                                   "wait", "--session", session, "--json", "--timeout", str(WAIT)],
-                                  env=environment(), stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True)
         started = time.monotonic()
         restart = subprocess.Popen([str(args.mj.resolve()), "--instance", args.instance,
                                     "daemon", "restart"], env=environment(),
@@ -271,10 +362,8 @@ def main():
             assert not current.get("has_error"), current
             return current["state"] == "running"
         wait_for(running, "the recovered session to run")
-        waiter_out, waiter_err = waiter.communicate(timeout=WAIT)
-        # Exit 0 is `finished`: the session settled without error.
-        assert waiter.returncode == 0, (waiter.returncode, waiter_out, waiter_err)
-        assert json.loads(waiter_out)["outcome"] == "finished", waiter_out
+        waited = json.loads(cli("wait", "--session", session, "--json", "--timeout", str(WAIT)))
+        assert waited["outcome"] == "finished", waited
 
         database = sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True)
         intents = database.execute("SELECT count(*) FROM session_create_intents").fetchone()[0]
@@ -284,7 +373,7 @@ def main():
                           "artifacts": str(lab.root)}))
     finally:
         if (lab.data / "daemon.json").exists():
-            (lab.hooks / "create_after_target_provisioned.continue").touch()
+            (lab.hooks / f"{lab.hook_name}.continue").touch()
             try:
                 cli("daemon", "stop")
             except (AssertionError, subprocess.TimeoutExpired) as error:

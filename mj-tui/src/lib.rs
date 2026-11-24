@@ -352,6 +352,10 @@ pub enum DashboardAction {
         key: String,
         config: String,
     },
+    SelectProviderProfile {
+        request: mj_client::http::ProviderProfileSelectionRequest,
+        generation: u64,
+    },
     /// Read the session checkout's branch and changed files on its target.
     /// The host runs it off the loop and answers with `set_git_status`.
     ProbeGitStatus {
@@ -385,7 +389,7 @@ pub enum DashboardAction {
         /// confirmation is still in flight, so the request keeps its origin.
         workspace_id: String,
         profile_id: String,
-        /// Load-balance across enabled profiles in this provider when `profile_id` is empty.
+        /// Provider placement; a nonempty `profile_id` pins its selected profile.
         provider: Option<mj_core::config::QuotaProvider>,
         bundle_id: String,
         project_directory: Option<std::path::PathBuf>,

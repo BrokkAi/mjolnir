@@ -18863,3 +18863,98 @@ async fn streaming_operations_require_terminal_auth_and_invalid_login_refuses_be
     shutdown.cancel();
     server.await.unwrap().unwrap();
 }
+
+// Hard-won: #1675: bootstrap attached ordinary relay actors before admitting Create recovery
+#[tokio::test]
+async fn first_worker_target_publication_excludes_an_owned_interrupted_create() {
+    use mj_controller::controller::test_support::{IsolatedTest, test_name};
+    const CHILD: &str = "MJ_TEST_CREATE_BOOTSTRAP_FENCE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "first_worker_target_publication_excludes_an_owned_interrupted_create",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "create-bootstrap-fence")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Bootstrap").unwrap();
+    let data = mj_core::config::data_dir();
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            data.join("profile"),
+        ),
+    );
+    config
+        .targets
+        .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    for (id, state) in [
+        ("interrupted", SessionState::Disconnected),
+        ("running-peer", SessionState::Running),
+    ] {
+        let mut record = runtime_test_session(id, &workspace.id, state);
+        record.project_directory = Some(data.clone());
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: data.join(id),
+        }));
+        mj_controller::database::save_new_session(&record, None, false, false).unwrap();
+    }
+    let mut controller = Controller::load().unwrap();
+    controller.config = config;
+    let mut state = test_runtime_state_with(controller);
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(mj_controller::database::subscribe_committed_state().unwrap());
+    assert_eq!(
+        state.owner().pollable_worker_ids(),
+        ["interrupted", "running-peer"]
+    );
+    let mut intents = mj_controller::database::load_session_create_intents().unwrap();
+    assert_eq!(intents.len(), 1);
+    let intent = intents.remove(0);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let result = state
+        .admit_lifecycle(
+            intent.session_id,
+            LifecycleKind::Create,
+            super::lifecycle::LifecycleStart::request(intent.operation_id, None, None).automatic(),
+            {
+                let release = release.clone();
+                move |_, _, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+    let (targets, mut published) = tokio::sync::watch::channel(Vec::new());
+    let cancellation = CancellationToken::new();
+    let refresher =
+        process::spawn_manager_target_refresher(targets, cancellation.clone(), state.clone());
+    tokio::time::timeout(Duration::from_secs(5), published.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published
+            .borrow()
+            .iter()
+            .map(|target| target.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["running-peer"]
+    );
+    cancellation.cancel();
+    refresher.await.unwrap();
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    writer.shutdown().unwrap();
+}

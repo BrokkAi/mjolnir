@@ -1,17 +1,26 @@
 //! Where a session's harness profile lives on its target.
 
 use super::*;
+use mj_core::config::HarnessKind;
 
 pub fn target_profile_home(
     locator: &TargetLocator,
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
-    let root = removable_profile_root(locator, session_id, profile);
-    if profile.kind.nested_home() {
+    target_profile_home_for_kind(locator, session_id, profile.kind)
+}
+
+pub fn target_profile_home_for_kind(
+    locator: &TargetLocator,
+    session_id: &str,
+    kind: HarnessKind,
+) -> String {
+    let root = removable_profile_root_for_kind(locator, session_id, kind);
+    if kind.nested_home() {
         mj_core::target_path::text(&mj_core::target_path::join(
             Path::new(&root),
-            Path::new(profile.kind.id()),
+            Path::new(kind.id()),
         ))
     } else {
         root
@@ -30,8 +39,16 @@ pub fn removable_profile_root(
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
+    removable_profile_root_for_kind(locator, session_id, profile.kind)
+}
+
+fn removable_profile_root_for_kind(
+    locator: &TargetLocator,
+    session_id: &str,
+    kind: HarnessKind,
+) -> String {
     if let TargetLocator::LocalBare { worker_root } = locator
-        && !profile.kind.nested_home()
+        && !kind.nested_home()
     {
         return mj_core::target_path::text(&mj_core::target_path::join(
             Path::new(worker_root),

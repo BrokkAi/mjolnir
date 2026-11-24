@@ -61,8 +61,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
-    dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
-    spawn_image_refresher, unowned_interrupted_lifecycles,
+    interrupted_destroy_session_ids, interrupted_suspend_session_ids, spawn_image_refresher,
+    unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.

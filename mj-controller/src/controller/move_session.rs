@@ -1787,20 +1787,6 @@ impl Controller {
                 super::backend::TargetCheck::Launch,
             )?;
         }
-        if cross_harness {
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let resolve =
-                crate::utility_llm::UtilityLlmRuntime::shared().resolve(&self.config, &cancel);
-            tokio::pin!(resolve);
-            loop {
-                tokio::select! {
-                    result = &mut resolve => { result.context("cross-harness move needs an available utility model")?; break; }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                        if executor.cancellation_requested() { cancel.cancel(); bail!("move preparation cancelled"); }
-                    }
-                }
-            }
-        }
         // What moving a local checkout into a target really does, computed
         // before anything is stopped so a person can confirm it.
         let conversion = planned_conversion
@@ -3463,6 +3449,20 @@ impl Controller {
                             let canonical = mj_transcript::projection::canonical_session_from_materialized_owned(
                                 materialized,
                             )?;
+                            let canonical = std::sync::Arc::new(canonical);
+                            let native_prior = if !had_prior_expected_store_id {
+                                super::resume::native_prior_from_target_while_cancellable(
+                                    &id,
+                                    &source_backend,
+                                    source_harness_kind,
+                                    previous_session.native_session_id.as_deref(),
+                                    &canonical,
+                                    executor,
+                                )
+                                .await?
+                            } else {
+                                None
+                            };
                             let context_bytes =
                                 crate::handoff::profile_handoff_bytes(Some(&dest_profile));
                             Some(
@@ -3470,7 +3470,7 @@ impl Controller {
                                     &id,
                                     &self.config,
                                     &canonical,
-                                    None,
+                                    native_prior.as_ref(),
                                     context_bytes,
                                     executor,
                                     tokio_util::sync::CancellationToken::new(),

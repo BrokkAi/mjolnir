@@ -5846,3 +5846,88 @@ sys.stdin.read()
     );
     assert_eq!(client.next_request, before);
 }
+
+#[cfg(unix)]
+// Hard-won: #1675: Create readiness persisted relay events before Create committed
+#[tokio::test]
+async fn create_readiness_uses_one_status_only_relay_at_the_negotiated_protocol() {
+    use crate::readiness::{NativeSessionProbe, NativeSessionReadiness};
+    use mj_core::relay::{
+        HarnessPreparation, RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL, RelayExecutionState,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let relay = DurableRelay::open(directory.path(), SESSION_ID, "1.0.0").unwrap();
+    let mut ready = relay.operational_state();
+    ready.native_session_id = Some("native".into());
+    ready.acp_ready = Some(true);
+    let mut preparing = ready.clone();
+    preparing.harness_preparation = Some(HarnessPreparation::Preparing {
+        step: "install".into(),
+        since_ms: 3,
+    });
+    let mut closed = preparing.clone();
+    closed.execution = RelayExecutionState::Closed;
+    let mut failed = closed.clone();
+    failed.harness_preparation = Some(HarnessPreparation::Failed {
+        step: "install".into(),
+        error: "unavailable".into(),
+        at_ms: 3,
+    });
+    let statuses = directory.path().join("statuses.json");
+    std::fs::write(
+        &statuses,
+        serde_json::to_vec(&[preparing, ready, closed, failed]).unwrap(),
+    )
+    .unwrap();
+    let protocol = RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL - 1;
+    let fixture = r#"
+import json, sys
+protocol = int(sys.argv[1])
+
+def respond(method, payload):
+    request = json.loads(sys.stdin.readline())
+    assert request["request"]["method"] == method, request
+    print(json.dumps(dict(request_id=request["request_id"], protocol_version=protocol,
+                          result="ok", payload=dict(type=method, data=payload))), flush=True)
+
+respond("hello", dict(negotiated=protocol, relay_version="old", session_id=sys.argv[2]))
+with open(sys.argv[3]) as statuses:
+    for status in json.load(statuses):
+        respond("status", status)
+assert not sys.stdin.readline()
+"#;
+    let spec = CommandSpec::new(
+        "python3",
+        [
+            "-c".into(),
+            fixture.into(),
+            protocol.to_string(),
+            SESSION_ID.into(),
+            statuses.to_string_lossy().into_owned(),
+        ],
+    );
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(NativeSessionProbe::protocol_version(&client), protocol);
+    let next_request = client.next_request;
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::Preparing { step, since_ms: 3 } if step == "install"
+    ));
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::Ready(id) if id == "native"
+    ));
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::Closed
+    ));
+    assert!(matches!(
+        client.native_session_readiness().await.unwrap(),
+        NativeSessionReadiness::PreparationFailed { step, error }
+            if step == "install" && error == "unavailable"
+    ));
+    assert_eq!(client.next_request, next_request + 4);
+}

@@ -707,6 +707,24 @@ pub(crate) async fn apply_dashboard_action(
                 move |result| DashboardIoUpdate::ProfileHydration { key, result },
             );
         }
+        DashboardAction::SelectProviderProfile {
+            request,
+            generation,
+        } => {
+            super::io::spawn_async_io(
+                "selecting provider profile",
+                context.dashboard_io_tx.clone(),
+                async move {
+                    daemon::connect_existing()
+                        .await?
+                        .http()
+                        .await?
+                        .select_provider_profile(request)
+                        .await
+                },
+                move |result| DashboardIoUpdate::ProviderProfileSelection { generation, result },
+            );
+        }
         DashboardAction::ProbeGitStatus { session_id } => {
             context.spawn_git_probe(session_id);
         }
