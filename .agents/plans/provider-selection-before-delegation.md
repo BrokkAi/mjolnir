@@ -12,7 +12,7 @@ Choosing a provider group in New session must resolve to a named profile when le
 - [x] Add a daemon-owned provider selection request using the existing scheduler.
 - [x] Run that request asynchronously at the first page and apply only its current reply.
 - [x] Exercise saved policies, cancellation, failures, and stale replies; run focused tests and Clippy.
-- [ ] Commit, review, merge upstream if necessary, and push to origin/master.
+- [x] Commit, review, merge upstream, and push to origin/master (3d89d82a4).
 
 ## Surprises & Discoveries
 
@@ -29,7 +29,11 @@ The daemon and TUI already transport the remembered delegation policies correctl
 
 ## Outcomes & Retrospective
 
-Implemented early provider resolution through the daemon scheduler. The profile transition regressions (3), delegation regressions including the Create golden (3), and HTTP client contract test (1) pass. Clippy passed on all five affected crates. The existing provider scheduler regression also passes (1). The isolated daemon approval-policy regression also passes (1), and profile transitions (3) and Clippy passed again after retaining provider origin. The second review identified target-compatible refinement and stable profile identity; both are implemented, with extended profile/config-refresh/navigation tests and an isolated mixed-provider test. Final checks and third review remain.
+Provider-group launches now resolve to a concrete profile after the first page and restore its saved mode and Orchestrators choice. The profile ID remains stable across list refreshes. Before leaving the target page, the daemon retains a compatible profile or selects another compatible member of the same provider and restores its preferences. Create validates the final pinned profile and accounts for its quota placement.
+
+Validation passed: three profile-transition tests, three delegation tests including the Create golden, the HTTP-client contract test, the provider-scheduler test, and the isolated daemon test covering target approval constraints and a compatible mixed-provider alternative. Formatting, diff checks, and Clippy passed. Three implementation/review rounds were followed by a clean zero-diff review of upstream merges; code was pushed to origin/master as 3d89d82a4.
+
+Remaining configuration-edit edge cases are tracked in #1683: picker highlighting after profile insertion, an in-flight target check during a target/policy reload, and provider membership changing between pages. These were explicitly declined in the final implementation review. Final Create admission still checks the actual named profile, target policy, provider membership, and current quota. The separate Oracle-map issue #1680 remains outside this change. No live installation was performed.
 
 ## Context and Orientation
 
@@ -71,3 +75,5 @@ Review identified two consequences of treating an automatically resolved profile
 2026-11-24 14:13Z: Revised the Create boundary after the first review; targeted validation passed (three profile tests and the isolated approval-policy test); Clippy passed again.
 
 2026-11-24 14:22Z: Updated the final design after review: target compatibility is resolved before review, IDs survive profile-list changes, and Back invalidates pending target checks.
+
+2026-11-24 14:27Z: Recorded successful publication and the bounded config-reload follow-up after final review.
