@@ -1169,6 +1169,117 @@ if not (attempt / "recover").exists():
         self.assertNotIn("mjolnir/first/G/r1/reviewer-1", started)
         self.assertTrue((self.root / "active-diff.json").exists())
 
+    def test_concurrent_matrix_observes_completed_failure_before_refilling(self):
+        import threading
+
+        groups = pilot.select_jobs(self.manifest, diff="mjolnir/first", arms=["N", "G", "R"])
+        done = set()
+        started = []
+        lock = threading.Lock()
+        first_done_in_complete = threading.Event()
+        second_finished = threading.Event()
+        both_running = threading.Barrier(2, timeout=5)
+
+        def complete(job):
+            key = job["job"]
+            with lock:
+                is_done = key in done
+            if key == "mjolnir/first/G/r1/writer" and is_done:
+                first_done_in_complete.set()
+                second_finished.wait(timeout=5)
+            return is_done
+
+        def execute(job):
+            key = job["job"]
+            with lock:
+                started.append(key)
+            if key == "mjolnir/first/G/r1/writer":
+                both_running.wait()
+                with lock:
+                    done.add(key)
+                return "done"
+            if key == "mjolnir/first/R/r1/writer":
+                both_running.wait()
+                first_done_in_complete.wait(timeout=5)
+                try:
+                    return "interrupted: peer failed during validation"
+                finally:
+                    second_finished.set()
+            with lock:
+                done.add(key)
+            return "done"
+
+        with redirect_stdout(StringIO()):
+            rc = pilot.run_matrix(self.root, groups, "codex", complete, execute, FakeQuota("90"), concurrency=2)
+        self.assertEqual(rc, 1)
+        self.assertEqual(set(started), {"mjolnir/first/G/r1/writer", "mjolnir/first/R/r1/writer"})
+
+    def test_pilot_audit_verifies_codex_rollout_rql_mcp_and_file_change(self):
+        own = "a" * 32
+        brief_path = f"/workspace/{own}/mjolnir/brief.md"
+        transcript = self.root / "transcript.json"
+        rollout_dir = self.root / audit.ROLLOUT_DIRECTORY
+        rollout_dir.mkdir()
+        rollout_file = rollout_dir / "rollout-1.jsonl"
+        pages = [{
+            "cwd": f"/workspace/{own}/mjolnir",
+            "items": [
+                {
+                    "seq": 1,
+                    "role": "tool",
+                    "body": {"call": {
+                        "toolCallId": "exec-rql-1",
+                        "title": "mcp.rql.rql_query",
+                        "kind": "execute",
+                        "status": "completed",
+                        "rawInput": {"server": "rql", "tool": "rql_query", "arguments": {"query": "(function)"}},
+                    }},
+                },
+                {
+                    "seq": 2,
+                    "role": "tool",
+                    "body": {"call": {
+                        "toolCallId": "exec-edit-1",
+                        "title": "Editing files",
+                        "kind": "edit",
+                        "status": "completed",
+                        "content": [{"type": "diff", "path": brief_path, "newText": ""}],
+                    }},
+                },
+            ],
+        }]
+        pilot.driver.save(transcript, pages)
+        pilot.driver.save(self.root / "pre-inventory.json", {
+            "cwd": f"/workspace/{own}/mjolnir", "head": "b" * 40,
+            "status": "", "ignored": "", "tracked_symlinks": [], "tracked_symlink_targets": {},
+        })
+        rollout_rows = [
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "McpToolCall", "id": "exec-rql-1", "server": "rql", "tool": "rql_query",
+            }}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "FileChange", "id": "exec-edit-1",
+                "changes": {brief_path: {"type": "add"}},
+            }}},
+        ]
+        rollout_file.write_text("\n".join(json.dumps(row) for row in rollout_rows) + "\n")
+        ok = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertTrue(ok["passed"], ok["hits"])
+        no_rql = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=False)
+        self.assertFalse(no_rql["passed"])
+        self.assertTrue(any(hit["seq"] == 1 and hit["kind"] == "needs-inspection" for hit in no_rql["hits"]))
+        # Without rollout evidence, neither the Codex MCP card nor the pathless edit card is accepted.
+        rollout_file.unlink()
+        missing = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(missing["passed"])
+        self.assertEqual({hit["seq"] for hit in missing["hits"]}, {1, 2})
+        # Outside-workspace rollout edit is caught.
+        rollout_rows[1]["payload"]["item"]["changes"] = {"/etc/hosts": {"type": "update", "move_path": None}}
+        rollout_file.write_text("\n".join(json.dumps(row) for row in rollout_rows) + "\n")
+        disagree = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(disagree["passed"])
+        self.assertTrue(any("disagree" in hit["snippet"] for hit in disagree["hits"]))
+
 
 if __name__ == "__main__":
     unittest.main()

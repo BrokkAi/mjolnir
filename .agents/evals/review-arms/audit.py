@@ -103,6 +103,96 @@ def rollout_commands(paths):
     return {identifier: command for identifier, command in commands.items() if identifier not in conflicts}
 
 
+def rollout_mcp_calls(paths):
+    """Index Codex's durable MCP tool call IDs so mcp.rql.rql_query cannot be spoofed."""
+    calls, conflicts = {}, set()
+    try:
+        for path in paths:
+            with path.open(encoding="utf-8") as rows:
+                for line in rows:
+                    entry = json.loads(line)
+                    event = entry.get("payload") or {}
+                    item = event.get("item") or {}
+                    if (entry.get("type") != "event_msg" or event.get("type") != "item_completed"
+                            or item.get("type") != "McpToolCall"):
+                        continue
+                    identifier, server, tool = item.get("id"), item.get("server"), item.get("tool")
+                    if not isinstance(identifier, str) or not identifier:
+                        continue
+                    if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
+                        conflicts.add(identifier)
+                        continue
+                    record = (server, tool)
+                    if calls.setdefault(identifier, record) != record:
+                        conflicts.add(identifier)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+    return {identifier: record for identifier, record in calls.items() if identifier not in conflicts}
+
+
+def rollout_file_changes(paths):
+    """Index Codex's durable FileChange IDs for ACP Editing files cards."""
+    edits, conflicts = {}, set()
+    try:
+        for path in paths:
+            with path.open(encoding="utf-8") as rows:
+                for line in rows:
+                    entry = json.loads(line)
+                    event = entry.get("payload") or {}
+                    item = event.get("item") or {}
+                    if (entry.get("type") != "event_msg" or event.get("type") != "item_completed"
+                            or item.get("type") != "FileChange"):
+                        continue
+                    identifier, changes = item.get("id"), item.get("changes")
+                    if not isinstance(identifier, str) or not identifier:
+                        continue
+                    if not isinstance(changes, dict) or not changes:
+                        conflicts.add(identifier)
+                        continue
+                    targets, has_move, valid = [], False, True
+                    for target, change in changes.items():
+                        if (not isinstance(target, str) or not target or "\0" in target
+                                or not isinstance(change, dict)
+                                or change.get("type") not in {"add", "update", "delete", "move"}):
+                            valid = False
+                            break
+                        targets.append(target)
+                        if change.get("type") == "move":
+                            has_move = True
+                        move_path = change.get("move_path")
+                        if move_path is not None:
+                            if not isinstance(move_path, str) or not move_path or "\0" in move_path:
+                                valid = False
+                                break
+                            targets.append(move_path)
+                            has_move = True
+                    if not valid:
+                        conflicts.add(identifier)
+                        continue
+                    record = (tuple(dict.fromkeys(targets)), has_move)
+                    if edits.setdefault(identifier, record) != record:
+                        conflicts.add(identifier)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+    return {identifier: record for identifier, record in edits.items() if identifier not in conflicts}
+
+
+def is_rql_mcp_call(call, rollout_mcp=None, rollout=None):
+    title, kind, raw = call.get("title"), call.get("kind"), call.get("rawInput")
+    if title in ("rql_query", "mcp__rql__rql_query") and kind != "execute":
+        return True
+    if (title == "mcp.rql.rql_query" and kind == "execute" and call.get("name") is None
+            and isinstance(raw, dict) and raw.get("server") == "rql" and raw.get("tool") == "rql_query"
+            and set(raw) <= {"server", "tool", "arguments"}):
+        identifier = call.get("toolCallId")
+        if rollout is not None and identifier in rollout:
+            return False
+        if rollout_mcp is not None:
+            return rollout_mcp.get(identifier) == ("rql", "rql_query")
+        return True
+    return False
+
+
 def call_command(call):
     raw = call.get("rawInput")
     command = raw.get("command", raw.get("cmd", raw.get("argv"))) if isinstance(raw, dict) else raw
@@ -133,8 +223,9 @@ def tool_succeeded(call, body, rollout_exit):
 
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
-         antigravity=False, tracked_head=None, tracked_symlink_targets=None, claude_code_version=None):
+         rollout=None, rollout_mcp=None, rollout_files=None, allow_in_place_edits=False, tracked_symlinks=None,
+         tracked_paths=None, engine=False, antigravity=False, tracked_head=None, tracked_symlink_targets=None,
+         claude_code_version=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
@@ -184,8 +275,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 if not findings and engine_calls is not None and isinstance(identifier, str):
                     engine_calls.setdefault(identifier, seq)
                 continue
-            if (not antigravity and allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query")
-                    and call.get("kind") != "execute"):
+            if not antigravity and allow_rql and is_rql_mcp_call(call, rollout_mcp, rollout):
                 continue
             if commits is not None:
                 match = None
@@ -214,6 +304,30 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                         scripts.clear()
                         edit_paths.blocked = True
                         continue
+                elif (not antigravity and rollout_files is not None and call.get("kind") == "edit"
+                        and call.get("name") is None and call.get("rawInput") is None
+                        and not (call.get("locations") or [])
+                        and (rollout is None or call.get("toolCallId") not in rollout)):
+                    file_match = rollout_files.get(call.get("toolCallId"))
+                    if file_match is not None:
+                        paths, has_move = file_match
+                        diff_entries = [
+                            entry for entry in (call.get("content") or [])
+                            if isinstance(entry, dict) and entry.get("type") == "diff"
+                        ]
+                        if any(not isinstance(entry.get("path"), str) or entry["path"] not in paths
+                               for entry in diff_entries):
+                            hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
+                                         "snippet": "Codex transcript and rollout edited paths disagree"})
+                            scripts.clear()
+                            edit_paths.blocked = True
+                            continue
+                        has_move = has_move or any(
+                            isinstance(entry.get("_meta"), dict) and entry["_meta"].get("kind") == "move"
+                            for entry in diff_entries
+                        )
+                        call = {**call, "kind": "move" if has_move else "edit",
+                                "locations": [{"path": path} for path in paths]}
                 observed = {}
                 edit_index = 0
                 for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
@@ -2689,7 +2803,9 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                       tracked_symlink_targets=before.get("tracked_symlink_targets"),
                       claude_code_version=claude_code_version,
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
-                      rollout=rollout_commands(rollout_paths))
+                      rollout=rollout_commands(rollout_paths),
+                      rollout_mcp=rollout_mcp_calls(rollout_paths),
+                      rollout_files=rollout_file_changes(rollout_paths))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
     return dict(result, passed=all(hit["kind"] in PASSING_HIT_KINDS for hit in result["hits"]))

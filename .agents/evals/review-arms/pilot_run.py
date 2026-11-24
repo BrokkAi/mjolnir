@@ -129,64 +129,85 @@ def run_matrix(root, diff_jobs, profile, complete, execute, quota=driver.quota_h
                 writer = jobs_by_id.get(f"{job['diff']}/{job['arm']}/r{job['replicate']}/writer")
                 return writer is None or bool(complete(writer))
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                while True:
-                    if not halted:
-                        while len(in_flight) < concurrency:
-                            active_ids = {member["job"] for member in in_flight.values()}
-                            next_job = None
-                            while retry_queue:
-                                candidate = retry_queue.pop(0)
-                                if candidate["job"] not in active_ids and not complete(candidate):
-                                    next_job = candidate
-                                    break
-                            if next_job is None:
-                                for candidate in ordered:
-                                    if (candidate["job"] not in active_ids
-                                            and not complete(candidate)
-                                            and ready(candidate)):
-                                        next_job = candidate
-                                        break
-                            if next_job is None:
-                                break
-                            in_flight[pool.submit(execute, next_job)] = next_job
-                    if not in_flight:
+            def pick_next(active_ids):
+                while retry_queue:
+                    candidate = retry_queue.pop(0)
+                    if candidate["job"] not in active_ids and not complete(candidate):
+                        return candidate
+                for candidate in ordered:
+                    if (candidate["job"] not in active_ids
+                            and not complete(candidate)
+                            and ready(candidate)):
+                        return candidate
+                return None
+
+            def handle_outcome(job, state):
+                nonlocal halted, error
+                print(json.dumps({"job": job["job"], "state": state}), flush=True)
+                if job["job"] in retried:
+                    print(json.dumps({"job": job["job"], "retained_attempts": retained_attempts(root, job)}),
+                          flush=True)
+                if state == "retained-failure" and job["job"] not in retried:
+                    if halted:
+                        return
+                    remaining = [member for member in jobs if not complete(member)]
+                    if hold := admission(profile, remaining, quota):
+                        print(json.dumps({"diff": key, "state": "held", "reason": hold,
+                                          "retained_attempts": retained_attempts(root, job)}), flush=True)
+                        halted = True
+                        return
+                    retried.add(job["job"])
+                    retry_queue.insert(0, job)
+                    return
+                if state != "done":
+                    halted = True
+                    return
+                if not complete(job):
+                    halted = True
+                    if error is None:
+                        error = RuntimeError(f"{job['job']} completed without valid artifacts")
+
+            if concurrency == 1:
+                while not halted:
+                    next_job = pick_next(set())
+                    if next_job is None:
                         break
-                    done_futures, _ = concurrent.futures.wait(
-                        in_flight, return_when=concurrent.futures.FIRST_COMPLETED
-                    )
-                    for future in done_futures:
-                        job = in_flight.pop(future)
-                        try:
-                            state = future.result()
-                        except Exception as exc:
-                            halted = True
-                            if error is None:
-                                error = exc
-                            continue
-                        print(json.dumps({"job": job["job"], "state": state}), flush=True)
-                        if job["job"] in retried:
-                            print(json.dumps({"job": job["job"], "retained_attempts": retained_attempts(root, job)}),
-                                  flush=True)
-                        if state == "retained-failure" and job["job"] not in retried:
-                            if halted:
-                                continue
-                            remaining = [member for member in jobs if not complete(member)]
-                            if hold := admission(profile, remaining, quota):
-                                print(json.dumps({"diff": key, "state": "held", "reason": hold,
-                                                  "retained_attempts": retained_attempts(root, job)}), flush=True)
-                                halted = True
-                                continue
-                            retried.add(job["job"])
-                            retry_queue.insert(0, job)
-                            continue
-                        if state != "done":
-                            halted = True
-                            continue
-                        if not complete(job):
-                            halted = True
-                            if error is None:
-                                error = RuntimeError(f"{job['job']} completed without valid artifacts")
+                    handle_outcome(next_job, execute(next_job))
+            else:
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+                interrupted = False
+                try:
+                    while True:
+                        # Drain every already-finished future before refilling slots so a peer
+                        # interruption or exception halts submission before spending more quota.
+                        while ready_done := [future for future in list(in_flight) if future.done()]:
+                            for future in ready_done:
+                                job = in_flight.pop(future)
+                                try:
+                                    state = future.result()
+                                except Exception as exc:
+                                    halted = True
+                                    if error is None:
+                                        error = exc
+                                    continue
+                                handle_outcome(job, state)
+                        if not halted:
+                            while len(in_flight) < concurrency:
+                                active_ids = {member["job"] for member in in_flight.values()}
+                                next_job = pick_next(active_ids)
+                                if next_job is None:
+                                    break
+                                in_flight[pool.submit(execute, next_job)] = next_job
+                        if not in_flight:
+                            break
+                        concurrent.futures.wait(in_flight, return_when=concurrent.futures.FIRST_COMPLETED)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+                finally:
+                    if not interrupted:
+                        pool.shutdown(wait=True)
             if error is not None:
                 raise error
             if halted:
