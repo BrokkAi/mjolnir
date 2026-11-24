@@ -400,7 +400,18 @@ impl RelayClient {
         operation_id: &str,
         expected_store_id: &str,
     ) -> Result<()> {
+        self.release_in_place_move_dispatch_checked(operation_id, expected_store_id, None)
+            .await
+    }
+
+    pub async fn release_in_place_move_dispatch_checked(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        expected_harness_restarted: Option<bool>,
+    ) -> Result<()> {
         let request = RelayRequest::ReleaseInPlaceMoveDispatch {
+            expected_harness_restarted,
             operation_id: operation_id.to_owned(),
             expected_store_id: expected_store_id.to_owned(),
         };
@@ -415,8 +426,10 @@ impl RelayClient {
         operation_id: &str,
         expected_store_id: &str,
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        candidate_id: Option<String>,
     ) -> Result<()> {
         let request = RelayRequest::RestartHarnessInPlace {
+            candidate_id,
             operation_id: operation_id.to_owned(),
             expected_store_id: expected_store_id.to_owned(),
             launch_config,

@@ -107,6 +107,8 @@ func TestWorkspaceIsOfferedOnlyWhereItSelectsSomething(t *testing.T) {
 		{"sessions", "--workspace", "w"},
 		{"events", "--workspace", "w"},
 		{"resume", "--wiki", "x", "--workspace", "w"},
+		{"import", "codex", "--latest", "--workspace", "w"},
+		{"acp", "--workspace", "w"},
 		{"--workspace", "w", "new", "--project-directory", "/p"},
 		{"--workspace", "w"},
 	} {
@@ -114,14 +116,6 @@ func TestWorkspaceIsOfferedOnlyWhereItSelectsSomething(t *testing.T) {
 			t.Errorf("%q: %v", argv, err)
 		}
 	}
-	// Until their arguments are ported, these two accept any command line,
-	// so a parse here would prove nothing.
-	t.Run("import", func(t *testing.T) {
-		t.Skip("needs mj-cli's import.rs (not yet ported): ImportArgs with its flattened WorkspaceName")
-	})
-	t.Run("acp", func(t *testing.T) {
-		t.Skip("needs mj-cli's acp.rs (not yet ported): AcpArgs with its flattened WorkspaceName")
-	})
 	for _, argv := range [][]string{
 		{"prompt", "--session", "s", "hi", "--workspace", "w"},
 		{"wait", "--session", "s", "--workspace", "w"},

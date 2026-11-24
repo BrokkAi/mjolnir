@@ -4,19 +4,31 @@
 
 use super::*;
 
+/// Prints the host's mbx configuration directory.
+pub(super) const DIRECTORY_SCRIPT: &str = r#"printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/mbx""#;
+
+/// Reads the file named by `$1`, or exits 3 when it is not there. A trailing
+/// `x` marks the end of the file, so a shell that captures the output (a
+/// batched probe does) keeps the file's final newlines.
+pub(super) const READ_FRAMED_SCRIPT: &str = r#"[ -f "$1" ] || exit 3
+cat -- "$1" && printf x"#;
+
+const DIRECTORY_PURPOSE: &str = "locate host mbx configuration";
+const READ_PURPOSE: &str = "read machine mbx configuration";
+
 pub fn host_directory(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
     if matches!(host, CacheHost::Local) {
         return dirs::config_dir()
             .map(|path| path.join("mbx"))
-            .context("locate host mbx configuration");
+            .context(DIRECTORY_PURPOSE);
     }
-    let command = host.shell_command(
-        r#"printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/mbx""#,
-        LABEL,
-        [],
-        "locate host mbx configuration",
-    );
-    let output = checked(executor.execute(&command)?, &command)?;
+    let command = host.shell_command(DIRECTORY_SCRIPT, LABEL, [], DIRECTORY_PURPOSE);
+    directory_from_probe(executor.execute(&command)?)
+}
+
+/// Read the answer to [`DIRECTORY_SCRIPT`], however the probe was run.
+pub(super) fn directory_from_probe(output: CommandOutput) -> Result<PathBuf> {
+    let output = checked_as(output, DIRECTORY_PURPOSE)?;
     let path =
         PathBuf::from(String::from_utf8(output.stdout).context("decode mbx configuration path")?);
     ensure!(
@@ -35,7 +47,7 @@ pub fn read_file(
         READ_CONFIG_SCRIPT,
         LABEL,
         [path.to_string_lossy().into_owned()],
-        "read machine mbx configuration",
+        READ_PURPOSE,
     );
     let output = executor.execute(&command)?;
     if output.status == 3 {
@@ -45,6 +57,19 @@ pub fn read_file(
     Ok(Some(
         String::from_utf8(output.stdout).context("decode machine mbx configuration")?,
     ))
+}
+
+/// Read the answer to [`READ_FRAMED_SCRIPT`] run in a batched probe.
+pub(super) fn file_from_framed_probe(output: CommandOutput) -> Result<Option<String>> {
+    if output.status == 3 {
+        return Ok(None);
+    }
+    let output = checked_as(output, READ_PURPOSE)?;
+    let text = String::from_utf8(output.stdout).context("decode machine mbx configuration")?;
+    let text = text
+        .strip_suffix('x')
+        .context("the machine mbx configuration was cut short")?;
+    Ok(Some(text.to_owned()))
 }
 
 pub fn configured_limit(text: Option<&str>, table: &str, field: &str) -> Result<Option<String>> {

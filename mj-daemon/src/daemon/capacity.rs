@@ -1003,7 +1003,7 @@ pub(super) fn spawn_capacity_service(
                     };
                     // The service may have rebuilt the targets after the
                     // poller queued this result.
-                    if !targets_tx.borrow().targets.contains(&reading.target) {
+                    if !targets_tx.borrow().targets.iter().any(|current| current.same_schedule_identity(&reading.target)) {
                         continue;
                     }
                     states_tx.send_modify(|states| {
@@ -1045,18 +1045,32 @@ fn refresh_probe_targets(
         states.retain(|id, _| targets.iter().any(|target| target.id == *id));
         states.len() != before
     });
-    if targets_tx.send_if_modified(|current| {
+    let mut publish = refresh_generation.is_some();
+    targets_tx.send_if_modified(|current| {
         if refresh_generation.is_none() && current.targets == targets {
             return false;
         }
+        publish |= !targets_match_schedule_identity(&current.targets, &targets);
         current.targets = targets;
         if let Some(generation) = refresh_generation {
             current.refresh_generation = generation;
         }
         true
-    }) {
+    });
+    if publish {
         state.publish_revision();
     }
+}
+
+fn targets_match_schedule_identity(
+    left: &[mj_core::targets::DeploymentCapacityTarget],
+    right: &[mj_core::targets::DeploymentCapacityTarget],
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.same_schedule_identity(right))
 }
 
 /// Tell every surface once when a filesystem on a host becomes full.
@@ -1256,6 +1270,7 @@ mod tests {
             .map(str::to_owned)
             .to_vec();
         let target = mj_controller::targets::DeploymentCapacityTarget {
+            stable_identity: None,
             id: "local".into(),
             host: "local".into(),
             target_ids: target_ids.clone(),
@@ -1885,6 +1900,7 @@ mod tests {
         const HOST: &str = "runtime-capacity-sharing";
         let state = crate::daemon::tests::test_runtime_state();
         let target = mj_controller::targets::DeploymentCapacityTarget {
+            stable_identity: None,
             id: "local".into(),
             host: HOST.into(),
             target_ids: vec!["podman".into()],

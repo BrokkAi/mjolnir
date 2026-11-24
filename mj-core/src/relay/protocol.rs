@@ -318,6 +318,8 @@ pub enum RelayRequest {
     /// Idempotently release an in-place Move dispatch hold for `operation_id`
     /// on `expected_store_id` and resume queue promotion. Protocol 81.
     ReleaseInPlaceMoveDispatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_harness_restarted: Option<bool>,
         operation_id: String,
         expected_store_id: String,
     },
@@ -328,6 +330,8 @@ pub enum RelayRequest {
         operation_id: String,
         expected_store_id: String,
         launch_config: Box<crate::worker_launch::WorkerLaunchConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
     },
     CommandRetentionStatus,
     /// Freeze a coherent current-state recovery cut on this connection.
@@ -757,6 +761,9 @@ impl RelayRequest {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
+            Self::HistoryQuery {
+                query: crate::history::HistoryQuery::SearchHistory { .. },
+            } => super::RELAY_SEARCH_HISTORY_PROTOCOL,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
             | Self::CompleteHistoryRequest { .. } => 16,
@@ -1273,6 +1280,12 @@ pub enum RelayErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RelayErrorDetail {
+    ReloadInProgress {
+        operation_id: String,
+    },
+    ReloadFailedAfterCommit {
+        operation_id: String,
+    },
     Desynchronized {
         requested_after: u64,
         requested_digest: String,

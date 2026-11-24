@@ -511,6 +511,7 @@ impl DurableRelay {
             .map(|queued| queued.command_id.clone())
             .collect();
         self.snapshot.in_place_move_hold = Some(mj_core::relay::InPlaceMoveHold {
+            reload_phase: None,
             operation_id: operation_id.to_owned(),
             captured_pending_command_ids: captured_pending_command_ids.clone(),
             harness_restarted: false,
@@ -638,6 +639,7 @@ impl DurableRelay {
         &mut self,
         operation_id: &str,
         expected_store_id: &str,
+        expected_harness_restarted: Option<bool>,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
         if let Some(error) = self.verify_expected_store_id(expected_store_id) {
             return Ok(Err(error));
@@ -647,11 +649,49 @@ impl DurableRelay {
                 RelayErrorCode::InvalidState,
                 "cannot release in-place move dispatch hold while an in-place harness restart is in progress",
                 true,
-                None,
+                Some(RelayErrorDetail::ReloadInProgress {
+                    operation_id: operation_id.to_owned(),
+                }),
             )));
         }
         match &self.snapshot.in_place_move_hold {
             Some(hold) if hold.operation_id == operation_id => {
+                use mj_core::relay::InPlaceReloadPhase;
+                if matches!(hold.reload_phase, Some(InPlaceReloadPhase::Committed)) {
+                    return Ok(Err(relay_protocol_error(
+                        RelayErrorCode::InvalidState,
+                        "cannot release in-place move dispatch hold while a committed harness reload is starting",
+                        true,
+                        Some(RelayErrorDetail::ReloadInProgress {
+                            operation_id: operation_id.to_owned(),
+                        }),
+                    )));
+                }
+                if let Some(expected) = expected_harness_restarted {
+                    if !expected
+                        && let Some(InPlaceReloadPhase::FailedAfterCommit { message }) =
+                            &hold.reload_phase
+                    {
+                        return Ok(Err(relay_protocol_error(
+                            RelayErrorCode::Internal,
+                            message.clone(),
+                            false,
+                            Some(RelayErrorDetail::ReloadFailedAfterCommit {
+                                operation_id: operation_id.to_owned(),
+                            }),
+                        )));
+                    }
+                    let actual_restarted = hold.harness_restarted
+                        || matches!(hold.reload_phase, Some(InPlaceReloadPhase::Started));
+                    if actual_restarted != expected {
+                        return Ok(Err(relay_protocol_error(
+                            RelayErrorCode::InvalidState,
+                            "in-place move harness reload state changed before releasing dispatch hold",
+                            true,
+                            None,
+                        )));
+                    }
+                }
                 self.snapshot.in_place_move_hold = None;
                 self.persist_snapshot()?;
                 self.promote_next_queued_command()?;
@@ -697,12 +737,41 @@ impl DurableRelay {
                 None,
             )));
         }
+        use mj_core::relay::InPlaceReloadPhase;
+        match &hold.reload_phase {
+            Some(InPlaceReloadPhase::Started) => {
+                return Ok(InPlaceHarnessRestartDecision::AlreadyRestarted);
+            }
+            Some(InPlaceReloadPhase::Committed) => {
+                return Err(Box::new(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "in-place harness reload already committed and is starting",
+                    true,
+                    Some(RelayErrorDetail::ReloadInProgress {
+                        operation_id: operation_id.to_owned(),
+                    }),
+                )));
+            }
+            Some(InPlaceReloadPhase::FailedAfterCommit { message }) => {
+                return Err(Box::new(relay_protocol_error(
+                    RelayErrorCode::Internal,
+                    message.clone(),
+                    false,
+                    Some(RelayErrorDetail::ReloadFailedAfterCommit {
+                        operation_id: operation_id.to_owned(),
+                    }),
+                )));
+            }
+            None => (),
+        }
         if self.in_place_harness_restart_in_flight.is_some() {
             return Err(Box::new(relay_protocol_error(
                 RelayErrorCode::InvalidState,
                 "an in-place harness restart is already in progress",
                 true,
-                None,
+                Some(RelayErrorDetail::ReloadInProgress {
+                    operation_id: operation_id.to_owned(),
+                }),
             )));
         }
         if hold.harness_restarted {
@@ -751,9 +820,104 @@ impl DurableRelay {
             hold.operation_id
         );
         hold.harness_restarted = true;
+        hold.reload_phase = Some(mj_core::relay::InPlaceReloadPhase::Started);
         self.persist_snapshot()?;
         self.in_place_harness_restart_in_flight = None;
         Ok(())
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn reconcile_committed_reload(&mut self, operation_id: &str) -> Result<()> {
+        if let Some(hold) = self.snapshot.in_place_move_hold.as_mut()
+            && hold.operation_id == operation_id
+            && hold.reload_phase.is_none()
+            && !hold.harness_restarted
+        {
+            hold.reload_phase = Some(mj_core::relay::InPlaceReloadPhase::Committed);
+            self.persist_snapshot()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn finish_committed_reload(&mut self) -> Result<()> {
+        if let Some((operation, store)) = self.committed_reload_operation() {
+            self.set_reload_phase(
+                &operation,
+                &store,
+                mj_core::relay::InPlaceReloadPhase::Started,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn committed_reload_operation(&self) -> Option<(String, String)> {
+        let hold = self.snapshot.in_place_move_hold.as_ref()?;
+        matches!(
+            hold.reload_phase,
+            Some(
+                mj_core::relay::InPlaceReloadPhase::Committed
+                    | mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { .. }
+            )
+        )
+        .then(|| {
+            (
+                hold.operation_id.clone(),
+                self.snapshot.store_id.clone().expect("held store"),
+            )
+        })
+    }
+
+    pub(crate) fn mark_in_place_harness_committed(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<()> {
+        self.set_reload_phase(
+            operation_id,
+            expected_store_id,
+            mj_core::relay::InPlaceReloadPhase::Committed,
+        )
+    }
+
+    pub(crate) fn mark_in_place_harness_failed_after_commit(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        message: String,
+    ) -> Result<()> {
+        self.set_reload_phase(
+            operation_id,
+            expected_store_id,
+            mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { message },
+        )
+    }
+
+    fn set_reload_phase(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        phase: mj_core::relay::InPlaceReloadPhase,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.snapshot.store_id.as_deref() == Some(expected_store_id),
+            "reload store identity changed"
+        );
+        let hold = self
+            .snapshot
+            .in_place_move_hold
+            .as_mut()
+            .context("reload hold disappeared")?;
+        anyhow::ensure!(
+            hold.operation_id == operation_id,
+            "reload hold owner changed"
+        );
+        if matches!(phase, mj_core::relay::InPlaceReloadPhase::Started) {
+            hold.harness_restarted = true;
+        }
+        hold.reload_phase = Some(phase);
+        self.persist_snapshot()
     }
 
     fn submit_command_inner(

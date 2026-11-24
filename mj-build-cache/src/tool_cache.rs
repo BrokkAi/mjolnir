@@ -75,12 +75,13 @@ fn prepare_checked(
     // A container shares these directories through a bind mount, which needs
     // the host's own kernel. A bare session on a Mac runs on the Mac itself.
     // Other hosts keep native defaults.
-    match host.platform(executor)? {
+    let (platform, home) = host.platform_and_home(executor)?;
+    match platform {
         HostPlatform::Linux => {}
         HostPlatform::Darwin if !container => {}
         HostPlatform::Darwin | HostPlatform::Windows => return Ok(None),
     }
-    let home = host.home(executor)?;
+    let home = home?;
     let directory = match settings.and_then(|settings| settings.tools_directory.clone()) {
         Some(directory) => directory,
         None => mj_core::target_path::join(&home, Path::new(".cache/mjolnir/build")),
@@ -100,8 +101,10 @@ fn prepare_checked(
     } else {
         nx_home.clone()
     };
-    for (directory, destination) in [(&directory, &directory), (&nx_home, &nx_destination)] {
-        if container {
+    let caches = [(&directory, &directory), (&nx_home, &nx_destination)];
+    // Both are checked before the host is touched.
+    if container {
+        for (directory, destination) in caches {
             ensure!(
                 !mounts
                     .iter()
@@ -111,35 +114,37 @@ fn prepare_checked(
                 directory.display()
             );
         }
-        let command = host.command(
-            vec![
-                "mkdir".into(),
-                "-p".into(),
-                "-m".into(),
-                "700".into(),
-                "--".into(),
-                directory.to_string_lossy().into_owned(),
-            ],
-            "create shared native build cache",
-        );
-        let output = executor.execute(&command)?;
-        ensure!(
-            output.status == 0,
-            "create native build cache: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let filesystems =
-            targets::probe_filesystem_types(host.ssh(), std::slice::from_ref(directory), executor)?;
-        let filesystem = filesystems
-            .first()
-            .context("native cache filesystem probe returned no result")?;
+    }
+    let sources: Vec<_> = caches.iter().map(|(source, _)| (*source).clone()).collect();
+    let mut create = vec![
+        "mkdir".to_owned(),
+        "-p".into(),
+        "-m".into(),
+        "700".into(),
+        "--".into(),
+    ];
+    create.extend(
+        sources
+            .iter()
+            .map(|source| source.to_string_lossy().into_owned()),
+    );
+    let output = executor.execute(&host.command(create, "create shared native build cache"))?;
+    ensure!(
+        output.status == 0,
+        "create native build cache: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let filesystems = targets::probe_filesystem_types(host.ssh(), &sources, executor)?;
+    for ((directory, _), filesystem) in caches.iter().zip(&filesystems) {
         ensure!(
             !targets::overlay_unsupported_filesystem(filesystem)
                 .is_some_and(|reason| matches!(reason, "network filesystem" | "FUSE filesystem")),
             "native build cache {} needs a local filesystem; configure build_cache.tools_directory on this machine",
             directory.display()
         );
-        if container {
+    }
+    if container {
+        for (directory, destination) in caches {
             mounts.push(targets::AdditionalMount {
                 source: directory.clone(),
                 destination: destination.clone(),
@@ -191,7 +196,9 @@ mod tests {
         fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
             let (status, stdout, stderr) = match command.program.as_str() {
                 "uname" => (0, "Linux x86_64\n", ""),
-                "sh" if command.purpose == "probe mount source filesystem" => (0, "ext4\n", ""),
+                "sh" if command.purpose == "probe mount source filesystem" => {
+                    (0, "ext4\next4\n", "")
+                }
                 "mkdir"
                     if command
                         .args
@@ -250,9 +257,12 @@ mod tests {
         fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
             self.ran.lock().unwrap().push(command.program.clone());
             let stdout = match command.program.as_str() {
-                "uname" => "Darwin arm64\n",
-                "sh" if command.purpose == "probe mount source filesystem" => "apfs\n",
-                "mkdir" => "",
+                "uname" => "Darwin arm64\n".to_owned(),
+                "sh" if command.purpose == "probe mount source filesystem" => {
+                    // One answer per directory, after the script and its label.
+                    "apfs\n".repeat(command.args.len() - 3)
+                }
+                "mkdir" => String::new(),
                 other => anyhow::bail!("unexpected preparation program {other}"),
             };
             Ok(targets::CommandOutput {
@@ -329,6 +339,167 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|notice| notice.contains("fixture Nx volume is unavailable"))
+        );
+    }
+    /// An SSH host that answers each kind of command by its purpose and keeps
+    /// the remote command lines it was given.
+    struct RemoteHost {
+        /// The filesystems of the cache directory and of `.nx`, in that order.
+        filesystems: [&'static str; 2],
+        lines: Mutex<Vec<(String, String)>>,
+        notices: Mutex<Vec<String>>,
+    }
+
+    impl RemoteHost {
+        fn new(filesystems: [&'static str; 2]) -> Self {
+            Self {
+                filesystems,
+                lines: Mutex::default(),
+                notices: Mutex::default(),
+            }
+        }
+
+        fn purposes(&self) -> Vec<String> {
+            self.lines
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(purpose, _)| purpose.clone())
+                .collect()
+        }
+    }
+
+    impl CommandExecutor for RemoteHost {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute(&self, command: &targets::CommandSpec) -> Result<targets::CommandOutput> {
+            assert_eq!(command.program, "ssh", "{command:?}");
+            let line = command.args.last().cloned().unwrap_or_default();
+            self.lines
+                .lock()
+                .unwrap()
+                .push((command.purpose.clone(), line));
+            let stdout = match command.purpose.as_str() {
+                "detect build cache host platform and home" => {
+                    targets::ssh_podman_probe_fixture(&[
+                        ("platform", 0, "Linux x86_64", ""),
+                        ("home", 0, "/home/builder", ""),
+                    ])
+                }
+                "create shared native build cache" => Vec::new(),
+                "probe mount source filesystem" => {
+                    format!("{}\n{}\n", self.filesystems[0], self.filesystems[1]).into_bytes()
+                }
+                other => anyhow::bail!("unexpected preparation command {other}"),
+            };
+            Ok(targets::CommandOutput {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
+        }
+    }
+
+    fn remote_config() -> Config {
+        let mut config = Config::default().with_local_targets();
+        let template: TargetTemplate = serde_json::from_value(serde_json::json!({
+            "kind": "ssh-podman", "host": "tools.test", "user": "builder", "image": "fixture",
+        }))
+        .unwrap();
+        config.targets.insert("remote".into(), template);
+        config
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
+    fn an_ssh_host_prepares_both_native_caches_in_three_round_trips() {
+        let executor = RemoteHost::new(["ext4", "xfs"]);
+        let mut mounts = Vec::new();
+        let placement = prepare(&remote_config(), "remote", &mut mounts, &executor).unwrap();
+        assert_eq!(
+            placement.directory,
+            Path::new("/home/builder/.cache/mjolnir/build")
+        );
+        assert_eq!(mounts.len(), 2);
+        // Platform and home together, one `mkdir` for both directories, and one
+        // filesystem probe for both, where each used to be a call of its own.
+        assert_eq!(
+            executor.purposes(),
+            [
+                "detect build cache host platform and home",
+                "create shared native build cache",
+                "probe mount source filesystem",
+            ]
+        );
+        let lines = executor.lines.lock().unwrap();
+        for directory in ["/home/builder/.cache/mjolnir/build", "/home/builder/.nx"] {
+            assert!(lines[1].1.contains(directory), "{}", lines[1].1);
+            assert!(lines[2].1.contains(directory), "{}", lines[2].1);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
+    fn a_network_filesystem_under_either_directory_or_an_overlapping_mount_refuses_before_any_mount()
+     {
+        // The second directory's filesystem is the one that is refused.
+        let executor = RemoteHost::new(["ext4", "nfs"]);
+        let mut mounts = Vec::new();
+        assert!(prepare(&remote_config(), "remote", &mut mounts, &executor).is_none());
+        assert!(mounts.is_empty(), "a refused cache leaves no mount behind");
+        let notices = executor.notices.lock().unwrap();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("/home/builder/.nx needs a local filesystem")),
+            "{notices:?}"
+        );
+
+        // A mount over the second cache is refused before the host is changed.
+        let executor = RemoteHost::new(["ext4", "ext4"]);
+        let original = vec![targets::AdditionalMount {
+            source: "/data".into(),
+            destination: "/home/hel/.nx/shared".into(),
+            access: targets::MountAccess::Ro,
+        }];
+        let mut mounts = original.clone();
+        assert!(prepare(&remote_config(), "remote", &mut mounts, &executor).is_none());
+        assert_eq!(mounts, original);
+        assert_eq!(
+            executor.purposes(),
+            ["detect build cache host platform and home"],
+            "nothing was created on the host"
         );
     }
 }

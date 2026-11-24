@@ -297,7 +297,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
             && opened.received[0].contains(&"mj-agents".into())
     );
     assert!(
-        opened.standing.contains("search_sessions") && opened.standing.contains("send_message"),
+        opened.standing.contains("search_history") && opened.standing.contains("send_message"),
         "{}",
         opened.standing
     );
@@ -312,7 +312,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
             && opened.received[0].contains(&"mj-agents".into())
     );
     assert!(
-        !opened.standing.contains("search_sessions") && !opened.standing.contains("send_message"),
+        !opened.standing.contains("search_history") && !opened.standing.contains("send_message"),
         "{}",
         opened.standing
     );

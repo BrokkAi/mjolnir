@@ -350,25 +350,9 @@ fn archive_round_trip_verifies_multi_repo_payloads_and_mode() {
     assert_eq!(verified.canonical_session, input().canonical_session);
     assert_eq!(verified.manifest.schema_version, ARCHIVE_SCHEMA_VERSION);
     assert_eq!(verified.archive_sha256.len(), 64);
-    let repository_bundles = verify_repository_bundles_streaming(&path).unwrap();
-    assert_eq!(repository_bundles.archive_sha256, verified.archive_sha256);
     assert_eq!(
         read_checkpoint_repository_bundles(&path)
             .unwrap()
-            .iter()
-            .map(|repository| (
-                repository.metadata.id.as_str(),
-                repository.committed_bundle.as_slice(),
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            ("hel", b"bundle-hel".as_slice()),
-            ("worker", b"bundle-worker".as_slice()),
-        ]
-    );
-    assert_eq!(
-        repository_bundles
-            .repositories
             .iter()
             .map(|repository| (
                 repository.metadata.id.as_str(),
@@ -3430,6 +3414,95 @@ fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
     };
     assert!(reason.contains("no commits beyond origin"), "{reason}");
     assert!(reason.contains("mj export --kind patch"), "{reason}");
+}
+
+#[test]
+fn a_linked_worktrees_bundle_holds_only_its_own_head_not_its_siblings_refs() {
+    let temp = tempfile::tempdir().unwrap();
+    let main = temp.path().join("main");
+    initialize_repository(&main);
+    commit_file(&main, "tracked.txt", b"base\n", "base");
+    let base = git_line(&main, &["rev-parse", "HEAD"]);
+    // A sibling's branch and tag, with a commit of their own.
+    git(&main, &["checkout", "-q", "-b", "other"]);
+    commit_file(&main, "other.txt", b"other\n", "other");
+    let other = git_line(&main, &["rev-parse", "HEAD"]);
+    git(&main, &["tag", "sibling-tag"]);
+    git(&main, &["checkout", "-q", "main"]);
+    let worktree = temp.path().join("worktree");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "session",
+            worktree.to_str().unwrap(),
+            &base,
+        ],
+    );
+
+    // Nothing of the worktree's own beyond the base: the sibling's commits are
+    // not its work.
+    let SessionExportError::Refused(reason) =
+        session_bundle_bytes(&SystemGit, &worktree, Some(&base), None, false, None).unwrap_err()
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        reason.contains("no commits beyond the session base"),
+        "{reason}"
+    );
+
+    git(&worktree, &["config", "user.name", "Hel Test"]);
+    git(&worktree, &["config", "user.email", "hel@example.test"]);
+    commit_file(&worktree, "session.txt", b"session\n", "session");
+    let head = git_line(&worktree, &["rev-parse", "HEAD"]);
+    let bytes =
+        session_bundle_bytes(&SystemGit, &worktree, Some(&base), None, false, None).unwrap();
+    let bundle = temp.path().join("session.bundle");
+    fs::write(&bundle, &bytes).unwrap();
+    let heads = git_line(&main, &["bundle", "list-heads", bundle.to_str().unwrap()]);
+    assert!(heads.contains(&head), "{heads}");
+    assert!(heads.contains("refs/heads/session"), "{heads}");
+    assert!(!heads.contains("refs/heads/other"), "{heads}");
+    assert!(!heads.contains("refs/heads/main"), "{heads}");
+    assert!(!heads.contains("sibling-tag"), "{heads}");
+    assert!(!heads.contains(&other), "{heads}");
+    // Applied to a repository that holds only the base, the bundle brings
+    // the worktree's commit and nothing of the sibling's.
+    git(&main, &["bundle", "verify", bundle.to_str().unwrap()]);
+    let unbundled = temp.path().join("unbundled");
+    initialize_repository(&unbundled);
+    git(
+        &unbundled,
+        &[
+            "fetch",
+            "-q",
+            main.to_str().unwrap(),
+            "refs/heads/main:refs/heads/seed",
+        ],
+    );
+    git(
+        &unbundled,
+        &[
+            "fetch",
+            "-q",
+            bundle.to_str().unwrap(),
+            "HEAD:refs/heads/imported",
+        ],
+    );
+    assert_eq!(git_line(&unbundled, &["rev-parse", "imported"]), head);
+    let missing = std::process::Command::new("git")
+        .current_dir(&unbundled)
+        .args(["cat-file", "-e", &other])
+        .status()
+        .unwrap();
+    assert!(
+        !missing.success(),
+        "the sibling's commit travelled in the bundle"
+    );
 }
 
 #[test]

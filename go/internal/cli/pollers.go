@@ -16,10 +16,23 @@ package cli
 import (
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
+	"github.com/BrokkAi/mjolnir/go/internal/daemon"
 )
+
+// dashboardLifecycleUpdate is one lifecycle operation's result. Completion
+// identity belongs to the UI operation that started the work; the daemon's
+// lifecycle projection remains the authority for session state. Exactly one
+// of success and failure is set. Declared for the dashboard (slice 2b).
+type dashboardLifecycleUpdate struct {
+	sessionID string
+	success   daemon.LifecycleSuccess
+	failure   *dashboardLifecycleFailure
+	operation *atomic.Bool
+}
 
 type dashboardLifecycleFailureKind int
 

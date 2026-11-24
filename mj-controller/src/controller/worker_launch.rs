@@ -78,6 +78,11 @@ impl Controller {
 
     /// Return the pending harness preflight so a new checkout can finish first,
     /// and the staged credential identities.
+    ///
+    /// `created_container` is what this launch's own creation command reported
+    /// about the container, if it reported anything.
+    // Each argument is an independent input of one launch's worker staging.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) fn stage_worker_files_for(
         &self,
         session_id: &str,
@@ -86,6 +91,7 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
         history: LaunchHistory<'_>,
+        created_container: Option<&targets::CreationObservation>,
     ) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
         worker_launch::stage_worker_files_for(
             &self.config,
@@ -96,6 +102,7 @@ impl Controller {
             executor,
             preparation,
             history,
+            created_container,
         )
     }
 

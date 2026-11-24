@@ -1160,8 +1160,8 @@ sessions omit it, even if the profile contains a user copy. Your own `skills/`
 directory is left alone.
 
 Session recall and file provenance are provided by the `mj-memory` MCP server:
-`search_sessions`, `get_session_brief`, `search_session`, `read_session`,
-`trace_file`, `session_files`, and `blame_file`. They query the controller's
+`search_history`, `get_session_brief`, `read_session`, `trace_file`,
+`session_files`, and `blame_file`. They query the controller's
 session index on local, container, and SSH targets without installing `sw` or
 copying the index to the target. Claude receives these history tools and keeps
 native project notes. Other harnesses read and write their session's project

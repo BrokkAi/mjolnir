@@ -33,24 +33,4 @@ impl Controller {
             ),
         }
     }
-
-    /// Capture an archive for bundle export while the target remains live.
-    pub async fn checkpoint_for_bundle_export(
-        &mut self,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-    ) -> Result<CheckpointMetadata> {
-        self.checkpoint_for_bundle_export_controlled(admission, session_id, &ProcessExecutor)
-            .await
-    }
-
-    pub(super) async fn checkpoint_for_bundle_export_controlled(
-        &mut self,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<CheckpointMetadata> {
-        self.checkpoint_for_bundle_export_with_manager(admission, session_id, executor, None)
-            .await
-    }
 }

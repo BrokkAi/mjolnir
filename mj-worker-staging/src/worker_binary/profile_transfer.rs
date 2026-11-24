@@ -1,13 +1,55 @@
 //! Receiver-owned negotiation for staged profile files.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Cursor, Seek};
 use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const RECEIVER: &str = include_str!("profile_receiver.pl");
-const PROBE: &str =
-    "perl -MDigest::SHA -MFcntl -MFile::Copy -MFile::Path -MFile::Temp -MJSON::PP -e 1";
+const PROBE: &str = "perl -MDigest::SHA -MFcntl -MFile::Basename -MFile::Copy -MFile::Path -MFile::Temp -MJSON::PP -e 1";
+
+/// The longest wait between retries of a `busy` claim. Same-daemon transfers
+/// to a host serialize in `try_transfer`, so only another daemon's transfer
+/// (or a legacy uploader) can collide; start quick and back off to this.
+const BUSY_RETRY_CEILING: Duration = Duration::from_secs(2);
+
+type HostKey = (PathBuf, String, Vec<String>);
+
+fn upload_generations() -> &'static Mutex<HashMap<HostKey, u64>> {
+    static GENERATIONS: OnceLock<Mutex<HashMap<HostKey, u64>>> = OnceLock::new();
+    GENERATIONS.get_or_init(Default::default)
+}
+
+fn host_key(ssh: &SshTarget) -> HostKey {
+    (
+        mj_core::config::data_dir(),
+        ssh.destination.clone(),
+        ssh.ssh_args.clone(),
+    )
+}
+
+/// How many launch uploads to this host have sent objects the host lacked.
+/// A launch that finds everything present, and any prewarm, leave it alone, so
+/// a caller that remembers a value knows the host's shared store has not
+/// needed new content since: a launch that did send objects means the store
+/// had lost or never had them, and a prewarm taken before it is out of date.
+pub fn profile_upload_generation(ssh: &SshTarget) -> u64 {
+    upload_generations()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&host_key(ssh))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn record_launch_upload(ssh: &SshTarget) {
+    *upload_generations()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(host_key(ssh))
+        .or_default() += 1;
+}
 
 #[derive(serde::Serialize)]
 struct ManifestEntry {
@@ -77,16 +119,21 @@ impl ProfileContentManifest {
         Ok(manifest)
     }
 
+    /// Left uncompressed: the batch's outer gzip stream compresses it once.
     fn private_bundle(&self) -> Result<Option<File>> {
         if self.private.is_empty() {
             return Ok(None);
         }
-        Ok(Some(archive(|archive| {
-            for path in &self.private {
-                archive.append_path_with_name(self.source.join(path), path)?;
-            }
-            Ok(())
-        })?))
+        let mut file = tempfile::tempfile().context("create private profile bundle spool")?;
+        let mut archive = tar::Builder::new(&mut file);
+        archive.follow_symlinks(true);
+        for path in &self.private {
+            archive.append_path_with_name(self.source.join(path), path)?;
+        }
+        archive.finish()?;
+        drop(archive);
+        file.rewind()?;
+        Ok(Some(file))
     }
 
     /// Transfer to a fresh staging home, or prewarm just the non-secret
@@ -98,10 +145,41 @@ impl ProfileContentManifest {
         ssh: &SshTarget,
         destination: Option<&str>,
     ) -> Result<bool> {
+        // A prewarm of a profile with nothing shareable has nothing to offer.
+        if destination.is_none() && self.objects.is_empty() {
+            return Ok(true);
+        }
         let executor = targets::WithoutDeadline::new(executor);
         if !supported(&executor, ssh)? {
             return Ok(false);
         }
+        // One transfer per host and shared content set at a time in this
+        // daemon: the receiver would answer a concurrent one over the same
+        // objects `busy` and make it poll. Transfers of other content do not
+        // wait for each other (the legacy upload takes the same gate), and a
+        // launch with nothing shareable takes none. Other daemons still meet
+        // the receiver's claims.
+        let gate = (!self.objects.is_empty()).then(|| {
+            let keys: Vec<_> = self.objects.keys().map(String::as_str).collect();
+            let content = mj_core::hex::lower_hex(Sha256::digest(keys.join("\n").as_bytes()));
+            let host = targets::TargetLocator::SshBare {
+                ssh: ssh.clone(),
+                worker_id: None,
+                workspace: String::new(),
+            };
+            super::super::store::store_gate(&host, &format!("{PROFILE_CONTENT_STORE}/{content}"))
+        });
+        let _transfer = gate
+            .as_deref()
+            .map(|gate| {
+                super::super::store::lock_gate(
+                    &executor,
+                    gate,
+                    destination.unwrap_or("prewarm"),
+                    "transfer profile content",
+                )
+            })
+            .transpose()?;
         transfer(&executor, ssh, self, destination)?;
         Ok(true)
     }
@@ -127,7 +205,7 @@ impl ProfileContentManifest {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(private.metadata()?.len());
                     header.set_mode(0o600);
-                    archive.append_data(&mut header, "private.tar.gz", private)?;
+                    archive.append_data(&mut header, "private.tar", private)?;
                 }
             }
             Ok(())
@@ -275,6 +353,7 @@ fn transfer(
     let mut objects_sent = 0;
     let mut claim_wait = Duration::ZERO;
     let mut send_time = Duration::ZERO;
+    let mut retry_delay = Duration::from_millis(250);
     let reused = loop {
         let (emit, chunks) = mpsc::channel();
         let mut input = BatchInput {
@@ -318,13 +397,16 @@ fn transfer(
         {
             let _queued = ProvisionStageGuard::new(executor, ProvisionStage::WaitingForWorkerStore);
             ensure!(
-                targets::sleep_unless_cancelled(Duration::from_millis(250), &|| executor
-                    .cancellation_requested()),
+                targets::sleep_unless_cancelled(retry_delay, &|| executor.cancellation_requested()),
                 "operation cancelled while waiting for profile content claims"
             );
         }
+        retry_delay = (retry_delay * 2).min(BUSY_RETRY_CEILING);
         claim_wait += start.elapsed();
     };
+    if destination.is_some() && objects_sent > 0 {
+        record_launch_upload(ssh);
+    }
     tracing::info!(
         bytes_offered = offered,
         bytes_sent,
@@ -355,6 +437,7 @@ mod tests {
         hold: Mutex<Option<Hold>>,
         pid: Option<&'a Path>,
         nofile: Option<u32>,
+        env: Vec<(&'static str, String)>,
     }
 
     impl<'a> LocalReceiver<'a> {
@@ -365,6 +448,7 @@ mod tests {
                 hold: Mutex::new(None),
                 pid: None,
                 nofile: None,
+                env: Vec::new(),
             }
         }
 
@@ -373,6 +457,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
+                // A support probe sends no input.
+                .filter(|bytes| !bytes.is_empty())
                 .map(|bytes| {
                     let data = bytes.windows(2).position(|bytes| bytes == b"\n\n").unwrap() + 2;
                     if data == bytes.len() {
@@ -464,10 +550,18 @@ mod tests {
             local
                 .env
                 .insert("HOME".into(), self.home.display().to_string());
+            for (name, value) in &self.env {
+                local.env.insert((*name).into(), value.clone());
+            }
             let mut record = Record {
                 input,
                 bytes: Vec::new(),
-                hold: self.hold.lock().unwrap().take(),
+                // A support probe is not the transfer a test holds.
+                hold: if command.purpose == "check negotiated profile receiver support" {
+                    None
+                } else {
+                    self.hold.lock().unwrap().take()
+                },
             };
             let output = targets::ProcessExecutor.execute_with_stdin(&local, &mut record)?;
             self.batches.lock().unwrap().push(record.bytes);
@@ -756,5 +850,399 @@ mod tests {
                     .exists()
             );
         }
+    }
+
+    fn tree_snapshot(root: &Path) -> BTreeMap<String, (u32, Vec<u8>)> {
+        fn visit(root: &Path, path: &Path, out: &mut BTreeMap<String, (u32, Vec<u8>)>) {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
+            let mode = metadata.mode() & 0o7777;
+            if metadata.is_dir() {
+                out.insert(name, (mode, Vec::new()));
+                let mut children: Vec<_> = std::fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect();
+                children.sort();
+                for child in children {
+                    visit(root, &child, out);
+                }
+            } else {
+                out.insert(name, (mode, std::fs::read(path).unwrap()));
+            }
+        }
+        let mut out = BTreeMap::new();
+        visit(root, root, &mut out);
+        out
+    }
+
+    /// Let tests remove trees that contain read-only directories.
+    fn make_writable(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::symlink_metadata(root)
+            && metadata.is_dir()
+        {
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            for entry in std::fs::read_dir(root).unwrap() {
+                make_writable(&entry.unwrap().path());
+            }
+        }
+    }
+
+    fn batch_entries(batch: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let data = batch.windows(2).position(|bytes| bytes == b"\n\n").unwrap() + 2;
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&batch[data..]));
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let name = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    // The private bundle is compressed once, by the batch's own gzip stream,
+    // and the receiver publishes the tree by rename into a parent directory it
+    // creates. The published files are copies: changing one leaves the shared
+    // object in the store as it was.
+    #[test]
+    fn private_bundle_is_compressed_once_and_the_published_profile_is_not_the_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let source = home.join("source");
+        std::fs::create_dir_all(source.join("replica")).unwrap();
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        let mut shared = vec![0; 96 * 1024 + 5];
+        getrandom::fill(&mut shared).unwrap();
+        std::fs::write(source.join("replica/topic"), &shared).unwrap();
+        // Compressible and over 64 KiB: a second gzip layer would show.
+        let private = b"private profile line\n".repeat(8 * 1024);
+        std::fs::write(source.join("notes/private.txt"), &private).unwrap();
+        std::fs::write(source.join("auth.json"), b"a private login").unwrap();
+        let receiver = LocalReceiver::new(home);
+        let roots = ["replica"].map(Path::new);
+        upload(
+            &receiver,
+            &dummy_ssh(),
+            &source,
+            "missing/parent/out",
+            &roots,
+        )
+        .unwrap();
+
+        let batches = receiver.batches.lock().unwrap();
+        let entries = batch_entries(&batches[0]);
+        let names: Vec<_> = entries.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"private.tar"), "{names:?}");
+        assert!(!names.contains(&"private.tar.gz"), "{names:?}");
+        let (_, bundle) = entries
+            .iter()
+            .find(|(name, _)| name == "private.tar")
+            .unwrap();
+        assert!(!bundle.starts_with(&[0x1f, 0x8b]), "private.tar is gzip");
+        assert!(bundle.len() > private.len());
+        let bundled: Vec<_> = tar::Archive::new(bundle.as_slice())
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            bundled.contains(&"notes/private.txt".to_owned()),
+            "{bundled:?}"
+        );
+        drop(batches);
+
+        let published = home.join("missing/parent/out");
+        assert_eq!(
+            std::fs::read(published.join("notes/private.txt")).unwrap(),
+            private
+        );
+        assert_eq!(
+            std::fs::read(published.join("auth.json")).unwrap(),
+            b"a private login"
+        );
+        for parent in ["missing", "missing/parent"] {
+            let mode = std::fs::metadata(home.join(parent)).unwrap().mode() & 0o7777;
+            assert_eq!(mode, 0o700, "{parent}");
+        }
+        let object = home.join(PROFILE_CONTENT_STORE).join(digest(&shared));
+        assert_eq!(std::fs::read(&object).unwrap(), shared);
+        let topic = published.join("replica/topic");
+        assert_eq!(std::fs::read(&topic).unwrap(), shared);
+        std::fs::set_permissions(&topic, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&topic, b"changed in the published profile").unwrap();
+        assert_eq!(std::fs::read(&object).unwrap(), shared);
+        assert!(
+            std::fs::read_dir(home.join("missing/parent"))
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() == "out")
+        );
+    }
+
+    // A destination on another filesystem makes rename fail with EXDEV. The
+    // receiver then copies in pure Perl, without `cp`, and still publishes
+    // atomically. The failure is forced by a module the test preloads into the
+    // receiver, so production code carries no test switch.
+    #[test]
+    fn rename_across_filesystems_falls_back_to_a_pure_perl_copy_with_the_same_result() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let hook = home.join("hook");
+        std::fs::create_dir(&hook).unwrap();
+        std::fs::write(
+            hook.join("ForceExdev.pm"),
+            r#"package ForceExdev;
+use Errno qw(EXDEV);
+BEGIN {
+    *CORE::GLOBAL::rename = sub {
+        my ($from, $to) = @_;
+        if ($to eq $ENV{MJ_TEST_EXDEV} && $from =~ m{/profile\z}) {
+            open(my $log, '>>', $ENV{MJ_TEST_EXDEV_LOG}) or die "log: $!";
+            print $log "exdev\n";
+            close($log);
+            $! = EXDEV;
+            return 0;
+        }
+        return CORE::rename($from, $to);
+    };
+}
+1;
+"#,
+        )
+        .unwrap();
+        let shim = home.join("shim");
+        std::fs::create_dir(&shim).unwrap();
+        std::fs::write(
+            shim.join("cp"),
+            "#!/bin/sh\necho cp >> \"$HOME/cp-called\"\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(shim.join("cp"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let source = home.join("source");
+        std::fs::create_dir_all(source.join("replica/nested/deeper")).unwrap();
+        std::fs::create_dir_all(source.join("replica/locked")).unwrap();
+        std::fs::create_dir_all(source.join("notes/0")).unwrap();
+        let mut shared = vec![0; 96 * 1024 + 9];
+        getrandom::fill(&mut shared).unwrap();
+        std::fs::write(source.join("replica/topic"), &shared).unwrap();
+        std::fs::set_permissions(
+            source.join("replica/topic"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(source.join("replica/nested/deeper/leaf"), b"leaf").unwrap();
+        std::fs::write(source.join("replica/locked/rule"), b"read only rule").unwrap();
+        std::fs::set_permissions(
+            source.join("replica/locked/rule"),
+            std::fs::Permissions::from_mode(0o400),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            source.join("replica/locked"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        // A file named "0" is false in Perl but is still an entry.
+        std::fs::write(source.join("notes/0/0"), b"zero").unwrap();
+        std::fs::write(source.join("auth.json"), b"a private login").unwrap();
+        std::fs::set_permissions(
+            source.join("auth.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let roots = ["replica"].map(Path::new);
+
+        // A hard-killed earlier attempt left its staging beside the destination.
+        let stale = home.join("elsewhere/exdev-out.staging");
+        std::fs::create_dir_all(stale.join("half-copied")).unwrap();
+        std::fs::write(stale.join("half-copied/file"), b"stale").unwrap();
+        let log = home.join("exdev.log");
+        let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
+        let forced = LocalReceiver {
+            env: vec![
+                ("PERL5OPT", format!("-I{} -MForceExdev", hook.display())),
+                ("MJ_TEST_EXDEV", "elsewhere/exdev-out".into()),
+                ("MJ_TEST_EXDEV_LOG", log.display().to_string()),
+                ("PATH", path.clone()),
+            ],
+            ..LocalReceiver::new(home)
+        };
+        upload(
+            &forced,
+            &dummy_ssh(),
+            &source,
+            "elsewhere/exdev-out/",
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "exdev\n");
+        let renamed = LocalReceiver {
+            env: vec![("PATH", path)],
+            ..LocalReceiver::new(home)
+        };
+        upload(
+            &renamed,
+            &dummy_ssh(),
+            &source,
+            "elsewhere/renamed-out",
+            &roots,
+        )
+        .unwrap();
+        assert!(!home.join("cp-called").exists(), "the receiver ran cp");
+
+        let copied = tree_snapshot(&home.join("elsewhere/exdev-out"));
+        assert_eq!(copied, tree_snapshot(&home.join("elsewhere/renamed-out")));
+        assert_eq!(copied["replica/locked"].0, 0o500);
+        assert_eq!(copied["replica/locked/rule"].0, 0o400);
+        assert_eq!(copied["replica/topic"].0, 0o755);
+        assert_eq!(copied["notes/0/0"].1, b"zero");
+        assert_eq!(copied["auth.json"].1, b"a private login");
+        assert_eq!(copied["replica/topic"].1, shared);
+        // No staging directory is left beside the published profile.
+        let mut siblings: Vec<_> = std::fs::read_dir(home.join("elsewhere"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        siblings.sort();
+        assert_eq!(siblings, ["exdev-out", "renamed-out"]);
+        assert!(!copied.keys().any(|path| path.contains("half-copied")));
+        // The copy is its own: the store object is untouched by changing it.
+        let object = home.join(PROFILE_CONTENT_STORE).join(digest(&shared));
+        make_writable(&home.join("elsewhere"));
+        let topic = home.join("elsewhere/exdev-out/replica/topic");
+        std::fs::write(&topic, b"changed").unwrap();
+        assert_eq!(std::fs::read(object).unwrap(), shared);
+        make_writable(&source);
+    }
+
+    // Transfers of one content set to a host are serialized in this daemon, so
+    // they never meet the receiver's `busy` reply, while a transfer of other
+    // content to the same host does not wait behind them; an empty prewarm
+    // does not touch the host; and the host's upload generation advances only
+    // when a launch had to send objects.
+    #[test]
+    fn host_transfers_serialize_and_only_a_launch_that_sends_objects_advances_the_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let ssh = SshTarget {
+            destination: "serialized-transfer-test-host".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        };
+        let roots = ["replica"].map(Path::new);
+        let mut shared = vec![0; 96 * 1024 + 3];
+        getrandom::fill(&mut shared).unwrap();
+        let mut profiles = Vec::new();
+        for name in ["first", "second"] {
+            let profile = home.join(name);
+            std::fs::create_dir_all(profile.join("replica")).unwrap();
+            std::fs::write(profile.join("replica/topic"), &shared).unwrap();
+            std::fs::write(profile.join("auth.json"), format!("login of {name}")).unwrap();
+            profiles.push(ProfileContentManifest::from_staged(&profile, &roots).unwrap());
+        }
+        let generation = || profile_upload_generation(&ssh);
+        let initial = generation();
+
+        // Nothing shareable: no support probe, no receiver, no generation.
+        let empty = home.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::write(empty.join("auth.json"), b"only private").unwrap();
+        let untouched = LocalReceiver::new(home);
+        let nothing = ProfileContentManifest::from_staged(&empty, &roots).unwrap();
+        assert!(nothing.try_transfer(&untouched, &ssh, None).unwrap());
+        assert!(untouched.batches.lock().unwrap().is_empty());
+
+        let other = home.join("other");
+        std::fs::create_dir_all(other.join("replica")).unwrap();
+        std::fs::write(other.join("replica/other"), b"other shared content").unwrap();
+        let other = ProfileContentManifest::from_staged(&other, &roots).unwrap();
+        let first = LocalReceiver::new(home);
+        let second = LocalReceiver::new(home);
+        let third = LocalReceiver::new(home);
+        let (reached, ready) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        *first.hold.lock().unwrap() = Some((reached, held));
+        std::thread::scope(|scope| {
+            let started = scope.spawn(|| profiles[0].try_transfer(&first, &ssh, Some("one-out")));
+            ready.recv_timeout(Duration::from_secs(10)).unwrap();
+            let gate = crate::worker_binary::store::store_gate(
+                &targets::TargetLocator::SshBare {
+                    ssh: ssh.clone(),
+                    worker_id: None,
+                    workspace: String::new(),
+                },
+                &format!(
+                    "{PROFILE_CONTENT_STORE}/{}",
+                    digest(digest(&shared).as_bytes())
+                ),
+            );
+            assert!(gate.try_lock("probe", "probe").is_none(), "gate not held");
+            let queued = scope.spawn(|| profiles[1].try_transfer(&second, &ssh, Some("two-out")));
+            // The second transfer passes its support probe, then waits at the
+            // gate: it must not reach the receiver while the first holds it.
+            let start = Instant::now();
+            while second.batches.lock().unwrap().is_empty()
+                && start.elapsed() < Duration::from_secs(10)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Other content to the same host goes through while the first
+            // transfer is held.
+            let disjoint = scope.spawn(|| other.try_transfer(&third, &ssh, Some("three-out")));
+            let start = Instant::now();
+            while !disjoint.is_finished() && start.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                disjoint.is_finished(),
+                "waited behind an unrelated transfer"
+            );
+            assert!(disjoint.join().unwrap().unwrap());
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(second.batches.lock().unwrap().len(), 1, "only the probe");
+            release.send(()).unwrap();
+            assert!(started.join().unwrap().unwrap());
+            assert!(queued.join().unwrap().unwrap());
+        });
+        // One transfer batch each: nobody was told `busy`. The shared object
+        // crossed the link once.
+        assert_eq!(first.claimed_objects().len(), 1);
+        assert_eq!(second.claimed_objects(), [BTreeSet::new()]);
+        assert_eq!(first.claimed_objects(), [BTreeSet::from([digest(&shared)])]);
+        assert_eq!(
+            std::fs::read(home.join("two-out/replica/topic")).unwrap(),
+            shared
+        );
+        assert_eq!(
+            third.claimed_objects(),
+            [BTreeSet::from([digest(b"other shared content")])]
+        );
+        // The first launch and the unrelated one each sent objects.
+        assert_eq!(generation(), initial + 2);
+
+        // A launch that finds everything present, and a prewarm that sends
+        // an object, leave the generation alone.
+        profiles[1]
+            .try_transfer(&second, &ssh, Some("again"))
+            .unwrap();
+        let fresh = home.join("fresh");
+        std::fs::create_dir_all(fresh.join("replica")).unwrap();
+        std::fs::write(fresh.join("replica/new"), b"new shared content").unwrap();
+        let fresh = ProfileContentManifest::from_staged(&fresh, &roots).unwrap();
+        fresh.try_transfer(&second, &ssh, None).unwrap();
+        assert_eq!(generation(), initial + 2);
     }
 }

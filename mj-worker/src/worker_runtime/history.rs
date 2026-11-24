@@ -30,9 +30,42 @@ impl Default for HistoryEndpoint {
 }
 
 impl HistoryEndpoint {
+    #[cfg(test)]
     pub fn requests(&self) -> Vec<HistoryRequest> {
+        self.requests_for_protocol(mj_core::relay::RELAY_PROTOCOL_VERSION)
+    }
+
+    /// Pending requests a controller speaking `protocol_version` can parse.
+    /// A controller older than `search_history` would fail to deserialize the
+    /// whole `HistoryRequests` reply, so such requests are failed here and
+    /// never listed.
+    pub fn requests_for_protocol(&self, protocol_version: u32) -> Vec<HistoryRequest> {
         let mut pending = self.pending.lock().expect("history queue lock poisoned");
         pending.retain(|_, entry| entry.expires > Instant::now() && !entry.reply.is_closed());
+        if protocol_version < mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL {
+            let unsupported: Vec<String> = pending
+                .iter()
+                .filter(|(_, entry)| {
+                    matches!(entry.request.query, HistoryQuery::SearchHistory { .. })
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in unsupported {
+                if let Some(entry) = pending.remove(&id) {
+                    let result = HistoryResult::failed(
+                        id,
+                        format!(
+                            "search_history requires controller relay protocol {} (connected controller uses {}); upgrade or restart the daemon",
+                            mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL,
+                            protocol_version
+                        ),
+                    );
+                    if entry.reply.send(result).is_err() {
+                        tracing::debug!("history caller disconnected before its response");
+                    }
+                }
+            }
+        }
         pending
             .values()
             .map(|entry| entry.request.clone())
@@ -306,6 +339,72 @@ mod tests {
         }
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
+        assert!(endpoint.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn older_controllers_get_search_history_failed_and_still_poll_legacy_requests() {
+        let endpoint = HistoryEndpoint::default();
+        let search = {
+            let endpoint = endpoint.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .query(
+                        HistoryQuery::SearchHistory {
+                            query: "needle".into(),
+                            session_ids: None,
+                            session_id: None,
+                            role: None,
+                            order: None,
+                            limit: 20,
+                            context_messages: 0,
+                            max_chars: 16_000,
+                            cursor: None,
+                        },
+                        Path::new("/"),
+                    )
+                    .await
+            })
+        };
+        let legacy = {
+            let endpoint = endpoint.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .query(
+                        HistoryQuery::TraceFile {
+                            path: "a.rs".into(),
+                            limit: 20,
+                        },
+                        Path::new("/"),
+                    )
+                    .await
+            })
+        };
+        while endpoint.requests().len() != 2 {
+            tokio::task::yield_now().await;
+        }
+        let older = mj_core::relay::RELAY_SEARCH_HISTORY_PROTOCOL - 1;
+        let listed = endpoint.requests_for_protocol(older);
+        assert_eq!(listed.len(), 1);
+        assert!(matches!(listed[0].query, HistoryQuery::TraceFile { .. }));
+        // The reply serializes with only variants an older controller knows.
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(!wire.contains("search_history"));
+        let failed = search.await.unwrap().unwrap();
+        assert!(failed.is_error);
+        let error = failed.value["error"].as_str().unwrap();
+        assert!(
+            error.contains("requires controller relay protocol 92"),
+            "{error}"
+        );
+        assert!(error.contains("connected controller uses 91"), "{error}");
+        assert!(!legacy.is_finished());
+        endpoint.complete(HistoryResult {
+            request_id: listed[0].request_id.clone(),
+            value: serde_json::json!({"ok": true}),
+            is_error: false,
+        });
+        assert!(!legacy.await.unwrap().unwrap().is_error);
         assert!(endpoint.requests().is_empty());
     }
 }

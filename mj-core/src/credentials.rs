@@ -61,18 +61,24 @@ pub enum ClaudeEnvironmentAuth {
     ExternalProvider,
 }
 
+/// Whether a Claude Code boolean setting is on. Claude Code interprets the
+/// trimmed value case-insensitively.
+pub fn claude_environment_flag(
+    environment: &std::collections::BTreeMap<String, String>,
+    name: &str,
+) -> bool {
+    environment.get(name).is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 pub fn claude_environment_auth(
     environment: &std::collections::BTreeMap<String, String>,
 ) -> Option<ClaudeEnvironmentAuth> {
-    // Claude Code interprets these trimmed values case-insensitively.
-    let enabled = |name| {
-        environment.get(name).is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-    };
+    let enabled = |name| claude_environment_flag(environment, name);
     if enabled("CLAUDE_CODE_USE_BEDROCK") {
         return Some(ClaudeEnvironmentAuth::Bedrock);
     }

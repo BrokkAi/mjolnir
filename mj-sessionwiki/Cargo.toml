@@ -27,7 +27,7 @@ mj-import.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
 ruzstd.workspace = true
 sessionwiki.workspace = true
 serde_json.workspace = true
