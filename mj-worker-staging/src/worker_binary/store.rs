@@ -461,7 +461,11 @@ fn install_binary_at(
         }
         let command = |mode| {
             script(
-                targets::SshTrafficClass::Bulk,
+                if mode == "link" {
+                    targets::SshTrafficClass::Control
+                } else {
+                    targets::SshTrafficClass::Bulk
+                },
                 locator,
                 r#"set -eu
 source=$1; temporary=$2; destination=$3
@@ -626,9 +630,12 @@ fi
             )
             .best_effort_cleanup(),
         ];
-        let command =
-            targets::locator_command(SshTrafficClass::Bulk, locator, targets::step_script(steps))
-                .purpose("publish shared Mjolnir worker");
+        let command = targets::locator_command(
+            SshTrafficClass::Control,
+            locator,
+            targets::step_script(steps),
+        )
+        .purpose("publish shared Mjolnir worker");
         // A failed or disconnected batch may not have reached its EXIT trap.
         // Retry its idempotent discard through the executor's cleanup path.
         let output = executor.execute(&command)?;

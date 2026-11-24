@@ -1,0 +1,11 @@
+Print a unified diff of a session's work
+
+Usage: mj diff [OPTIONS] --session <SESSION>
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --base <BASE>        Compare against this Git commit or revision instead of the launch base
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --json               Print the response as JSON instead of text
+  -h, --help               Print help

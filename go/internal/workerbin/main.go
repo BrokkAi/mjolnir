@@ -22,7 +22,6 @@ import (
 	"iter"
 	"log/slog"
 	"os"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -623,70 +622,10 @@ func harnessStartupFailure(err error) *core.WorkerHarnessStartupFailure {
 }
 
 // reportMainError prints err as Rust prints the error a `main` returns
-// (`Error: ` and anyhow's Debug form, its causes under "Caused by:") and
-// returns the exit status 1.
+// (core.MainErrorReport) and returns the exit status 1.
 func reportMainError(err error) int {
-	_, _ = io.WriteString(os.Stderr, "Error: "+anyhowDebug(err)+"\n")
+	_, _ = io.WriteString(os.Stderr, core.MainErrorReport(err))
 	return 1
-}
-
-// anyhowDebug is anyhow's Debug form of err: its outermost message, then
-// each cause under "Caused by:", numbered when there is more than one.
-func anyhowDebug(err error) string {
-	chain := errorChain(err)
-	text := chain[0]
-	causes := chain[1:]
-	if len(causes) == 0 {
-		return text
-	}
-	text += "\n\nCaused by:"
-	for index, cause := range causes {
-		prefix, indent := "    ", "    "
-		if len(causes) > 1 {
-			prefix, indent = fmt.Sprintf("%5d: ", index), "       "
-		}
-		text += "\n" + prefix + strings.ReplaceAll(cause, "\n", "\n"+indent)
-	}
-	return text
-}
-
-// errorChain is err's messages from the outermost to its root cause, each
-// without the causes it wraps: a layer `context: cause` made with %w is
-// "context" followed by the chain of cause. A layer whose text does not end
-// with its cause's is kept whole and ends the chain, and so is an error of
-// Go's standard library (an *fs.PathError reads as one io::Error does).
-func errorChain(err error) []string {
-	var messages []string
-	for err != nil {
-		text := err.Error()
-		next := errors.Unwrap(err)
-		if next == nil || !isContextLayer(err) {
-			return append(messages, text)
-		}
-		own, ok := strings.CutSuffix(text, ": "+next.Error())
-		if !ok {
-			return append(messages, text)
-		}
-		messages = append(messages, own)
-		err = next
-	}
-	return messages
-}
-
-// isContextLayer reports whether err adds context over the error it wraps:
-// fmt's %w wrapper, or a Mjolnir error type. Standard library wrappers such
-// as *fs.PathError are one error whose text names their cause.
-func isContextLayer(err error) bool {
-	kind := reflect.TypeOf(err)
-	for kind.Kind() == reflect.Pointer {
-		kind = kind.Elem()
-	}
-	path := kind.PkgPath()
-	if path == "fmt" {
-		return true
-	}
-	first, _, _ := strings.Cut(path, "/")
-	return strings.Contains(first, ".")
 }
 
 // workerRuntimeThreads is the number of threads that run Go code at once in

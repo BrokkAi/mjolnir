@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -24,11 +26,13 @@ func unsetHelpEnvironment(t *testing.T) {
 // hold the Go build to the same command-line surface.
 func TestGoldenRootHelpMatchesTheRustBuild(t *testing.T) {
 	unsetHelpEnvironment(t)
-	var stdout, stderr bytes.Buffer
-	if code := Main([]string{"--help"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit %d: %s", code, stderr.String())
+	for flag, golden := range map[string]string{"--help": "root-help.golden", "-h": "root-help-short.golden"} {
+		var stdout, stderr bytes.Buffer
+		if code := Main([]string{flag}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d: %s", code, stderr.String())
+		}
+		assertGolden(t, golden, stdout.String())
 	}
-	assertGolden(t, "root-help.golden", stdout.String())
 }
 
 func TestGoldenUnknownCommandMatchesTheRustBuild(t *testing.T) {
@@ -39,14 +43,13 @@ func TestGoldenUnknownCommandMatchesTheRustBuild(t *testing.T) {
 	assertGolden(t, "unknown-command.golden", stderr.String())
 }
 
-// Every command whose arguments are ported prints, for `-h` and for
-// `--help`, the help the Rust mj at the pinned commit prints. The files in
-// testdata/help were captured from that build (`mj <command> --help`, with
-// MJ_INSTANCE and MJ_NO_SPLASH unset); clap prints the same text for `-h`
-// because none of these commands has a long help. The commands whose
-// arguments arrive with their own files (image, go, simple, acp, ec2,
-// import) are not here yet.
-func TestGoldenHelpOfEveryPortedCommandMatchesTheRustBuild(t *testing.T) {
+// Every command and subcommand, hidden `setup` included, prints the help the
+// Rust mj at the pinned commit prints: testdata/help holds `mj <command>
+// --help` and testdata/help-short `mj <command> -h`, captured from that build
+// with MJ_INSTANCE and MJ_NO_SPLASH unset. They differ where clap has a long
+// help (`mj acp`, whose --on-exit values have their own help). `mj help
+// <command>` prints the long help.
+func TestGoldenHelpOfEveryCommandMatchesTheRustBuild(t *testing.T) {
 	unsetHelpEnvironment(t)
 	entries, err := os.ReadDir(filepath.Join("testdata", "help"))
 	if err != nil {
@@ -58,13 +61,20 @@ func TestGoldenHelpOfEveryPortedCommandMatchesTheRustBuild(t *testing.T) {
 	for _, entry := range entries {
 		name := strings.TrimSuffix(entry.Name(), ".txt")
 		command := strings.Split(name, "_")
-		for _, flag := range []string{"--help", "-h"} {
-			t.Run(name+flag, func(t *testing.T) {
+		for _, invocation := range []struct {
+			args   []string
+			golden string
+		}{
+			{append(slices.Clone(command), "--help"), filepath.Join("help", entry.Name())},
+			{append(slices.Clone(command), "-h"), filepath.Join("help-short", entry.Name())},
+			{append([]string{"help"}, command...), filepath.Join("help", entry.Name())},
+		} {
+			t.Run(strings.Join(invocation.args, " "), func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
-				if code := Main(append(append([]string(nil), command...), flag), &stdout, &stderr); code != 0 {
+				if code := Main(invocation.args, &stdout, &stderr); code != 0 {
 					t.Fatalf("exit %d: %s", code, stderr.String())
 				}
-				assertGolden(t, filepath.Join("help", entry.Name()), stdout.String())
+				assertGolden(t, invocation.golden, stdout.String())
 			})
 		}
 	}
@@ -109,6 +119,46 @@ func TestGoldenRepeatedArgumentsAreRefusedPerCommandLevel(t *testing.T) {
 // Hard-won: 9fd6c692b: an option given no value did not list the values it takes
 func TestGoldenMissingValueListsThePossibleValues(t *testing.T) {
 	assertParseErrorGolden(t, "missing-value-of-enumerated-option", "", []string{"--instance", "go-port-golden", "new", "--oracle"})
+}
+
+// The files in testdata/error-report were captured from the Rust mj at the
+// pinned commit, run from this directory with its own MJ_DATA_DIR and
+// MJ_CONFIG_DIR and the same command lines. A failed command prints anyhow's
+// report: the context, then its cause on its own line under "Caused by:",
+// an OS error read as Rust's io::Error ("(os error N)"). The command runs as
+// Main runs it, without the process setup around it (runMain), which a test
+// binary cannot do: it has no build identity.
+//
+// Hard-won: 5425a414d: a failed command printed its causes on one line, a file error in Go's words
+func TestGoldenFailedCommandsReportTheirErrorsAsTheRustBuild(t *testing.T) {
+	if rerunInIsolatedChild(t, "MJ_TEST_ERROR_REPORT_CHILD") {
+		return
+	}
+	unsetHelpEnvironment(t)
+	// The captures ran outside a session; inside one, `mj prompt` refuses.
+	for _, name := range []string{"MJ_SESSION_ID", "MJ_SESSION_BASH_ENV"} {
+		t.Setenv(name, "")
+		check(t, os.Unsetenv(name))
+	}
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{"missing-prompt-file", []string{"prompt", "--session", "abc", "--prompt-file", "/nonexistent/prompt.txt"}},
+		{"response-file-is-a-directory", []string{"respond", "--session", "abc", "--elicitation", "e", "--response-file", "testdata/error-report"}},
+		{"prompt-file-not-utf8", []string{"prompt", "--session", "abc", "--prompt-file", "testdata/error-report/invalid-utf8-prompt"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := parseCommandLine(test.args)
+			check(t, err)
+			var stderr bytes.Buffer
+			result := runCommand(context.Background(), parsed.command, parsed.workspace, parsed.noSplash)
+			if code := reportError(&stderr, result); code != 1 {
+				t.Fatalf("exit %d: %s", code, stderr.String())
+			}
+			assertGolden(t, filepath.Join("error-report", test.name+".txt"), stderr.String())
+		})
+	}
 }
 
 // assertParseErrorGolden parses args, which must fail, and compares what mj

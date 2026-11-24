@@ -1,0 +1,15 @@
+Save a recovery copy and release the environment for later Resume
+
+Usage: mj suspend [OPTIONS]
+
+Options:
+  -i, --instance <NAME>     Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>   Session id, as `mj sessions` lists it
+      --discard-untracked   Discard untracked files, nested repositories, untracked stashes, and `.mj/keep/` contents
+      --no-splash           Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --abort-operation     Abort any in-progress Git operation (merge, rebase, cherry-pick, revert, am, bisect)
+      --without-checkpoint  Stop the session without taking a fresh checkpoint
+      --yes                 Confirm `--without-checkpoint` when no verified checkpoint exists to resume from
+      --dry-run             Inspect what would be saved and what would be lost without changing anything
+      --json                Print the response as JSON instead of text
+  -h, --help                Print help

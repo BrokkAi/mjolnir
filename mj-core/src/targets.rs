@@ -400,6 +400,17 @@ impl CommandSpec {
         self
     }
 
+    /// Preserve the proxy command while moving Control traffic to the Bulk lane.
+    pub fn ssh_bulk_variant(&self) -> Option<CommandSpec> {
+        let request = self.ssh_session.as_ref()?;
+        if request.class != SshTrafficClass::Control {
+            return None;
+        }
+        let mut bulk = self.clone();
+        bulk.ssh_session.as_mut()?.class = SshTrafficClass::Bulk;
+        Some(bulk)
+    }
+
     /// Record that this command is a fail-fast `ssh` probe, such as a target
     /// validation, that joins `ssh`'s shared connection without ever opening
     /// a master. Its short timeouts and keepalives belong to the probe alone:

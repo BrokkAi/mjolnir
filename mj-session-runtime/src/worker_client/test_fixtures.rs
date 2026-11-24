@@ -232,6 +232,7 @@ pub(crate) fn duplex_relay_client(
 ) -> RelayClient {
     let (output, input) = tokio::io::split(controller);
     RelayClient {
+        bulk_spec: None,
         child: None,
         input: Some(Box::new(input)),
         output: BufReader::new(Box::new(output)),

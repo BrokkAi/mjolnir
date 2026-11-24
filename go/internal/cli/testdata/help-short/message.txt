@@ -1,0 +1,15 @@
+Send a message and return: from your shell, a prompt; inside a session, a message to another session or one of your sub-agents
+
+Usage: mj message [OPTIONS] --session <SESSION> [TEXT]
+
+Arguments:
+  [TEXT]  Message text. `-` reads it from standard input
+
+Options:
+  -i, --instance <NAME>            Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>          Full session ID or unique case-insensitive hexadecimal prefix of at least 8 characters
+      --command-id <COMMAND_ID>    Stable producer-chosen identity; repeat it after an ambiguous reply
+      --no-splash                  Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --prompt-file <PROMPT_FILE>  Read the message from this file instead
+      --json                       Print the response as JSON instead of text
+  -h, --help                       Print help

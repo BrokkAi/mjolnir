@@ -1,0 +1,14 @@
+List the sessions the daemon holds
+
+Usage: mj sessions [OPTIONS]
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Show one session, including how its last turn ended
+      --all                Include sub-agents as well as top-level sessions
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --target <TARGET>    List only sessions on this target, as `mj hosts` names its targets. A fleet's instances are selected this way
+      --host <HOST>        List only sessions on this machine, as `mj hosts` names its hosts
+      --json               Print the response as JSON instead of text
+      --workspace <NAME>   Workspace to work in, by name. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it, and need it when the instance has more than one workspace
+  -h, --help               Print help

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -68,12 +70,17 @@ type clapArg struct {
 	env       string
 	order     int
 	// index is a positional's 1-based position; 0 for an option.
-	index        int
-	required     bool
-	multiple     bool
-	hidden       bool
-	global       bool
-	possible     []string
+	index    int
+	required bool
+	multiple bool
+	hidden   bool
+	global   bool
+	possible []string
+	// possibleHelp is each possible value's help, "" for none: the doc
+	// comments of a clap ValueEnum's variants.
+	possibleHelp []string
+	// aliases are the visible long aliases (`visible_alias`).
+	aliases      []string
 	defaultValue *string
 	conflicts    []string
 	requires     []string
@@ -181,8 +188,10 @@ func (a *clapArg) sortKey() (int, string) {
 }
 
 // specVals is what clap writes after the help text: the environment
-// variable and its value, the default, and the possible values.
-func (a *clapArg) specVals() string {
+// variable and its value, the default, the visible aliases, and the possible
+// values unless the long help lists them with their own help. The long help
+// puts each on its own line.
+func (a *clapArg) specVals(useLong bool) string {
 	var vals []string
 	if a.env != "" {
 		vals = append(vals, "[env: "+a.env+"="+os.Getenv(a.env)+"]")
@@ -190,10 +199,32 @@ func (a *clapArg) specVals() string {
 	if a.takesValue() && a.defaultValue != nil {
 		vals = append(vals, "[default: "+*a.defaultValue+"]")
 	}
-	if len(a.possible) > 0 {
+	if len(a.aliases) > 0 {
+		aliases := make([]string, len(a.aliases))
+		for i, alias := range a.aliases {
+			aliases[i] = "--" + alias
+		}
+		vals = append(vals, "[aliases: "+strings.Join(aliases, ", ")+"]")
+	}
+	if len(a.possible) > 0 && !a.longPossibleValues(useLong) {
 		vals = append(vals, "[possible values: "+strings.Join(a.possible, ", ")+"]")
 	}
+	if useLong {
+		return strings.Join(vals, "\n")
+	}
 	return strings.Join(vals, " ")
+}
+
+// showsPossibleValueHelp is whether any possible value has help (clap's
+// PossibleValue::should_show_help on any of them).
+func (a *clapArg) showsPossibleValueHelp() bool {
+	return slices.ContainsFunc(a.possibleHelp, func(help string) bool { return help != "" })
+}
+
+// longPossibleValues is clap's use_long_pv: the long help lists the possible
+// values one per line, with their help.
+func (a *clapArg) longPossibleValues(useLong bool) bool {
+	return useLong && a.showsPossibleValueHelp()
 }
 
 // clapGroup is a clap ArgGroup.
@@ -273,6 +304,22 @@ func hidden() argOption                   { return func(a *clapArg) { a.hidden =
 func global() argOption                   { return func(a *clapArg) { a.global = true } }
 func possibleValues(values ...string) argOption {
 	return func(a *clapArg) { a.possible = values }
+}
+
+// valueEnum is a clap ValueEnum: each variant's value and its help.
+func valueEnum(variants ...[2]string) argOption {
+	return func(a *clapArg) {
+		a.possible, a.possibleHelp = nil, nil
+		for _, variant := range variants {
+			a.possible = append(a.possible, variant[0])
+			a.possibleHelp = append(a.possibleHelp, variant[1])
+		}
+	}
+}
+
+// visibleAlias is another long name the help lists (`visible_alias`).
+func visibleAlias(long string) argOption {
+	return func(a *clapArg) { a.aliases = append(a.aliases, long) }
 }
 func conflictsWith(ids ...string) argOption {
 	return func(a *clapArg) { a.conflicts = append(a.conflicts, ids...) }
@@ -383,13 +430,21 @@ func (c *clapCommand) flag(target *bool, id, help string, options ...argOption) 
 
 func (c *clapCommand) register(arg *clapArg) { registerFlag(c.cmd, arg) }
 
-// registerFlag gives level a pflag flag for arg. A global argument gets one
-// at every level (propagateGlobalArgs).
+// registerFlag gives level a pflag flag for arg, and for each of its
+// aliases. A global argument gets one at every level (propagateGlobalArgs).
 func registerFlag(level *cobra.Command, arg *clapArg) {
-	flag := level.Flags().VarPF(clapValue{arg, level}, arg.long, arg.short, arg.help)
+	flags := level.Flags()
+	flag := flags.VarPF(clapValue{arg, level}, arg.long, arg.short, arg.help)
 	flag.Hidden = arg.hidden
 	if !arg.takesValue() {
 		flag.NoOptDefVal = "true"
+	}
+	for _, alias := range arg.aliases {
+		aliasFlag := flags.VarPF(clapValue{arg, level}, alias, "", arg.help)
+		aliasFlag.Hidden = true
+		if !arg.takesValue() {
+			aliasFlag.NoOptDefVal = "true"
+		}
 	}
 }
 
@@ -486,6 +541,58 @@ func parseRustUint(raw string, bits int) (uint64, error) {
 		return 0, errors.New("number too large to fit in target type")
 	}
 	return value, nil
+}
+
+// parseRustInt parses a signed integer with the errors Rust's `str::parse`
+// reports for an i64.
+func parseRustInt(raw string) (int64, error) {
+	if raw == "" {
+		return 0, errors.New("cannot parse integer from empty string")
+	}
+	digits, negative := raw, false
+	switch raw[0] {
+	case '+':
+		digits = raw[1:]
+	case '-':
+		digits, negative = raw[1:], true
+	}
+	if digits == "" {
+		return 0, errors.New("invalid digit found in string")
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return 0, errors.New("invalid digit found in string")
+		}
+	}
+	if negative {
+		digits = "-" + digits
+	}
+	value, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		if negative {
+			return 0, errors.New("number too small to fit in target type")
+		}
+		return 0, errors.New("number too large to fit in target type")
+	}
+	return value, nil
+}
+
+// storeU32 is clap's `value_parser!(u32)`, a RangedI64ValueParser over
+// 0..=u32::MAX; `.range(minimum..)` raises the start and keeps that end. The
+// value parses as an i64 and must lie in the range.
+func storeU32(target **uint32, minimum int64) func(string) error {
+	return func(raw string) error {
+		value, err := parseRustInt(raw)
+		if err != nil {
+			return err
+		}
+		if value < minimum || value > math.MaxUint32 {
+			return fmt.Errorf("%d is not in %d..=%d", value, minimum, uint64(math.MaxUint32))
+		}
+		converted := uint32(value)
+		*target = &converted
+		return nil
+	}
 }
 
 // finish assigns the positional arguments, parses every value and makes
@@ -900,9 +1007,26 @@ func (c *clapCommand) checkRequired(all, matched []*clapArg) error {
 	}
 }
 
-// helpArgs are `-h, --help` and, on the root, `-V, --version`.
-func helpArgs(cmd *cobra.Command) []*clapArg {
-	args := []*clapArg{{id: "help", long: "help", short: "h", help: "Print help", order: clapLastOrder}}
+// longHelpExists is clap's long_help_exists: whether `--help` says more
+// than `-h`. Of what makes a long help, mj's commands have only possible
+// values with help; subcommands are not considered.
+func (c *clapCommand) longHelpExists() bool {
+	return slices.ContainsFunc(c.allArgs(), func(arg *clapArg) bool {
+		return !arg.hidden && arg.showsPossibleValueHelp()
+	})
+}
+
+// helpArgs are `-h, --help` and, on the root, `-V, --version`. useLong
+// chooses the help flag's long help.
+func helpArgs(cmd *cobra.Command, useLong bool) []*clapArg {
+	help := "Print help"
+	if clapOf(cmd).longHelpExists() {
+		help = "Print help (see more with '--help')"
+		if useLong {
+			help = "Print help (see a summary with '-h')"
+		}
+	}
+	args := []*clapArg{{id: "help", long: "help", short: "h", help: help, order: clapLastOrder}}
 	if cmd.Version != "" {
 		args = append(args, &clapArg{id: "version", long: "version", short: "V", help: "Print version", order: clapLastOrder})
 	}
@@ -978,8 +1102,11 @@ func displayWidth(text string) int { return utf8.RuneCountInString(text) }
 
 // writeArgs is clap's write_args: one row per argument, sorted by display
 // order, with the help beside the widest spec, or on the next line when one
-// help would not fit beside it.
-func writeArgs(b *strings.Builder, args []*clapArg) {
+// help would not fit beside it. The long help (useLong) puts every help on
+// the next line with a blank line between arguments, lists possible values
+// that have help one per line, and puts the environment variable, default,
+// aliases and possible values in a paragraph of their own.
+func writeArgs(b *strings.Builder, args []*clapArg, useLong bool) {
 	longest := 2
 	for _, arg := range args {
 		width := displayWidth(arg.display(arg.required))
@@ -996,10 +1123,10 @@ func writeArgs(b *strings.Builder, args []*clapArg) {
 		}
 		return cmp.Compare(aKey, bKey)
 	})
-	nextLine := false
+	nextLine := useLong
 	for _, arg := range args {
 		taken := longest + 4
-		helpWidth := displayWidth(arg.help) + displayWidth(arg.specVals())
+		helpWidth := displayWidth(arg.help) + displayWidth(arg.specVals(false))
 		if clapTermWidth >= taken && float32(taken)/float32(clapTermWidth) > 0.40 && helpWidth > clapTermWidth-taken {
 			nextLine = true
 		}
@@ -1007,6 +1134,9 @@ func writeArgs(b *strings.Builder, args []*clapArg) {
 	for i, arg := range args {
 		if i != 0 {
 			b.WriteString("\n")
+			if nextLine && useLong {
+				b.WriteString("\n")
+			}
 		}
 		spec := arg.spec()
 		b.WriteString("  " + spec)
@@ -1017,20 +1147,53 @@ func writeArgs(b *strings.Builder, args []*clapArg) {
 		} else {
 			b.WriteString(strings.Repeat(" ", longest+2-displayWidth(spec)))
 		}
+		// clap indents every line of the help after the first, blank ones
+		// included, to where the first starts.
+		indent := func(text string, spaces int) string {
+			return strings.ReplaceAll(text, "\n", "\n"+strings.Repeat(" ", spaces))
+		}
 		help := arg.help
-		if vals := arg.specVals(); vals != "" {
+		vals := arg.specVals(useLong)
+		if vals != "" && !useLong {
 			if help != "" {
 				help += " "
 			}
 			help += vals
 		}
-		b.WriteString(strings.ReplaceAll(help, "\n", "\n"+strings.Repeat(" ", spaces)))
+		b.WriteString(indent(help, spaces))
+		listedValues := arg.longPossibleValues(useLong)
+		if listedValues {
+			// "- " hangs in the help's indent.
+			longestValue := 0
+			for _, value := range arg.possible {
+				longestValue = max(longestValue, displayWidth(value))
+			}
+			if help != "" {
+				b.WriteString("\n\n" + strings.Repeat(" ", spaces))
+			}
+			b.WriteString("Possible values:")
+			for index, value := range arg.possible {
+				description := value
+				if arg.possibleHelp[index] != "" {
+					description += ": " + strings.Repeat(" ", longestValue-displayWidth(value)) + arg.possibleHelp[index]
+				}
+				b.WriteString("\n" + strings.Repeat(" ", spaces) + "- " + indent(description, spaces+2))
+			}
+		}
+		if vals != "" && useLong {
+			if help != "" || listedValues {
+				vals = "\n\n" + vals
+			}
+			b.WriteString(indent(vals, spaces))
+		}
 	}
 }
 
-// writeHelp writes cmd's help as clap's default template lays it out. None
-// of mj's commands has a long help, so `-h` and `--help` print the same.
-func writeHelp(out io.Writer, cmd *cobra.Command) {
+// writeHelp writes cmd's help as clap's default template lays it out.
+// useLong asks for the long help (`--help`, `mj help <command>`), which a
+// command has only when longHelpExists; otherwise both are the short help.
+func writeHelp(out io.Writer, cmd *cobra.Command, useLong bool) {
+	useLong = useLong && clapOf(cmd).longHelpExists()
 	var b strings.Builder
 	if cmd.Short != "" {
 		b.WriteString(cmd.Short + "\n\n")
@@ -1064,22 +1227,39 @@ func writeHelp(out io.Writer, cmd *cobra.Command) {
 	if len(positionals) > 0 {
 		var section strings.Builder
 		section.WriteString("Arguments:\n")
-		writeArgs(&section, positionals)
+		writeArgs(&section, positionals, useLong)
 		sections = append(sections, section.String())
 	}
 	var section strings.Builder
 	section.WriteString("Options:\n")
-	writeArgs(&section, append(options, helpArgs(cmd)...))
+	writeArgs(&section, append(options, helpArgs(cmd, useLong)...), useLong)
 	sections = append(sections, section.String())
 
 	b.WriteString("\n\n" + strings.Join(sections, "\n\n"))
 	io.WriteString(out, strings.TrimRight(b.String(), " \t\n")+"\n")
 }
 
+// helpIsLong is whether the help flag on this command line asks for the
+// long help: clap's Help action prints it for `--help` and the short help
+// for `-h`, whichever came first.
+func helpIsLong(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--":
+			return true
+		case arg == "--help":
+			return true
+		case !strings.HasPrefix(arg, "--") && strings.HasPrefix(arg, "-") && strings.Contains(arg[1:], "h"):
+			return false
+		}
+	}
+	return true
+}
+
 // installClapStyle replaces cobra's help, version and error output.
 func installClapStyle(root *cobra.Command) {
-	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
-		writeHelp(cmd.OutOrStdout(), cmd)
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		writeHelp(cmd.OutOrStdout(), cmd, helpIsLong(args))
 	})
 	root.SetVersionTemplate("{{.Name}} {{.Version}}\n")
 	root.SetFlagErrorFunc(clapFlagError)
@@ -1157,7 +1337,8 @@ func addHelpSubcommand(parent *cobra.Command) {
 				}
 				target = found
 			}
-			writeHelp(cmd.OutOrStdout(), target)
+			// clap's help subcommand prints the long help.
+			writeHelp(cmd.OutOrStdout(), target, true)
 			return nil
 		},
 	})
@@ -1181,14 +1362,15 @@ func reportError(stderr io.Writer, err error) int {
 	}
 	var help *helpRequested
 	if errors.As(err, &help) {
-		writeHelp(stderr, help.command)
+		// A missing subcommand prints the short help.
+		writeHelp(stderr, help.command, false)
 		return 2
 	}
 	var exit *exitStatus
 	if errors.As(err, &exit) {
 		return exit.code
 	}
-	fmt.Fprintf(stderr, "Error: %s\n", err)
+	_, _ = io.WriteString(stderr, core.MainErrorReport(err))
 	return 1
 }
 

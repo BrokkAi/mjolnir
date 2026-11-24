@@ -1,0 +1,13 @@
+Block until a turn ends and print how it ended
+
+Usage: mj wait [OPTIONS] --session <SESSION>
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --turn <TURN>        Wait until this turn, as `mj new` or `mj message` printed it, or a later one, has ended, and say how. The wait does not follow what the session does after the turn (a turn the agent starts on its own, background work, an automatic continuation); the answer names that as `next`. It describes the latest turn that ended (a session keeps only that turn's outcome and reply), and `--json` reports it as `turn_id` beside `requested_turn_id`. Omit it to wait until the session settles: idle, with nothing queued, including after turns the agent starts on its own
+      --timeout <TIMEOUT>  Seconds to wait before answering `timeout`
+      --return-on-input    Return when the harness asks for structured input
+      --json               Print the response as JSON instead of text
+  -h, --help               Print help

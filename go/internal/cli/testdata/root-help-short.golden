@@ -1,0 +1,60 @@
+ACP session control plane
+
+Usage: mj [OPTIONS] [COMMAND]
+
+Commands:
+  image              Build and inspect project session images from mise recipes
+  go                 Work in a folder using remembered account and target settings
+  simple             Open a minimal local session with direct Ctrl-key commands
+  workspaces         Open the workspace selector even when Mjolnir could auto-attach, or list and create workspaces without a terminal
+  daemon             Inspect or control the persistent per-user daemon
+  acp                Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon
+  doctor             Diagnose platform and configuration prerequisites
+  ec2                Create, list, or destroy persistent EC2 hosts with rootless Podman
+  import             Adopt a native coding-agent session as a stopped Mjolnir session
+  recover            Find, adopt, or explicitly destroy managed workers missing from state
+  move               Move a session to another configured profile and/or target
+  upgrade-container  Preview or explicitly queue a storage-preserving container upgrade
+  move-sources       Inspect stopped sources retained by Move, or explicitly remove one
+  login              Sign in a profile, installing its pinned harness when needed. Live sessions pick up fresh credentials
+  new                Create a session through the API and print its id
+  prompt             Send a prompt as the user and wait for its turn to end
+  clear-queue        Cancel queued prompts while preserving the session and its current turn
+  event              Queue an external event in a session's durable mailbox
+  message            Send a message and return: from your shell, a prompt; inside a session, a message to another session or one of your sub-agents
+  wait               Block until a turn ends and print how it ended
+  transcript         Page through a session's transcript
+  usage              Read recorded token usage and coverage
+  events             Follow durable session events as line-delimited JSON
+  put-file           Atomically upload a file to an idle session workspace
+  fetch              Copy a file, or a directory as a zip archive, from a session's target into this machine's temporary directory and print where it landed
+  elicitations       List structured input requests from a session
+  respond            Respond to a structured input request
+  diff               Print a unified diff of a session's work
+  export             Get a session's work out as a patch, a pushed branch, or a git bundle
+  sessions           List the sessions the daemon holds
+  suspend            Save a recovery copy and release the environment for later Resume
+  purge-untracked    Remove legacy untracked checkpoint payloads from stopped sessions
+  destroy            Permanently destroy a session, its environment, and recovery archive
+  notices            Read recent cleanup notices, including after a session was destroyed
+  resume             Resume a stopped session from its checkpoint
+  restart            Restart a running session's agent (replaces pre-release workers in place)
+  interrupt-turn     Cancel the turn a session is running
+  review             Review a session's committed work, or show the review it has open
+  stop-task          Stop a session's background task, or all tasks the worker can stop
+  api-info           Print the API base URL
+  api-token          Print only the API bearer token for external HTTP clients
+  github-token       Print a valid GitHub App token for an owner or repository
+  ui                 Change what the person's dashboard shows: pane sizes, which session is open, or Settings with changes staged for them to save
+  models             Discover available models and efforts for a profile
+  quota              Show each profile's remaining quota as the daemon last read it
+  hosts              Show each host's CPU, RAM and disk space as the daemon last read it
+  set-config         Apply a session configuration setting
+  help               Print this message or the help of the given subcommand(s)
+
+Options:
+  -i, --instance <NAME>   Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash         Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --workspace <NAME>  Open the dashboard in this workspace, by name. Given before a command, it applies to that command when the command works in a workspace
+  -h, --help              Print help
+  -V, --version           Print version

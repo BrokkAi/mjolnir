@@ -139,6 +139,7 @@ pub use credential_targets::*;
 /// Callers persist bounded attachment pages, then acknowledge only a frontier
 /// that is already durable locally.
 pub struct RelayClient {
+    bulk_spec: Option<CommandSpec>,
     child: Option<proxy::ProxyChild>,
     input: Option<proxy::ProxyWriter>,
     output: BufReader<proxy::ProxyReader>,

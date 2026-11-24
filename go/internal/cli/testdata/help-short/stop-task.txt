@@ -1,0 +1,14 @@
+Stop a session's background task, or all tasks the worker can stop
+
+Usage: mj stop-task [OPTIONS] --session <SESSION> [TASK_ID]
+
+Arguments:
+  [TASK_ID]  Opaque task id from `mj sessions --session <id> --json`
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --all                Stop every currently listed task that the worker can stop
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --json               Print accepted task ids, skipped task ids and failures as JSON
+  -h, --help               Print help

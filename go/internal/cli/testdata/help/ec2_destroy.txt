@@ -1,0 +1,13 @@
+Terminate a managed VM and delete its disks, sessions, keys, and target. Also cleans up an interrupted create; accepts its operation ID
+
+Usage: mj ec2 destroy [OPTIONS] <HOST>
+
+Arguments:
+  <HOST>  Managed target name, EC2 instance ID, or interrupted create operation ID
+
+Options:
+  -i, --instance <NAME>            Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --region <REGION>            AWS region. Omitted uses the saved host's region or the AWS default
+      --aws-profile <AWS_PROFILE>  AWS CLI credential profile (independent of an mj harness profile)
+      --no-splash                  Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+  -h, --help                       Print help

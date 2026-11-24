@@ -1,0 +1,11 @@
+Re-apply mj's host tuning (kernel limits) to an existing managed host, so hosts made before a tuning change do not need to be recreated
+
+Usage: mj ec2 tune [OPTIONS] <HOST>
+
+Arguments:
+  <HOST>  Machine name from the create that made the host
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+  -h, --help             Print help
