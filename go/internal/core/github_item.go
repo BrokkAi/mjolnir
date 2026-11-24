@@ -405,7 +405,7 @@ func marshalSerdeJSON(v any) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
+	if err := encoder.Encode(SerdeCollections(v)); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
@@ -417,7 +417,7 @@ func marshalSerdeJSONPretty(v any) ([]byte, error) {
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(v); err != nil {
+	if err := encoder.Encode(SerdeCollections(v)); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil

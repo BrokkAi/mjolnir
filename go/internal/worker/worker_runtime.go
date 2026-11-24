@@ -478,7 +478,7 @@ func workerRuntimeMarshalJSON(v any) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
+	if err := encoder.Encode(core.SerdeCollections(v)); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
@@ -491,7 +491,7 @@ func workerRuntimeMarshalPretty(v any) ([]byte, error) {
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(v); err != nil {
+	if err := encoder.Encode(core.SerdeCollections(v)); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
