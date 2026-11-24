@@ -1,0 +1,17 @@
+{
+  "phase": "judged",
+  "diffs": 70,
+  "diffs_with_findings": 68,
+  "sessions": 431,
+  "findings": 717,
+  "batches": 34,
+  "judges_by_profile": {
+    "gemini": 17,
+    "gemini2": 17
+  },
+  "groups_by_verdict": {
+    "confirmed": 291,
+    "plausible": 2,
+    "rejected": 17
+  }
+}

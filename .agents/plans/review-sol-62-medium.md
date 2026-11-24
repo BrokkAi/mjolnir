@@ -10,9 +10,10 @@ Measure whether one GPT 6.2 Sol reviewer at medium effort improves on GPT 6.1 So
 
 - [x] (2026-11-23 23:50Z) Located the original study and its persistent run directory; delegated runner/scoring mapping and baseline/model checks.
 - [x] (2026-11-23 23:52Z) Confirmed the runner accepts `gpt-6.2-sol:medium`; reserved unused arm O. Baseline metadata has 140 E Sol/medium sessions and 221 A/B Terra/high sessions across 70 diffs. Independent availability/count checks remain in progress.
-- [ ] Register and run one new Sol 6.2 medium review on each original diff, at concurrency 16 (completed: registration, jobs/readiness audit, successful first review and independent input/capture audit; full campaign running, remaining: all 70 completion audits).
-- [ ] Audit completed runs, verify findings using the established blinded method, and score old and new configurations consistently.
-- [ ] Independently check the comparison, record results, commit, obtain review, and push to origin/master.
+- [x] (2026-11-24 00:29Z) Completed exactly 70 audited Sol 6.2 medium reviews, one per original diff, with live runtime/image capture and matched positive prompt clocks for all 70. Two handbacks explicitly contain no findings.
+- [x] (2026-11-24) Audited all 34 accepted Neon/medium judge outputs and durable model selections; scored all 70 diffs and 431 sessions with no missing timing or usage. Preserved verify6 checksum manifest.
+- [x] (2026-11-24) Independently reconstructed the raw pool, groups, all four comparisons, paired bootstrap intervals, and model attribution. Published the complete readout and supporting data in the worktree.
+- [ ] Commit final results, obtain review, and push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -25,6 +26,10 @@ The original discovery worker's read-only assignment caused automatic approval r
 The installed 2.74.0 CLI removed `suspend --acknowledge-unpublished-work`. The captured first review was preserved and collected again without starting another review. Removing that obsolete flag at the two carrier cleanup sites in `driver.py` and the ordinary judge cleanup in `verify_driver.py` makes the study compatible with the installed command. Ordinary suspend's dry run reported no blockers, untracked work, Git operations, or Git delta.
 
 Review of the cleanup checkpoint found that ordinary judge/task sessions create untracked output files, unlike the clean carrier. The judge helper now supplies explicit `--discard-untracked` consent after a successful output is fetched and persisted; a quota-failed attempt has no accepted result and may discard partial output. Both call sites were checked, and syntax/diff checks pass. The first real verify7 judge will validate cleanup against the installed CLI. No judge result needs to be recomputed.
+
+One carrier failed before any prompt or review acceptance during a daemon restart. The interrupted Create retired a worker environment and reprovisioned the same session against a retained relay projection, producing an event-3 digest mismatch and a correctly refused rewind to genesis. Independent trace/source inspection confirmed the pre-review failure. Filed live daemon bug #1675. The original driver finished with 69 accepted samples; after it exited, the failed attempt was archived and only that job was retried on a new carrier. The retry passed the same audit and supplies the seventieth sample. No accepted review was repeated.
+
+The initial judge driver found a stale cached workspace ID: all 34 new-session commands were explicitly refused as unknown workspace before session creation or prompting. The old named workspace was absent from the live list. Under the existing workspace-setup lock the owner archived the stale pointer, recreated the same named workspace over the unchanged verifier checkout, and retried the 34 refused units with the identical blinded inputs. The first 16 replacement session receipts are persisted. This is setup recovery, not repeated judging.
 
 ## Decision Log
 
@@ -48,7 +53,15 @@ The removal and the existing recovery tests' call signatures are implemented. Py
 
 ## Outcomes & Retrospective
 
-The first review completed under installed Mjolnir 2.74.0 and passed independent audit. Its live configuration confirms `gpt-6.2-sol` at medium effort; historical context matches arms E and N byte for byte. The 57.862-second live-prompt clock matches usage, and inventory was unchanged. Four raw finding bullets await blinded verification. The full campaign is running with executor concurrency 16, PID 184435 at launch, with durable logs; the old two-creation gate remains in that process. Completion and the full comparison remain pending. Runner checkpoints through `5c564d6af` passed repository review and were pushed to origin/master in merge `b5e6d3fce`.
+All 70 new reviews passed audit under installed Mjolnir 2.74.0; all have model/effort selection, fixed image, sole matching completed usage turn, positive prompt clock, and input/inventory fidelity evidence. The original process used executor concurrency 16 and the historical two-creation gate, with a peak of 11 overlapping reviewer turns. A single pre-review startup failure was retried after driver exit. Arm registration, cleanup, and removal of the redundant gate through `9c4d616e0` passed repository review and are pushed to origin/master.
+
+Joint verify7 completed 34 blinded batches with Neon/medium on gemini and gemini2 at concurrency 16. Its audited pool contains exactly 431 selected sessions and 717 raw findings on 68 diffs; all 70 diffs remain covered, including two with no findings. The judge formed 310 groups: 291 confirmed, two plausible, and 17 rejected. The old verify6 inputs and specification are frozen. Across 443 common raw findings, verdict agreement is 98.0%; severity agreement is 84.6% when both rounds kept the finding.
+
+Sol 6.2 medium raised confirmed findings from 50.00 to 259.00 solo and from 138.50 to 284.33 with two Terra/high reviewers. The paired 95% intervals for the gains are +177.00 to +242.50 solo and +121.17 to +171.58 with the Terra pair. High/medium findings rose from 47.50 to 189.00 solo and from 122.33 to 210.00 with the pair. Independent raw reconstruction exactly reproduced all totals, per-diff wins/ties, and 20,000-resample intervals, with no extraction or counting artifact found.
+
+The quality improvement has higher recorded resource use: estimated median parallel turn time rises from 46.3 to 106.3 seconds solo and from 54.3 to 109.6 seconds with the pair. Estimated API cost per diff rises from $0.100 to $0.252 solo and from $0.187 to $0.339 with the pair. All counts use the same 70 diffs; costs exclude coordination/judging. The old and new cohorts ran on different dates and harness versions, and one new sample per diff does not measure repeat variance. These are the setups as run, assessed by the same fresh blinded judge round.
+
+The result and reproduction commands are in `.agents/evals/review-arms/results/sol-62-medium/README.md` and `reproduction.md`, with scored CSVs, paired comparisons, Pareto CSVs, usage, coverage, judge attribution/audit, and prior-round consistency data. The main study README links the addition. Real carrier/judge cleanup succeeded after the current-CLI fixes; the two existing recovery tests and applicable script syntax checks passed. No Rust build or installation was needed. Final result commit/review/push remains.
 
 ## Context and Orientation
 
@@ -118,6 +131,8 @@ Original study: `.agents/evals/review-arms/README.md`. Original frontier: `.agen
 First-run evidence: `$REVIEW_ARMS_DIR/runs/diff-05bc8c1e68/O/`; driver PID 153560 at launch; log `$REVIEW_ARMS_DIR/arm-O-canary.log`. Captured image digest: `sha256:1f5469c1c7264c025668e465a852199bc165938f6e84e925303f4fb46ca5e0db`. The live model/effort was observed rather than inferred from arm configuration.
 
 Full campaign log and process receipt: `$REVIEW_ARMS_DIR/arm-O-driver.log` and `$REVIEW_ARMS_DIR/arm-O-driver.pid`. First-run audit: `$REVIEW_ARMS_DIR/arm-O-canary-audit.json`. The changed scripts passed Python syntax parsing, and the repaired cleanup completed against the real installed CLI.
+
+Final reviewer audit: `$REVIEW_ARMS_DIR/arm-O-audit.json`. Failed pre-review attempt: `$REVIEW_ARMS_DIR/runs/diff-660c78e96c/O-failed-bootstrap-dddc797142ac/`; retry log: `$REVIEW_ARMS_DIR/arm-O-retry-bootstrap.log`. Bug report: `https://github.com/BrokkAi/mjolnir/issues/1675`. Verify7 build/pool/driver receipts: `$REVIEW_ARMS_DIR/verify7/build.log`, `pool-audit.json`, `driver.log`, and `driver.pid`. The first judge driver PID 1627672 exited after explicit workspace refusals. Replacement driver PID 1642525 uses `$REVIEW_ARMS_DIR/verify7/retry-workspace.log`; stale pointer and live refusal evidence are `workspace-stale.json` and `workspaces-at-refusal.json`.
 
 ## Interfaces and Dependencies
 
