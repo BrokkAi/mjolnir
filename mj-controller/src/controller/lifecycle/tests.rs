@@ -4246,7 +4246,48 @@ fn interrupted_local_suspend_fixture(
 #[cfg(unix)]
 #[tokio::test]
 async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct CancelCaptureStartup(AtomicBool);
+
+    impl CommandExecutor for CancelCaptureStartup {
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            if command.purpose == "probe Mjolnir worker daemon liveness" {
+                self.0.store(true, Ordering::SeqCst);
+                anyhow::bail!("cancelled during CheckpointOnly startup");
+            }
+            ProcessExecutor.execute(command)
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &CommandSpec,
+        ) -> Result<targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<targets::CommandOutput> {
+            ProcessExecutor.execute_with_stdin_without_deadline(command, input)
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
 
     const NAME: &str = "interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel";
     const SESSION_ID: &str = "interrupted-parked-raw-suspend";
@@ -4265,6 +4306,13 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
         .get_mut(SESSION_ID)
         .unwrap()
         .project_directory = Some(checkout.clone());
+    controller.config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            directory.path().join("profile"),
+        ),
+    );
     persist_controller_fixture(&mut controller);
     let mut attempt = OriginDeltaSuspend::load(&controller, SESSION_ID, &ProcessExecutor).unwrap();
     attempt.accept(&ProcessExecutor, true).unwrap();
@@ -4277,12 +4325,54 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
 
     // A parked session has no relay for the old close-recovery path to lease.
     let manager = crate::session_manager::spawn_session_manager().unwrap();
-    let cancelled = targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)));
+    let startup = CancelCaptureStartup::default();
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
     let error = controller
         .recover_interrupted_close_managed(
-            &crate::controller::test_support::session_admission(SESSION_ID),
+            &admission,
             SESSION_ID,
-            &cancelled,
+            &startup,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    assert!(startup.cancellation_requested(), "{error:#}");
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending)
+    );
+    let accepted: String = wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap();
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, accepted);
+    assert_eq!(
+        restart.error.as_deref(),
+        Some("operation cancelled before parked capture")
+    );
+    controller
+        .record_failed_close(
+            SESSION_ID,
+            "Suspend was interrupted during capture startup.",
+            error.downcast_ref::<LifecycleFailureReason>().copied(),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::database::read_durable_session_record(SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Closing
+    );
+
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &ProcessExecutor,
             &manager.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             Some(Box::pin(async {
@@ -4304,7 +4394,8 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
         .unwrap();
     assert_eq!(record.state, SessionState::Parked);
     assert!(checkout.is_dir());
-    assert!(!worker_root.join(mj_core::worker_suspend::ACCEPTED).exists());
+    assert!(!worker_root.join(wire::ACCEPTED).exists());
+    assert!(!worker_root.join(wire::RESTART).exists());
 }
 
 #[cfg(unix)]
@@ -5625,6 +5716,46 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
 
     attempt.wait_for_stop(&fake).await.unwrap();
     assert!(attempt.receipt(&fake).unwrap().unwrap().error.is_none());
+
+    // The original stop recorded borrowers before their live bindings vanished.
+    // Its scope must feed the replacement launch, even after a daemon reload.
+    let mut persisted: SuspendRequest = {
+        let files = fake.files.lock().unwrap();
+        serde_json::from_slice(&files[wire::REQUEST]).unwrap()
+    };
+    let original_operation = persisted.operation.clone();
+    let store_request = |request: &SuspendRequest| {
+        fake.files
+            .lock()
+            .unwrap()
+            .insert(wire::REQUEST.into(), serde_json::to_vec(request).unwrap());
+    };
+    persisted.child_sessions = vec!["stopped-borrower".into()];
+    store_request(&persisted);
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert_eq!(
+        reloaded.capture_scope().child_sessions,
+        persisted.child_sessions
+    );
+    assert_eq!(reloaded.capture_scope().checkout, checkout);
+    assert_eq!(reloaded.capture_scope().operation, original_operation);
+
+    persisted.operation = "older-suspend".into();
+    store_request(&persisted);
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!reloaded.request_recorded());
+    assert!(reloaded.capture_scope().child_sessions.is_empty());
+
+    persisted.operation = original_operation;
+    persisted.checkout = checkout.join("wrong");
+    store_request(&persisted);
+    let error = OriginDeltaSuspend::load(&controller, session_id, &fake)
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("different checkout"),
+        "{error:#}"
+    );
 
     attempt
         .record_restart(&anyhow::anyhow!("cancelled"), &fake)

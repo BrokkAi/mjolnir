@@ -422,6 +422,13 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
                     kill_owned(capture_pid)
                 kill_owned(old_daemon)
                 if dead_capture:
+                    # A recovered cancellation may still have a durable restart
+                    # intent, but the relay has already committed Close.
+                    operation = json.loads((root / "suspend-operation.json").read_text())
+                    (root / "suspend-restart.json").write_text(json.dumps({
+                        "operation": operation,
+                        "error": "suspend was cancelled",
+                    }))
                     # This process gained access after Close was acknowledged.
                     # Teardown must leave it alone.
                     holder = start_checkout_holder()

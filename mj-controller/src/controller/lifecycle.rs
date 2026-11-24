@@ -1035,6 +1035,10 @@ impl Controller {
             checkpoint_export_policy,
             CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
         );
+        let owning_origin_suspend = settlement == SuspendSettlement::Suspend
+            && move_intent.is_none()
+            && disposition == SourceTargetDisposition::Destroy;
+        let user_cancelled = || executor.cancellation_requested() && !executor.shutdown_interrupted();
         let yield_origin_delta_preflight = move_intent.is_some() && is_origin_delta;
         if yield_origin_delta_preflight {
             executor.begin_resumable_work()?;
@@ -1075,8 +1079,9 @@ impl Controller {
             executor.end_resumable_work("persist Move source stop")?;
         }
         let mut origin_delta = origin_delta?;
-        if let Some(attempt) = origin_delta.as_ref().filter(|attempt| attempt.already_quiescent())
-            && executor.cancellation_requested() && !executor.shutdown_interrupted()
+        if !owning_origin_suspend
+            && let Some(attempt) = origin_delta.as_ref().filter(|attempt| attempt.already_quiescent())
+            && user_cancelled()
         {
             return Err(self.restart_after_refused_origin_delta(
                 admission, session_id, executor, manager, attempt, &previous,
@@ -1135,6 +1140,30 @@ impl Controller {
             "persist closing state before checkpointing the session",
         )?;
 
+        let restart_reason = |attempt: &OriginDeltaSuspend| -> Result<Option<String>> {
+            let cancelled = user_cancelled();
+            let restart = if cancelled {
+                attempt.restart_reason(&ProcessExecutor)
+            } else {
+                attempt.restart_reason(executor)
+            };
+            if !owning_origin_suspend {
+                return restart;
+            }
+            let restart = restart.context(LifecycleFailureReason::SuspendPending)?;
+            if !cancelled || restart.is_some() {
+                return Ok(restart);
+            }
+            let reason = if attempt.already_quiescent() {
+                "operation cancelled before parked capture"
+            } else {
+                "suspend was cancelled"
+            };
+            attempt.record_restart(&anyhow::anyhow!(reason), &ProcessExecutor)
+                .context(LifecycleFailureReason::SuspendPending)?;
+            Ok(Some(reason.to_owned()))
+        };
+        let mut restart = None;
         if let Some(attempt) = origin_delta.as_mut() {
             if mj_core::test_hooks::test_hooks_enabled() {
                 mj_core::runtime::off_async_worker(|| {
@@ -1146,12 +1175,15 @@ impl Controller {
                 // identity directly, including recording cancellation.
                 attempt.wait_for_stop(executor).await?;
             } else {
-                if let Some(reason) = attempt.restart_reason(executor)? {
+                restart = restart_reason(attempt)?;
+                if !owning_origin_suspend && let Some(reason) = restart.take() {
                     drop(held_relay.take());
                     return Err(self.restart_after_refused_origin_delta(
                         admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
                     ).await);
                 }
+            }
+            if !attempt.request_recorded() && restart.is_none() {
                 if before_close.is_some() {
                     executor.begin_resumable_work()?;
                     let children = executor.stop_borrowed_workers_before_quiesce().await;
@@ -1243,46 +1275,93 @@ impl Controller {
                     };
                 }
             }
-            // Capture must connect to the replacement, never to the stopped worker.
-            drop(held_relay.take());
-            let (restart, receipt) =
-                if executor.cancellation_requested() && !executor.shutdown_interrupted() {
-                    (attempt.restart_reason(&ProcessExecutor)?, attempt.receipt(&ProcessExecutor)?)
-                } else {
-                    (attempt.restart_reason(executor)?, attempt.receipt(executor)?)
-                };
-            if let Some(error) = restart.map(anyhow::Error::msg).or_else(|| {
-                receipt.and_then(|receipt| receipt.error)
-                    .map(|reason| mj_core::refusal::Refusal::precondition(reason).into())
-            }) {
+            if restart.is_none() {
+                restart = restart_reason(attempt)?;
+            }
+            let receipt = if user_cancelled() {
+                attempt.receipt(&ProcessExecutor)
+            } else {
+                attempt.receipt(executor)
+            };
+            let receipt = if owning_origin_suspend {
+                receipt.context(LifecycleFailureReason::SuspendPending)?
+            } else {
+                receipt?
+            };
+            let refusal = receipt.and_then(|receipt| receipt.error)
+                .map(|reason| anyhow::Error::from(mj_core::refusal::Refusal::precondition(reason)));
+            // An owning Suspend always records its verified archive before
+            // submitting Close. An older archive is possible, so when one is
+            // present only the relay can decide whether rollback is safe.
+            let rollback = if !owning_origin_suspend || previous.checkpoint.is_none() {
+                restart.take().map(anyhow::Error::msg).or(refusal)
+            } else {
+                refusal
+            };
+            if let Some(error) = rollback {
+                drop(held_relay.take());
                 return Err(self.restart_after_refused_origin_delta(
                     admission, session_id, executor, manager, attempt, &previous, error,
                 ).await);
             }
-            held_relay = Some(match attempt.start_worker(
-                self, admission, session_id, executor,
-                if attempt.already_quiescent() { None } else { manager },
-                WorkerRunMode::CheckpointOnly,
-                false,
-            ).await {
-                Ok(relay) => relay,
-                Err(error) if executor.shutdown_interrupted() => return Err(error),
-                Err(error) if error.is::<UnsealedSuspendRefusal>() => {
-                    return Err(self.restart_after_refused_origin_delta(
-                        admission, session_id, executor, manager, attempt, &previous, error,
-                    ).await);
-                }
-                Err(error) => return Err(error.context(LifecycleFailureReason::SuspendPending)),
-            });
+
+            let observe_original = if restart.is_some()
+                && !attempt.request_recorded() && !attempt.already_quiescent()
+            {
+                let mode = if user_cancelled() {
+                    attempt.live_worker_mode(&ProcessExecutor)
+                } else {
+                    attempt.live_worker_mode(executor)
+                };
+                mode.context(LifecycleFailureReason::SuspendPending)? == Some(WorkerRunMode::Harness)
+            } else {
+                false
+            };
+            if !observe_original || held_relay.is_none() {
+                drop(held_relay.take());
+                let run_mode = if observe_original {
+                    WorkerRunMode::Harness
+                } else {
+                    WorkerRunMode::CheckpointOnly
+                };
+                let capture_manager = if attempt.already_quiescent() { None } else { manager };
+                let relay = if user_cancelled() {
+                    executor.begin_resumable_work()?;
+                    let result = attempt.start_worker(self, admission, session_id, &ProcessExecutor,
+                        capture_manager, run_mode, observe_original).await;
+                    executor.end_resumable_work("observe suspend seal after cancellation")?;
+                    result
+                } else {
+                    attempt.start_worker(self, admission, session_id, executor,
+                        capture_manager, run_mode, observe_original).await
+                };
+                held_relay = Some(match relay {
+                    Ok(relay) => relay,
+                    Err(error) if executor.shutdown_interrupted() => return Err(error),
+                    Err(error) if error.is::<UnsealedSuspendRefusal>() => {
+                        return Err(self.restart_after_refused_origin_delta(
+                            admission, session_id, executor, manager, attempt, &previous, error,
+                        ).await);
+                    }
+                    Err(error) => {
+                        if owning_origin_suspend && user_cancelled() {
+                            restart_reason(attempt)?;
+                        }
+                        return Err(error.context(LifecycleFailureReason::SuspendPending));
+                    }
+                });
+            }
         }
 
-        if origin_delta.is_some()
-            && settlement == SuspendSettlement::Suspend
-            && move_intent.is_none()
+        if owning_origin_suspend
+            && let Some(attempt) = origin_delta.as_ref()
             && let Some(relay) = held_relay.as_mut()
         {
-            let execution = relay.sync_snapshot().await
-                .context(LifecycleFailureReason::SuspendPending)?.operational.execution;
+            let snapshot = relay.sync_snapshot().await;
+            if restart.is_none() && user_cancelled() {
+                restart = restart_reason(attempt)?;
+            }
+            let execution = snapshot.context(LifecycleFailureReason::SuspendPending)?.operational.execution;
             if matches!(execution, RelayExecutionState::Closing | RelayExecutionState::Closed) {
                 relay_sealed = true;
                 if execution == RelayExecutionState::Closing {
@@ -1291,10 +1370,19 @@ impl Controller {
                 }
                 drop(held_relay.take());
                 let verified = previous.checkpoint.as_deref().context("sealed origin-delta close has no verified checkpoint")?;
+                if user_cancelled() {
+                    return self.destroy_after_verified_checkpoint(session_id, verified, &ProcessExecutor, settlement);
+                }
                 if let Some(before_close) = before_close {
                     before_close.await?;
                 }
                 return self.destroy_after_verified_checkpoint(session_id, verified, executor, settlement);
+            }
+            if let Some(reason) = restart {
+                drop(held_relay.take());
+                return Err(self.restart_after_refused_origin_delta(
+                    admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
+                ).await);
             }
         }
 

@@ -392,17 +392,25 @@ impl OriginDeltaSuspend {
         };
         let accepted = read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?;
         let request =
-            read_wire::<SuspendRequest>(&backend, session_id, &root, wire::REQUEST, executor)?;
-        let request_recorded = accepted.as_ref().is_some_and(|operation| {
-            request
-                .as_ref()
-                .is_some_and(|request| &request.operation == operation)
-        });
-        let mut child_sessions = controller.state.active_borrowers(session_id);
-        if !child_sessions.is_empty() {
-            let peers = crate::database::bound_environment_member_ids(session_id)?;
-            child_sessions.retain(|id| peers.contains(id));
-        }
+            read_wire::<SuspendRequest>(&backend, session_id, &root, wire::REQUEST, executor)?
+                .filter(|request| accepted.as_ref() == Some(&request.operation));
+        let request_recorded = request.is_some();
+        let child_sessions = if let Some(request) = request {
+            ensure!(
+                request.checkout == checkout_path,
+                "accepted suspend request belongs to a different checkout"
+            );
+            // A stopped borrower can still have detached writers. Keep the
+            // scope of the original stop after its worker has exited.
+            request.child_sessions
+        } else {
+            let mut child_sessions = controller.state.active_borrowers(session_id);
+            if !child_sessions.is_empty() {
+                let peers = crate::database::bound_environment_member_ids(session_id)?;
+                child_sessions.retain(|id| peers.contains(id));
+            }
+            child_sessions
+        };
         Ok(Self {
             session_id: session_id.to_owned(),
             backend,
@@ -451,6 +459,14 @@ impl OriginDeltaSuspend {
 
     pub(super) fn request_recorded(&self) -> bool {
         self.request_recorded
+    }
+
+    pub(super) fn capture_scope(&self) -> wire::SuspendCapture {
+        wire::SuspendCapture {
+            operation: self.operation.clone(),
+            checkout: self.checkout.clone(),
+            child_sessions: self.child_sessions.clone(),
+        }
     }
 
     pub(super) fn restart_reason(
@@ -740,11 +756,7 @@ impl OriginDeltaSuspend {
             let mut launch = controller.current_worker_launch_config(session_id, &self.backend)?;
             launch.run_mode = run_mode;
             launch.suspend_capture =
-                (run_mode == WorkerRunMode::CheckpointOnly).then(|| wire::SuspendCapture {
-                    operation: self.operation.clone(),
-                    checkout: self.checkout.clone(),
-                    child_sessions: self.child_sessions.clone(),
-                });
+                (run_mode == WorkerRunMode::CheckpointOnly).then(|| self.capture_scope());
             let worker_root = self.root.as_str();
             let mut restart = InstalledWorkerRestart {
                 backend: &self.backend,
