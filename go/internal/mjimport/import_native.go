@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
@@ -86,7 +90,43 @@ func (c *NativeScanCache) ParsedFiles() uint64 {
 // excludes identified children, preserving parents even when their
 // entrypoint or missing working directory prevents importing.
 func (c *NativeScanCache) IndexEligible(kind core.HarnessKind, path string) (bool, error) {
-	panic("unported: mj-import/src/import/native.rs NativeScanCache::index_eligible")
+	if kind == core.HarnessKindClaude {
+		for _, component := range importPathComponents(path) {
+			if component.text == "subagents" {
+				return false, nil
+			}
+		}
+	}
+	metadata, err := os.Stat(path)
+	if err != nil {
+		return false, importIOError(err)
+	}
+	modifiedAt := metadata.ModTime()
+	sizeBytes := uint64(metadata.Size())
+	if cached, ok := c.cached(path, modifiedAt, sizeBytes); ok {
+		if eligible, ok := cached.(cachedNativeMetadataIndexEligible); ok {
+			return bool(eligible), nil
+		}
+	}
+	var eligible bool
+	switch kind {
+	case core.HarnessKindCodex:
+		summary, err := codexSessionSummaryFor(path)
+		if err != nil {
+			return false, err
+		}
+		eligible = !summary.Subagent
+	case core.HarnessKindClaude:
+		summary, err := claudeNativeSummaryFor(path)
+		if err != nil {
+			return false, err
+		}
+		eligible = !summary.Subagent
+	default:
+		return false, fmt.Errorf("%s has its own top-level source enumeration", importHarnessDebug(kind))
+	}
+	c.store(path, modifiedAt, sizeBytes, cachedNativeMetadataIndexEligible(eligible))
+	return eligible, nil
 }
 
 func (c *NativeScanCache) cached(path string, modifiedAt time.Time, sizeBytes uint64) (cachedNativeMetadata, bool) {
@@ -184,7 +224,45 @@ func LocateNativeSession(
 	home string,
 	selection ClaudeSessionSelection,
 ) (LocatedNativeSession, error) {
-	panic("unported: mj-import/src/import/native.rs locate_native_session")
+	switch harness {
+	case core.HarnessKindMuse:
+		root, err := checkpoint.MuseSessionsRoot(home)
+		if err != nil {
+			return LocatedNativeSession{}, err
+		}
+		return museLocate(root, selection)
+	case core.HarnessKindCodex:
+		located, err := LocateCodexSession(home, selection)
+		if err != nil {
+			return LocatedNativeSession{}, err
+		}
+		return LocatedNativeSession{NativeSessionID: located.NativeSessionID, SourcePath: located.JSONLPath}, nil
+	case core.HarnessKindClaude:
+		located, err := LocateClaudeSession(home, selection)
+		if err != nil {
+			return LocatedNativeSession{}, err
+		}
+		return LocatedNativeSession{NativeSessionID: located.NativeSessionID, SourcePath: located.JSONLPath}, nil
+	case core.HarnessKindKimi:
+		located, err := LocateKimiSession(home, selection)
+		if err != nil {
+			return LocatedNativeSession{}, err
+		}
+		return LocatedNativeSession{NativeSessionID: located.NativeSessionID, SourcePath: located.SessionPath}, nil
+	case core.HarnessKindGrok:
+		located, err := LocateGrokSession(home, selection)
+		if err != nil {
+			return LocatedNativeSession{}, err
+		}
+		return LocatedNativeSession{NativeSessionID: located.NativeSessionID, SourcePath: located.SessionPath}, nil
+	case core.HarnessKindOpenCode:
+		return LocatedNativeSession{}, errors.New("OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet")
+	case core.HarnessKindAntigravity:
+		return LocatedNativeSession{}, errors.New("Mjolnir cannot import Antigravity sessions yet")
+	case core.HarnessKindDsh:
+		return LocatedNativeSession{}, errors.New("Mjolnir cannot import DSH sessions yet")
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(harness)))
 }
 
 // NativeSessionIDFromPath is the id LocateNativeSession takes, read back
@@ -199,7 +277,15 @@ func LocateNativeSession(
 // the session's own directory, and Muse names the directory above
 // `session.jsonl`.
 func NativeSessionIDFromPath(harness core.HarnessKind, path string) (string, bool) {
-	panic("unported: mj-import/src/import/native.rs native_session_id_from_path")
+	if harness == core.HarnessKindCodex && strings.ContainsRune(path, '\u001f') {
+		return "", false
+	}
+	adapter, ok := importAdapter(harness)
+	// Rust's `path.to_str()?`: a path that is not UTF-8 has no readable name.
+	if !ok || !utf8.ValidString(path) {
+		return "", false
+	}
+	return adapter.NativeID(path)
 }
 
 // ReadNativeTranscript projects one native session into the canonical
@@ -246,5 +332,72 @@ func ScanNativeSessions(
 	cache *NativeScanCache,
 	report func(SessionScanProgress[NativeSessionListing]),
 ) error {
-	panic("unported: mj-import/src/import/native.rs scan_native_sessions")
+	forward := func(scanned, total int, session *NativeSessionListing) {
+		report(SessionScanProgress[NativeSessionListing]{Scanned: scanned, Total: total, Session: session})
+	}
+	// listing is a located session of a harness that reports no import issue
+	// and no archive flag of its own.
+	listing := func(id, title string, modifiedAt time.Time, gitBranch string, sizeBytes uint64, cwd string) *NativeSessionListing {
+		return &NativeSessionListing{
+			NativeSessionID: id,
+			Title:           title,
+			ModifiedAt:      modifiedAt,
+			GitBranch:       gitBranch,
+			SizeBytes:       sizeBytes,
+			Cwd:             cwd,
+		}
+	}
+	switch harness {
+	case core.HarnessKindMuse:
+		root, err := checkpoint.MuseSessionsRoot(home)
+		if err != nil {
+			return err
+		}
+		return museScan(root, func(progress SessionScanProgress[NativeSessionListing]) {
+			forward(progress.Scanned, progress.Total, progress.Session)
+		})
+	case core.HarnessKindCodex:
+		return ScanCodexSessions(home, cache, func(progress SessionScanProgress[LocatedCodexSession]) {
+			var session *NativeSessionListing
+			if located := progress.Session; located != nil {
+				session = listing(located.NativeSessionID, located.Title, located.ModifiedAt, located.GitBranch, located.SizeBytes, located.Cwd)
+				if issue, ok := located.HistoryMode.ImportIssue(); ok {
+					session.UnavailableReason = &issue
+				}
+				session.NativelyArchived = located.NativelyArchived
+			}
+			forward(progress.Scanned, progress.Total, session)
+		})
+	case core.HarnessKindClaude:
+		return ScanClaudeSessions(home, cache, func(progress SessionScanProgress[LocatedClaudeSession]) {
+			var session *NativeSessionListing
+			if located := progress.Session; located != nil {
+				session = listing(located.NativeSessionID, located.Title, located.ModifiedAt, located.GitBranch, located.SizeBytes, located.Cwd)
+			}
+			forward(progress.Scanned, progress.Total, session)
+		})
+	case core.HarnessKindKimi:
+		return ScanKimiSessions(home, func(progress SessionScanProgress[LocatedKimiSession]) {
+			var session *NativeSessionListing
+			if located := progress.Session; located != nil {
+				session = listing(located.NativeSessionID, located.Title, located.ModifiedAt, located.GitBranch, located.SizeBytes, located.Cwd)
+			}
+			forward(progress.Scanned, progress.Total, session)
+		})
+	case core.HarnessKindGrok:
+		return ScanGrokSessions(home, func(progress SessionScanProgress[LocatedGrokSession]) {
+			var session *NativeSessionListing
+			if located := progress.Session; located != nil {
+				session = listing(located.NativeSessionID, located.Title, located.ModifiedAt, located.GitBranch, located.SizeBytes, located.Cwd)
+			}
+			forward(progress.Scanned, progress.Total, session)
+		})
+	case core.HarnessKindOpenCode:
+		return errors.New("OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet")
+	case core.HarnessKindAntigravity:
+		return errors.New("Mjolnir cannot enumerate Antigravity sessions yet")
+	case core.HarnessKindDsh:
+		return errors.New("Mjolnir cannot enumerate DSH sessions yet")
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(harness)))
 }
