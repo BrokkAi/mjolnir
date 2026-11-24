@@ -5,6 +5,12 @@
 package accounts
 
 import (
+	"math"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 )
 
@@ -18,8 +24,52 @@ func WindowApplies(window *client.QuotaWindow, model string) bool {
 // scores mean more sustainable capacity for the requested model. False when
 // no window that applies to the model says how much is left.
 func QuotaScore(windows []client.QuotaWindow, model string, nowSeconds int64) (float64, bool) {
-	panic("unported: mj-accounts/src/quota/recovery.rs quota_score")
+	var lowest float64
+	scored := false
+	for i := range windows {
+		window := &windows[i]
+		if !WindowApplies(window, model) {
+			continue
+		}
+		var remaining float64
+		switch {
+		case window.RemainingPercent != nil:
+			remaining = float64(*window.RemainingPercent)
+		case window.Used != nil && window.Limit != nil && *window.Limit > 0:
+			limit := float64(*window.Limit)
+			remaining = min(max(100*(limit-float64(*window.Used))/limit, 0), 100)
+		default:
+			continue
+		}
+		remaining = min(remaining, 100)
+		var score float64
+		switch {
+		case window.ResetsAtEpochSeconds != nil && *window.ResetsAtEpochSeconds <= nowSeconds:
+			score = 1
+		case remaining == 0:
+			score = 0
+		case window.ResetsAtEpochSeconds != nil && window.DurationSeconds != nil && *window.DurationSeconds > 0:
+			duration := *window.DurationSeconds
+			secondsLeft := min(max(quotaSaturatingSubInt64(*window.ResetsAtEpochSeconds, nowSeconds), 0), duration)
+			pace := 100 * float64(secondsLeft) / float64(duration)
+			if pace <= recoveryEpsilon {
+				score = 4
+			} else {
+				score = min(remaining/pace, 4)
+			}
+		default:
+			score = min(remaining/50, 4)
+		}
+		if !scored || score < lowest {
+			lowest = score
+		}
+		scored = true
+	}
+	return lowest, scored
 }
+
+// recoveryEpsilon is Rust's f64::EPSILON.
+const recoveryEpsilon = 2.220446049250313e-16
 
 // MergeResetWindows re-exports client.MergeResetWindows (Rust's
 // `pub use mj_client::quota::merge_reset_windows`).
@@ -37,7 +87,39 @@ type StatedReset struct {
 }
 
 func MessageReset(message string, observedMs int64) *StatedReset {
-	panic("unported: mj-accounts/src/quota/recovery.rs message_reset")
+	observed := time.UnixMilli(observedMs)
+	if observed.Unix() < quotaChronoMinTimestamp || observed.Unix() > quotaChronoMaxTimestamp {
+		return nil
+	}
+	now := quotaFixed(observed.In(time.Local))
+	// ASCII lowercasing keeps every byte offset, so the index reads the
+	// original message.
+	index := strings.Index(quotaASCIILower(message), "reset")
+	if index < 0 {
+		return nil
+	}
+	value := strings.TrimSpace(strings.TrimLeft(message[index+len("reset"):], "s"))
+	value = strings.TrimPrefix(value, "at ")
+	value = strings.TrimSpace(strings.TrimLeft(value, ":"))
+	if value == "" {
+		return nil
+	}
+	line, _, _ := strings.Cut(value, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	value = strings.TrimRight(strings.TrimSpace(line), ".")
+	// Some providers name the wait as a duration from the refusal
+	// (Antigravity: "Resets in 40s") rather than a wall-clock time.
+	if seconds, ok := durationSeconds(value); ok {
+		if now.Unix() > math.MaxInt64-seconds {
+			return nil
+		}
+		return &StatedReset{At: now.Unix() + seconds, Relative: true}
+	}
+	at, ok := NormalizeResetAt(value, now)
+	if !ok {
+		return nil
+	}
+	return &StatedReset{At: at.Unix(), Relative: false}
 }
 
 // durationSeconds is the seconds in a duration stated in words, as in
@@ -45,7 +127,64 @@ func MessageReset(message string, observedMs int64) *StatedReset {
 // (`at 14:00`, `Aug 14 at 4am`, `2026-11-12T19:52:53Z`) is not a duration and
 // the caller keeps its wall-clock parsing.
 func durationSeconds(value string) (int64, bool) {
-	panic("unported: mj-accounts/src/quota/recovery.rs duration_seconds")
+	value = strings.TrimSpace(value)
+	if rest, ok := strings.CutPrefix(value, "in "); ok {
+		value = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	}
+	chars := []rune(value)
+	at := 0
+	var total int64
+	stated := false
+	for {
+		for at < len(chars) && (unicode.IsSpace(chars[at]) || chars[at] == ',') {
+			at++
+		}
+		if at == len(chars) {
+			break
+		}
+		start := at
+		for at < len(chars) && chars[at] >= '0' && chars[at] <= '9' {
+			at++
+		}
+		amount := string(chars[start:at])
+		for at < len(chars) && unicode.IsSpace(chars[at]) {
+			at++
+		}
+		start = at
+		for at < len(chars) && (chars[at] >= 'a' && chars[at] <= 'z' || chars[at] >= 'A' && chars[at] <= 'Z') {
+			at++
+		}
+		unit := string(chars[start:at])
+		if amount == "" || unit == "" {
+			return 0, false
+		}
+		var unitSeconds int64
+		switch quotaASCIILower(unit) {
+		case "s", "sec", "secs", "second", "seconds":
+			unitSeconds = 1
+		case "m", "min", "mins", "minute", "minutes":
+			unitSeconds = 60
+		case "h", "hr", "hrs", "hour", "hours":
+			unitSeconds = 60 * 60
+		case "d", "day", "days":
+			unitSeconds = 24 * 60 * 60
+		case "w", "wk", "wks", "week", "weeks":
+			unitSeconds = 7 * 24 * 60 * 60
+		default:
+			return 0, false
+		}
+		parsed, err := strconv.ParseInt(amount, 10, 64)
+		if err != nil || parsed > math.MaxInt64/unitSeconds {
+			return 0, false
+		}
+		seconds := parsed * unitSeconds
+		if total > math.MaxInt64-seconds {
+			return 0, false
+		}
+		total += seconds
+		stated = true
+	}
+	return total, stated
 }
 
 // Exhausted is whether window shows no quota left and has not reset by
@@ -81,7 +220,47 @@ func LongWindowStop(windows []client.QuotaWindow, model string, explicit *int64,
 // RecoveryReset: a reset already used for an unsuccessful retry cannot
 // schedule another retry.
 func RecoveryReset(windows []client.QuotaWindow, explicit *int64, nowSeconds int64, consumed *int64) *int64 {
-	panic("unported: mj-accounts/src/quota/recovery.rs recovery_reset")
+	usable := func(time *int64) bool {
+		return time != nil && *time > nowSeconds && (consumed == nil || *time > *consumed)
+	}
+	anyExhausted := false
+	var furthest int64
+	for i := range windows {
+		window := &windows[i]
+		if !Exhausted(window, nowSeconds) {
+			continue
+		}
+		// Unknown exhausted windows must not be silently ignored. A
+		// provider's explicit reset can supply the missing bound.
+		var reset int64
+		switch {
+		case usable(window.ResetsAtEpochSeconds):
+			reset = *window.ResetsAtEpochSeconds
+		case usable(explicit):
+			reset = *explicit
+		default:
+			return nil
+		}
+		if !anyExhausted || reset > furthest {
+			furthest = reset
+		}
+		anyExhausted = true
+	}
+	if anyExhausted {
+		return &furthest
+	}
+	if usable(explicit) {
+		reset := *explicit
+		return &reset
+	}
+	var earliest *int64
+	for i := range windows {
+		if reset := windows[i].ResetsAtEpochSeconds; usable(reset) && (earliest == nil || *reset < *earliest) {
+			value := *reset
+			earliest = &value
+		}
+	}
+	return earliest
 }
 
 // RetryDeadline is the deadline for the next attempt after a refusal.
