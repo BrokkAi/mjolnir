@@ -972,7 +972,40 @@ impl Controller {
             let metadata = {
                 let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
                 let transfer_started = Instant::now();
-                let verified = transfer.execute(executor)?;
+                // Suspend on an SSH container host promotes the staged archive
+                // into the host snapshot cache in place instead of uploading
+                // the same bytes back, so the staging file outlives the
+                // download under a durable row that Destroy and the expiry
+                // sweep reclaim if this daemon stops first.
+                let mut retained_staging = None;
+                let verified = if exclusivity == LatchExclusivity::HoldThroughClose
+                    && let Some(staging_path) = transfer.host_staging_path()
+                {
+                    let staging_path = staging_path?;
+                    let row_id = super::record_host_staging_entry(
+                        session_id,
+                        &backend,
+                        &operation_id,
+                        &staging_path,
+                    )?;
+                    match transfer.execute_retaining_host_staging(executor) {
+                        Ok((verified, retained)) => {
+                            retained_staging = retained.map(|retained| (retained, row_id));
+                            verified
+                        }
+                        Err(error) => {
+                            if crate::checkpoint_transfer::host_staging_may_remain(&error) {
+                                // Removal failed: the row stays for Destroy and expiry.
+                                super::notify_host_snapshot_cache_updated();
+                            } else {
+                                super::retire_host_staging_entry(row_id);
+                            }
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    transfer.execute(executor)?
+                };
                 tracing::info!(
                     session_id,
                     transfer_and_checksum_ms = transfer_started.elapsed().as_millis() as u64,
@@ -990,7 +1023,20 @@ impl Controller {
                     );
                     Ok(())
                 };
+                // Every exit below that does not promote the retained staging
+                // file removes it first.
+                let release_staging = || {
+                    if let Some((retained, row_id)) = &retained_staging {
+                        super::release_host_staging(
+                            &backend,
+                            &retained.staging_path,
+                            *row_id,
+                            executor,
+                        );
+                    }
+                };
                 if let Err(error) = validate_transferred() {
+                    release_staging();
                     return Err(remove_uninstalled_checkpoint(&installed_archive, error));
                 }
                 // A checkpoint that still holds its barrier proves workspace
@@ -1014,6 +1060,7 @@ impl Controller {
                         }
                     });
                     if let Err(error) = revalidated {
+                        release_staging();
                         return Err(remove_uninstalled_checkpoint(
                             &installed_archive,
                             error.context(
@@ -1022,10 +1069,33 @@ impl Controller {
                         ));
                     }
                 }
+                // A bare SSH target's archive is already on the cache host:
+                // promote it before the cleanup below removes it.
+                let promotes_bare_archive = exclusivity == LatchExclusivity::HoldThroughClose
+                    && matches!(
+                        backend,
+                        targets::TargetLocator::SshBare { .. }
+                            | targets::TargetLocator::AwsEc2 { .. }
+                    );
+                if promotes_bare_archive {
+                    super::promote_host_snapshot_cache_best_effort(
+                        &super::HostCachePromotion {
+                            session_id,
+                            locator: &backend,
+                            source_host_path: &remote_archive,
+                            remove_source: false,
+                            known_remote_home: None,
+                            sha256: verified.sha256(),
+                            staging_row_id: None,
+                        },
+                        executor,
+                    );
+                }
                 if let Err(error) = transfer
                     .cleanup_plan(&verified)
                     .and_then(|plan| plan.execute(executor).map(|_| ()))
                 {
+                    release_staging();
                     return Err(remove_uninstalled_checkpoint(
                         &installed_archive,
                         error.context("clean target checkpoint staging"),
@@ -1036,13 +1106,27 @@ impl Controller {
                 target_files.handed_off();
                 // Best-effort atomic publish into host-owned snapshot cache
                 // before the session's environment (e.g. container) is retired.
-                if exclusivity == LatchExclusivity::HoldThroughClose {
+                if let Some((retained, row_id)) = &retained_staging {
+                    super::promote_host_snapshot_cache_best_effort(
+                        &super::HostCachePromotion {
+                            session_id,
+                            locator: &backend,
+                            source_host_path: &retained.staging_path,
+                            remove_source: true,
+                            known_remote_home: retained.remote_home.as_deref(),
+                            sha256: verified.sha256(),
+                            staging_row_id: Some(*row_id),
+                        },
+                        executor,
+                    );
+                } else if exclusivity == LatchExclusivity::HoldThroughClose
+                    && !promotes_bare_archive
+                {
                     super::publish_host_snapshot_cache_best_effort(
                         session_id,
                         &backend,
                         verified.archive_path(),
                         verified.sha256(),
-                        executor,
                     );
                 }
                 CheckpointMetadata {
