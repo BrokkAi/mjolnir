@@ -364,7 +364,6 @@ pub(crate) fn render_composer_band(
             })
         })
         .or_else(|| chat.connection_feedback.clone())
-        .or_else(|| chat.turn_review_status())
         .filter(|_| prompt_area.height > 3)
     {
         let feedback_area = Rect::new(prompt_area.x, prompt_area.y, prompt_area.width, 1);

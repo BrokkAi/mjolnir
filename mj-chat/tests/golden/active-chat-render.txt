@@ -147,13 +147,39 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detac
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-Review running · 2 reviewers
+╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│> Can you inspect the changes?                                                                    │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+PromptInput rect=(3, 19, 95, 3)
+
+=== review refusal remains visible (100x24) ===
+╭ Conversation · Reviewing ────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Review request refused: repository is already under review
 ╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> Can you inspect the changes?                                                                    │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-PromptInput rect=(3, 20, 95, 2)
 
 === two reviews running (100x24) ===
 ╭ Conversation · Reviewing ────────────────────────────────────────────────────────────────────────╮
@@ -174,13 +200,13 @@ PromptInput rect=(3, 20, 95, 2)
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-a: Reviewing · c: Reviewing
 ╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> Anything else to review?                                                                        │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-PromptInput rect=(3, 20, 95, 2)
+PromptInput rect=(3, 19, 95, 3)
 
 === autocomplete popup and hit target (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮

@@ -2981,7 +2981,11 @@ async fn golden_active_chat_render() {
         &[active_golden_rect(&chat, SurfaceId::PromptInput)],
     );
 
-    // Several reviews at once: the footer names each by its repository.
+    chat.report_review_refusal("Review request refused: repository is already under review".into());
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(&mut output, "review refusal remains visible", &buffer, &[]);
+
+    // Several reviews at once leave the composer free of passive status text.
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_turn_reviews(
         [

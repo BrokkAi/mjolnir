@@ -5,25 +5,17 @@ use mj_core::review::driver::TurnReviewPhase;
 #[derive(Debug)]
 pub(super) struct TurnReview {
     pub(super) view: RuntimeReviewView,
-    pub(super) failure: Option<String>,
 }
 
 impl TurnReview {
     pub(super) fn new(view: RuntimeReviewView) -> Self {
-        Self {
-            view,
-            failure: None,
-        }
+        Self { view }
     }
 
     pub(super) fn update(&mut self, view: RuntimeReviewView) -> bool {
         let changed = self.view != view;
         self.view = view;
         changed
-    }
-
-    pub(super) fn status(&self) -> String {
-        self.failure.as_ref().unwrap_or(&self.view.status).clone()
     }
 
     pub(super) fn pending_elicitations(
@@ -41,15 +33,6 @@ impl TurnReview {
             .filter(|question| self.view.owns_reviewer(&question.role))
             .map(|question| (question.role.clone(), question.request.clone()))
             .collect()
-    }
-
-    pub(super) fn report_failure(&mut self, message: impl Into<String>) -> bool {
-        let message = message.into();
-        if self.failure.as_deref() == Some(message.as_str()) {
-            return false;
-        }
-        self.failure = Some(message);
-        true
     }
 }
 
@@ -73,51 +56,7 @@ impl super::ChatState {
         !self.turn_reviews.is_empty()
     }
 
-    /// The one line the footer shows for the reviews: the status of a single
-    /// review, or each review's status after its repositories when there are
-    /// several.
-    pub(super) fn turn_review_status(&self) -> Option<String> {
-        match self.turn_reviews.as_slice() {
-            [] => None,
-            [only] => Some(only.status()),
-            // One row has room for each review's repository and state, not for
-            // each review's full status.
-            several => Some(
-                several
-                    .iter()
-                    .map(|review| {
-                        let state = review
-                            .failure
-                            .clone()
-                            .or_else(|| review.view.activity_label().map(str::to_owned))
-                            .unwrap_or_else(|| "Reviewing".to_owned());
-                        let roots = review.view.roots_label();
-                        if roots.is_empty() {
-                            state
-                        } else {
-                            format!("{roots}: {state}")
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            ),
-        }
-    }
-
-    /// Reports a refusal on the review it is about when exactly one is open;
-    /// with several, a refusal cannot be tied to one of them, so it is a
-    /// notice.
-    pub(super) fn report_turn_review_failure(&mut self, message: String) {
-        match self.turn_reviews.as_mut_slice() {
-            [only] => {
-                only.report_failure(message);
-            }
-            _ => self.set_notice(message),
-        }
-    }
-
-    /// Replaces the open reviews with the daemon's latest projection. A review
-    /// that stays open keeps the failure it reported.
+    /// Replaces the open reviews with the daemon's latest projection.
     pub(super) fn set_turn_reviews(&mut self, views: Vec<RuntimeReviewView>) {
         self.review_projection_known = true;
         let mut previous = std::mem::take(&mut self.turn_reviews);
