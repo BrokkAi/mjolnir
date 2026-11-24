@@ -4074,11 +4074,13 @@ pub(super) async fn serve_client_with_shared_credentials(
                 use crate::relay::ReserveIdleAntigravityCheck;
                 let immediate = {
                     let mut state = relay.lock().expect("relay state lock poisoned");
-                    match state.reserve_idle_antigravity_check(command_id) {
+                    if let Some(body) = state.envelope_rejection(&envelope) {
+                        Some(RelayResponseEnvelope { request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version, body })
+                    } else { match state.reserve_idle_antigravity_check(command_id) {
                         ReserveIdleAntigravityCheck::ProceedDirectly => Some(state.handle(envelope.clone())),
                         ReserveIdleAntigravityCheck::RejectNow => Some(state.reserve_idle_after_antigravity_refresh(envelope.clone(), None)),
                         ReserveIdleAntigravityCheck::RefreshFirst => None,
-                    }
+                    } }
                 };
                 if let Some(response) = immediate { Some(response) } else {
                     let synced_epoch = if let Some(tx) = &antigravity_refresh {

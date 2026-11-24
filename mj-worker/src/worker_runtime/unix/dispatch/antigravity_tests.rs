@@ -1600,3 +1600,147 @@ async fn antigravity_blocked_scan_keeps_coordinator_events_responsive_and_coales
     coordinator.abort();
     assert!(coordinator.await.unwrap_err().is_cancelled());
 }
+
+#[tokio::test]
+async fn antigravity_reserve_idle_arrivals_require_a_scan_started_after_the_request() {
+    for explicit_refresh in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let databases = Databases::create(temp.path());
+        let relay = antigravity_relay(&temp.path().join("relay"));
+        let mut monitor = attach_monitor(temp.path(), &relay).await;
+        stop(
+            &mut relay.lock().unwrap(),
+            Some(NATIVE),
+            Some(true),
+            "END_TURN",
+        );
+        monitor.refresh(&relay, true).await.unwrap();
+        let (reply1, result1) = oneshot::channel();
+        monitor
+            .request_idle_reservation_refresh(&relay, reply1)
+            .unwrap();
+        // Leave the completed read in-flight, reproducing a late arrival after
+        // steps was read but before the coordinator consumed its completion.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !monitor.in_flight_scan_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        databases.task(1);
+        let (reply2, mut result2) = oneshot::channel();
+        let (reply3, mut result3) = oneshot::channel();
+        monitor
+            .request_idle_reservation_refresh(&relay, reply2)
+            .unwrap();
+        monitor
+            .request_idle_reservation_refresh(&relay, reply3)
+            .unwrap();
+        if explicit_refresh {
+            monitor.refresh(&relay, true).await.unwrap();
+        } else {
+            monitor.finish_in_flight_scan(&relay).await.unwrap();
+            assert!(matches!(
+                result2.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                result3.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            monitor.finish_in_flight_scan(&relay).await.unwrap();
+        }
+        assert!(result1.await.unwrap().is_some());
+        let second = result2.await.unwrap();
+        assert!(second.is_some());
+        assert_eq!(second, result3.await.unwrap());
+        assert!(!monitor.has_in_flight_scan());
+        let mut state = relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_commands.len(), 1);
+        let response = state.reserve_idle_after_antigravity_refresh(
+            RelayRequestEnvelope {
+                request_id: "fresh-scan".into(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::ReserveIdle {
+                    command_id: "fresh-scan".into(),
+                },
+            },
+            second,
+        );
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::IdleReservation { ordinal: None }
+            }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn antigravity_reserve_idle_rejects_invalid_envelopes_before_scanning() {
+    let temp = tempfile::tempdir().unwrap();
+    let _databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    let (refresh_tx, mut refresh_rx) = mpsc::channel(16);
+    let (wake, _wakes) = mpsc::channel(8);
+    let (fatal, _errors) = mpsc::channel(1);
+    let (server, client) = UnixStream::pair().unwrap();
+    let connection = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+        server,
+        relay.clone(),
+        wake,
+        SharedCredentials::new(Ok(credential_endpoint(
+            HarnessKind::Antigravity,
+            temp.path(),
+        ))),
+        ConnectionRuntime {
+            antigravity_refresh: Some(refresh_tx),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    for unavailable in [false, true] {
+        if unavailable {
+            relay
+                .lock()
+                .unwrap()
+                .antigravity_tasks_unavailable()
+                .unwrap();
+        } else {
+            monitor.refresh(&relay, true).await.unwrap();
+        }
+        for (id, version) in [("", RELAY_PROTOCOL_VERSION), ("invalid-version", 0)] {
+            let envelope = RelayRequestEnvelope {
+                request_id: id.into(),
+                protocol_version: version,
+                request: RelayRequest::ReserveIdle {
+                    command_id: "invalid-envelope".into(),
+                },
+            };
+            let direct = relay
+                .lock()
+                .unwrap()
+                .reserve_idle_after_antigravity_refresh(envelope.clone(), None);
+            assert!(matches!(direct.body, RelayResponseBody::Error { .. }));
+            let mut bytes = serde_json::to_vec(&envelope).unwrap();
+            bytes.push(b'\n');
+            client.write_all(&bytes).await.unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), client.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+            assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+            assert!(matches!(
+                refresh_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+    drop(client);
+    connection.await.unwrap().unwrap();
+}

@@ -143,10 +143,11 @@ impl AntigravityTaskMonitor {
 
     pub(crate) async fn refresh(&mut self, relay: &Arc<RelayCell>, force: bool) -> Result<()> {
         while self.has_in_flight_scan() {
-            self.finish_in_flight_scan(relay).await?;
+            self.finish_in_flight_scan_inner(relay, !force).await?;
         }
         if force {
-            self.start_scan(relay, true, 1, Vec::new())?;
+            let waiters = std::mem::take(&mut self.pending_idle_waiters);
+            self.start_scan(relay, true, 1, waiters)?;
         } else {
             self.start_periodic_poll(relay)?;
         }
@@ -200,16 +201,10 @@ impl AntigravityTaskMonitor {
             let _ = reply.send(None);
             return Ok(());
         }
-        let epoch = relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .antigravity_hook_epoch();
-        if let Some(scan) = &mut self.in_flight {
-            if scan.force && scan.hook_epoch == epoch {
-                scan.waiters.push(reply);
-            } else {
-                self.pending_idle_waiters.push(reply);
-            }
+        // A scan that started before this request may already have read steps.
+        // All arrivals during it share a fresh scan after it finishes.
+        if self.in_flight.is_some() {
+            self.pending_idle_waiters.push(reply);
             return Ok(());
         }
         self.start_scan(relay, true, 1, vec![reply])
@@ -275,7 +270,22 @@ impl AntigravityTaskMonitor {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn in_flight_scan_finished(&self) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_some_and(|scan| scan.task.is_finished())
+    }
+
     pub(crate) async fn finish_in_flight_scan(&mut self, relay: &Arc<RelayCell>) -> Result<()> {
+        self.finish_in_flight_scan_inner(relay, true).await
+    }
+
+    async fn finish_in_flight_scan_inner(
+        &mut self,
+        relay: &Arc<RelayCell>,
+        start_pending_waiters: bool,
+    ) -> Result<()> {
         // Poll by reference: select! cancellation must not lose the follower or waiters.
         let result = (&mut self.in_flight.as_mut().expect("scan exists").task).await;
         let scan = self.in_flight.take().expect("completed scan exists");
@@ -320,7 +330,7 @@ impl AntigravityTaskMonitor {
         for reply in scan.waiters {
             let _ = reply.send(synced_epoch);
         }
-        if !self.pending_idle_waiters.is_empty() {
+        if start_pending_waiters && !self.pending_idle_waiters.is_empty() {
             let waiters = std::mem::take(&mut self.pending_idle_waiters);
             self.start_scan(relay, true, 1, waiters)?;
         }

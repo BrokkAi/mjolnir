@@ -7,6 +7,13 @@ impl DurableRelay {
         envelope: RelayRequestEnvelope,
         synced_epoch: Option<u64>,
     ) -> RelayResponseEnvelope {
+        if let Some(body) = self.envelope_rejection(&envelope) {
+            return RelayResponseEnvelope {
+                request_id: envelope.request_id,
+                protocol_version: envelope.protocol_version,
+                body,
+            };
+        }
         let RelayRequest::ReserveIdle { command_id } = &envelope.request else {
             unreachable!("idle reservation only")
         };
@@ -75,7 +82,7 @@ impl DurableRelay {
     /// version admits. `Some` is the response to send instead of handling.
     /// [`Self::take_deferred_attach`] consults the same checks so an attach it
     /// defers is one the normal path would have accepted.
-    pub(super) fn envelope_rejection(
+    pub(crate) fn envelope_rejection(
         &self,
         envelope: &RelayRequestEnvelope,
     ) -> Option<RelayResponseBody> {
