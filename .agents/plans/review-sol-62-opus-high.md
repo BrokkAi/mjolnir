@@ -11,8 +11,8 @@ Concurrency remains 16 from the user's earlier instruction. Reuse accepted revie
 ## Progress
 
 - [x] (2026-11-24) Recorded the new user mandate and delegated execution plus an independent Opus/profile/cohort preflight. No Neon judging is authorized.
-- [ ] Confirm exact unused arm names, complete historical raw cohort, original and currently available Opus model identity, Claude-only profiles, quota, and judge commands (completed: unused Q/R/S/T registered; remaining: Opus/cohort preflight).
-- [ ] Add and audit 280 new reviews at concurrency 16, preserving all existing O/P samples and pins.
+- [x] (2026-11-24) Confirmed unused Q/R/S/T, the exact historical cohort, original/current Opus 5.5 route, Claude-only profiles, quota and judging commands. Registered slots passed review and were pushed in merge `9ef3bc9c0`.
+- [ ] Add and audit 280 new reviews at concurrency 16, preserving all existing O/P samples and pins (completed: Q/R canaries passed, full manifest is active; remaining: all 280 accepted slots).
 - [ ] Freshly judge the complete selected raw pool with Opus/high at concurrency 16; validate every accepted judge's identity and high effort.
 - [ ] Compute and independently audit the one-/two-/three-reviewer results, severity tiers, frontier, price, latency, and paired intervals.
 - [ ] Publish, commit, obtain review, and push to origin/master.
@@ -23,6 +23,10 @@ The original Stage 4 Opus/high round was `verify5`. A later user-requested round
 
 The old runner's extra two-creation gate has already been removed. Each new job must have a single reviewer so the 16-worker executor does not silently admit 32 reviewer turns. All builds are outside this task: use installed Mjolnir and the existing pinned reviewer image.
 
+Preflight confirmed 1,306 historical sessions with 1,960 raw findings and 396 empty reports. The historical cohort plus existing O/P comprises 784 jobs and 1,446 sessions; adding 280 new jobs gives 1,064 jobs and 1,726 sessions. Only DSF/low is incomplete, with 35 sessions on 16 diffs. It remains in judging and is excluded from the primary 70-diff frontier. Historical missing token/API-price fields remain unavailable, not zero.
+
+All 34 original Opus turns used bridge selector `opus`, high effort, fast and ultracode off, and provider `claude-opus-5-5`. Eleven also recorded known auxiliary `claude-haiku-5-5` usage. Recent completed turns on the installed runtime attest the same route on claude4. The 2026-11-24 03:01 UTC quota snapshot showed 90% standard weekly remaining on claude4; claude5 had 7% weekly and 86% five-hour remaining. The parent accepted claude4 initially, with claude5 considered only after an observed quota problem and a new parent ruling.
+
 ## Decision Log
 
 - Decision: Add four distinct single-reviewer arms, provisionally Q=low, R=medium, S=low, T=medium after confirming those names are unused.
@@ -30,6 +34,9 @@ The old runner's extra two-creation gate has already been removed. Each new job 
   Date/Author: 2026-11-24, parent agent.
 - Decision: Use Opus/high exclusively for the new joint judging round, provisionally verify9.
   Rationale: This is the user's explicit correction. Pin the exact supported Opus identity and Claude profiles, attest every accepted turn, and fail visibly if unavailable; no other judge is an authorized fallback.
+  Date/Author: 2026-11-24, parent agent.
+- Decision: Use `--model opus --effort high --profiles claude4 --quota-scope claude`, with exact command-specific provider attestation and a first-real-batch canary.
+  Rationale: The bridge normalizes model IDs to `opus`; an exact full-ID selector would conflict with the existing returned-value check. Durable selection plus provider usage must show the main `claude-opus-5-5`, with only the original known Haiku auxiliary allowed. A narrow repeatable `--batch` selector keeps the canary in verify9 with the same stable command and no copied judgments.
   Date/Author: 2026-11-24, parent agent.
 - Decision: Include the original historical frontier's raw reviewer cohort plus all 420 Sol 6.2 reviews in one fresh blinded pool.
   Rationale: This makes the new sample range comparable with earlier frontier configurations under one Opus verdict set. Use historical round metadata only to enumerate raw inputs, never to import Neon judgments. Exact membership is pending the independent preflight; the expected cohort is 1,306 historical sessions plus 420 Sol 6.2 sessions.
@@ -40,7 +47,7 @@ The old runner's extra two-creation gate has already been removed. Each new job 
 
 ## Outcomes & Retrospective
 
-Pending. The 280 additional reviews and new Opus judgments have not yet completed. Earlier results are preserved in `results/sol-62-medium/` and `results/sol-62-low/` under `.agents/evals/review-arms/`.
+The Q low and R medium canaries passed all input, runtime, handback and matching-turn checks. Their reviewer durations were 59.486 and 101.649 seconds respectively. The Q carrier completed its original context turn after 440 seconds; it was not restarted or duplicated. The full 280-slot interleaved manifest is running at executor concurrency 16. Earlier results remain preserved in `results/sol-62-medium/` and `results/sol-62-low/`. No Opus judging has started yet; it waits for all accepted reviews and the exact pool audit.
 
 ## Context and Orientation
 
@@ -78,14 +85,20 @@ Commands run from this checkout, with study scripts run from `.agents/evals/revi
 After recording exact unused names and a saved interleaved manifest, the reviewer interfaces are:
 
     python3 -B driver.py --jobs "$R/sol-62-repeats/canaries.json" --concurrency 2 --same-image "$R/sol-62-repeats/image.json" --stop-on-failure
-    python3 -B driver.py --jobs <confirmed-280-job-manifest> --concurrency 16 --same-image "$R/sol-62-repeats/image.json"
+    python3 -B driver.py --jobs "$R/sol-62-repeats/jobs.json" --concurrency 16 --same-image "$R/sol-62-repeats/image.json"
 
 Run the full driver with durable detached logging and record its PID. Accepted canaries must skip on the full invocation. Before judging, fill in and record the exact preflight-confirmed Opus and pool arguments; no placeholders may reach a live command:
 
-    python3 -B build_verify.py verify9 --arms <exact-selected-arms> --configs <exact-selected-configs> --ready-jobs <complete-actual-ready-jobs> --bugs-from "$R/arm-QRST-jobs.json"
-    python3 -B verify_driver.py verify9 --kind verify --target localhost --model <exact-opus-id> --effort high --profiles <claude-only-profiles> --quota-scope <confirmed-claude-scope> --concurrency 16
+    jq -s '.[0] + .[1]' "$PREFLIGHT/historical-and-op-ready-jobs.json" "$R/sol-62-repeats/jobs.json" > "$R/stage9-ready-jobs.json"
+    mkdir "$R/verify9"
+    cp "$R/verify5/SPEC.md" "$R/verify9/SPEC.md"
+    python3 -B build_verify.py verify9 --arms A,B,D,D2,E,G-base,G-plus,H,I,J,K,L,N,O,P,Q,R,S,T --configs gpt-6.1-terra:high,gpt-6.1-terra:xhigh,gpt-6.1-sol:high,gpt-6.1-sol:medium,gpt-6.1-sol:xhigh,greptile:base,greptile:plus,deepseek-flash:low,muse-ember-1.0:xhigh,gemini-4-hydrogen:high,gemini-4-hydrogen:medium,kimi-code/k3.1-pro:high,gpt-6.2-sol:low,gpt-6.2-sol:medium --ready-jobs "$R/stage9-ready-jobs.json" --bugs-from "$R/sol-62-repeats/jobs.json"
+    python3 -B verify_driver.py verify9 --kind verify --target localhost --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe --model opus --effort high --profiles claude4 --quota-scope claude --concurrency 1 --batch 0
+    python3 -B verify_driver.py verify9 --kind verify --target localhost --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe --model opus --effort high --profiles claude4 --quota-scope claude --concurrency 16
     python3 -B score.py verify9
-    python3 -B pareto.py verify9 --sessions gpt-6.2-sol/low=3,gpt-6.2-sol/medium=3,<historical-caps>
+    python3 -B pareto.py verify9 --exclude DSF/low --bootstrap 300 --sessions Sol/medium=2,Terra/xhigh=2,Sol/xhigh=2,Greptile/base=1,Greptile/plus=1,Ember/xhigh=1,Gemini/high=1,Gemini/medium=1,Kimi/high=1,gpt-6.2-sol/low=3,gpt-6.2-sol/medium=3
+
+Here `PREFLIGHT` is `.mj/agents/f75b54121d7b1bc32ae30aa6c5981737` under this checkout, or a preserved copy of that report directory. Require the built first batch to be ID 0 before using the shown canary command; otherwise substitute the existing first ID. After its accepted Opus/high output and provider attestation, the full invocation skips the completed batch. The quota scope does not add a quota floor; it only interprets any explicitly configured existing floor using standard Claude windows rather than Fable windows.
 
 Existing previous publications have complete environment and timing/scoring interfaces. Record all final commands, cohort definitions, audits and logs in the new result's reproduction document. Never execute the old Neon judge commands from those historical documents.
 
@@ -106,6 +119,8 @@ New arms, round and result directories must be additive and confirmed unused. Re
 Original method and frontier: `.agents/evals/review-arms/README.md`. Completed current-model samples and tables: `results/sol-62-medium/` and `results/sol-62-low/` there. Raw verify5 is the original Opus round; verify6 is a historical cohort source; verify7/8 are archived Neon rounds. New expected raw round is verify9 and publication is `.agents/evals/review-arms/results/sol-62-opus-high/`.
 
 Prior execution: `.mj/agents/108e236adc4f5d9bc5710ccb830ababa/`. Prior final independent audit: `.mj/agents/777987907c1b745b746e446b07cb0bd7/verify8-final-audit.md`. New execution reports: `.mj/agents/e716b3bf9cbf5440f17f95105b1245e3/`; Opus/cohort preflight: `.mj/agents/f75b54121d7b1bc32ae30aa6c5981737/`. The first detached canary command exited before launching or recording a session. The active canary driver uses exec session 5015; durable PID/log receipts are `$R/sol-62-repeats/canaries-exec.pid` and `canaries-exec.log`.
+
+Both canaries completed; `$R/sol-62-repeats/canary-audit.json` is the receipt. The full reviewer driver uses exec session 11483, with `$R/sol-62-repeats/reviewers.pid` and `reviewers.log`. Exact preflight manifests, checksum files, quota/model evidence, caps and accepted CLI arguments are in the preflight report directory's `preflight.md` and linked artifacts. The main driver audit must compare actual selected session IDs against those frozen manifests because `--ready-jobs` enforces readiness without whitelisting ingestion.
 
 ## Interfaces and Dependencies
 

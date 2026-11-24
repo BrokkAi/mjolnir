@@ -45,6 +45,8 @@ p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("--concurrency", type=int, default=7)
 p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
+p.add_argument("--batch", type=int, action="append", metavar="ID",
+               help="verify only the specified existing batch ID (repeatable)")
 p.add_argument("--text-only", action="store_true",
                help="pilot judgment task: one pinned profile and a sealed empty Podman checkout")
 p.add_argument("--instance", help="named instance for sealed pilot judges")
@@ -107,6 +109,15 @@ elif a.instance or a.seal_probe or a.provider_model or a.model_version:
     p.error("--instance, --seal-probe, --provider-model and --model-version require --text-only")
 REPO_NAME = a.bundle or os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 V = ROOT / a.verify
+selected_batches = []
+if a.batch is not None:
+    if a.kind != "verify":
+        p.error("--batch requires --kind verify")
+    batch_ids = sorted(set(a.batch))
+    missing = [i for i in batch_ids if i < 0 or not (V / f"batch-{i}.json").is_file()]
+    if missing:
+        p.error(f"no such batches in {V}: {missing}")
+    selected_batches = [V / f"batch-{i}.json" for i in batch_ids]
 REPO = ROOT / "verify/repo"
 SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
                                   "rev-parse", "--show-toplevel"], text=True).strip()
@@ -667,7 +678,7 @@ def run_unit(batch_path, judge=None):
 if a.kind == "task":
     batches = sorted(d for d in V.iterdir() if d.is_dir() and (d / "INSTRUCTIONS.md").exists())
 else:
-    batches = sorted(V.glob("batch-*.json"), key=lambda f: int(f.stem.split("-")[1]))
+    batches = selected_batches or sorted(V.glob("batch-*.json"), key=lambda f: int(f.stem.split("-")[1]))
 JUDGES = a.judges.split(",")
 if a.kind == "judge" and (not JUDGES or set(JUDGES) - {"A", "B"} or len(set(JUDGES)) != len(JUDGES)):
     p.error("--judges must name A, B or both")
