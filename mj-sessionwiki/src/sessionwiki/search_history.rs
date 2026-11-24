@@ -39,12 +39,26 @@ struct FileMeta {
     row: SessionRow,
 }
 impl FileMeta {
+    /// Newest-first key. Live updates only raise `ended`, which moves a session
+    /// toward the front, never back past a cursor already issued.
     fn recency(&self) -> &str {
         self.row
             .last_active
             .as_deref()
             .or(self.row.started.as_deref())
             .unwrap_or("")
+    }
+    /// Oldest-first key. `started` never changes, so a live `ended` update
+    /// cannot move an already returned session past a cursor.
+    fn age(&self) -> &str {
+        self.row
+            .started
+            .as_deref()
+            .or(self.row.last_active.as_deref())
+            .unwrap_or("")
+    }
+    fn order_key(&self, newest: bool) -> &str {
+        if newest { self.recency() } else { self.age() }
     }
 }
 
@@ -294,6 +308,16 @@ pub(super) fn execute(
                 global == c["i"].is_null(),
                 "malformed search_history cursor mode"
             );
+            // A scoped cursor freezes the remaining session order, starting
+            // with its boundary session.
+            if !global {
+                let rem = c["rem"]
+                    .as_array()
+                    .filter(|rem| !rem.is_empty() && rem.len() <= 50)
+                    .filter(|rem| rem.iter().all(Value::is_string))
+                    .filter(|rem| rem[0] == c["s"]);
+                ensure!(rem.is_some(), "malformed search_history cursor");
+            }
             Ok(c)
         })
         .transpose()?;
@@ -320,20 +344,33 @@ pub(super) fn execute(
     )?;
     let mut sessions: Vec<_> = hits.keys().cloned().collect();
     sessions.sort_by(|a, b| {
-        let cmp = (files[a].recency(), a).cmp(&(files[b].recency(), b));
+        let cmp = (files[a].order_key(newest), a).cmp(&(files[b].order_key(newest), b));
         if newest { cmp.reverse() } else { cmp }
     });
-    sessions.retain(|sid| {
-        cursor.as_ref().is_none_or(|c| {
-            let key = (files[sid].recency(), sid.as_str());
+    if let Some(c) = &cursor {
+        if global {
             let boundary = (c["r"].as_str().unwrap(), c["s"].as_str().unwrap());
-            if newest {
-                key < boundary || (!global && key == boundary)
-            } else {
-                key > boundary || (!global && key == boundary)
-            }
-        })
-    });
+            sessions.retain(|sid| {
+                let key = (files[sid].order_key(newest), sid.as_str());
+                if newest {
+                    key < boundary
+                } else {
+                    key > boundary
+                }
+            });
+        } else {
+            // Resume in the order page one froze, so a live `ended` update on
+            // any session cannot reorder, skip, or repeat one.
+            sessions = c["rem"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|sid| sid.as_str())
+                .filter(|sid| hits.contains_key(*sid))
+                .map(str::to_owned)
+                .collect();
+        }
+    }
     for ids in hits.values_mut() {
         ids.sort_unstable();
         if newest {
@@ -346,7 +383,7 @@ pub(super) fn execute(
         .limit
         .clamp(1, 50)
         .min((max_chars / min_usable).max(1));
-    let mut loaded = HashMap::new();
+    let mut ids_by_session: HashMap<String, Vec<i64>> = HashMap::new();
     let mut selected: Vec<(String, Vec<i64>)> = Vec::new();
     let mut remaining = limit;
     let mut more = false;
@@ -372,15 +409,16 @@ pub(super) fn execute(
                 more = true;
                 break;
             }
-            let messages = indexed_messages::load(connection, sid)?;
-            let positions: HashMap<_, _> = messages.iter().map(|m| (m.id, m.i)).collect();
+            let all = indexed_messages::load_ids(connection, sid)?;
             let eligible: Vec<_> = hits[sid]
                 .iter()
                 .copied()
                 .filter(|id| {
                     cursor.as_ref().is_none_or(|c| {
                         c["s"] != *sid || {
-                            let i = positions[id];
+                            let Ok(i) = all.binary_search(id) else {
+                                return false;
+                            };
                             let boundary = c["i"].as_u64().unwrap() as usize;
                             if newest { i < boundary } else { i > boundary }
                         }
@@ -393,7 +431,7 @@ pub(super) fn execute(
             if take > 0 {
                 selected.push((sid.clone(), eligible[..take].to_vec()));
             }
-            loaded.insert(sid.clone(), messages);
+            ids_by_session.insert(sid.clone(), all);
         }
     }
     let n: usize = selected.iter().map(|(_, ids)| ids.len()).sum();
@@ -407,16 +445,39 @@ pub(super) fn execute(
     let mut left = n;
     let mut output = Vec::new();
     let mut last = None;
+    let mut bodies: HashMap<String, HashMap<usize, indexed_messages::IndexedMessage>> =
+        HashMap::new();
     for (sid, ids) in selected {
-        if !loaded.contains_key(&sid) {
-            loaded.insert(sid.clone(), indexed_messages::load(connection, &sid)?);
+        if !ids_by_session.contains_key(&sid) {
+            ids_by_session.insert(sid.clone(), indexed_messages::load_ids(connection, &sid)?);
         }
-        let messages = &loaded[&sid];
-        let positions: HashMap<_, _> = messages.iter().map(|m| (m.id, m.i)).collect();
+        let all = &ids_by_session[&sid];
+        // Read only the hits and their context neighbors, never the whole session.
+        let mut positions = Vec::with_capacity(ids.len());
+        let mut wanted = Vec::new();
+        for id in &ids {
+            let Ok(i) = all.binary_search(id) else {
+                bail!("a matching message left the index during the search; retry");
+            };
+            positions.push(i);
+            let low = if ctx > 0 { i.saturating_sub(ctx) } else { i };
+            let high = if ctx > 0 {
+                (i + ctx).min(all.len() - 1)
+            } else {
+                i
+            };
+            wanted.extend((low..=high).map(|j| (all[j], j)));
+        }
+        wanted.sort_unstable_by_key(|(_, j)| *j);
+        wanted.dedup();
+        let messages = bodies
+            .entry(sid.clone())
+            .or_insert(indexed_messages::load_by_ids(connection, &wanted)?);
         let mut values = Vec::new();
-        for id in ids {
-            let i = positions[&id];
-            let message = &messages[i];
+        for (id, i) in ids.into_iter().zip(positions) {
+            let Some(message) = messages.get(&i) else {
+                bail!("a matching message left the index during the search; retry");
+            };
             let budget = hit_budget / left;
             left -= 1;
             let highlighted: String = connection.query_row("SELECT highlight(msgs, 0, char(2), char(3)) FROM msgs WHERE msgs.rowid = ?1 AND msgs MATCH ?2", rusqlite::params![id,fts], |r| r.get(0))?;
@@ -454,7 +515,7 @@ pub(super) fn execute(
             last = Some((sid.clone(), i));
         }
         let row = &files[&sid].row;
-        let mut v = json!({"session_id":sid,"title":row.title,"total_messages":messages.len(),"hits_in_session":hits[&sid].len(),"hits":values});
+        let mut v = json!({"session_id":sid,"title":row.title,"total_messages":all.len(),"hits_in_session":hits[&sid].len(),"hits":values});
         if let Some(t) = &row.started {
             v["started"] = json!(t);
         }
@@ -471,7 +532,7 @@ pub(super) fn execute(
         let mut slots_left: usize = output
             .iter()
             .map(|session| {
-                let total = loaded[session["session_id"].as_str().unwrap()].len();
+                let total = ids_by_session[session["session_id"].as_str().unwrap()].len();
                 session["hits"]
                     .as_array()
                     .unwrap()
@@ -484,12 +545,14 @@ pub(super) fn execute(
             })
             .sum();
         for session in &mut output {
-            let messages = &loaded[session["session_id"].as_str().unwrap()];
+            let sid = session["session_id"].as_str().unwrap().to_owned();
+            let total = ids_by_session[&sid].len();
+            let messages = &bodies[&sid];
             for hit in session["hits"].as_array_mut().unwrap() {
                 let i = hit["i"].as_u64().unwrap() as usize;
                 for (name, range) in [
                     ("context_before", i.saturating_sub(ctx)..i),
-                    ("context_after", (i + 1)..(i + ctx + 1).min(messages.len())),
+                    ("context_after", (i + 1)..(i + ctx + 1).min(total)),
                 ] {
                     let mut context = Vec::new();
                     for j in range {
@@ -501,7 +564,7 @@ pub(super) fn execute(
                         if slot_budget == 0 {
                             continue;
                         }
-                        let value = excerpt_value(&messages[j], 0, slot_budget);
+                        let value = excerpt_value(&messages[&j], 0, slot_budget);
                         context_budget -= value["excerpt"].as_str().unwrap().chars().count();
                         context.push(value);
                     }
@@ -517,9 +580,12 @@ pub(super) fn execute(
         result["self_hits_omitted"] = json!(omitted);
     }
     if more && let Some((sid, i)) = last {
-        result["next_cursor"] = json!(encode(&serde_json::to_vec(
-            &json!({"v":1,"o":order,"s":sid,"r":files[&sid].recency(),"i":if global { None } else { Some(i) },"f":fingerprint})
-        )?));
+        let mut cursor = json!({"v":1,"o":order,"s":sid,"r":files[&sid].order_key(newest),"i":if global { None } else { Some(i) },"f":fingerprint});
+        if !global {
+            let at = sessions.iter().position(|s| *s == sid).unwrap_or(0);
+            cursor["rem"] = json!(&sessions[at..]);
+        }
+        result["next_cursor"] = json!(encode(&serde_json::to_vec(&cursor)?));
     }
     if params.cursor.is_none()
         && output.is_empty()
@@ -715,6 +781,78 @@ mod tests {
             .unwrap();
         let shrunk = run(&db, &p, None);
         assert_eq!(shrunk["sessions"][0]["hits"][0]["i"], 0);
+    }
+    fn stamp(db: &rusqlite::Connection, sid: &str, started: &str, ended: &str) {
+        db.execute(
+            "UPDATE files SET started = ?2, ended = ?3 WHERE session_id = ?1",
+            rusqlite::params![sid, started, ended],
+        )
+        .unwrap();
+    }
+    fn session_ids(page: &Value) -> Vec<String> {
+        page["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["session_id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    #[test]
+    fn scoped_cursor_keeps_its_frozen_session_order_when_the_boundary_session_advances() {
+        let _held = testing::lock();
+        let (_dir, db) = testing::isolated_index();
+        add(&db, "newer", &vec!["quokka passage".into(); 3]);
+        add(&db, "older", &vec!["quokka passage".into(); 3]);
+        stamp(&db, "newer", "2026-02-01", "2026-02-02");
+        stamp(&db, "older", "2026-01-01", "2026-01-02");
+        let mut p = SearchHistoryParams {
+            query: "quokka".into(),
+            session_ids: vec!["newer".into(), "older".into()],
+            limit: 2,
+            ..Default::default()
+        };
+        let first = run(&db, &p, None);
+        assert_eq!(session_ids(&first), ["newer"]);
+        assert_eq!(first["sessions"][0]["hits"].as_array().unwrap().len(), 2);
+        // A live append moves the boundary session's `ended` forward.
+        stamp(&db, "newer", "2026-02-01", "2026-11-24");
+        p.cursor = Some(first["next_cursor"].as_str().unwrap().into());
+        p.limit = 10;
+        let second = run(&db, &p, None);
+        assert_eq!(session_ids(&second), ["newer", "older"]);
+        assert_eq!(second["sessions"][0]["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(second["sessions"][0]["hits"][0]["i"], 0);
+        assert_eq!(second["sessions"][1]["hits"].as_array().unwrap().len(), 3);
+        assert!(second.get("next_cursor").is_none());
+    }
+    #[test]
+    fn global_oldest_first_cursor_ignores_live_ended_updates_to_returned_sessions() {
+        let _held = testing::lock();
+        let (_dir, db) = testing::isolated_index();
+        for (sid, month) in [("x", "01"), ("y", "02"), ("z", "03")] {
+            add(&db, sid, &["quokka passage".into()]);
+            stamp(
+                &db,
+                sid,
+                &format!("2026-{month}-01"),
+                &format!("2026-{month}-02"),
+            );
+        }
+        let mut p = SearchHistoryParams {
+            query: "quokka".into(),
+            order: Some("oldest".into()),
+            limit: 1,
+            ..Default::default()
+        };
+        let first = run(&db, &p, None);
+        assert_eq!(session_ids(&first), ["x"]);
+        stamp(&db, "x", "2026-01-01", "2026-11-24");
+        p.cursor = Some(first["next_cursor"].as_str().unwrap().into());
+        let second = run(&db, &p, None);
+        assert_eq!(session_ids(&second), ["y"]);
+        p.cursor = Some(second["next_cursor"].as_str().unwrap().into());
+        let third = run(&db, &p, None);
+        assert_eq!(session_ids(&third), ["z"]);
     }
     #[test]
     fn search_history_coordinates_budget_context_and_caller() {

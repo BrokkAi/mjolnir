@@ -2199,7 +2199,6 @@ fn query_rows_from(
         .is_autocommit()
         .then(|| connection.unchecked_transaction())
         .transpose()?;
-    ensure_search_tokenizer(connection)?;
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
     let query = query.trim();
     if query.is_empty() {
@@ -2219,6 +2218,9 @@ fn query_rows_from(
         fill_session_tags(connection, &mut rows)?;
         return Ok(rows);
     }
+    // Only a text search reads the FTS table; listing recent sessions must keep
+    // working while the tokenizer migrates.
+    ensure_search_tokenizer(connection)?;
     // SessionWiki filters conversational roles before its candidate cap and
     // session grouping. Native-child filtering still happens here, so
     // over-fetch to keep children ranked first from shortening a page.
@@ -2598,7 +2600,11 @@ fn fts_hit_transcript(
     let mut blocks = Vec::new();
     let mut previous = None;
     for message in &messages {
-        if !spans.keys().any(|i| message.i.abs_diff(*i) <= context) {
+        if spans
+            .range(message.i.saturating_sub(context)..=message.i.saturating_add(context))
+            .next()
+            .is_none()
+        {
             continue;
         }
         let ranges = spans.get(&message.i).map_or(&[][..], Vec::as_slice);
@@ -3431,6 +3437,30 @@ mod tests {
             include_tool_matches,
             &mut top_level::QueryVisibility::new(ownership, &crate::import::NativeScanCache::new()),
         )
+    }
+
+    #[test]
+    fn listing_sessions_works_while_the_tokenizer_migrates_but_searching_asks_to_retry() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        tags::testing::index_row(&connection, "listed", TOOL);
+        sessionwiki::index::set_tokenizer_spec(&connection, "trigram").unwrap();
+        let snapshot = top_level::Snapshot::default();
+        let cache = crate::import::NativeScanCache::new();
+        let mut visibility = top_level::QueryVisibility::new(&snapshot, &cache);
+        let rows =
+            query_rows_from(&connection, "", 10, &BTreeSet::new(), true, &mut visibility).unwrap();
+        assert_eq!(rows.len(), 1);
+        let error = query_rows_from(
+            &connection,
+            "listed",
+            10,
+            &BTreeSet::new(),
+            true,
+            &mut visibility,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("retry shortly"), "{error:#}");
     }
 
     fn item(position: u64, body: CanonicalTranscriptBody) -> CanonicalTranscriptItem {

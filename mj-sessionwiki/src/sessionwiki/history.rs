@@ -340,7 +340,7 @@ fn query(
     request.query.validate()?;
     let mut connection = super::readable_index()?.with_context(super::unreadable_reason)?;
     connection.busy_timeout(Duration::from_secs(2))?;
-    super::wait_for_tokenizer(&connection, budget.deadline, &budget.cancel)?;
+    wait_for_tokenizer_if_searching(&connection, request, budget)?;
     budget.install(&mut connection)?;
     let ownership = super::top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
@@ -356,6 +356,22 @@ fn query(
         "source": "indexed_snapshot",
         "coverage": "Indexed history can lag live sessions. Retained transcripts may omit original timestamps, tool output, or older messages. File evidence discarded before provenance indexing cannot be recovered.",
     }))
+}
+
+/// Only the full-text tools read the FTS table, so only they wait for a
+/// tokenizer migration. The rest work on a trigram index at once.
+fn wait_for_tokenizer_if_searching(
+    connection: &rusqlite::Connection,
+    request: &HistoryRequest,
+    budget: &QueryBudget,
+) -> Result<()> {
+    if matches!(
+        request.query,
+        HistoryQuery::SearchHistory { .. } | HistoryQuery::SearchSessions { .. }
+    ) {
+        super::wait_for_tokenizer(connection, budget.deadline, &budget.cancel)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1057,5 +1073,43 @@ mod tests {
             .await
             .expect("the dropped query released its permit");
         drop(all);
+    }
+
+    #[test]
+    fn only_full_text_queries_wait_for_the_tokenizer_migration() {
+        let _held = super::super::tags::testing::lock();
+        let (_directory, connection) = super::super::tags::testing::isolated_index();
+        super::super::tags::testing::index_row(&connection, "aaaa0001", super::super::TOOL);
+        connection
+            .execute(
+                "INSERT INTO messages(session_id, role, text) VALUES ('aaaa0001', 'user', 'hello')",
+                [],
+            )
+            .unwrap();
+        sessionwiki::index::set_tokenizer_spec(&connection, "trigram").unwrap();
+        let budget = QueryBudget {
+            cancel: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now(),
+        };
+        wait_for_tokenizer_if_searching(&connection, &read_request("aaaa0001"), &budget).unwrap();
+        let page = query_in(&connection, &read_request("aaaa0001")).unwrap();
+        assert_eq!(page["messages"][0]["text"], "hello");
+        let search = request(HistoryQuery::SearchHistory {
+            query: "hello".into(),
+            session_ids: None,
+            session_id: None,
+            role: None,
+            order: None,
+            limit: 20,
+            context_messages: 0,
+            max_chars: 16_000,
+            cursor: None,
+        });
+        assert!(
+            wait_for_tokenizer_if_searching(&connection, &search, &budget)
+                .unwrap_err()
+                .to_string()
+                .contains("retry shortly")
+        );
     }
 }
