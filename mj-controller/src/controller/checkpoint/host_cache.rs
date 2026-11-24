@@ -277,13 +277,18 @@ pub fn record_host_staging_entry(
     operation_id: &str,
     staging_path: &str,
 ) -> Result<i64> {
-    record_host_snapshot_cache_entry(
+    let row_id = record_host_snapshot_cache_entry(
         session_id,
         &host_cache_key(locator),
         &format!("{HOST_STAGING_SHA256_PREFIX}{operation_id}"),
         staging_path,
         &Utc::now().to_rfc3339(),
-    )
+    )?;
+    // Wake the expiry task now: this suspend can be cancelled before it
+    // promotes or releases the file, and the task may be sleeping on an
+    // empty table.
+    notify_host_snapshot_cache_updated();
+    Ok(row_id)
 }
 
 /// Forget a retained staging row whose file is gone or became a cache copy.
@@ -461,30 +466,36 @@ fn promote_into_host_cache(
         ],
     )
     .purpose("promote host archive into snapshot cache");
-    let failure = match executor.execute(&command) {
+    let (failure, nothing_written) = match executor.execute(&command) {
         Ok(out) if out.status == 0 => {
             notify_host_snapshot_cache_updated();
             return Ok(PathBuf::from(final_path));
         }
         Ok(out) => {
+            // The script exits 44, 45 and 46 before it creates anything.
+            // Any other status may come after `mv` or `rm`, and 255 is a
+            // dropped SSH session, so the file's fate is unknown.
             let reason = match out.status {
                 44 => "the host archive is missing".to_owned(),
                 45 => "the host has neither sha256sum nor shasum".to_owned(),
                 46 => "the host archive's SHA-256 differs from the verified archive".to_owned(),
                 _ => String::from_utf8_lossy(&out.stderr).trim().to_owned(),
             };
-            anyhow::anyhow!(
-                "host snapshot cache promotion failed with status {}: {reason}",
-                out.status
+            (
+                anyhow::anyhow!(
+                    "host snapshot cache promotion failed with status {}: {reason}",
+                    out.status
+                ),
+                matches!(out.status, 44..=46),
             )
         }
-        Err(error) => error,
+        Err(error) => (error, false),
     };
-    if matches!(remote_file_exists(&ssh, &final_path, executor), Ok(false)) {
+    if nothing_written {
         let _ = delete_host_snapshot_cache_entry(row_id);
     } else {
-        // The file may exist on the host (or the host cannot be asked): keep
-        // the row so expiry reclaims it.
+        // The file may exist on the host: keep the row so Destroy and expiry
+        // reclaim it.
         notify_host_snapshot_cache_updated();
     }
     Err(failure)
@@ -1103,27 +1114,6 @@ fn resolve_ssh_home(ssh: &SshTarget, executor: &impl CommandExecutor) -> Result<
     Ok(home)
 }
 
-fn remote_file_exists(
-    ssh: &SshTarget,
-    path: &str,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    let command = mj_core::targets::ssh_command_owned(
-        SshTrafficClass::Control,
-        ssh,
-        vec![
-            "sh".to_owned(),
-            "-c".to_owned(),
-            "test -f \"$1\"".to_owned(),
-            "hel-snapshot-cache-exists".to_owned(),
-            path.to_owned(),
-        ],
-    )
-    .purpose("check whether remote snapshot cache archive exists");
-    let output = executor.execute(&command)?;
-    Ok(output.status == 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1504,11 +1494,10 @@ mod tests {
         );
         assert!(!home.join(&staging).exists());
         let rows = list_host_snapshot_cache_entries_for_session("sess-x").unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "only the first promotion's row remains: {rows:?}"
-        );
+        // The failed copy's outcome was not confirmed, so its row stays for
+        // expiry to reclaim; no file exists at its path.
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(!Path::new(&rows[1].path).exists());
     }
 
     #[cfg(unix)]
@@ -1584,7 +1573,6 @@ mod tests {
         down.unreachable = vec![
             "promote host archive into snapshot cache",
             "remove remote checkpoint staging",
-            "check whether remote snapshot cache archive exists",
         ];
         let healthy = LocalSsh::new(home);
         let row_id = record_host_staging_entry("sess-c", &locator, "op-c", &staging).unwrap();
@@ -1928,5 +1916,81 @@ mod tests {
             .unwrap(),
             "sess-b must still be able to reuse its verified cached copy"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_a_staging_row_wakes_the_expiry_task_and_ambiguous_failures_keep_cache_rows() {
+        if !in_isolated_store(
+            "recording_a_staging_row_wakes_the_expiry_task_and_ambiguous_failures_keep_cache_rows",
+            "MJ_HOST_CACHE_WAKE_CHILD",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let locator = container_locator();
+
+        // Recording wakes a task that is sleeping on an empty table.
+        let wakeup = host_snapshot_cache_wakeup();
+        let (staging, _, sha) = stage_on_host(home, "sess-w", "op-w");
+        let row_id = record_host_staging_entry("sess-w", &locator, "op-w", &staging).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), wakeup.notified())
+                .await
+                .expect("recording a staging row must wake the expiry task");
+        });
+
+        // A promotion that dies with an unknown outcome (status 255, as a
+        // dropped SSH session reports) keeps the cache row even though no
+        // probe can confirm the file; a status the script exits with before
+        // writing anything (46) removes it.
+        let promote = |executor: &LocalSsh| {
+            promote_host_snapshot_cache(
+                &HostCachePromotion {
+                    session_id: "sess-w",
+                    locator: &locator,
+                    source_host_path: &staging,
+                    remove_source: false,
+                    known_remote_home: home.to_str(),
+                    sha256: &sha,
+                    staging_row_id: None,
+                },
+                executor,
+            )
+        };
+        write_shim(home, "mv", "exit 255");
+        let executor = LocalSsh::new(home);
+        let error = promote(&executor).unwrap_err();
+        assert!(format!("{error:#}").contains("status 255"), "{error:#}");
+        let cache_rows = |session: &str| {
+            list_host_snapshot_cache_entries_for_session(session)
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.sha256 == sha)
+                .count()
+        };
+        assert_eq!(
+            cache_rows("sess-w"),
+            1,
+            "unknown outcome keeps the cache row"
+        );
+        // The script's trap removed its temporary file and empty directory.
+        assert_eq!(
+            fs::read_dir(home.join(".cache/mjolnir/snapshot-cache"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        fs::write(home.join(&staging), b"tampered").unwrap();
+        let before = cache_rows("sess-w");
+        promote(&executor).unwrap_err();
+        assert_eq!(cache_rows("sess-w"), before, "status 46 drops its own row");
+        retire_host_staging_entry(row_id);
     }
 }

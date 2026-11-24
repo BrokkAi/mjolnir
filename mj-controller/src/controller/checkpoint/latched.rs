@@ -978,16 +978,32 @@ impl Controller {
                 // download under a durable row that Destroy and the expiry
                 // sweep reclaim if this daemon stops first.
                 let mut retained_staging = None;
-                let verified = if exclusivity == LatchExclusivity::HoldThroughClose
-                    && let Some(staging_path) = transfer.host_staging_path()
-                {
-                    let staging_path = staging_path?;
-                    let row_id = super::record_host_staging_entry(
-                        session_id,
-                        &backend,
-                        &operation_id,
-                        &staging_path,
-                    )?;
+                // The row is bookkeeping for crash recovery. If it cannot be
+                // recorded, suspend still completes: the staging file is
+                // removed at once and the host cache stays unpopulated.
+                let staging_row = match transfer.host_staging_path() {
+                    Some(staging_path) if exclusivity == LatchExclusivity::HoldThroughClose => {
+                        let staging_path = staging_path?;
+                        match super::record_host_staging_entry(
+                            session_id,
+                            &backend,
+                            &operation_id,
+                            &staging_path,
+                        ) {
+                            Ok(row_id) => Some(row_id),
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id,
+                                    error = %format!("{error:#}"),
+                                    "could not record host staging row; suspend will not promote into the host snapshot cache"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let verified = if let Some(row_id) = staging_row {
                     match transfer.execute_retaining_host_staging(executor) {
                         Ok((verified, retained)) => {
                             retained_staging = retained.map(|retained| (retained, row_id));
@@ -1121,6 +1137,7 @@ impl Controller {
                     );
                 } else if exclusivity == LatchExclusivity::HoldThroughClose
                     && !promotes_bare_archive
+                    && transfer.host_staging_path().is_none()
                 {
                     super::publish_host_snapshot_cache_best_effort(
                         session_id,
