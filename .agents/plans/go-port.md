@@ -21,7 +21,7 @@ Two earlier efforts failed on basic mistakes. The first (2026-11-20, reverted in
 3. Use the swap-in method. Rust and Go speak the same protocols, so: the Go worker runs under a Rust daemon (`MJ_WORKER_BINARY`); the Go `mj` CLI and dashboard talk to a Rust daemon; the Rust CLI talks to a Go daemon. Every scenario also runs on the all-Rust control in a second isolated instance, which shows what correct means.
 4. Every merge passes three gates, in order: (a) `go build ./...` and `go vet ./...`; (b) the scenario suite for every part that is already Go, plus the Go tests of the changed packages; (c) an independent reviewer agent, who did not write the change, compares every added or changed Go test with its Rust original and rejects weakened ones (see "Test fidelity rules" below). A change that fails a gate is not merged.
 5. Small batches. Fan out agents only inside one slice, and only as much work as can be gated the same day. Before any fan-out, state what the owner will be able to run when it lands and roughly what it costs.
-6. One Rust target, a released version. The Go build matches Mjolnir v2.75.0 (tag `v2.75.0`, commit 5b68df737), recorded in `go/RUST_TARGET`. Until the replay below lands, the translated code follows commit 3dde0c11b plus five later commits teammates carried into `go/` (0fc96c573, b1200383e, e14e4a6fe, e818721b6, 8a8ea94d0, all in v2.75.0). The gap is closed commit by commit: each Rust commit between 3dde0c11b and v2.75.0 that touches a ported crate (119 of them) is replayed in order as one Go commit titled `go port: <Rust subject> (rust <short sha>)`, gated like any change; the five carried commits are checked for completeness and recorded as applied, not ported twice. Crates not yet ported are ported from v2.75.0. Later releases are taken the same way, commit by commit, never piecemeal.
+6. One Rust target, a fixed commit. The Go build matches Rust commit 5b68df737775f748e6d3e9207930e5467c31e397 (5b68df737), recorded in `go/RUST_TARGET`. It was the `v2.75.0` tag on 2026-11-24, but that release was still in flight and the tag may move: the commit is the target, never the tag. Until the replay below lands, the translated code follows commit 3dde0c11b plus five later commits teammates carried into `go/` (0fc96c573, b1200383e, e14e4a6fe, e818721b6, 8a8ea94d0, all in v2.75.0). The gap is closed commit by commit: each Rust commit between 3dde0c11b and v2.75.0 that touches a ported crate (119 of them) is replayed in order as one Go commit titled `go port: <Rust subject> (rust <short sha>)`, gated like any change; the five carried commits are checked for completeness and recorded as applied, not ported twice. Crates not yet ported are ported from the target commit. Later releases are taken the same way, commit by commit, never piecemeal.
 7. Report progress as the list of scenarios that pass on Go, never as lines or percentages ported.
 8. Operating rules for agents and the coordinator:
    - Never `cd` out of the repository in a shell that later launches worktree agents; use absolute paths, `git -C` and `go -C`. A worktree workflow launched from outside the repository fails every agent.
@@ -62,7 +62,7 @@ The 2026-11-24 audit of the ported tests (below) found the same weakening habits
 - [ ] Milestone 2: Go `mj` CLI and Charm dashboard against the Rust daemon.
 - [ ] Milestone 3: Go daemon serving the Rust CLI and Go workers, slice by slice.
 - [ ] Milestone 4: all Go; the credential-free scripts in `tests/e2e/` pass against `go/bin/mj`.
-- [x] (2026-11-24) Target chosen with the owner: Mjolnir v2.75.0 (5b68df737), the release cut that day; it is ahead of the 3dde0c11b baseline and contains the five Rust commits already carried into `go/`.
+- [x] (2026-11-24) Target chosen with the owner: Rust commit 5b68df737 (what the in-flight v2.75.0 tag pointed at that day; the commit, not the tag, is the target); it is ahead of the 3dde0c11b baseline and contains the five Rust commits already carried into `go/`.
 - [ ] Replay the 119 Rust commits from 3dde0c11b to v2.75.0 that touch ported crates, one Go commit each, in order, after milestone 1's current debugging lands (they touch the same worker code). Then rebuild the Rust reference at v2.75.0 and rerun the scenario suite.
 - [ ] Later releases: replay commit by commit after milestone 4.
 
@@ -120,7 +120,7 @@ Milestone 4, all Go and parity. Every credential-free script in `tests/e2e/` pas
 - Decision: parse with cobra, render help and usage errors in clap's layout; recognise development builds by a `.mj-development-build` directory beside the binary or Go's `go-build` temporary directories.
   Date/Author: 2026-11-20, agent.
 
-- Decision: the Go build targets a released Mjolnir version, v2.75.0, and reaches it, and every later release, by replaying Rust commits one by one.
+- Decision: the Go build targets one fixed Rust commit, 5b68df737 (v2.75.0 as tagged on 2026-11-24; the tag may move, the commit does not), and reaches it, and every later release, by replaying Rust commits one by one.
   Rationale: the owner wants the Go build to match a version of mj, and commit-by-commit porting to be easy at the end; per-crate bases (`go/PORTED_FROM`) and piecemeal syncs left the Go code matching no single Rust revision. `go/RUST_TARGET` replaces `go/PORTED_FROM`.
   Date/Author: 2026-11-24, agent with the owner.
 
@@ -134,7 +134,7 @@ As of 2026-11-24: about 590k of 925k Rust lines are translated and their ported 
 
 The daemon (`mj daemon-run`, crates mj-daemon over mj-controller, mj-server and mj-session-runtime) is the control plane: it owns the SQLite store, session records, lifecycle operations and the HTTP API. Workers (mj-worker, binary `mj-worker`, one per session, copied into the session's worker directory as `hel`) are the data plane: they run the harness over ACP and own the relay journal. The `mj` CLI (mj-cli, with mj-client for the API, mj-tui and mj-chat for the dashboard) talks to the daemon over HTTP. AGENTS.md describes the contracts between them.
 
-The current Rust reference is a read-only git worktree at `/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b` (create with `git worktree add --detach <path> 3dde0c11b` if missing); its debug build is in that checkout's `target/debug` (`mj`, `mj-worker`). After the replay, a second read-only worktree at `/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-v2.75.0` (tag v2.75.0) becomes the reference and the swap-in harness uses its build.
+The current Rust reference is a read-only git worktree at `/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b` (create with `git worktree add --detach <path> 3dde0c11b` if missing); its debug build is in that checkout's `target/debug` (`mj`, `mj-worker`). After the replay, a second read-only worktree at `/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-5b68df737` (commit 5b68df737, created from the commit, not the tag) becomes the reference and the swap-in harness uses its build.
 
 
 ## Plan of Work
