@@ -318,10 +318,7 @@ fn a_slow_worker_byte_stream_outlives_the_operation_deadline_but_short_commands_
     transfer_binary(&executor, &locator, "session", &file, "store/.upload/hel").unwrap();
     assert_eq!(
         *executor.0.borrow(),
-        [
-            "untimed stage replacement Mjolnir worker",
-            "timed make replaced Mjolnir worker executable"
-        ]
+        ["untimed stage replacement Mjolnir worker"]
     );
 }
 
@@ -942,7 +939,7 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     sample.filesystems[0].paths = vec![temp.path().to_string_lossy().into_owned()];
     crate::target_storage::record_samples(&[sample], 1);
     // The first install above claimed this interval's collection.
-    forget_collections();
+    let _ = std::fs::remove_file(store.join(".collected"));
     let executor = Transfers::default();
     install(&executor, &locator, id, &bytes);
     let profile = temp.path().join("empty-profile");
@@ -1243,4 +1240,227 @@ fn concurrent_publication_after_initial_link_miss_hard_links_instead_of_copying(
         std::fs::read(&dest_nolink).unwrap(),
         std::fs::read(&binary).unwrap()
     );
+}
+
+#[test]
+fn ssh_container_script_reuses_verified_pins_heals_corruption_and_cleans_failed_copies() {
+    use std::os::unix::fs::PermissionsExt;
+    struct ShellHost {
+        root: PathBuf,
+        calls: AtomicUsize,
+    }
+    impl CommandExecutor for ShellHost {
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> Result<targets::CommandOutput> {
+            assert!(command.ssh_gzip_stdin);
+            let mut local = CommandSpec::new("sh", ["-c", command.args.last().unwrap()]);
+            local.cwd = Some(self.root.clone());
+            local
+                .env
+                .insert("HOME".into(), self.root.display().to_string());
+            local.env.insert(
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
+            );
+            targets::ProcessExecutor.execute_with_stdin(&local, input)
+        }
+        fn execute_without_deadline(
+            &self,
+            command: &CommandSpec,
+        ) -> Result<targets::CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> Result<targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut local = CommandSpec::new("sh", ["-c", command.args.last().unwrap()]);
+            local.cwd = Some(self.root.clone());
+            local
+                .env
+                .insert("HOME".into(), self.root.display().to_string());
+            local.env.insert(
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
+            );
+            targets::ProcessExecutor.execute(&local)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join("bin")).unwrap();
+    for (name, body) in [
+        ("podman", "#!/bin/sh\ncase $1 in exec) shift; if [ \"$1\" = --user ]; then shift 2; fi; shift; exec \"$@\";; cp) cp -- \"$2\" \"${3#*:}\" || exit $?; [ ! -e \"$HOME/fail-cp\" ];; *) exit 1;; esac\n".to_owned()),
+        ("sha256sum", format!("#!/bin/sh\necho hash >> '{}'\nexec /usr/bin/sha256sum \"$@\"\n", root.join("hashes").display())),
+    ] {
+        let path = root.join("bin").join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let id = "cccccccccccccccccccccccccccccccc";
+    let locator = targets::TargetLocator::SshPodman {
+        ssh: SshTarget {
+            destination: "fake".into(),
+            ssh_args: vec![],
+        },
+        container_id: targets::resource_name(id).unwrap(),
+        borrowed_from: None,
+        workspace_storage: Default::default(),
+    };
+    let binary = source(root, "binary");
+    let digest = mj_core::worker_launch::worker_executable_digest(&binary).unwrap();
+    let host_dir = root
+        .join(".local/share/hel/workers/worker-binaries")
+        .join(&digest);
+    std::fs::create_dir_all(&host_dir).unwrap();
+    std::fs::copy(&binary, host_dir.join("hel")).unwrap();
+    let store = root.join("container-store").display().to_string();
+    let destination = root.join("hel").display().to_string();
+    let temporary = root.join("pin").display().to_string();
+    let executor = ShellHost {
+        root: root.into(),
+        calls: AtomicUsize::new(0),
+    };
+    for expected in [1, 2] {
+        install_ssh_container(
+            &executor,
+            &locator,
+            id,
+            &binary,
+            &destination,
+            &temporary,
+            &store,
+            &digest,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            std::fs::read(&binary).unwrap()
+        );
+        assert_eq!(executor.calls.load(Ordering::Relaxed), expected);
+        assert_eq!(
+            std::fs::read_to_string(root.join("hashes"))
+                .unwrap()
+                .lines()
+                .count(),
+            expected
+        );
+    }
+    assert!(!Path::new(&store).join(".collected").exists());
+    let stale = Path::new(&store).join("d".repeat(64)).join("hel");
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, b"unused").unwrap();
+    execute_checked(
+        &targets::ProcessExecutor,
+        CommandSpec::new("touch", ["-t", "200001010000", stale.to_str().unwrap()]),
+    )
+    .unwrap();
+    install_ssh_container(
+        &executor,
+        &locator,
+        id,
+        &binary,
+        &destination,
+        &temporary,
+        &store,
+        &digest,
+    )
+    .unwrap();
+    assert!(!stale.exists());
+    assert!(Path::new(&store).join(".collected").exists());
+    for corrupt_host in [false, true] {
+        std::fs::write(format!("{store}/{digest}/hel"), b"corrupt").unwrap();
+        if corrupt_host {
+            std::fs::write(host_dir.join("hel"), b"corrupt host").unwrap();
+        }
+        install_ssh_container(
+            &executor,
+            &locator,
+            id,
+            &binary,
+            &destination,
+            &temporary,
+            &store,
+            &digest,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            std::fs::read(&binary).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(host_dir.join("hel")).unwrap(),
+            std::fs::read(&binary).unwrap()
+        );
+    }
+    std::fs::remove_file(format!("{store}/{digest}/hel")).unwrap();
+    std::fs::write(root.join("fail-cp"), b"").unwrap();
+    assert!(
+        install_ssh_container(
+            &executor,
+            &locator,
+            id,
+            &binary,
+            &destination,
+            &temporary,
+            &store,
+            &digest
+        )
+        .is_err()
+    );
+    assert!(std::fs::read_dir(&store).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".upload-")
+    }));
+}
+
+#[test]
+fn image_install_collects_a_single_leftover_host_binary() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let locator = target(temp.path(), id);
+    let binary = source(temp.path(), "binary");
+    install(&targets::ProcessExecutor, &locator, id, &binary);
+    let store = store_root(&locator, id).unwrap();
+    let digest = mj_core::worker_launch::worker_executable_digest(&binary).unwrap();
+    let cached = store.join(digest).join("hel");
+    execute_checked(
+        &targets::ProcessExecutor,
+        CommandSpec::new("touch", ["-t", "200001010000", cached.to_str().unwrap()]),
+    )
+    .unwrap();
+    let destination = temp.path().join(id).join("hel");
+    install_binary_at(
+        &targets::ProcessExecutor,
+        &locator,
+        id,
+        None,
+        destination.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_link(destination).unwrap(),
+        Path::new(IMAGE_WORKER)
+    );
+    assert!(!cached.exists());
+    assert!(store.join(".collected").exists());
 }

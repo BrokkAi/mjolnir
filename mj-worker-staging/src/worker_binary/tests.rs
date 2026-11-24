@@ -1259,7 +1259,7 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
     );
     assert!(
         error.starts_with(
-            "Codex launch preflight failed on local host; provide Node.js 22+ with npm and npx \
+            "Codex launch preflight failed on local host; provide Node.js 22.0.0+ with npm and npx \
              on the target PATH"
         ),
         "{error}"
@@ -5461,7 +5461,6 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
             "create managed harness preparation staging",
             "remove stale private worker staging",
             "link shared Mjolnir worker into session",
-            "collect unused Mjolnir worker binaries",
             "stage managed harness launch configuration",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
