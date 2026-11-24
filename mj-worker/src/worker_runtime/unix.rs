@@ -115,7 +115,7 @@ struct HarnessPreparationSetup {
     config: WorkerLaunchConfig,
     relay: Arc<RelayCell>,
     restarting: bool,
-    task_monitor_targets: watch::Receiver<(u64, TaskMonitorTarget)>,
+    task_monitors: TaskMonitors,
     resume_session: Option<String>,
     native_session_history: NativeSessionHistory,
     /// What a sub-agent's worker observes at the end of each turn.
@@ -486,7 +486,7 @@ fn start_bridge(
     setup: PreparedAcpSetup,
     relay: Arc<RelayCell>,
     dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
-    task_monitor_targets: watch::Receiver<(u64, TaskMonitorTarget)>,
+    task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: &CancellationToken,
@@ -543,7 +543,7 @@ fn start_bridge(
         dispatch_wakes,
         commands_tx,
         user_shells,
-        task_monitor_targets,
+        task_monitors,
         capture,
         HarnessStartup::new(),
     )));
@@ -755,76 +755,71 @@ impl Drop for InPlaceHarnessRestartGuard {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TaskMonitorTarget {
-    None,
-    Kimi(std::result::Result<PathBuf, String>),
-    Antigravity(std::result::Result<PathBuf, String>),
+pub struct HarnessReloadTransition {
+    pub(crate) harness: HarnessKind,
+    pub(crate) claude_login_path: Option<PathBuf>,
+    pub(crate) boundary_mailbox_hook_available: bool,
+    pub(crate) mailbox_delivery_mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    pub(crate) credentials: std::result::Result<CredentialEndpoint, String>,
+    pub(crate) shared_credentials: SharedCredentials,
 }
 
-impl TaskMonitorTarget {
-    fn from_harness(
-        harness: HarnessKind,
-        credentials: &std::result::Result<CredentialEndpoint, String>,
-    ) -> Self {
-        let home = || {
-            credentials
-                .as_ref()
-                .map(|endpoint| endpoint.home.clone())
-                .map_err(Clone::clone)
-        };
-        match harness {
-            HarnessKind::Kimi => Self::Kimi(home()),
-            HarnessKind::Antigravity => Self::Antigravity(home()),
-            _ => Self::None,
-        }
+impl std::fmt::Debug for HarnessReloadTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HarnessReloadTransition")
+            .field("harness", &self.harness)
+            .finish_non_exhaustive()
     }
 }
 
-/// Worker-wide credentials and monitor target shared across proxy connections.
+type ReloadOutcome = std::result::Result<(), String>;
+type ReloadCompletion = (
+    HarnessReloadTransition,
+    tokio::sync::oneshot::Sender<ReloadOutcome>,
+);
+
+/// Runtime events can be cloned, but only the coordinator consumes this
+/// transition and acknowledges it on the event FIFO.
+#[derive(Clone, Debug)]
+pub struct HarnessReload(Arc<Mutex<Option<ReloadCompletion>>>);
+
+impl HarnessReload {
+    pub(crate) fn new(
+        transition: HarnessReloadTransition,
+    ) -> (Self, tokio::sync::oneshot::Receiver<ReloadOutcome>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Self(Arc::new(Mutex::new(Some((transition, tx))))), rx)
+    }
+
+    pub(crate) fn take(self) -> Option<ReloadCompletion> {
+        self.0.lock().expect("harness reload lock poisoned").take()
+    }
+}
+
 /// Credential requests hold a read guard through their filesystem operation.
 /// An in-place move drains those requests before swapping the endpoint.
 #[derive(Clone)]
-pub(super) struct SharedCredentials {
-    endpoint: Arc<tokio::sync::RwLock<std::result::Result<CredentialEndpoint, String>>>,
-    monitor_targets: watch::Sender<(u64, TaskMonitorTarget)>,
-}
+pub(crate) struct SharedCredentials(
+    Arc<tokio::sync::RwLock<std::result::Result<CredentialEndpoint, String>>>,
+);
 
 impl SharedCredentials {
-    pub(super) fn new(
-        harness: HarnessKind,
-        initial: std::result::Result<CredentialEndpoint, String>,
-    ) -> Self {
-        let (monitor_targets, _) =
-            watch::channel((0, TaskMonitorTarget::from_harness(harness, &initial)));
-        Self {
-            endpoint: Arc::new(tokio::sync::RwLock::new(initial)),
-            monitor_targets,
-        }
+    pub(crate) fn new(initial: std::result::Result<CredentialEndpoint, String>) -> Self {
+        Self(Arc::new(tokio::sync::RwLock::new(initial)))
     }
 
     pub(super) async fn read(
         &self,
     ) -> tokio::sync::RwLockReadGuard<'_, std::result::Result<CredentialEndpoint, String>> {
-        self.endpoint.read().await
+        self.0.read().await
     }
 
     pub(super) async fn drain(&self) {
-        let _guard = self.endpoint.write().await;
+        let _guard = self.0.write().await;
     }
 
-    pub(super) async fn set(
-        &self,
-        harness: HarnessKind,
-        updated: std::result::Result<CredentialEndpoint, String>,
-    ) {
-        let target = TaskMonitorTarget::from_harness(harness, &updated);
-        let mut endpoint = self.endpoint.write().await;
-        *endpoint = updated;
-        self.monitor_targets.send_modify(|(generation, current)| {
-            *generation += 1;
-            *current = target;
-        });
+    async fn set(&self, updated: std::result::Result<CredentialEndpoint, String>) {
+        *self.0.write().await = updated;
     }
 
     async fn antigravity_home(&self) -> Option<PathBuf> {
@@ -834,10 +829,6 @@ impl SharedCredentials {
             .ok()
             .filter(|endpoint| endpoint.harness == HarnessKind::Antigravity)
             .map(|endpoint| endpoint.home.clone())
-    }
-
-    fn subscribe_task_monitors(&self) -> watch::Receiver<(u64, TaskMonitorTarget)> {
-        self.monitor_targets.subscribe()
     }
 
     #[cfg(test)]
@@ -998,9 +989,16 @@ async fn restart_harness_in_place_response(
     );
     let updated_credentials = super::credential_endpoint(&launch_config);
     let updated_harness = launch_config.harness;
-    let updated_claude_login_path = (updated_harness == HarnessKind::Claude)
-        .then(|| mj_core::credentials::claude_oauth_login_path(&launch_config.environment))
-        .flatten();
+    let transition = HarnessReloadTransition {
+        harness: updated_harness,
+        claude_login_path: (updated_harness == HarnessKind::Claude)
+            .then(|| mj_core::credentials::claude_oauth_login_path(&launch_config.environment))
+            .flatten(),
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode: updated_mailbox_delivery_mode,
+        credentials: updated_credentials.clone(),
+        shared_credentials: credentials.clone(),
+    };
     writer.gate.set_step("reload harness", chrono::Utc::now());
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
@@ -1012,43 +1010,18 @@ async fn restart_harness_in_place_response(
             additional_directories,
             supervisor_spec: Some(Box::new((supervisor_path, prepared.spec))),
             leases: Some(Box::new((prepared.managed, prepared.managed_node))),
+            on_restart: Some(Box::new(transition)),
             resolved,
         })
         .await
     {
         Ok(()) => match resolution.await {
             Ok(Ok(())) => {
-                // The replacement bridge is now live under the updated launch
-                // config. Publish its relay policies before waking the new
-                // task monitor through the credential endpoint update.
-                let login_identity = {
-                    let mut relay = relay.lock().expect("relay state lock poisoned");
-                    relay.set_turn_verdict_harness(updated_harness);
-                    relay.authentication_login_path = updated_claude_login_path;
-                    relay.set_steering_delivery_mode(
-                        updated_harness,
-                        boundary_mailbox_hook_available,
-                    );
-                    relay.update_mailbox_delivery_mode(updated_mailbox_delivery_mode);
-                    relay.set_harness_turn_policy(harness_turn_policy_for(updated_harness));
-                    relay.set_background_work_policy(background_work_policy_for(updated_harness));
-                    if let Err(error) = relay.retire_harness_process_state() {
-                        return RelayResponseEnvelope {
-                            request_id,
-                            protocol_version,
-                            body: compaction_error(
-                                RelayErrorCode::Internal,
-                                &format!(
-                                    "retire previous harness state after in-place restart: {error:#}"
-                                ),
-                            ),
-                        };
-                    }
-                    relay.login_identity.clone()
-                };
-                credentials
-                    .set(updated_harness, updated_credentials.clone())
-                    .await;
+                let login_identity = relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .login_identity
+                    .clone();
                 if let Ok(endpoint) = &updated_credentials {
                     if let Err(error) =
                         requests::observe_initial_login(endpoint, &login_identity).await
@@ -1905,8 +1878,8 @@ pub async fn run_daemon_owned(
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
     let subagent_role = config.subagent_mcp_role();
     let has_subagent_tools = subagent_role.is_some();
-    let shared_credentials = SharedCredentials::new(config.harness, credentials);
-    let task_monitor_targets = shared_credentials.subscribe_task_monitors();
+    let task_monitors = TaskMonitors::new(config.harness, &credentials);
+    let shared_credentials = SharedCredentials::new(credentials);
     let mut client_task = mj_core::runtime::spawn(accept_worker_clients(
         listener,
         socket_guard,
@@ -1930,7 +1903,7 @@ pub async fn run_daemon_owned(
         config,
         relay: relay.clone(),
         restarting,
-        task_monitor_targets,
+        task_monitors,
         resume_session,
         native_session_history,
         capture,
@@ -3218,7 +3191,7 @@ async fn prepare_and_start_harness(
         mut config,
         relay,
         restarting,
-        task_monitor_targets,
+        task_monitors,
         resume_session,
         native_session_history,
         capture,
@@ -3297,7 +3270,7 @@ async fn prepare_and_start_harness(
         prepared_acp,
         relay,
         dispatch_wake_rx,
-        task_monitor_targets,
+        task_monitors,
         capture,
         tokio::runtime::Handle::current(),
         cancel,
@@ -3455,14 +3428,11 @@ pub(super) async fn serve_client_with_memory(
     runtime: ConnectionRuntime,
     fatal: mpsc::Sender<anyhow::Error>,
 ) -> Result<()> {
-    let harness = credentials
-        .as_ref()
-        .map_or(HarnessKind::Codex, |endpoint| endpoint.harness);
     serve_client_with_shared_credentials(
         stream,
         relay,
         dispatch_wake,
-        SharedCredentials::new(harness, credentials),
+        SharedCredentials::new(credentials),
         runtime,
         fatal,
     )
@@ -4251,7 +4221,7 @@ mod preparation_tests {
             guard,
             relay,
             dispatch_wake,
-            SharedCredentials::new(HarnessKind::Codex, Err("fixture has no credentials".into())),
+            SharedCredentials::new(Err("fixture has no credentials".into())),
             ConnectionRuntime {
                 preparation: Some(preparation),
                 preparation_cancel: Some(preparation_cancel),
@@ -5294,8 +5264,7 @@ mod preparation_tests {
         let profile = temp.path().join("profile");
         std::fs::create_dir_all(&profile).unwrap();
         let launch = super::super::relay_tests::launch_config(profile.to_str().unwrap());
-        let credentials =
-            SharedCredentials::new(launch.harness, super::super::credential_endpoint(&launch));
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
         let relay = test_relay(temp.path());
         let store_id = relay.lock().unwrap().operational_state().store_id.unwrap();
         let (client, server) = UnixStream::pair().unwrap();
@@ -5476,14 +5445,15 @@ mod preparation_tests {
                 expected_store_id: store_id.clone(),
             },
         });
-        let credentials =
-            SharedCredentials::new(launch.harness, super::super::credential_endpoint(&launch));
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
         launch.no_github_credentials = reject_opt_out;
         let (commands, mut receiver) = mpsc::channel(1);
+        let reload_relay = relay.clone();
         let reload = mj_core::runtime::spawn(async move {
             let Some(CommandRequest::ReloadLaunchConfig {
                 supervisor_spec,
                 environment,
+                on_restart,
                 resolved,
                 ..
             }) = receiver.recv().await
@@ -5493,6 +5463,13 @@ mod preparation_tests {
             if reject_opt_out {
                 resolved.send(Err("turn active".into())).unwrap();
             } else {
+                apply_harness_reload_transition(
+                    &reload_relay,
+                    &mut TaskMonitors::default(),
+                    *on_restart.unwrap(),
+                )
+                .await
+                .unwrap();
                 resolved.send(Ok(())).unwrap();
             }
             let (_, spec) = *supervisor_spec.unwrap();
@@ -5633,8 +5610,7 @@ mod preparation_tests {
         });
         let mut launch = super::super::relay_tests::launch_config(root.to_str().unwrap());
         launch.cwd = root.to_owned();
-        let credentials =
-            SharedCredentials::new(launch.harness, super::super::credential_endpoint(&launch));
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
         let (commands, mut receiver) = mpsc::channel(1);
         let request = |request_id: &str| RelayRequestEnvelope {
             request_id: request_id.into(),
@@ -5692,11 +5668,23 @@ mod preparation_tests {
             "first writer must retire its generation"
         );
 
+        let reload_relay = relay.clone();
         let accepted = mj_core::runtime::spawn(async move {
-            let Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) = receiver.recv().await
+            let Some(CommandRequest::ReloadLaunchConfig {
+                on_restart,
+                resolved,
+                ..
+            }) = receiver.recv().await
             else {
                 panic!("expected restart C to reach the ACP runtime");
             };
+            apply_harness_reload_transition(
+                &reload_relay,
+                &mut TaskMonitors::default(),
+                *on_restart.unwrap(),
+            )
+            .await
+            .unwrap();
             resolved.send(Ok(())).unwrap();
         });
         let response = restart_harness_in_place_response(
@@ -5744,9 +5732,7 @@ mod preparation_tests {
         // No hold active -> rejected without touching acp-supervisor.json or credentials.
         let launch_config = super::super::relay_tests::launch_config(root.path().to_str().unwrap());
         let initial_credentials = super::super::credential_endpoint(&launch_config);
-        let shared_credentials =
-            SharedCredentials::new(launch_config.harness, initial_credentials.clone());
-        let mut monitor_targets = shared_credentials.subscribe_task_monitors();
+        let shared_credentials = SharedCredentials::new(initial_credentials.clone());
         {
             let mut state = relay.lock().unwrap();
             state.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AntigravityTasks);
@@ -5847,11 +5833,13 @@ mod preparation_tests {
         std::fs::create_dir_all(&dest_home).unwrap();
         let profile_to_read = dest_home.clone();
         let worker_root = root.path().to_owned();
+        let reload_relay = relay.clone();
         let acceptor = mj_core::runtime::spawn(async move {
             match ok_rx.recv().await {
                 Some(CommandRequest::ReloadLaunchConfig {
                     environment,
                     supervisor_spec,
+                    on_restart,
                     resolved,
                     ..
                 }) => {
@@ -5881,6 +5869,13 @@ mod preparation_tests {
                     ] {
                         assert!(allow.contains(&serde_json::json!(tool)), "missing {tool}");
                     }
+                    apply_harness_reload_transition(
+                        &reload_relay,
+                        &mut TaskMonitors::default(),
+                        *on_restart.unwrap(),
+                    )
+                    .await
+                    .unwrap();
                     let _ = resolved.send(Ok(()));
                     Some((environment, supervisor_spec))
                 }
@@ -5983,11 +5978,6 @@ mod preparation_tests {
                 payload: RelayResponsePayload::HarnessRestartedInPlace
             }
         ));
-        assert!(monitor_targets.has_changed().unwrap());
-        assert_eq!(
-            *monitor_targets.borrow_and_update(),
-            (1, TaskMonitorTarget::None)
-        );
         assert_eq!(
             relay
                 .lock()

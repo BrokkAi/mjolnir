@@ -1692,7 +1692,7 @@ impl DurableRelay {
         true
     }
 
-    fn persist_activity_transition(&mut self) -> Result<()> {
+    pub(crate) fn persist_activity_transition(&mut self) -> Result<()> {
         // The one place background work gains members: every change to it
         // ends here, journaled or not.
         self.note_background_work()?;
@@ -2118,8 +2118,11 @@ impl DurableRelay {
     /// [`Self::offer_settle_facts`]: the same observation, taken at the same
     /// point, as for a prompt that is finishing. Each arm names the condition
     /// its settling site tests.
-    pub fn event_settles_autonomous_turn(&self, event: &mj_core::acp::RuntimeEvent) -> bool {
-        use mj_core::acp::RuntimeEvent;
+    pub fn event_settles_autonomous_turn<R>(
+        &self,
+        event: &mj_core::acp::RuntimeEventWithReload<R>,
+    ) -> bool {
+        use mj_core::acp::RuntimeEventWithReload as RuntimeEvent;
         if self.snapshot.active_prompt.is_some()
             || self.snapshot.autonomous_harness_turn().is_none()
         {

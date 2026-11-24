@@ -60,85 +60,33 @@ impl HarnessStartup {
 }
 
 #[derive(Default)]
-struct TaskMonitors {
+pub(super) struct TaskMonitors {
     kimi: Option<KimiTaskMonitor>,
     antigravity: Option<AntigravityTaskMonitor>,
-    target_rx: Option<watch::Receiver<(u64, TaskMonitorTarget)>>,
-    applied_generation: u64,
 }
 
 impl TaskMonitors {
-    fn new(mut target_rx: watch::Receiver<(u64, TaskMonitorTarget)>) -> Self {
-        let (generation, target) = target_rx.borrow_and_update().clone();
-        let mut monitors = Self {
-            target_rx: Some(target_rx),
-            ..Self::default()
+    pub(super) fn new(
+        harness: HarnessKind,
+        credentials: &std::result::Result<CredentialEndpoint, String>,
+    ) -> Self {
+        let home = || {
+            credentials
+                .as_ref()
+                .map(|endpoint| endpoint.home.clone())
+                .map_err(Clone::clone)
         };
-        monitors.apply_target(generation, target);
-        monitors
-    }
-
-    fn apply_target(&mut self, generation: u64, target: TaskMonitorTarget) {
-        self.applied_generation = generation;
-        (self.kimi, self.antigravity) = match target {
-            TaskMonitorTarget::None => (None, None),
-            TaskMonitorTarget::Kimi(home) => (Some(KimiTaskMonitor::new(home)), None),
-            TaskMonitorTarget::Antigravity(home) => (None, Some(AntigravityTaskMonitor::new(home))),
-        };
-    }
-
-    fn sync_target(&mut self) -> bool {
-        let Some(target_rx) = &mut self.target_rx else {
-            return false;
-        };
-        if target_rx.borrow().0 == self.applied_generation {
-            return false;
+        match harness {
+            HarnessKind::Kimi => Self {
+                kimi: Some(KimiTaskMonitor::new(home())),
+                antigravity: None,
+            },
+            HarnessKind::Antigravity => Self {
+                kimi: None,
+                antigravity: Some(AntigravityTaskMonitor::new(home())),
+            },
+            _ => Self::default(),
         }
-        let (generation, target) = target_rx.borrow_and_update().clone();
-        self.apply_target(generation, target);
-        true
-    }
-
-    fn has_target_rx(&self) -> bool {
-        self.target_rx.is_some()
-    }
-
-    async fn target_changed(&mut self) -> bool {
-        let Some(target_rx) = &mut self.target_rx else {
-            return false;
-        };
-        if target_rx.changed().await.is_ok() {
-            true
-        } else {
-            self.target_rx = None;
-            false
-        }
-    }
-
-    async fn reconcile_and_attach(
-        &mut self,
-        relay: &Arc<RelayCell>,
-        session_configured: bool,
-    ) -> Result<()> {
-        self.sync_target();
-        if !session_configured {
-            return Ok(());
-        }
-        let id = relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .operational_state()
-            .native_session_id;
-        if let Some(id) = id {
-            if let Some(monitor) = self.antigravity.as_mut() {
-                monitor.attach(id.clone(), relay).await?;
-            }
-            if let Some(monitor) = self.kimi.as_mut() {
-                // Attaching a new conversation also refreshes its journal.
-                monitor.attach(id, relay).await?;
-            }
-        }
-        Ok(())
     }
 
     async fn prepare_event(
@@ -146,13 +94,6 @@ impl TaskMonitors {
         relay: &Arc<RelayCell>,
         event: &mut RuntimeEvent,
     ) -> Result<()> {
-        if self.sync_target()
-            && let Some(target_rx) = &mut self.target_rx
-        {
-            // An unrelated event may see the update after SessionConfigured.
-            // Preserve the wake that attaches the replacement after the batch.
-            target_rx.mark_changed();
-        }
         prepare_kimi_runtime_event(&mut self.kimi, relay, event).await?;
         prepare_antigravity_runtime_event(&mut self.antigravity, relay, event).await
     }
@@ -165,7 +106,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
     dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
-    task_monitor_targets: watch::Receiver<(u64, TaskMonitorTarget)>,
+    task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
 ) -> Result<()> {
@@ -176,7 +117,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
         dispatch_wakes,
         commands,
         user_shells,
-        TaskMonitors::new(task_monitor_targets),
+        task_monitors,
         verdict,
         capture,
         Some(startup),
@@ -583,39 +524,6 @@ fn run_relay_coordinator(
                         session_configuration.is_ready(),
                         &mut user_shells,
                     )?;
-                }
-                changed = task_monitors.target_changed(), if task_monitors.has_target_rx() && !held => {
-                    if changed {
-                        // A queued restart invalidates readiness for the old conversation.
-                        let queued = events.len();
-                        let mut capturing = capture.as_ref().map(|observer| Capture {
-                            observer,
-                            wakes: &mut dispatch_wakes,
-                        });
-                        if record_queued_runtime_events(
-                            &relay,
-                            &mut in_flight,
-                            &mut events,
-                            &mut session_configuration,
-                            &mut user_shells,
-                            &mut task_monitors,
-                            queued,
-                            capturing.as_mut(),
-                            startup.as_mut(),
-                        ).await? {
-                            verdict_tasks.shutdown().await;
-                            return Ok(());
-                        }
-                        task_monitors.reconcile_and_attach(&relay, session_configuration.is_ready()).await?;
-                        recover_authentication(&relay)?;
-                        dispatch_pending(
-                            &relay,
-                            &commands,
-                            &mut in_flight,
-                            session_configuration.is_ready(),
-                            &mut user_shells,
-                        )?;
-                    }
                 }
                 _ = tokio::time::sleep_until(mailbox_lease_wake_at), if mailbox_lease_deadline.is_some() && !held => {
                     let deadline = mailbox_lease_deadline.expect("guarded mailbox lease timer");
@@ -1053,15 +961,65 @@ async fn observe_and_record(
             None
         }
     };
+    let reload = match &mut event {
+        RuntimeEvent::HarnessRestarting { reload, .. } => {
+            reload.take().and_then(HarnessReload::take)
+        }
+        _ => None,
+    };
     track_user_shell_completion(user_shells, &event);
-    record_runtime_event_with_startup(
+    let stopped = record_runtime_event_with_startup(
         relay,
         in_flight,
         event,
         session_configuration,
         work_facts,
         startup,
-    )
+    );
+    if let Some((transition, applied)) = reload {
+        let result = match stopped {
+            Ok(stopped) => apply_harness_reload_transition(relay, task_monitors, transition)
+                .await
+                .map(|()| stopped),
+            Err(error) => Err(error),
+        };
+        let _ = applied.send(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}")),
+        );
+        return result;
+    }
+    stopped
+}
+
+pub(super) async fn apply_harness_reload_transition(
+    relay: &Arc<RelayCell>,
+    task_monitors: &mut TaskMonitors,
+    transition: HarnessReloadTransition,
+) -> Result<()> {
+    let HarnessReloadTransition {
+        harness,
+        claude_login_path,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode,
+        credentials,
+        shared_credentials,
+    } = transition;
+    {
+        let mut state = relay.lock().expect("relay state lock poisoned");
+        state.set_turn_verdict_harness(harness);
+        state.authentication_login_path = claude_login_path;
+        state.set_steering_delivery_mode(harness, boundary_mailbox_hook_available);
+        state.update_mailbox_delivery_mode(mailbox_delivery_mode);
+        state.set_harness_turn_policy(harness_turn_policy_for(harness));
+        state.set_background_work_policy(background_work_policy_for(harness));
+        state.persist_activity_transition()?;
+    }
+    shared_credentials.set(credentials.clone()).await;
+    *task_monitors = TaskMonitors::new(harness, &credentials);
+    Ok(())
 }
 
 fn record_runtime_event_with_startup(
@@ -1532,7 +1490,7 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::Warning { message } => {
             relay.record_observation(RelayObservation::Warning { message })?;
         }
-        RuntimeEvent::HarnessRestarting { message } => {
+        RuntimeEvent::HarnessRestarting { message, .. } => {
             // Close admission before interrupting anything: interruption may
             // otherwise promote a replacement ahead of SessionRestarted.
             relay.clear_acp_readiness();
@@ -2270,6 +2228,7 @@ mod startup_tests {
             if arrival == Arrival::BatchedRestart {
                 events
                     .send(RuntimeEvent::HarnessRestarting {
+                        reload: None,
                         message: "restart".into(),
                     })
                     .await
@@ -2423,6 +2382,7 @@ mod startup_tests {
                             }
                         } else {
                             RuntimeEvent::HarnessRestarting {
+                                reload: None,
                                 message: "restart".into(),
                             }
                         })

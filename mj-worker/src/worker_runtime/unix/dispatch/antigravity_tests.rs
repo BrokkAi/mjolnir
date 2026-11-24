@@ -213,10 +213,8 @@ async fn send_stop(client: &mut BufReader<UnixStream>, reason: &str) {
 }
 
 async fn stop_over_socket(home: &Path, relay: &Arc<RelayCell>, reason: &str) {
-    let credentials = SharedCredentials::new(
-        HarnessKind::Antigravity,
-        Ok(credential_endpoint(HarnessKind::Antigravity, home)),
-    );
+    let credentials =
+        SharedCredentials::new(Ok(credential_endpoint(HarnessKind::Antigravity, home)));
     let (task, mut client, _wakes) = stop_connection(relay, credentials);
     send_stop(&mut client, reason).await;
     drop(client);
@@ -845,126 +843,218 @@ async fn antigravity_broken_database_refuses_idle_reservation_until_recovery() {
     assert!(reserve_idle(&mut relay.lock().unwrap()));
 }
 
-fn switch_policies(relay: &Arc<RelayCell>, harness: HarnessKind) {
-    let mut state = relay.lock().unwrap();
-    state.set_turn_verdict_harness(harness);
-    state.set_harness_turn_policy(harness_turn_policy_for(harness));
-    state.set_background_work_policy(background_work_policy_for(harness));
-    state.retire_harness_process_state().unwrap();
+struct ReloadFixture {
+    relay: Arc<RelayCell>,
+    credentials: SharedCredentials,
+    events: mpsc::Sender<RuntimeEvent>,
+    wake: mpsc::Sender<()>,
+    coordinator: tokio::task::JoinHandle<Result<()>>,
 }
 
-async fn switch_to_antigravity(configured_before_target: bool) {
-    let temp = tempfile::tempdir().unwrap();
-    let databases = Databases::create(temp.path());
-    let relay = Arc::new(RelayCell::new(
-        DurableRelay::open(
-            temp.path().join("relay"),
+impl ReloadFixture {
+    async fn start(root: &Path, harness: HarnessKind, home: &Path) -> Self {
+        let endpoint = Ok(credential_endpoint(harness, home));
+        let mut state = DurableRelay::open(
+            root.join("relay"),
             crate::relay::test_support::SESSION,
             "test",
         )
-        .unwrap(),
-    ));
-    switch_policies(&relay, HarnessKind::Claude);
-    let claude = credential_endpoint(HarnessKind::Claude, &temp.path().join("claude"));
-    let credentials = SharedCredentials::new(HarnessKind::Claude, Ok(claude.clone()));
-    let (event_tx, events) = mpsc::channel(8);
-    let (_wake, wakes) = mpsc::channel(1);
-    let (commands, _command_rx) = mpsc::channel(1);
-    let (shell_events, _shell_rx) = mpsc::channel(1);
-    let shells = crate::user_shell::UserShellRegistry::new(
-        temp.path().to_owned(),
-        BTreeMap::new(),
-        shell_events,
-    );
-    event_tx
-        .try_send(RuntimeEvent::SessionStarted {
-            native_session_id: "old-claude-conversation".into(),
-            resumed: true,
-            execution_mode: None,
-            native_continuity_lost: false,
-            replaced_unused_native_session_id: None,
-        })
         .unwrap();
-    event_tx.try_send(configured_event()).unwrap();
-    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
-        relay.clone(),
-        events,
-        wakes,
-        commands,
-        shells,
-        TaskMonitors::new(credentials.subscribe_task_monitors()),
-        None,
-        None,
-        None,
-    ));
-    wait_state(&relay, |state| state.native_session_is_ready()).await;
-
-    switch_policies(&relay, HarnessKind::Antigravity);
-    let antigravity = credential_endpoint(HarnessKind::Antigravity, temp.path());
-    if !configured_before_target {
-        credentials
-            .set(HarnessKind::Antigravity, Ok(antigravity.clone()))
-            .await;
+        state.set_turn_verdict_harness(harness);
+        state.set_harness_turn_policy(harness_turn_policy_for(harness));
+        state.set_background_work_policy(background_work_policy_for(harness));
+        let relay = Arc::new(RelayCell::new(state));
+        let credentials = SharedCredentials::new(endpoint.clone());
+        let (event_tx, events) = mpsc::channel(8);
+        let (wake, wakes) = mpsc::channel(1);
+        let (commands, _commands) = mpsc::channel(1);
+        let (shell_events, _shell_events) = mpsc::channel(1);
+        let shells = crate::user_shell::UserShellRegistry::new(
+            root.to_owned(),
+            BTreeMap::new(),
+            shell_events,
+        );
+        let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
+            relay.clone(),
+            events,
+            wakes,
+            commands,
+            shells,
+            TaskMonitors::new(harness, &endpoint),
+            None,
+            None,
+            None,
+        ));
+        let fixture = Self {
+            relay,
+            credentials,
+            events: event_tx,
+            wake,
+            coordinator,
+        };
+        fixture.open().await;
+        fixture
     }
-    event_tx
-        .try_send(RuntimeEvent::HarnessRestarting {
-            message: "switch harness".into(),
-        })
-        .unwrap();
-    event_tx.try_send(opened_event()).unwrap();
-    event_tx.try_send(configured_event()).unwrap();
-    wait_state(&relay, |state| {
-        state.native_session_id.as_deref() == Some(NATIVE) && state.native_session_is_ready()
+
+    async fn open(&self) {
+        self.events.try_send(opened_event()).unwrap();
+        self.events.try_send(configured_event()).unwrap();
+        wait_state(&self.relay, |state| state.native_session_is_ready()).await;
+    }
+
+    async fn reload(&self, harness: HarnessKind, home: &Path) {
+        let endpoint = Ok(credential_endpoint(harness, home));
+        let (reload, applied) = HarnessReload::new(HarnessReloadTransition {
+            harness,
+            claude_login_path: None,
+            mailbox_delivery_mode: None,
+            boundary_mailbox_hook_available: false,
+            credentials: endpoint.clone(),
+            shared_credentials: self.credentials.clone(),
+        });
+        self.events
+            .try_send(RuntimeEvent::HarnessRestarting {
+                message: "switch harness".into(),
+                reload: Some(reload),
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), applied)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(self.credentials.snapshot().await, endpoint);
+        assert!(
+            !self
+                .relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .native_session_is_ready()
+        );
+    }
+
+    async fn finish(self) {
+        drop(self.events);
+        self.coordinator.await.unwrap().unwrap();
+    }
+}
+
+// Hard-won: a5eed662d: switching in place left the task monitor bound to the startup harness.
+#[tokio::test]
+async fn antigravity_in_place_attaches_sqlite_monitor_and_drops_it_on_switch_away() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let claude_home = temp.path().join("claude");
+    let fixture = ReloadFixture::start(temp.path(), HarnessKind::Claude, &claude_home).await;
+
+    fixture.reload(HarnessKind::Antigravity, temp.path()).await;
+    fixture.open().await;
+    {
+        let mut state = fixture.relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_work_known, Some(true));
+        pre_invocation(&mut state, Some(NATIVE));
+        assert!(state.operational_state().harness_turn.is_some());
+    }
+    databases.set_summary(RUNNING, false);
+    wait_state(&fixture.relay, |state| {
+        state.background_work_known == Some(true)
     })
     .await;
-    if configured_before_target {
-        {
-            let mut state = relay.lock().unwrap();
-            assert_eq!(state.operational_state().background_work_known, Some(false));
-            pre_invocation(&mut state, Some(NATIVE));
-            assert!(state.operational_state().harness_turn.is_some());
-        }
-        databases.set_summary(RUNNING, false);
-        credentials
-            .set(HarnessKind::Antigravity, Ok(antigravity))
-            .await;
-        wait_state(&relay, |state| state.background_work_known == Some(true)).await;
-        databases.set_summary(IDLE, false);
-        wait_state(&relay, |state| state.harness_turn.is_none()).await;
-    } else {
-        wait_state(&relay, |state| state.background_work_known == Some(true)).await;
-    }
+    databases.set_summary(IDLE, false);
+    wait_state(&fixture.relay, |state| state.harness_turn.is_none()).await;
 
-    // Switching away retires the previous database's work and removes its monitor.
-    let mut monitors = TaskMonitors::new(credentials.subscribe_task_monitors());
-    assert!(monitors.antigravity.is_some());
-    switch_policies(&relay, HarnessKind::Claude);
-    credentials.set(HarnessKind::Claude, Ok(claude)).await;
-    assert!(monitors.sync_target());
-    assert!(monitors.antigravity.is_none());
+    fixture.reload(HarnessKind::Claude, &claude_home).await;
+    // A leftover monitor would try to open this table on SessionConfigured.
+    databases
+        .summary
+        .execute_batch("DROP TABLE conversation_summaries")
+        .unwrap();
+    fixture.open().await;
+    {
+        let relay = fixture.relay.lock().unwrap();
+        assert_eq!(relay.operational_state().background_work_known, None);
+        assert!(!relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap().iter().any(|event| {
+            matches!(&event.observation, RelayObservation::Warning { message } if message.contains("Antigravity background task tracking is unavailable"))
+        }));
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn kimi_in_place_reload_does_not_reattach_old_monitor_to_same_conversation_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session = home.join("sessions/workspace").join(NATIVE);
+    let wire = session.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session.join("state.json"),
+        serde_json::json!({"id": NATIVE}).to_string(),
+    )
+    .unwrap();
+    let indexed = serde_json::json!({"sessionId": NATIVE, "sessionDir": session});
+    std::fs::write(home.join("session_index.jsonl"), format!("{indexed}\n")).unwrap();
+    let running = serde_json::json!({
+        "type": "task.started",
+        "agentId": "main",
+        "info": {
+            "taskId": "detached-agent",
+            "description": "Background task from the previous bridge",
+            "status": "running",
+            "detached": true,
+            "startedAt": 1234,
+            "kind": "agent",
+            "agentId": "detached-agent"
+        }
+    });
+    std::fs::write(wire, format!("{running}\n")).unwrap();
+    let fixture = ReloadFixture::start(temp.path(), HarnessKind::Kimi, &home).await;
     assert_eq!(
-        relay
+        fixture
+            .relay
             .lock()
             .unwrap()
             .operational_state()
-            .background_work_known,
-        None
+            .native_agent_count,
+        1
     );
 
-    drop(event_tx);
-    coordinator.await.unwrap().unwrap();
+    fixture
+        .reload(HarnessKind::Claude, &temp.path().join("claude"))
+        .await;
+    fixture.open().await;
+    assert_eq!(
+        fixture
+            .relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .native_agent_count,
+        0
+    );
+    fixture.finish().await;
 }
 
-// Hard-won: a5eed662d: configuring Antigravity before the target update left its autonomous turns without SQLite recovery.
 #[tokio::test]
-async fn antigravity_in_place_configured_before_target_recovers_autonomous_turn() {
-    switch_to_antigravity(true).await;
-}
+async fn antigravity_in_place_reload_keeps_replacement_stop_settlement() {
+    let temp = tempfile::tempdir().unwrap();
+    let _database = Databases::create(temp.path());
+    let fixture = ReloadFixture::start(temp.path(), HarnessKind::Antigravity, temp.path()).await;
+    fixture.reload(HarnessKind::Antigravity, temp.path()).await;
 
-// Hard-won: a5eed662d: switching in place left the monitor bound to the startup harness.
-#[tokio::test]
-async fn antigravity_in_place_target_before_restart_attaches_new_conversation() {
-    switch_to_antigravity(false).await;
+    // The replacement's hooks can run before ACP reports SessionStarted.
+    {
+        let mut state = fixture.relay.lock().unwrap();
+        pre_invocation(&mut state, Some(NATIVE));
+        assert!(state.operational_state().harness_turn.is_some());
+        stop(&mut state, Some(NATIVE), Some(true), "NO_TOOL_CALL");
+        assert!(state.has_pending_antigravity_turn_settle());
+    }
+    fixture.wake.try_send(()).unwrap();
+    wait_state(&fixture.relay, |state| state.harness_turn.is_none()).await;
+    fixture.open().await;
+    fixture.finish().await;
 }
 
 // Hard-won: a5eed662d: existing control connections kept the startup Stop-hook home after a switch.
@@ -975,14 +1065,14 @@ async fn antigravity_stop_samples_live_home_on_existing_connection() {
     let relay = antigravity_relay(&temp.path().join("relay"));
     let mut monitor = attach_monitor(temp.path(), &relay).await;
     let claude = credential_endpoint(HarnessKind::Claude, &temp.path().join("claude"));
-    let credentials = SharedCredentials::new(HarnessKind::Claude, Ok(claude.clone()));
+    let credentials = SharedCredentials::new(Ok(claude.clone()));
     let (task, mut client, _wakes) = stop_connection(&relay, credentials.clone());
 
     credentials
-        .set(
+        .set(Ok(credential_endpoint(
             HarnessKind::Antigravity,
-            Ok(credential_endpoint(HarnessKind::Antigravity, temp.path())),
-        )
+            temp.path(),
+        )))
         .await;
     databases.set_step_count(1);
     pre_invocation(&mut relay.lock().unwrap(), Some(NATIVE));
@@ -1016,7 +1106,7 @@ async fn antigravity_stop_samples_live_home_on_existing_connection() {
     );
 
     // Keep the relay policy accepting Stop here to isolate the home lookup.
-    credentials.set(HarnessKind::Claude, Ok(claude)).await;
+    credentials.set(Ok(claude)).await;
     databases.set_step_count(3);
     pre_invocation(&mut relay.lock().unwrap(), Some(NATIVE));
     send_stop(&mut client, "NO_TOOL_CALL").await;

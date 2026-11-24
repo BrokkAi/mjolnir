@@ -36,8 +36,14 @@ use session_config::*;
 pub use verdict_client::VerdictSource;
 
 use crate::relay::NativeSessionHistory;
+#[cfg(unix)]
+use crate::worker_runtime::{HarnessReload, HarnessReloadTransition};
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
+
+#[cfg(unix)]
+pub type RuntimeEvent = mj_core::acp::RuntimeEventWithReload<HarnessReload>;
+
 pub mod antigravity_tasks;
 mod antigravity_usage;
 mod claude_usage;
@@ -327,6 +333,8 @@ pub enum CommandRequest {
         additional_directories: Vec<PathBuf>,
         supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
         leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+        #[cfg(unix)]
+        on_restart: Option<Box<HarnessReloadTransition>>,
         resolved: oneshot::Sender<std::result::Result<(), String>>,
     },
     CancelTurnFor {
@@ -437,6 +445,8 @@ pub(super) enum SessionRestart {
         additional_directories: Vec<PathBuf>,
         supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
         leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+        #[cfg(unix)]
+        on_restart: Option<Box<HarnessReloadTransition>>,
         resume_session: Option<String>,
         resolved: oneshot::Sender<std::result::Result<(), String>>,
     },
@@ -484,6 +494,8 @@ struct LaunchConfigReload {
     additional_directories: Vec<PathBuf>,
     supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
     leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+    #[cfg(unix)]
+    on_restart: Option<Box<HarnessReloadTransition>>,
     resolved: oneshot::Sender<std::result::Result<(), String>>,
 }
 
@@ -526,6 +538,8 @@ async fn run_inner(
     // Within this worker, restore readiness can first see any replacement.
     let mut first_replaced_unused_native_session_id = None;
     let mut pending_reload_ack: Option<oneshot::Sender<std::result::Result<(), String>>> = None;
+    #[cfg(unix)]
+    let mut pending_reload_transition: Option<Box<HarnessReloadTransition>> = None;
     let mut _active_reload_leases: Option<Box<dyn std::fmt::Debug + Send + Sync>> = None;
     let mut rollback = None;
     loop {
@@ -546,13 +560,51 @@ async fn run_inner(
                 }
                 BridgeRestartNotice::Unexpected => ACP_BRIDGE_LOST_WARNING,
             };
-            emit_runtime_event(
-                &events,
-                RuntimeEvent::HarnessRestarting {
-                    message: message.to_owned(),
-                },
-            )
-            .await?;
+            #[cfg(unix)]
+            let (reload, applied) = match pending_reload_transition.take() {
+                Some(transition) => {
+                    let (reload, applied) = HarnessReload::new(*transition);
+                    (Some(reload), Some(applied))
+                }
+                None => (None, None),
+            };
+            let restarting = RuntimeEvent::HarnessRestarting {
+                message: message.to_owned(),
+                #[cfg(unix)]
+                reload,
+                #[cfg(not(unix))]
+                reload: None,
+            };
+            #[cfg(unix)]
+            let notification = if let Some(applied) = applied {
+                // The replacement can run native hooks as soon as it starts.
+                // Wait for the coordinator to retire the old state and install
+                // the new harness state before starting the process.
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        if let Some(resolved) = pending_reload_ack.take() {
+                            let _ = resolved.send(Err("ACP runtime shut down while applying harness reload".into()));
+                        }
+                        return Ok(());
+                    }
+                    result = async {
+                        emit_runtime_event(&events, restarting).await?;
+                        applied.await.context("coordinator stopped while applying harness reload")?
+                            .map_err(anyhow::Error::msg)
+                    } => result,
+                }
+            } else {
+                emit_runtime_event(&events, restarting).await
+            };
+            #[cfg(not(unix))]
+            let notification = emit_runtime_event(&events, restarting).await;
+            if let Err(error) = notification {
+                if let Some(resolved) = pending_reload_ack.take() {
+                    let _ = resolved.send(Err(format!("{error:#}")));
+                }
+                return Err(error);
+            }
         }
         let opened = Arc::new(Mutex::new(None));
         let result = run_bridge(
@@ -667,6 +719,8 @@ async fn run_inner(
             additional_directories,
             supervisor_spec,
             leases,
+            #[cfg(unix)]
+            on_restart,
             resolved,
         }) = restart.reload_launch_config
         {
@@ -706,6 +760,10 @@ async fn run_inner(
                     spec.project_memory = launch_config.project_memory.clone();
                     _active_reload_leases = leases;
                     pending_reload_ack = Some(resolved);
+                    #[cfg(unix)]
+                    {
+                        pending_reload_transition = on_restart;
+                    }
                 }
                 Err(error) => {
                     let _ = resolved.send(Err(format!("{error:#}")));
@@ -951,6 +1009,8 @@ async fn run_bridge(
             additional_directories,
             supervisor_spec,
             leases,
+            #[cfg(unix)]
+            on_restart,
             resume_session,
             resolved,
         })) => Ok(Some(BridgeRestart {
@@ -964,6 +1024,8 @@ async fn run_bridge(
                 additional_directories,
                 supervisor_spec,
                 leases,
+                #[cfg(unix)]
+                on_restart,
                 resolved,
             }),
             native_session_used: opened_now

@@ -6059,7 +6059,7 @@ for line in sys.stdin:
             .expect("the runtime must survive the first bridge's death");
         match event {
             RuntimeEvent::NativeAgent { event } => replay.push(event),
-            RuntimeEvent::HarnessRestarting { message } => restart_messages.push(message),
+            RuntimeEvent::HarnessRestarting { message, .. } => restart_messages.push(message),
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
@@ -6459,7 +6459,7 @@ while True:
                     break;
                 }
             }
-            RuntimeEvent::HarnessRestarting { message } => {
+            RuntimeEvent::HarnessRestarting { message, .. } => {
                 assert!(
                     message.contains("reloading the native session"),
                     "{message}"
@@ -6593,7 +6593,7 @@ while True:
                     .expect("the ACP runtime keeps reporting")
                     .expect("the event channel stays open");
                 match event {
-                    RuntimeEvent::HarnessRestarting { message } => {
+                    RuntimeEvent::HarnessRestarting { message, .. } => {
                         panic!("an acknowledged cancel must not restart the bridge: {message}")
                     }
                     RuntimeEvent::PromptFinished { request_id, .. } => {
@@ -9673,6 +9673,7 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             supervisor_spec: None,
             leases: None,
+            on_restart: None,
             resolved,
         })
         .await
@@ -9741,7 +9742,15 @@ for line in sys.stdin:
     next_launch.cwd = temp.path().to_path_buf();
     next_launch.harness = HarnessKind::Claude;
     let next_command = PathBuf::from("python3");
-    let next_args = vec!["-u".into(), "-c".into(), bridge_script("ses-reloaded")];
+    let next_args = vec![
+        "-u".into(),
+        "-c".into(),
+        format!(
+            "from pathlib import Path\nPath('replacement-spawned').touch()\n{}",
+            bridge_script("ses-reloaded")
+        ),
+    ];
+    let spawned = temp.path().join("replacement-spawned");
     let mut next_supervisor = crate::worker_runtime::AcpSupervisorSpec::from(&next_launch);
     next_supervisor.command = next_command.clone();
     next_supervisor.args = next_args.clone();
@@ -9755,10 +9764,48 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             supervisor_spec: Some(Box::new((supervisor_path.clone(), next_supervisor))),
             leases: None,
+            on_restart: Some(Box::new(HarnessReloadTransition {
+                harness: HarnessKind::Claude,
+                claude_login_path: None,
+                boundary_mailbox_hook_available: false,
+                mailbox_delivery_mode: None,
+                credentials: Err("fixture has no credentials".into()),
+                shared_credentials: crate::worker_runtime::SharedCredentials::new(Err(
+                    "fixture has no credentials".into(),
+                )),
+            })),
             resolved,
         })
         .await
         .unwrap();
+
+    let applied = loop {
+        match tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RuntimeEvent::HarnessRestarting {
+                reload: Some(reload),
+                ..
+            } => break reload.take().unwrap().1,
+            RuntimeEvent::SessionStarted { .. } => {
+                panic!("replacement opened before the restart barrier")
+            }
+            _ => {}
+        }
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), event_rx.recv())
+            .await
+            .is_err(),
+        "replacement must not emit bridge events while the restart barrier is held"
+    );
+    assert!(
+        !spawned.exists(),
+        "replacement process started before the barrier"
+    );
+    applied.send(Ok(())).unwrap();
 
     resolution
         .await
@@ -9770,17 +9817,20 @@ for line in sys.stdin:
         written_spec.contains("ses-reloaded"),
         "expected updated supervisor spec on disk, got: {written_spec}"
     );
-    let mut saw_reloaded = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if format!("{event:?}").contains("ses-reloaded") {
-            saw_reloaded = true;
+    loop {
+        let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let RuntimeEvent::SessionStarted {
+            native_session_id, ..
+        } = event
+        {
+            assert_eq!(native_session_id, "ses-reloaded");
             break;
         }
     }
-    assert!(
-        saw_reloaded,
-        "replacement bridge should have opened with the new command/args (ses-reloaded)"
-    );
+    assert!(spawned.exists());
     shutdown.cancel();
     let _ = runtime.await;
 }
