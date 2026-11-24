@@ -644,6 +644,69 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
+/// Reviewer model selection reports why a profile could not be checked
+/// instead of folding discovery failures into "no profile offers the model".
+#[tokio::test]
+async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
+    if !isolated_spawn_test("reviewer_model_selection_reports_profiles_that_fail_discovery") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+
+    // Every enabled profile fails discovery.
+    let (backend, _) = selection_backend(&[], None).await;
+    let error = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+    assert!(!error.contains("no further enabled"), "{error}");
+    let error = backend
+        .reviewer_autoconfigure_candidates()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("deepseek (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+
+    // Two profiles answer without the model; one fails discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &["flash"]), ("deepseek", &["flash"])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let candidates = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap();
+    assert!(candidates.offered.is_empty());
+    assert_eq!(candidates.unavailable.len(), 1);
+    assert_eq!(candidates.unavailable[0].0, "codex-high");
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let error = crate::server::api::resolve_reviewer_model_profile_selection(
+        &backend,
+        "luna",
+        None,
+        mj_core::config::ExecutionPolicy::Unconstrained,
+        "reviewer",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.message.contains("Could not check: codex-high (")
+            && error.message.contains("cannot be discovered"),
+        "{}",
+        error.message
+    );
+}
+
 /// A close is accepted long before the child is gone: it cancels whatever owned
 /// the session, checkpoints, seals the relay and tears the process tree down,
 /// and the record only says `Closing` once that is under way. A child that had
