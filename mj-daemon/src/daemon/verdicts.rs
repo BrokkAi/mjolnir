@@ -207,7 +207,7 @@ pub(crate) fn projected_activity(
     )
 }
 
-pub(super) fn review_working(runtime: &RuntimeProjection, id: &str) -> bool {
+fn review_working(runtime: &RuntimeProjection, id: &str) -> bool {
     mj_client::review::any_working(
         runtime
             .metadata
@@ -301,6 +301,7 @@ fn own_verdict(
     } else {
         NoRecoveryCopy
     };
+    let review_working = review_working(runtime, id);
     SessionVerdict {
         transition,
         transition_failure,
@@ -312,7 +313,8 @@ fn own_verdict(
         working: (connected_worker && live.is_some_and(|live| live.is_computing(form)))
             || held
             || launching
-            || review_working(runtime, id),
+            || review_working,
+        review_working,
         active_work,
         unfinished: unfinished_turn || active_work || held || launching,
         interrupt: turn_targetable,

@@ -904,14 +904,18 @@ async fn wait_uses_fresh_worker_idle_state_and_retains_other_subtree_work() {
     session.verdict.working = true;
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
 
-    for (working_descendants, reviewing, subtree_idle) in
-        [(0, false, true), (1, false, false), (0, true, false)]
-    {
+    for (working_descendants, review_working, review_status, subtree_idle) in [
+        (0, false, None, true),
+        (1, false, None, false),
+        (0, true, Some("Reviewing"), false),
+        (0, false, Some("Waiting for input"), true),
+    ] {
         session.verdict.working_descendants = working_descendants;
-        session.turn_review = reviewing.then(|| {
+        session.verdict.review_working = review_working;
+        session.turn_review = review_status.map(|status| {
             Box::new(crate::server::ViewerTurnReview {
                 child_session_id: None,
-                status: "Reviewing".into(),
+                status: status.into(),
                 roles: Vec::new(),
                 verdict: None,
             })

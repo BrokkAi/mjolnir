@@ -76,7 +76,7 @@ pub(super) fn update(
                     .changes(&next.verdicts)
                     .filter_map(|(id, next)| {
                         let busy = |v: &mj_client::runtime_feed::SessionVerdict| {
-                            (v.working, v.working_descendants)
+                            (v.working, v.working_descendants, v.review_working)
                         };
                         (previous.verdicts.get(id).map(busy) != next.map(busy)).then(|| id.clone())
                     }),
@@ -604,7 +604,7 @@ fn project_states(
             } else if transitioning || record.state == mj_core::state::SessionState::Checkpointing {
                 Working
             } else if !record.state.is_active() {
-                if super::verdicts::review_working(runtime, id) {
+                if runtime.verdicts.get(id).is_some_and(|v| v.review_working) {
                     Working
                 } else {
                     Inactive

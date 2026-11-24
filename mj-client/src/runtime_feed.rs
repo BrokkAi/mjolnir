@@ -55,6 +55,8 @@ pub struct SessionVerdict {
     pub move_queue_held: bool,
     pub idle: bool,
     pub working: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_working: bool,
     pub active_work: bool,
     pub unfinished: bool,
     pub interrupt: bool,

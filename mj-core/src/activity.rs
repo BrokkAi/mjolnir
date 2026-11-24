@@ -266,7 +266,9 @@ impl ActivityState {
     #[must_use]
     pub fn is_computing(&self, waiting_for_input: bool, has_background: bool) -> bool {
         match self {
-            Self::Turn { .. } | Self::Tool { .. } => !waiting_for_input || has_background,
+            Self::Turn { .. } | Self::Tool { .. } | Self::Unrecognized => {
+                !waiting_for_input || has_background
+            }
             Self::Background { .. } | Self::Closing => true,
             Self::Unknown { last_known, .. } => {
                 last_known.is_computing(waiting_for_input, has_background)
@@ -276,8 +278,7 @@ impl ActivityState {
             | Self::Goal
             | Self::CheckingQuota
             | Self::Retry
-            | Self::Closed
-            | Self::Unrecognized => false,
+            | Self::Closed => false,
         }
     }
 

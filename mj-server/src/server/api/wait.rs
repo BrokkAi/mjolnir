@@ -477,13 +477,9 @@ pub(super) async fn finish_wait(
         && session.lifecycle == ViewerLifecycleCategory::Live
         && !observation.resuming
         && !observation.closing;
-    let review_working = viewer_session
-        .turn_review
-        .as_deref()
-        .is_some_and(|review| review.verdict.is_none());
     let stale_own_work = !viewer_session.verdict.idle && session.is_idle;
     let subtree_busy = if stale_own_work {
-        viewer_session.verdict.working_descendants > 0 || review_working
+        viewer_session.verdict.working_descendants > 0 || viewer_session.verdict.review_working
     } else {
         viewer_session.verdict.working
     };

@@ -2000,7 +2000,7 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
         session.title
     )];
     if session.working_subagents > 0 {
-        let worker_state = if session.is_idle { "idle" } else { "busy" };
+        let worker_state = worker_state_label(session);
         lines.push(format!(
             "subagents: {} working (session worker is {worker_state})",
             session.working_subagents
@@ -2400,6 +2400,20 @@ fn select_sessions(
         .collect())
 }
 
+fn worker_state_label(session: &ApiSession) -> &'static str {
+    if session.is_idle {
+        return "idle";
+    }
+    let computing = session.activity_state.as_ref().is_some_and(|state| {
+        !matches!(state, mj_core::activity::ActivityState::Unknown { .. })
+            && state.is_computing(
+                !session.pending_elicitations.is_empty(),
+                !session.background_tasks.is_empty(),
+            )
+    });
+    if computing { "working" } else { "not idle" }
+}
+
 /// The STATE column: the session's state, and "disk full" when its target
 /// cannot take writes. `--session` prints the whole reason.
 fn listed_state(session: &ApiSession) -> String {
@@ -2416,7 +2430,7 @@ fn listed_state(session: &ApiSession) -> String {
         state.push_str(&format!(" ({attention})"));
     }
     if session.working_subagents > 0 {
-        let worker_state = if session.is_idle { "idle" } else { "working" };
+        let worker_state = worker_state_label(session);
         let subagents = mj_core::text::counted(session.working_subagents, "subagent", "subagents");
         state.push_str(&format!(" ({worker_state}, {subagents} working)"));
     }
@@ -4948,6 +4962,7 @@ mod tests {
 
     #[test]
     fn sessions_report_the_workers_state_alongside_working_subagents() {
+        use mj_core::activity::ActivityState;
         use mj_core::attention::SessionAttention;
 
         let mut session = wait_response("finished", serde_json::json!({})).session;
@@ -4961,6 +4976,10 @@ mod tests {
         );
 
         session.is_idle = false;
+        session.activity_state = Some(ActivityState::Turn {
+            started_at_ms: None,
+            last_activity_at_ms: None,
+        });
         session.working_subagents = 2;
         assert_eq!(
             listed_state(&session),
@@ -4968,7 +4987,7 @@ mod tests {
         );
         assert_eq!(
             session_report_lines(&session, 0)[1],
-            "subagents: 2 working (session worker is busy)"
+            "subagents: 2 working (session worker is working)"
         );
 
         session.attention = SessionAttention::NeedsInput;
@@ -4976,6 +4995,17 @@ mod tests {
             listed_state(&session),
             "running (needs input) (working, 2 subagents working)"
         );
+
+        session.activity_state = Some(ActivityState::Expecting { since_ms: 1 });
+        assert_eq!(
+            listed_state(&session),
+            "running (needs input) (not idle, 2 subagents working)"
+        );
+        assert_eq!(
+            session_report_lines(&session, 0)[1],
+            "subagents: 2 working (session worker is not idle)"
+        );
+
         session.is_idle = true;
         session.working_subagents = 1;
         assert_eq!(
