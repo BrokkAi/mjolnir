@@ -753,6 +753,8 @@ pub async fn resolve_reviewer_model_profile_selection(
         // end the search: later-discovered profiles may.
         let mut tried = Vec::new();
         let mut last_error: Option<ApiFailure> = None;
+        // The profile IDs `last_error` already lists under "Could not check:".
+        let mut last_error_listed: Vec<String> = Vec::new();
         // Profiles whose capability check failed, kept across iterations so a
         // later refusal for one profile never hides the others.
         let mut unavailable_profiles: Vec<(String, String)> = Vec::new();
@@ -766,6 +768,7 @@ pub async fn resolve_reviewer_model_profile_selection(
                     return Err(with_could_not_check(
                         last_error.unwrap_or_else(|| error.into()),
                         &unavailable_profiles,
+                        &last_error_listed,
                     ));
                 }
             };
@@ -793,6 +796,7 @@ pub async fn resolve_reviewer_model_profile_selection(
                         ))
                     }),
                     &unavailable_profiles,
+                    &last_error_listed,
                 ));
             }
             // Profiles that could only be reported as unavailable add no
@@ -801,6 +805,11 @@ pub async fn resolve_reviewer_model_profile_selection(
             if candidates.offered.is_empty() && last_error.is_some() {
                 continue;
             }
+            let checked_ids = candidates
+                .unavailable
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
             match resolve_model_profile_selection_from(
                 backend,
                 candidates,
@@ -815,7 +824,14 @@ pub async fn resolve_reviewer_model_profile_selection(
             .await
             {
                 Ok(selected) => return Ok(selected),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    last_error_listed = if error.message.contains("Could not check:") {
+                        checked_ids
+                    } else {
+                        Vec::new()
+                    };
+                    last_error = Some(error);
+                }
             }
         }
     })
@@ -828,11 +844,15 @@ pub async fn resolve_reviewer_model_profile_selection(
 }
 
 /// Adds the profiles whose capabilities could not be checked to a refusal,
-/// except those it already lists.
-fn with_could_not_check(mut failure: ApiFailure, unavailable: &[(String, String)]) -> ApiFailure {
+/// except the `already_listed` ones its message names.
+fn with_could_not_check(
+    mut failure: ApiFailure,
+    unavailable: &[(String, String)],
+    already_listed: &[String],
+) -> ApiFailure {
     let missing = unavailable
         .iter()
-        .filter(|(id, _)| !failure.message.contains(&format!("{id} (")))
+        .filter(|(id, _)| !already_listed.contains(id))
         .map(|(id, reason)| format!("{id} ({reason})"))
         .collect::<Vec<_>>()
         .join("; ");
@@ -2591,6 +2611,53 @@ mod tests {
             error
                 .message
                 .contains("Could not check: signed-out (capability probe failed)"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A profile whose ID is the tail of an already listed one is still listed.
+    #[tokio::test]
+    async fn reviewer_refusal_lists_an_unchecked_profile_named_like_a_listed_one() {
+        let stage = |offered: Vec<SubagentCandidate>, unavailable: &[(&str, &str)]| {
+            (
+                0,
+                SubagentCandidates {
+                    offered,
+                    unavailable: unavailable
+                        .iter()
+                        .map(|(id, reason)| ((*id).into(), (*reason).into()))
+                        .collect(),
+                },
+            )
+        };
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: Some(vec![
+                stage(
+                    vec![candidate("other", Some(70), &["flash"])],
+                    &[("team-terra", "probe failed")],
+                ),
+                stage(Vec::new(), &[("terra", "login expired")]),
+            ]),
+            discovery_fails: false,
+            telemetry_store: None,
+            quota_preferences: Vec::new(),
+            config: Default::default(),
+            candidates: SubagentCandidates::default(),
+        });
+        let error = resolve_reviewer_model_profile_selection(
+            &backend,
+            "fixed",
+            None,
+            ExecutionPolicy::Unconstrained,
+            "reviewer",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.message.contains("team-terra (probe failed)")
+                && error.message.contains("terra (login expired)"),
             "{}",
             error.message
         );
