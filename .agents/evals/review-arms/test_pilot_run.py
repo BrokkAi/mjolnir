@@ -1310,6 +1310,10 @@ if not (attempt / "recover").exists():
         }}}) + "\n")
         bg_conflict = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
         self.assertFalse(bg_conflict["passed"])
+        # A truncated/malformed rollout must also reject an in_progress card.
+        rollout_file.write_text("{not valid json\n")
+        bg_corrupt = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertFalse(bg_corrupt["passed"])
 
 
 if __name__ == "__main__":

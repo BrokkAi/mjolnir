@@ -62,6 +62,7 @@ def audit_reviewer(transcript_path, own_workspace, *, cwd=None, inventory=None):
 
 
 ROLLOUT_DIRECTORY = "codex-rollout"
+ROLLOUT_UNREADABLE = object()
 PASSING_HIT_KINDS = {"interpreter-screened", "in-place-edit"}
 
 
@@ -105,6 +106,8 @@ def rollout_commands(paths):
 
 def rollout_mcp_calls(paths):
     """Index Codex's durable MCP tool call IDs so mcp.rql.rql_query cannot be spoofed."""
+    if not paths:
+        return {ROLLOUT_UNREADABLE: True}
     calls, conflicts = {}, set()
     try:
         for path in paths:
@@ -126,7 +129,7 @@ def rollout_mcp_calls(paths):
                     if calls.setdefault(identifier, record) != record:
                         conflicts.add(identifier)
     except (OSError, ValueError, AttributeError, TypeError):
-        return {}
+        return {ROLLOUT_UNREADABLE: True}
     for identifier in conflicts:
         calls[identifier] = None
     return calls
@@ -190,6 +193,8 @@ def is_rql_mcp_call(call, rollout_mcp=None, rollout=None):
         if rollout is not None and identifier in rollout:
             return False
         if rollout_mcp is not None:
+            if ROLLOUT_UNREADABLE in rollout_mcp:
+                return False
             if identifier in rollout_mcp:
                 return rollout_mcp[identifier] == ("rql", "rql_query")
             # A background Codex JS-exec MCP call still in_progress when the turn finishes
