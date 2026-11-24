@@ -4450,6 +4450,7 @@ case "$1 $2" in
     "container inspect") cat inspect.json ;;
     "exec -i")
         shift 3
+        printf '%s\n' "$*" >> exec.log
         case "$1 $2" in
             "sh -c")
                 case "$3" in
@@ -4572,7 +4573,7 @@ esac
     let worker_root = root.join("workers").join(SESSION_ID);
     std::fs::create_dir_all(&worker_root).unwrap();
     let admission = crate::controller::test_support::session_admission(SESSION_ID);
-    let interrupt_probe = |shutdown| {
+    let interrupt_probe = |controller: &Controller, shutdown| {
         let probe = InterruptedProbe {
             interrupted: AtomicBool::new(false),
             shutdown,
@@ -4586,7 +4587,7 @@ esac
     };
 
     // A cancelled probe without an accepted operation cannot queue a rollback.
-    let error = interrupt_probe(false).unwrap_err();
+    let error = interrupt_probe(&controller, false).unwrap_err();
     assert!(format!("{error:#}").contains("container existence check interrupted"));
     assert!(!worker_root.join(wire::ACCEPTED).exists());
     assert!(!worker_root.join(wire::RESTART).exists());
@@ -4594,7 +4595,7 @@ esac
     let mut attempt = OriginDeltaSuspend::load(&controller, SESSION_ID, &ProcessExecutor).unwrap();
     attempt.accept(&ProcessExecutor, true).unwrap();
     let accepted: String = wire::read(&worker_root, wire::ACCEPTED).unwrap().unwrap();
-    let error = interrupt_probe(true).unwrap_err();
+    let error = interrupt_probe(&controller, true).unwrap_err();
     assert_eq!(
         error.downcast_ref::<LifecycleFailureReason>(),
         Some(&LifecycleFailureReason::SuspendPending)
@@ -4619,7 +4620,7 @@ esac
                 crate::upgrade::gate().begin_draining();
             }
         });
-        let outcome = interrupt_probe(false);
+        let outcome = interrupt_probe(&controller, false);
         drain.await.unwrap();
         let error = outcome.unwrap_err();
         assert_eq!(
@@ -4638,10 +4639,46 @@ esac
         crate::upgrade::gate().expire_drain_for_test();
     }
 
-    interrupt_probe(false).unwrap();
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let probe = InterruptedProbe {
+        interrupted: AtomicBool::new(false),
+        shutdown: false,
+        admission_released: AtomicBool::new(false),
+    };
+    let exec_log = root.join("exec.log");
+    std::fs::write(&exec_log, "").unwrap();
+    let error = controller
+        .recover_interrupted_close_managed(
+            &admission,
+            SESSION_ID,
+            &probe,
+            &manager.control,
+            &consent,
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending),
+        "{error:#}"
+    );
+    assert!(probe.cancellation_requested());
+    assert!(!probe.admission_released.load(Ordering::SeqCst));
+    assert!(!worker_root.join(wire::REQUEST).exists());
     let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
     assert_eq!(restart.operation, accepted);
-    assert!(restart.error.as_deref().unwrap().contains("cancelled"));
+    let reason = restart.error.as_deref().unwrap();
+    assert!(reason.contains("cancelled") && format!("{error:#}").contains(reason));
+    let commands = std::fs::read_to_string(&exec_log).unwrap();
+    let last_command = commands.lines().last().unwrap();
+    assert!(
+        last_command.contains(wire::RESTART) && last_command.contains("cat >"),
+        "container I/O must end with the RESTART write: {commands}"
+    );
     let prior_reason = "cancelled by the first suspend operation";
     wire::write(
         &worker_root,
@@ -4652,12 +4689,16 @@ esac
         },
     )
     .unwrap();
-    interrupt_probe(false).unwrap();
+    let error = interrupt_probe(&controller, false).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending)
+    );
+    assert!(format!("{error:#}").contains(prior_reason));
 
     // Replay the accepted operation from durable state after replacing the
     // cancelled executor. A parked checkout should roll back without capture.
     controller.state = crate::database::load_state().unwrap();
-    let manager = crate::session_manager::spawn_session_manager().unwrap();
     let error = controller
         .recover_interrupted_close_managed(
             &admission,

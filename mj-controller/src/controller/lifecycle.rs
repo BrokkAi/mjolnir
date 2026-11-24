@@ -879,12 +879,9 @@ impl Controller {
                 let (executor, _) = cleanup.get_or_insert_with(cancellation_cleanup);
                 let attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
                 if attempt.accepted() {
-                    Self::record_suspend_cancellation(&attempt, executor)?;
-                    ensure!(
-                        !executor.cancellation_requested() && !crate::upgrade::is_draining(),
-                        "daemon handoff interrupted suspend cancellation cleanup"
-                    );
-                    return Ok(observed);
+                    let reason = Self::record_suspend_cancellation(&attempt, executor)?;
+                    // A fresh recovery owner will settle the durable restart.
+                    return Err(anyhow::Error::msg(reason));
                 }
             }
             result.map(Some)
