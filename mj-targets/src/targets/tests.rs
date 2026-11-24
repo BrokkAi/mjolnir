@@ -2727,6 +2727,126 @@ fn ssh_directory_check_quotes_the_source_and_distinguishes_missing() {
     assert!(!ssh_directory_exists(&ssh(), Path::new("/missing"), &missing).unwrap());
 }
 
+/// Runs what ssh would hand the remote login shell, on this machine.
+#[cfg(unix)]
+struct LoopbackSsh {
+    seen: RefCell<Vec<CommandSpec>>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for LoopbackSsh {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.seen.borrow_mut().push(command.clone());
+        assert_eq!(command.program, "ssh");
+        let remote = command.args.last().unwrap().clone();
+        ProcessExecutor.execute(&CommandSpec::new("sh", ["-c".to_owned(), remote]))
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_project_validation_asks_one_question_and_tells_the_answers_apart() {
+    let git = |directory: &Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.test"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{args:?}");
+    };
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("user's project");
+    std::fs::create_dir(&project).unwrap();
+    git(&project, &["init", "-q"]);
+    let validate = |path: &Path| {
+        let executor = LoopbackSsh {
+            seen: RefCell::new(vec![]),
+        };
+        let result = validate_bare_project_directory(&ssh(), path, &executor);
+        assert_eq!(executor.seen.borrow().len(), 1, "{}", path.display());
+        result
+    };
+    // A repository without a commit has no HEAD, and says so.
+    let error = validate(&project).unwrap_err();
+    assert!(
+        error.to_string().contains("has no valid Git HEAD"),
+        "{error:#}"
+    );
+    assert!(mj_core::refusal::Refusal::of(&error).is_none());
+    git(
+        &project,
+        &["commit", "-q", "--allow-empty", "-m", "initial"],
+    );
+    validate(&project).unwrap();
+    // A plain directory exists but is not a repository.
+    let plain = root.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    assert!(
+        validate(&plain)
+            .unwrap_err()
+            .to_string()
+            .contains("has no valid Git HEAD")
+    );
+    // A path that is missing, or is a file, is the caller's to correct.
+    std::fs::write(root.path().join("file"), "").unwrap();
+    for path in [root.path().join("missing"), root.path().join("file")] {
+        let error = validate(&path).unwrap_err();
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal");
+        assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Unusable);
+        assert!(
+            refusal
+                .message()
+                .contains("does not exist or is not a directory"),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    // The missing-directory status alone, without its sentinel, and ssh's own
+    // status 255 are not a missing directory.
+    for (status, stderr) in [(44, "fatal: odd\n"), (255, "Connection refused\n")] {
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+        }]);
+        let error = validate_bare_project_directory(&ssh(), Path::new("/srv/project"), &executor)
+            .unwrap_err();
+        assert!(
+            mj_core::refusal::Refusal::of(&error).is_none(),
+            "{status}: {error:#}"
+        );
+        if status == 255 {
+            assert!(
+                error.to_string().contains("remote directory check failed"),
+                "{error:#}"
+            );
+        }
+    }
+}
+
 /// Launch finding R3-6: a host-key refusal during `mj new --target <ssh>`
 /// reached the CLI as "500 ... the daemon log records the reason under
 /// reference ...". The caller gets ssh's own words and what to do, as a

@@ -539,17 +539,20 @@ pub fn ssh_directory_exists(
     match output.status {
         0 => Ok(true),
         1 => Ok(false),
-        status => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let error = anyhow::anyhow!(
-                "remote directory check failed with status {status}: {}",
-                stderr.trim()
-            );
-            Err(match host_key_refusal(&stderr, &ssh.ssh_args) {
-                Some(refusal) => error.context(refusal),
-                None => error,
-            })
-        }
+        status => Err(remote_directory_check_failure(ssh, status, &output.stderr)),
+    }
+}
+
+/// A check that could not answer, as opposed to one that found no directory.
+fn remote_directory_check_failure(ssh: &SshTarget, status: i32, stderr: &[u8]) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(stderr);
+    let error = anyhow::anyhow!(
+        "remote directory check failed with status {status}: {}",
+        stderr.trim()
+    );
+    match host_key_refusal(&stderr, &ssh.ssh_args) {
+        Some(refusal) => error.context(refusal),
+        None => error,
     }
 }
 
@@ -664,6 +667,15 @@ fn option_value<'a>(option: &'a str, keyword: &str) -> Option<&'a str> {
     Some(rest.strip_prefix('=').unwrap_or(rest).trim())
 }
 
+const MISSING_DIRECTORY_STATUS: i32 = 44;
+const MISSING_DIRECTORY_SENTINEL: &str = "__mj_missing_dir__";
+/// OpenSSH reports its own failures, such as a refused connection or host key,
+/// with status 255.
+const SSH_TRANSPORT_FAILURE_STATUS: i32 = 255;
+const BARE_PROJECT_VALIDATION_SCRIPT: &str = r#"[ -d "$1" ] || { echo __mj_missing_dir__ >&2; exit 44; }
+exec git -C "$1" rev-parse --verify HEAD
+"#;
+
 /// Verify that a bare-SSH project path exists and has a committed Git HEAD.
 pub fn validate_bare_project_directory(
     ssh: &SshTarget,
@@ -671,7 +683,23 @@ pub fn validate_bare_project_directory(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     validate_bare_project_path(path)?;
-    if !ssh_directory_exists(ssh, path, executor)? {
+    // One round trip. The script reports a missing directory with its own
+    // status and a sentinel, so neither Git's failures nor ssh's (255) can be
+    // mistaken for it. The path is a positional argument, never script text.
+    let output = executor.execute(&ssh_validation_command(
+        ssh,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            BARE_PROJECT_VALIDATION_SCRIPT.into(),
+            "mj-validate-bare-project".into(),
+            path.to_string_lossy().into_owned(),
+        ],
+        "validate bare SSH Git project",
+    ))?;
+    if output.status == MISSING_DIRECTORY_STATUS
+        && String::from_utf8_lossy(&output.stderr).contains(MISSING_DIRECTORY_SENTINEL)
+    {
         return Err(anyhow::Error::new(crate::refusal::Refusal::unusable(
             format!(
                 "remote project directory {} does not exist or is not a directory on {}",
@@ -680,18 +708,13 @@ pub fn validate_bare_project_directory(
             ),
         )));
     }
-    let output = executor.execute(&ssh_validation_command(
-        ssh,
-        vec![
-            "git".into(),
-            "-C".into(),
-            path.to_string_lossy().into_owned(),
-            "rev-parse".into(),
-            "--verify".into(),
-            "HEAD".into(),
-        ],
-        "validate bare SSH Git project",
-    ))?;
+    if output.status == SSH_TRANSPORT_FAILURE_STATUS {
+        return Err(remote_directory_check_failure(
+            ssh,
+            output.status,
+            &output.stderr,
+        ));
+    }
     if output.status != 0 {
         let detail = String::from_utf8_lossy(&output.stderr);
         let detail = detail.trim();
