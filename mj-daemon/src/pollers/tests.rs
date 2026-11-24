@@ -1742,6 +1742,7 @@ impl CapacityPollerFixture {
 
 fn capacity_target(id: &str) -> DeploymentCapacityTarget {
     DeploymentCapacityTarget {
+        stable_identity: None,
         id: id.into(),
         host: id.into(),
         target_ids: vec![id.into()],
@@ -3700,4 +3701,128 @@ fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures(
         .unwrap();
     assert!(again.contains("a-second"), "{again}");
     assert!(!again.contains("0-first-"), "{again}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_session_paths_preserve_cadence_and_inflight_refreshes() {
+    let mut fixture = CapacityPollerFixture::new();
+    let mut target = capacity_target("host");
+    target.stable_identity = Some(mj_core::targets::HostCapacityIdentity {
+        connections: Vec::new(),
+        local_template_paths: vec!["/template".into()],
+    });
+    fixture.publish_targets(vec![target.clone()]);
+    let initial = fixture.started.recv().await.unwrap();
+    initial.finish.send(Ok(None)).unwrap();
+    fixture.updates.recv().await.unwrap();
+
+    target.local_storage_paths.push("/session-one".into());
+    target
+        .probes
+        .push(CommandSpec::new("session-one", Vec::<String>::new()));
+    fixture.publish_targets(vec![target.clone()]);
+    fixture.assert_no_start().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let periodic = fixture.started.recv().await.unwrap();
+    assert_eq!(periodic.target, target);
+
+    target.local_storage_paths.push("/session-two".into());
+    fixture.publish_targets(vec![target.clone()]);
+    fixture.assert_no_start().await;
+    periodic.finish.send(Ok(None)).unwrap();
+    assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+    fixture.assert_no_start().await;
+
+    fixture.triggers.send(()).await.unwrap();
+    let old = fixture.started.recv().await.unwrap();
+    assert_eq!(old.target, target);
+    fixture
+        .targets
+        .send_modify(|inputs| inputs.refresh_generation = 1);
+    fixture.assert_no_start().await;
+    target.local_storage_paths.push("/session-three".into());
+    target
+        .probes
+        .push(CommandSpec::new("session-three", Vec::<String>::new()));
+    fixture.publish_targets(vec![target.clone()]);
+    fixture.assert_no_start().await;
+    old.finish.send(Ok(None)).unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
+    let follow_up = fixture.started.recv().await.unwrap();
+    assert_eq!(follow_up.target, target);
+    follow_up.finish.send(Ok(None)).unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    fixture.assert_no_start().await;
+
+    // A changed template starts immediately when idle.
+    target
+        .stable_identity
+        .as_mut()
+        .unwrap()
+        .local_template_paths
+        .push("/new-template".into());
+    fixture.publish_targets(vec![target.clone()]);
+    let obsolete = fixture.started.recv().await.unwrap();
+    target
+        .stable_identity
+        .as_mut()
+        .unwrap()
+        .local_template_paths
+        .push("/newer-template".into());
+    fixture.publish_targets(vec![target.clone()]);
+    fixture.assert_no_start().await;
+    obsolete.finish.send(Ok(None)).unwrap();
+    let replacement = fixture.started.recv().await.unwrap();
+    assert_eq!(replacement.target, target);
+    assert!(fixture.updates.try_recv().is_err());
+    replacement.finish.send(Ok(None)).unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().target, target);
+    fixture.assert_no_start().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_session_path_publication_during_backpressure_keeps_refresh_followup() {
+    let mut fixture = CapacityPollerFixture::new();
+    let mut target = capacity_target("host");
+    target.stable_identity = Some(mj_core::targets::HostCapacityIdentity {
+        connections: Vec::new(),
+        local_template_paths: vec!["/template".into()],
+    });
+    fixture.publish_targets(vec![target.clone()]);
+    // Fill the poller's 64-entry output channel, leaving the next completion
+    // waiting on reserve() so its latest watch value is read after publication.
+    for index in 0..64 {
+        if index != 0 {
+            fixture.triggers.send(()).await.unwrap();
+        }
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        fixture.assert_no_start().await;
+    }
+    assert_eq!(fixture.updates.len(), 64);
+    fixture.triggers.send(()).await.unwrap();
+    let old = fixture.started.recv().await.unwrap();
+    fixture
+        .targets
+        .send_modify(|inputs| inputs.refresh_generation = 1);
+    fixture.assert_no_start().await;
+    old.finish.send(Ok(None)).unwrap();
+    fixture.assert_no_start().await;
+    target.local_storage_paths.push("/newest-session".into());
+    fixture.publish_targets(vec![target.clone()]);
+    for _ in 0..64 {
+        fixture.updates.recv().await.unwrap();
+    }
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
+    let follow_up = fixture.started.recv().await.unwrap();
+    assert_eq!(follow_up.target, target);
+    follow_up.finish.send(Ok(None)).unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    fixture.assert_no_start().await;
 }
