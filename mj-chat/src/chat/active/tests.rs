@@ -2982,8 +2982,14 @@ async fn golden_active_chat_render() {
     );
 
     chat.report_review_refusal("Review request refused: repository is already under review".into());
+    chat.set_input("Continue while the review is open".into());
     let buffer = active_golden_buffer(&mut chat, 100, 24);
-    append_active_golden_state(&mut output, "review refusal remains visible", &buffer, &[]);
+    append_active_golden_state(
+        &mut output,
+        "review refusal survives composer edit",
+        &buffer,
+        &[],
+    );
 
     // Several reviews at once leave the composer free of passive status text.
     let mut chat = ChatState::new(&snapshot(), &[]);

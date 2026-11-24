@@ -5,11 +5,15 @@ use mj_core::review::driver::TurnReviewPhase;
 #[derive(Debug)]
 pub(super) struct TurnReview {
     pub(super) view: RuntimeReviewView,
+    pub(super) failure: Option<String>,
 }
 
 impl TurnReview {
     pub(super) fn new(view: RuntimeReviewView) -> Self {
-        Self { view }
+        Self {
+            view,
+            failure: None,
+        }
     }
 
     pub(super) fn update(&mut self, view: RuntimeReviewView) -> bool {
@@ -34,6 +38,15 @@ impl TurnReview {
             .map(|question| (question.role.clone(), question.request.clone()))
             .collect()
     }
+
+    pub(super) fn report_failure(&mut self, message: impl Into<String>) -> bool {
+        let message = message.into();
+        if self.failure.as_deref() == Some(message.as_str()) {
+            return false;
+        }
+        self.failure = Some(message);
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +69,38 @@ impl super::ChatState {
         !self.turn_reviews.is_empty()
     }
 
-    /// Replaces the open reviews with the daemon's latest projection.
+    /// Keep review failures visible without showing routine review progress.
+    pub(super) fn turn_review_failure(&self) -> Option<String> {
+        let failures = self
+            .turn_reviews
+            .iter()
+            .filter_map(|review| {
+                let failure = review.failure.as_ref()?;
+                let roots = review.view.roots_label();
+                Some(if self.turn_reviews.len() > 1 && !roots.is_empty() {
+                    format!("{roots}: {failure}")
+                } else {
+                    failure.clone()
+                })
+            })
+            .collect::<Vec<_>>();
+        (!failures.is_empty()).then(|| failures.join(" · "))
+    }
+
+    /// Reports a refusal on the review it is about when exactly one is open;
+    /// with several, a refusal cannot be tied to one of them, so it is a
+    /// notice.
+    pub(super) fn report_turn_review_failure(&mut self, message: String) {
+        match self.turn_reviews.as_mut_slice() {
+            [only] => {
+                only.report_failure(message);
+            }
+            _ => self.set_notice(message),
+        }
+    }
+
+    /// Replaces the open reviews with the daemon's latest projection. A review
+    /// that stays open keeps the failure it reported.
     pub(super) fn set_turn_reviews(&mut self, views: Vec<RuntimeReviewView>) {
         self.review_projection_known = true;
         let mut previous = std::mem::take(&mut self.turn_reviews);

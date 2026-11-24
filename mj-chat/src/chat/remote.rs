@@ -71,7 +71,7 @@ impl ChatState {
     }
 
     pub(super) fn report_review_refusal(&mut self, message: String) {
-        self.set_notice(message);
+        self.report_turn_review_failure(message);
     }
 }
 
