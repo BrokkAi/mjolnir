@@ -330,6 +330,7 @@ func managedCodexLaunch(sessionID, cwd string, environment map[string]string) co
 		Subagents:             core.SubagentPolicy{Mode: core.SubagentPolicyNative},
 		AgentMailboxesEnabled: true,
 		SubtleSubagents:       true,
+		ReviewTrigger:         core.ReviewTriggerOff,
 		TargetEnvironment:     map[string]string{},
 		SessionID:             sessionID,
 		Harness:               core.HarnessKindCodex,
@@ -341,6 +342,7 @@ func managedCodexLaunch(sessionID, cwd string, environment map[string]string) co
 		Cwd:                   cwd,
 		AdditionalDirectories: []string{},
 		ExecutionPolicy:       core.ExecutionPolicyConfiguredApprovals,
+		ClaudePermissionMode:  core.ClaudePermissionModeAuto,
 		MjolnirGuardian:       true,
 	}
 }

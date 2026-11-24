@@ -744,7 +744,12 @@ func TestStartingAWorkerUsesPrivateLogsWithoutTouchingIncumbentFiles(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := StartWorker(workerPermitFor(t, id, "test start"), executor, &locator, root, &github); err != nil {
+		// Rust's permit is a statement temporary, released once
+		// start_worker returns; the next start takes a fresh one.
+		permit := workerPermitFor(t, id, "test start")
+		err = StartWorker(permit, executor, &locator, root, &github)
+		permit.Release()
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -786,7 +791,10 @@ func TestStartingAWorkerUsesPrivateLogsWithoutTouchingIncumbentFiles(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := StartWorker(workerPermitFor(t, session.ID, "credential-free start"), executor, &locator, root, &github); err != nil {
+		permit = workerPermitFor(t, session.ID, "credential-free start")
+		err = StartWorker(permit, executor, &locator, root, &github)
+		permit.Release()
+		if err != nil {
 			t.Fatal(err)
 		}
 		for _, command := range recorder.all() {
