@@ -1217,12 +1217,7 @@ impl Controller {
                         {
                             relay.submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
                         }
-                        if let Err(error) = attempt.request_stop(executor) {
-                            *attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
-                            if !attempt.request_recorded() {
-                                return Err(error);
-                            }
-                        }
+                        attempt.request_stop(executor)?;
                         attempt.wait_for_stop(executor).await
                     }.await;
                     match stopped {
@@ -1231,7 +1226,7 @@ impl Controller {
                         Err(error) => match attempt.live_worker_mode(executor) {
                             Ok(None | Some(WorkerRunMode::CheckpointOnly)) => {},
                             Ok(Some(WorkerRunMode::Harness)) => {
-                                if attempt.request_recorded() {
+                                if error.downcast_ref::<LifecycleFailureReason>() == Some(&LifecycleFailureReason::SuspendPending) {
                                     return Err(error);
                                 }
                                 if let Err(cleanup) = attempt.clear_after_restart(executor) {

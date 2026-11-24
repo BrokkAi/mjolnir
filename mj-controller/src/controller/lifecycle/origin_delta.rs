@@ -538,7 +538,28 @@ impl OriginDeltaSuspend {
             args,
             "request managed checkout process quiescence",
         )?;
-        mj_core::runtime::off_async_worker(|| super::super::execute_checked(executor, command))?;
+        if let Err(error) =
+            mj_core::runtime::off_async_worker(|| super::super::execute_checked(executor, command))
+        {
+            // Delivery can fail after the worker's durable request is written.
+            match read_wire::<SuspendRequest>(
+                &self.backend,
+                &self.session_id,
+                &self.root,
+                wire::REQUEST,
+                executor,
+            ) {
+                Ok(Some(request)) if request.operation == self.operation => {}
+                Ok(_) => return Err(error),
+                Err(readback) => {
+                    return Err(error
+                        .context(format!(
+                            "could not confirm delivery of the stop request: {readback:#}"
+                        ))
+                        .context(LifecycleFailureReason::SuspendPending));
+                }
+            }
+        }
         self.request_recorded = true;
         Ok(())
     }

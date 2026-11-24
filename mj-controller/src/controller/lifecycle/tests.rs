@@ -5362,6 +5362,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
 
     const NAME: &str =
         "ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator";
+    const READ_REQUEST: &str = "read suspend record suspend-request.json";
     if !in_isolated_store(NAME) {
         return;
     }
@@ -5374,6 +5375,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         commands: RecordedCommands,
         worker_alive: Arc<Mutex<bool>>,
+        lose_stop_reply: bool,
         failed_stop_observation: Option<&'static str>,
     }
 
@@ -5401,7 +5403,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     stderr: Vec::new(),
                 });
             }
-            if self.failed_stop_observation == Some(command.purpose.as_str()) {
+            if self.failed_stop_observation == Some(command.purpose.as_str())
+                && (!self.lose_stop_reply || self.files.lock().unwrap().contains_key(wire::REQUEST))
+            {
                 anyhow::bail!("SSH failed during {}", command.purpose);
             }
             if joined.contains("identity-alive")
@@ -5450,6 +5454,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     })
                     .unwrap(),
                 );
+                if self.lose_stop_reply {
+                    anyhow::bail!("SSH lost the worker's stop reply");
+                }
                 files.insert(
                     wire::RECEIPT.to_owned(),
                     serde_json::to_vec(&SuspendReceipt {
@@ -5645,8 +5652,8 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         assert!(!files.contains_key(wire::RESTART));
     }
 
-    // SSH can fail before or during the wait for an accepted stop.
-    // Publishing either failure keeps the close for retry and startup.
+    // The worker can accept a stop while SSH loses both its reply and the
+    // readback. Lost observations during stop and capture also keep Closing.
     controller.state.sessions.get_mut(session_id).unwrap().state = SessionState::Closing;
     persist_controller_fixture(&mut controller);
     let consent = SuspendConsent {
@@ -5683,30 +5690,52 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
             wire::ACCEPTED.into(),
             serde_json::to_vec(&operation).unwrap(),
         ),
-        (wire::REQUEST.into(), serde_json::to_vec(&request).unwrap()),
         ("launch.json".into(), serde_json::to_vec(&launch).unwrap()),
     ]);
     *fake.worker_alive.lock().unwrap() = true;
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);
     for (worker_alive, command) in [
+        (true, READ_REQUEST),
         (true, "read suspend record suspend-progress.json"),
         (false, "probe Mjolnir worker daemon liveness"),
     ] {
         *fake.worker_alive.lock().unwrap() = worker_alive;
+        fake.lose_stop_reply = command == READ_REQUEST;
         fake.failed_stop_observation = Some(command);
-        let error = controller
-            .recover_interrupted_close_managed(
-                &admission,
-                session_id,
-                &fake,
-                &manager.control,
-                &consent,
-                Some(Box::pin(async { panic!("pending stop entered teardown") })),
-                SuspendSettlement::Suspend,
-            )
-            .await
-            .unwrap_err();
+        let before_close: BeforeClose = Box::pin(async { panic!("pending stop entered teardown") });
+        let error = if fake.lose_stop_reply {
+            controller
+                .suspend_session_controlled_with_manager(
+                    &admission,
+                    session_id,
+                    &fake,
+                    None,
+                    None,
+                    SourceTargetDisposition::Destroy,
+                    CheckpointExportPolicy::OriginDelta,
+                    &consent,
+                    Some(before_close),
+                    None,
+                    LatchExclusivity::HoldThroughClose,
+                    None,
+                    SuspendSettlement::Suspend,
+                )
+                .await
+        } else {
+            controller
+                .recover_interrupted_close_managed(
+                    &admission,
+                    session_id,
+                    &fake,
+                    &manager.control,
+                    &consent,
+                    Some(before_close),
+                    SuspendSettlement::Suspend,
+                )
+                .await
+        }
+        .unwrap_err();
         let reason = error.downcast_ref::<LifecycleFailureReason>().copied();
         assert_eq!(
             reason,
@@ -5714,6 +5743,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
             "{error:#}"
         );
         assert!(format!("{error:#}").contains(&format!("SSH failed during {command}")));
+        if fake.lose_stop_reply {
+            assert!(format!("{error:#}").contains("SSH lost the worker's stop reply"));
+        }
         assert_eq!(
             controller.state.sessions[session_id].state,
             SessionState::Closing
