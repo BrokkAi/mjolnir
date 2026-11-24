@@ -252,6 +252,11 @@ impl StandaloneSession {
                 tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
             }
         }
+        for reference in mj_core::attachment::file_references(prompt)? {
+            if let Err(error) = client.cache_file_attachment(&reference).await {
+                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
+            }
+        }
         Ok(())
     }
 
@@ -362,6 +367,13 @@ impl StandaloneSession {
         reference: &mj_core::attachment::AttachmentRef,
     ) -> Result<bool> {
         self.client.attachment_present(reference).await
+    }
+
+    pub async fn ensure_file_attachment(
+        &mut self,
+        reference: &mj_core::attachment::FileAttachmentRef,
+    ) -> Result<()> {
+        self.client.ensure_file_attachment(reference).await
     }
 
     pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {

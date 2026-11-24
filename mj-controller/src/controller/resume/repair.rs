@@ -429,16 +429,35 @@ impl Controller {
                             break;
                         }
                     }
+                    let files = mj_core::attachment::file_references(&blocks)?;
+                    let attachment_kind = if files.is_empty() {
+                        "image"
+                    } else {
+                        "attachment"
+                    };
+                    for reference in files {
+                        if let Err(error) = relay.ensure_file_attachment(&reference).await {
+                            tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not recover queued file attachment");
+                            missing = true;
+                        }
+                    }
                     if missing {
-                        let text = format!(
-                            "Queued prompt {} could not recover its image attachments. Re-send this prompt with its images; its content and references remain in the transcript.",
-                            prompt.command_id
-                        );
+                        let text = if attachment_kind == "image" {
+                            format!(
+                                "Queued prompt {} could not recover its image attachments. Re-send this prompt with its images; its content and references remain in the transcript.",
+                                prompt.command_id
+                            )
+                        } else {
+                            format!(
+                                "Queued prompt {} could not recover all its attachments. Re-send this prompt with its attachments; its content and references remain in the transcript.",
+                                prompt.command_id
+                            )
+                        };
                         executor.notify_notice(&text);
                         relay
                             .submit(
                                 format!(
-                                    "resume-missing-image-{}",
+                                    "resume-missing-{attachment_kind}-{}",
                                     mj_core::hex::lower_hex(sha2::Sha256::digest(
                                         prompt.command_id.as_bytes()
                                     ))

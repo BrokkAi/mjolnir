@@ -3587,6 +3587,9 @@ pub(super) async fn serve_client_with_shared_credentials(
                 RelayRequest::AttachmentPresent { .. }
                     | RelayRequest::InstallAttachment { .. }
                     | RelayRequest::ReadAttachment { .. }
+                    | RelayRequest::FileAttachmentPresent { .. }
+                    | RelayRequest::InstallFileAttachment { .. }
+                    | RelayRequest::ReadFileAttachment { .. }
             ) {
                 let operation = envelope.request.method_name();
                 let request_id = envelope.request_id.clone();
@@ -3616,6 +3619,25 @@ pub(super) async fn serve_client_with_shared_credentials(
                                     data: base64.encode(store.read(&reference)?),
                                 })
                             }
+                            RelayRequest::FileAttachmentPresent { reference } => {
+                                Ok(RelayResponsePayload::AttachmentPresent {
+                                    present: store.contains_file(&reference)?,
+                                })
+                            }
+                            RelayRequest::InstallFileAttachment { reference, data } => {
+                                anyhow::ensure!(
+                                    data.len()
+                                        <= mj_core::attachment::MAX_FILE_BYTES.div_ceil(3) * 4,
+                                    "file upload exceeds 5 MiB"
+                                );
+                                store.install_file(&reference, &base64.decode(data)?)?;
+                                Ok(RelayResponsePayload::AttachmentInstalled)
+                            }
+                            RelayRequest::ReadFileAttachment { reference } => {
+                                Ok(RelayResponsePayload::AttachmentData {
+                                    data: base64.encode(store.read_file(&reference)?),
+                                })
+                            }
                             _ => unreachable!(),
                         }
                     })
@@ -3627,7 +3649,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                         }
                         Err(error) => compaction_error(
                             RelayErrorCode::Internal,
-                            &format!("image attachment task failed: {error}"),
+                            &format!("attachment task failed: {error}"),
                         ),
                     };
                 write_logged_response(

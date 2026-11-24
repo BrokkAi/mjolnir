@@ -393,6 +393,16 @@ pub enum RelayRequest {
     ReadAttachment {
         reference: crate::attachment::AttachmentRef,
     },
+    FileAttachmentPresent {
+        reference: crate::attachment::FileAttachmentRef,
+    },
+    InstallFileAttachment {
+        reference: crate::attachment::FileAttachmentRef,
+        data: String,
+    },
+    ReadFileAttachment {
+        reference: crate::attachment::FileAttachmentRef,
+    },
     /// Add hidden background context attached to the next real prompt.
     /// This mutates only the relay-private snapshot and is never projected as
     /// conversation history.
@@ -691,6 +701,9 @@ impl RelayRequest {
             Self::AttachmentPresent { .. } => "attachment_present",
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
+            Self::FileAttachmentPresent { .. } => "file_attachment_present",
+            Self::InstallFileAttachment { .. } => "install_file_attachment",
+            Self::ReadFileAttachment { .. } => "read_file_attachment",
             Self::CpuUsage => "cpu_usage",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
@@ -753,6 +766,9 @@ impl RelayRequest {
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
+            Self::FileAttachmentPresent { .. }
+            | Self::InstallFileAttachment { .. }
+            | Self::ReadFileAttachment { .. } => super::RELAY_FILE_ATTACHMENT_PROTOCOL,
             Self::StopBackgroundTask { .. } => 9,
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::PollSubagentQueue { .. } => super::RELAY_SUBAGENT_FEED_PROTOCOL,

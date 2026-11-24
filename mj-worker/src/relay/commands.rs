@@ -936,13 +936,16 @@ impl DurableRelay {
             }
         }
         if let RelayCommand::Prompt { prompt } = &command {
-            let verified = mj_core::attachment::references(prompt).and_then(|references| {
+            let verified = (|| -> Result<()> {
                 let store = mj_core::attachment::AttachmentStore::worker(&self.root);
-                for reference in references {
+                for reference in mj_core::attachment::references(prompt)? {
                     store.read(&reference)?;
                 }
+                for reference in mj_core::attachment::file_references(prompt)? {
+                    store.read_file(&reference)?;
+                }
                 Ok(())
-            });
+            })();
             if let Err(error) = verified {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidRequest,

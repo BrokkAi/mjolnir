@@ -10623,3 +10623,149 @@ fn antigravity_connected_with_hook_publishes_steering_and_enables_automatic_stee
         } if t.contains("steer me")
     ));
 }
+
+#[tokio::test]
+async fn file_attachment_protocol_90_transfers_binary_and_dispatches_file_only_prompt() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use mj_core::attachment::{AttachmentStore, FileAttachmentRef};
+    use mj_core::relay::RELAY_FILE_ATTACHMENT_PROTOCOL;
+
+    let temp = tempfile::tempdir().unwrap();
+    let relay_root = temp.path().join("relay");
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let serving = mj_core::runtime::spawn(unix::serve_client(
+        server,
+        relay.clone(),
+        wake_tx,
+        test_credentials(),
+        None,
+        fatal_reports().0,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut exchange = async |protocol_version, request| {
+        let envelope = RelayRequestEnvelope {
+            request_id: "file-test".into(),
+            protocol_version,
+            request,
+        };
+        let mut encoded = serde_json::to_vec(&envelope).unwrap();
+        encoded.push(b'\n');
+        writer.write_all(&encoded).await.unwrap();
+        let line = tokio::time::timeout(crate::test_support::IO_TIMEOUT, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<RelayResponseEnvelope>(&line)
+            .unwrap()
+            .body
+    };
+
+    let bytes = (0..=255_u8).collect::<Vec<_>>().repeat(300);
+    let reference =
+        FileAttachmentRef::new(&bytes, "input.bin", "application/octet-stream".into()).unwrap();
+    let requests = [
+        RelayRequest::FileAttachmentPresent {
+            reference: reference.clone(),
+        },
+        RelayRequest::InstallFileAttachment {
+            reference: reference.clone(),
+            data: STANDARD.encode(&bytes),
+        },
+        RelayRequest::ReadFileAttachment {
+            reference: reference.clone(),
+        },
+        RelayRequest::Submit {
+            command_id: "file-only".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![reference.content_block()],
+            },
+        },
+    ];
+    for request in &requests {
+        assert!(matches!(
+            exchange(RELAY_FILE_ATTACHMENT_PROTOCOL - 1, request.clone()).await,
+            RelayResponseBody::Error { .. }
+        ));
+    }
+    let [present, install, read, submit] = requests;
+    let protocol = RELAY_FILE_ATTACHMENT_PROTOCOL;
+    assert!(matches!(
+        exchange(protocol, present.clone()).await,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachmentPresent { present: false }
+        }
+    ));
+    assert!(matches!(
+        exchange(protocol, install).await,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachmentInstalled
+        }
+    ));
+    assert!(matches!(
+        exchange(protocol, present).await,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachmentPresent { present: true }
+        }
+    ));
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::AttachmentData { data },
+    } = exchange(protocol, read).await
+    else {
+        panic!("expected downloaded file")
+    };
+    assert_eq!(STANDARD.decode(data).unwrap(), bytes);
+    assert_eq!(relay.lock().unwrap().latest_ordinal(), 0);
+    assert!(matches!(
+        exchange(protocol, submit).await,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Accepted { .. }
+        }
+    ));
+    drop(writer);
+    drop(lines);
+    serving.await.unwrap().unwrap();
+
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (command_tx, mut command_rx) = mpsc::channel(1);
+    let coordinator =
+        mj_core::runtime::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let CommandRequest::PromptAttachments {
+        request_id,
+        mut prompt,
+        root,
+    } = tokio::time::timeout(crate::test_support::IO_TIMEOUT, command_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("file-only prompt skipped attachment dispatch")
+    };
+    assert_eq!(request_id, "file-only");
+    assert_eq!(root, relay_root);
+    AttachmentStore::worker(&root).resolve(&mut prompt).unwrap();
+    let path = root
+        .join("attachments/files")
+        .join(&reference.sha256[..16])
+        .join("input.bin");
+    let expected = format!(
+        "Attached file: input.bin (application/octet-stream, 75.0 KiB) at {}",
+        path.display()
+    );
+    assert_eq!(prompt, vec![ContentBlock::Text(TextContent::new(expected))]);
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    coordinator.await.unwrap().unwrap();
+}
