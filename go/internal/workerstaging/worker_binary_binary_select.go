@@ -3,8 +3,15 @@
 package workerstaging
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/targets"
@@ -24,7 +31,17 @@ func DisplayPath(path string) string {
 // the configured AwsEc2 variant names a launch template, whose instance
 // type is only discoverable through the AWS API.
 func TemplateArchitecture(template core.TargetTemplate) (string, bool) {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs template_architecture")
+	container := template.Container()
+	if container == nil || container.Platform == nil {
+		return "", false
+	}
+	// Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
+	for _, part := range strings.Split(*container.Platform, "/") {
+		if arch, err := targets.NormalizeArchitecture(strings.TrimSpace(part)); err == nil {
+			return arch, true
+		}
+	}
+	return "", false
 }
 
 // PreflightArchitectures is the architectures a resume must be able to
@@ -34,7 +51,38 @@ func TemplateArchitecture(template core.TargetTemplate) (string, bool) {
 // template names, else the controller's own architecture for a target that
 // runs on this machine, else either Linux architecture for a remote target.
 func PreflightArchitectures(template core.TargetTemplate) []string {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs preflight_architectures")
+	if arch, ok := TemplateArchitecture(template); ok {
+		return []string{arch}
+	}
+	switch template.(type) {
+	case core.TargetTemplateLocalBare, core.TargetTemplateLocalPodman, core.TargetTemplateLocalDocker,
+		core.TargetTemplateAppleContainer:
+		return []string{rustArch()}
+	case core.TargetTemplateSshAppleContainer:
+		// Apple container runs only native Apple-silicon images, so a remote
+		// one is arm64 by definition.
+		return []string{"aarch64"}
+	default:
+		return []string{"x86_64", "aarch64"}
+	}
+}
+
+// workerRequirementForTemplate is the worker a template's sessions need
+// when no host answers for it: the native one on this host, otherwise the
+// portable Linux one.
+func workerRequirementForTemplate(template core.TargetTemplate) WorkerBinaryRequirement {
+	if _, ok := template.(core.TargetTemplateLocalBare); ok {
+		return WorkerBinaryRequirementLocalHost
+	}
+	return WorkerBinaryRequirementPortableLinux
+}
+
+// sshPlatformProbe asks an existing SSH host what it runs.
+func sshPlatformProbe(executor core.CommandExecutor, template core.TargetTemplateSshBare) (targets.TargetPlatform, error) {
+	ssh := core.SshTargetFromSshConnection(&template.SSH)
+	command := core.SSHCommand(core.SshTrafficClassControl, &ssh, []string{"uname", "-sm"}).
+		WithPurpose("detect target platform")
+	return probePlatform(executor, command)
 }
 
 // ReleaseImageSuppliesWorker is whether a container on this template gets
@@ -70,7 +118,38 @@ func PreflightWorkerBinary(template core.TargetTemplate, executor core.CommandEx
 // PreflightHostWorkerBinary is PreflightWorkerBinary without trusting a
 // release's image: a worker of this build must be available from the host.
 func PreflightHostWorkerBinary(template core.TargetTemplate, executor core.CommandExecutor) error {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs preflight_host_worker_binary")
+	if sshBare, ok := template.(core.TargetTemplateSshBare); ok {
+		platform, err := sshPlatformProbe(executor, sshBare)
+		if err != nil {
+			return err
+		}
+		availability, err := WorkerBinaryForArch(platform.Architecture, WorkerBinaryRequirementForOs(platform.Os))
+		if err != nil {
+			return err
+		}
+		_, err = materializeWorkerSource(availability)
+		return err
+	}
+	// Existing SSH bare hosts were resolved above. Containers and the
+	// disposable EC2 backend require portable Linux workers.
+	requirement := workerRequirementForTemplate(template)
+	var failure error
+	for _, arch := range PreflightArchitectures(template) {
+		availability, err := WorkerBinaryForArch(arch, requirement)
+		if err == nil {
+			_, err = materializeWorkerSource(availability)
+		}
+		if err == nil {
+			return nil
+		}
+		failure = err
+	}
+	if failure != nil {
+		// The message is the one provisioning would have printed later, so
+		// the user reads the same fix, sooner.
+		return fmt.Errorf("preflight the worker binary before provisioning: %w", failure)
+	}
+	return nil
 }
 
 // WorkerSourceProblem is why no worker binary could serve a session on this
@@ -84,7 +163,29 @@ func PreflightHostWorkerBinary(template core.TargetTemplate, executor core.Comma
 // answers with a platform Mjolnir does not support, is not a worker-source
 // problem and is left to the launch to report.
 func WorkerSourceProblem(template core.TargetTemplate, executor core.CommandExecutor) (string, bool) {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs worker_source_problem")
+	if ReleaseImageSuppliesWorker(template) {
+		return "", false
+	}
+	if sshBare, ok := template.(core.TargetTemplateSshBare); ok {
+		platform, err := sshPlatformProbe(executor, sshBare)
+		if err != nil {
+			return "", false
+		}
+		if _, err := WorkerBinaryForArch(platform.Architecture, WorkerBinaryRequirementForOs(platform.Os)); err != nil {
+			return err.Error(), true
+		}
+		return "", false
+	}
+	requirement := workerRequirementForTemplate(template)
+	failure, failed := "", false
+	for _, arch := range PreflightArchitectures(template) {
+		if _, err := WorkerBinaryForArch(arch, requirement); err != nil {
+			failure, failed = err.Error(), true
+			continue
+		}
+		return "", false
+	}
+	return failure, failed
 }
 
 // SSHWorkerPrerequisite is the worker an existing SSH host needs, with the
@@ -101,11 +202,33 @@ type SSHWorkerPrerequisite struct {
 // SSH host and for a host that does not say what it runs; the SSH
 // reachability check reports the latter.
 func SSHWorkerBinaryPrerequisite(template core.TargetTemplate, executor core.CommandExecutor) *SSHWorkerPrerequisite {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs ssh_worker_binary_prerequisite")
+	sshBare, ok := template.(core.TargetTemplateSshBare)
+	if !ok {
+		return nil
+	}
+	platform, err := sshPlatformProbe(executor, sshBare)
+	if err != nil {
+		return nil
+	}
+	requirement := WorkerBinaryRequirementForOs(platform.Os)
+	availability, err := WorkerBinaryForArch(platform.Architecture, requirement)
+	return &SSHWorkerPrerequisite{Triple: requirement.Triple(platform.Architecture), Availability: availability, Err: err}
 }
 
 func WorkerBinaryFor(locator *core.TargetsTargetLocator, executor core.CommandExecutor) (string, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs worker_binary_for")
+	platform, err := TargetPlatform(locator, executor)
+	if err != nil {
+		return "", err
+	}
+	requirement := WorkerBinaryRequirementForOs(platform.Os)
+	if locator.Kind == core.TargetsTargetLocatorLocalBare {
+		requirement = WorkerBinaryRequirementLocalHost
+	}
+	availability, err := WorkerBinaryForArch(platform.Architecture, requirement)
+	if err != nil {
+		return "", err
+	}
+	return materializeWorkerSource(availability)
 }
 
 func materializeWorkerSource(source WorkerBinaryAvailability) (string, error) {
@@ -133,11 +256,141 @@ func TargetPlatform(locator *core.TargetsTargetLocator, executor core.CommandExe
 }
 
 func probePlatform(executor core.CommandExecutor, command core.CommandSpec) (targets.TargetPlatform, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs probe_platform")
+	output, err := targets.ExecuteChecked(executor, command)
+	if err != nil {
+		return targets.TargetPlatform{}, err
+	}
+	text, err := binarySelectFromUTF8(output.Stdout)
+	if err != nil {
+		return targets.TargetPlatform{}, err
+	}
+	return targets.TargetPlatformParse(text)
+}
+
+// binarySelectFromUTF8 is Rust's `std::str::from_utf8`, failing with the
+// text of Rust's Utf8Error ("invalid utf-8 sequence of 1 bytes from index
+// 3", "incomplete utf-8 byte sequence from index 3").
+func binarySelectFromUTF8(text []byte) (string, error) {
+	index := 0
+	for index < len(text) {
+		first := text[index]
+		if first < 0x80 {
+			index++
+			continue
+		}
+		width := 0
+		switch {
+		case first >= 0xC2 && first <= 0xDF:
+			width = 2
+		case first >= 0xE0 && first <= 0xEF:
+			width = 3
+		case first >= 0xF0 && first <= 0xF4:
+			width = 4
+		}
+		if width == 0 {
+			return "", fmt.Errorf("invalid utf-8 sequence of 1 bytes from index %d", index)
+		}
+		low, high := byte(0x80), byte(0xBF)
+		switch first {
+		case 0xE0:
+			low = 0xA0
+		case 0xED:
+			high = 0x9F
+		case 0xF0:
+			low = 0x90
+		case 0xF4:
+			high = 0x8F
+		}
+		for offset := 1; offset < width; offset++ {
+			if index+offset >= len(text) {
+				return "", fmt.Errorf("incomplete utf-8 byte sequence from index %d", index)
+			}
+			next := text[index+offset]
+			if offset == 1 && (next < low || next > high) || offset > 1 && (next < 0x80 || next > 0xBF) {
+				return "", fmt.Errorf("invalid utf-8 sequence of %d bytes from index %d", offset, index)
+			}
+		}
+		index += width
+	}
+	return string(text), nil
 }
 
 func DownloadWorker(url, expectedSHA256, triple string) (string, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/binary_select.rs download_worker")
+	if err := ValidateWorkerSHA256(expectedSHA256); err != nil {
+		return "", err
+	}
+	digest := strings.ToLower(expectedSHA256)
+	directory := pathJoin(core.DataDir(), "workers", "pinned")
+	destination := pathJoin(directory, digest, "hel")
+	parent, ok := pathParent(destination)
+	if !ok {
+		parent = directory
+	}
+	if err := os.MkdirAll(parent, 0o777); err != nil {
+		return "", rustIOError(err)
+	}
+	if isFile(destination) {
+		actual, err := core.WorkerExecutableDigest(destination)
+		if err != nil {
+			return "", fmt.Errorf("read cached worker for %s from %s: %w", triple, destination, err)
+		}
+		if actual == digest {
+			if err := core.VerifyWorkerBuild(destination); err != nil {
+				return "", err
+			}
+			return destination, nil
+		}
+		return "", fmt.Errorf("content-addressed worker cache %s does not match %s checksum", destination, expectedSHA256)
+	}
+	body, err := onDedicatedThread(func() ([]byte, error) {
+		client := &http.Client{Timeout: 120 * time.Second}
+		response, err := client.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode >= 400 {
+			class := "client error"
+			if response.StatusCode >= 500 {
+				class = "server error"
+			}
+			return nil, fmt.Errorf("HTTP status %s (%s) for url (%s)", class, response.Status, url)
+		}
+		return io.ReadAll(response.Body)
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	actual := core.LowerHex(sum[:])
+	if !strings.EqualFold(actual, expectedSHA256) {
+		return "", fmt.Errorf("downloaded worker checksum mismatch: expected %s, got %s", expectedSHA256, actual)
+	}
+	if err := os.MkdirAll(directory, 0o777); err != nil {
+		return "", rustIOError(err)
+	}
+	temporary, err := os.CreateTemp(directory, ".tmp")
+	if err != nil {
+		return "", rustIOError(err)
+	}
+	prepare := func() error {
+		if _, err := temporary.Write(body); err != nil {
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			return err
+		}
+		if runtime.GOOS != "windows" {
+			return os.Chmod(temporary.Name(), 0o700)
+		}
+		return nil
+	}
+	if err := prepare(); err != nil {
+		temporary.Close()
+		os.Remove(temporary.Name())
+		return "", rustIOError(err)
+	}
+	return PublishCachedWorker(temporary, directory, digest)
 }
 
 func ValidateWorkerSHA256(expectedSHA256 string) error {

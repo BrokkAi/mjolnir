@@ -3,8 +3,12 @@
 package anvilclient
 
 import (
+	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -40,6 +44,51 @@ func KimiBackendConfigFromHome(home string) KimiBackendConfig {
 // BuildWithTokenProvider builds the Kimi backend with auth supplying every
 // request's bearer token: an OpenAI-compatible client with Kimi's headers
 // (its device id and the configured custom headers).
+//
+// A host that already refreshes this profile's OAuth credential passes the
+// same provider here so the profile has exactly one refresher and one
+// credential writer in the process. APIKey and CredentialsPath are ignored
+// because the provider owns authentication.
 func (c KimiBackendConfig) BuildWithTokenProvider(auth BearerTokenProvider) (LlmBackend, error) {
-	panic("unported: brokk-anvil-client/src/kimi_auth.rs KimiBackendConfig::build_with_token_provider")
+	headers, err := kimiProfileHeaders(c.DeviceIDPath, c.CustomHeaders)
+	if err != nil {
+		return nil, err
+	}
+	return NewOpenAiClientWithKimiSupport(strings.TrimRight(c.BaseURL, "/"), auth, headers), nil
+}
+
+// anvilVersion is the Anvil crate version the Kimi headers report.
+const anvilVersion = "0.28.6"
+
+func kimiProfileHeaders(deviceIDPath *string, custom http.Header) (http.Header, error) {
+	headers := custom.Clone()
+	if headers == nil {
+		headers = http.Header{}
+	}
+	headers.Set("User-Agent", "anvil/"+anvilVersion)
+	headers.Set("X-Msh-Platform", "kimi_code_cli")
+	headers.Set("X-Msh-Version", anvilVersion)
+	if deviceIDPath != nil {
+		if data, err := os.ReadFile(*deviceIDPath); err == nil && utf8.Valid(data) {
+			if deviceID := strings.TrimSpace(string(data)); deviceID != "" {
+				if !validHeaderValue(deviceID) {
+					return nil, errors.New("failed to parse header value")
+				}
+				headers.Set("X-Msh-Device-Id", deviceID)
+			}
+		}
+	}
+	return headers, nil
+}
+
+// validHeaderValue is the http crate's HeaderValue check: no control
+// character other than a tab.
+func validHeaderValue(value string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !(character >= 32 && character != 127 || character == '\t') {
+			return false
+		}
+	}
+	return true
 }

@@ -382,6 +382,7 @@ func TestAfkQuestionDecisionsAreRecordedWithTheRedactedRequestAndOutcome(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer log.Close()
 	turnContext.SetDecisionLog(log)
 	owner := &OperatorAway{}
 	pending := owner.pendingForBridgeWithSource(classifier.source, turnContext)

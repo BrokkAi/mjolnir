@@ -40,6 +40,7 @@ func TestExactInputAndFinalActionAreCorrelatedWithoutExposingInputsInLists(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer log.Close()
 	attempt := log.Start("s", "activity", "Who needs to act?", "Current conversation and live facts")
 	defer attempt.Release()
 	input := `{"text":"résumé 🛠","tools_in_flight":["shell"],"omitted":true}`
@@ -85,6 +86,7 @@ func TestCancellationRotationRestartAndPartialWritesAreHonest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer log.Close()
 	attempt := log.Start("s", "continuation", "Work left?", "Earlier instructions")
 	id := attempt.ID()
 	// Rust drops the last owner here.

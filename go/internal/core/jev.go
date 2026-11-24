@@ -288,7 +288,7 @@ type jevReadResult struct {
 }
 
 // jevFlushMessage asks the writer to close done once it has handled every
-// message queued before this one.
+// message queued before this one. A closing handle sends it last.
 type jevFlushMessage struct {
 	done chan struct{}
 }
@@ -303,7 +303,7 @@ func (jevFlushMessage) isJevMessage()  {}
 // goroutine serves the inbox; it starts when a message arrives at an idle
 // writer and ends when the inbox is empty, so an idle log holds no
 // goroutine. (Rust's writer thread ends when the last handle drops, which Go
-// cannot observe.)
+// cannot observe; DecisionLog.Close replaces that.)
 type jevWriter struct {
 	directory string
 	mu        sync.Mutex
@@ -368,14 +368,33 @@ func (w *jevWriter) serve() {
 }
 
 // DecisionLog appends Jev decisions through one writer per directory.
+//
+// The component that opens a log owns it and closes it when it shuts down.
+// Copies of it are borrowed by that owner's tasks (attempts, classifier
+// clients, the turn context) and write only until the owner closes it. Rust
+// ties the writer thread to the last handle instead: it drains, detached,
+// once every clone has dropped. Go cannot observe the last copy, so the
+// owner's Close takes its place and also waits for that drain, so no record
+// is written after the owner has shut down.
 type DecisionLog struct {
+	handle *jevHandle
+}
+
+// jevHandle is one opening of a directory's log; DecisionLog copies share
+// it.
+type jevHandle struct {
 	writer *jevWriter
+	mu     sync.Mutex
+	// drained is nil while the log is open. Close makes it, sends it to the
+	// writer behind every append this handle queued, and the writer closes
+	// it when those are written. Appends hold mu, so none can slip in after
+	// the flush.
+	drained chan struct{}
 }
 
 // jevRegistryState maps a log directory to its writer. Writers are never
-// dropped, so a directory has one writer for the life of the process: a
-// writer still draining when its last handle goes away cannot overlap a
-// later one on the same files.
+// dropped, so a directory has one writer for the life of the process: two
+// writers can never overlap on the same files.
 var jevRegistryState = struct {
 	sync.Mutex
 	writers map[string]*jevWriter
@@ -390,8 +409,10 @@ func ControllerLogDir() string {
 	return filepath.Join(DataDir(), "jev-decisions")
 }
 
-// DecisionLogOpen returns the directory's dedicated writer, made on first
-// use. Directory creation and all file I/O happen there.
+// DecisionLogOpen opens the log in directory for the caller, who owns the
+// result and must Close it. Every opening of a directory shares its
+// dedicated writer, made on first use; directory creation and all file I/O
+// happen there.
 func DecisionLogOpen(directory string) (DecisionLog, error) {
 	jevRegistryState.Lock()
 	defer jevRegistryState.Unlock()
@@ -400,27 +421,38 @@ func DecisionLogOpen(directory string) (DecisionLog, error) {
 		writer = &jevWriter{directory: directory}
 		jevRegistryState.writers[directory] = writer
 	}
-	return DecisionLog{writer: writer}, nil
+	return DecisionLog{handle: &jevHandle{writer: writer}}, nil
 }
 
-// append queues decision for the writer. Rust warns "Jev diagnostic writer
-// stopped" when its writer thread has died; a serving goroutine cannot die
-// without ending the process, so that case does not exist here.
+// append queues decision for the writer. Once the owner has closed the log
+// it warns as Rust does when its writer has stopped, and writes nothing.
 func (l DecisionLog) append(decision *JevDecision) {
+	handle := l.handle
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if handle.drained != nil {
+		slog.Warn("Jev diagnostic writer stopped", "decision_id", decision.ID)
+		return
+	}
 	copied := *decision
 	copied.Technical = slices.Clone(decision.Technical)
-	l.writer.send(jevAppendMessage{decision: copied})
+	handle.writer.send(jevAppendMessage{decision: copied})
 }
 
-// Flush returns once the writer has handled every message sent to this
-// log's directory before the call. Rust's writer thread drains when the last
-// handle drops; Go cannot observe that, so an owner that is done with the
-// log flushes it before the directory goes away. Records appended after the
-// call are not covered.
-func (l DecisionLog) Flush() {
-	done := make(chan struct{})
-	l.writer.send(jevFlushMessage{done: done})
-	<-done
+// Close is the owner's end of the log: every record appended through it or
+// its copies before the call is written when Close returns, and later
+// appends are refused. Calling it again waits for the same drain. Other
+// openings of the directory are unaffected.
+func (l DecisionLog) Close() {
+	handle := l.handle
+	handle.mu.Lock()
+	if handle.drained == nil {
+		handle.drained = make(chan struct{})
+		handle.writer.send(jevFlushMessage{done: handle.drained})
+	}
+	drained := handle.drained
+	handle.mu.Unlock()
+	<-drained
 }
 
 // jevNextAttempt numbers the attempts this process starts.
@@ -541,7 +573,8 @@ func (l DecisionLog) startWithID(session, kind, checked, scope, id string) Attem
 // one back. When the last handle is released, an attempt that never
 // finished records that it was cancelled. A handle that is never released
 // is released when it is garbage collected, so a leaked owner still ends
-// the record, only later.
+// the record, only later, and not at all once the log's owner has closed
+// the log.
 type Attempt struct {
 	handle *attemptHandle
 }

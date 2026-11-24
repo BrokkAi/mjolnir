@@ -15,6 +15,7 @@ require (
 	github.com/ebitengine/purego v0.11.3
 	github.com/gen2brain/malgo v0.11.28
 	github.com/klauspost/compress v1.20.4
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	github.com/sugarme/tokenizer v0.3.0

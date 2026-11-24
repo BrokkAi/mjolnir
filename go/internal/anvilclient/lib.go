@@ -3,10 +3,19 @@
 // Package anvilclient is the part of Brokk's Anvil LLM client (the
 // brokk-anvil-client crate, version 0.28.6, library anvil_client) that
 // Mjolnir calls: the LlmBackend interface and the model metadata it
-// publishes, one-shot structured inference (infer.rs), the Codex login file
-// (codex_auth.rs), and the provider clients Mjolnir builds for its own
-// utility inference (Codex, Grok, Muse, Kimi and the OpenAI-compatible
-// client it uses for DeepSeek).
+// publishes, one-shot structured inference (infer.rs) with its schema
+// validation (structured_output.rs), the Codex login file and its token
+// refresh (codex_auth.rs), and the provider clients Mjolnir builds for its
+// own utility inference (Codex, Grok, Muse, Kimi and the OpenAI-compatible
+// client it uses for DeepSeek), with the retry, tool-argument repair,
+// Responses API and prompt-cache continuation support they share.
+//
+// Tool offering is ported only as far as the request and stream shapes:
+// Mjolnir never offers tools, so the OpenRouter and Kimi tool-schema
+// projections, and structured-output coercion, are not ported. JSON Schema
+// validation uses github.com/santhosh-tekuri/jsonschema in place of the
+// jsonschema crate, so validation messages fed back to a model differ in
+// wording.
 //
 // Anvil is a separate Rust crate that Mjolnir depends on from crates.io, and
 // Go has no equivalent library, so the items Mjolnir uses are ported here,

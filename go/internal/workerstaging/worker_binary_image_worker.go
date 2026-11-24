@@ -6,7 +6,13 @@
 package workerstaging
 
 import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/targets"
 )
 
 // ImageWorker is where an agent-dev image keeps the worker built from its
@@ -57,17 +63,63 @@ func (w WorkerInstallHost) HostBinary() (string, bool) {
 // only when it has none of its own. A custom or older image gets the host
 // binary, which must carry this build too.
 func WorkerInstallForTarget(locator *core.TargetsTargetLocator, executor core.CommandExecutor) (WorkerInstall, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/image_worker.rs WorkerInstall::for_target")
+	if _, ok := locator.ContainerEngine(); !ok {
+		binary, err := WorkerBinaryFor(locator, executor)
+		if err != nil {
+			return nil, err
+		}
+		return WorkerInstallHost{Path: binary}, nil
+	}
+	imageBuild, carried, err := ImageWorkerBuild(locator, executor)
+	if err != nil {
+		return nil, err
+	}
+	imageIsCurrent := carried && imageBuild == core.WorkerBuildID()
+	if imageIsCurrent && core.ReleaseImageCarriesWorker() {
+		return WorkerInstallImage{}, nil
+	}
+	binary, err := WorkerBinaryFor(locator, executor)
+	if err == nil {
+		return WorkerInstallHost{Path: binary}, nil
+	}
+	if imageIsCurrent {
+		slog.Info("this build has no host worker; running the container image's worker of the same build",
+			"error", err.Error())
+		return WorkerInstallImage{}, nil
+	}
+	described := "no worker"
+	if carried {
+		described = "worker build " + imageBuild
+	}
+	return nil, fmt.Errorf("the container's image carries %s, not this Mjolnir's worker build %s, and no host worker can replace it: %w",
+		described, core.WorkerBuildID(), err)
 }
 
 // ImageWorkerBuild is the worker build a container's image carries at
 // ImageWorker; false when the image has no worker there.
 func ImageWorkerBuild(locator *core.TargetsTargetLocator, executor core.CommandExecutor) (string, bool, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/image_worker.rs image_worker_build")
+	command := core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"sh", "-c", imageWorkerBuildScript}).
+		WithPurpose("read the container image's worker build")
+	output, err := targets.ExecuteChecked(executor, command)
+	if err != nil {
+		return "", false, err
+	}
+	return parseImageWorkerBuild(output.Stdout)
 }
 
 func parseImageWorkerBuild(stdout []byte) (string, bool, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/image_worker.rs parse_image_worker_build")
+	text, err := binarySelectFromUTF8(stdout)
+	if err != nil {
+		return "", false, fmt.Errorf("the image's worker build is not UTF-8: %w", err)
+	}
+	text = strings.TrimSpace(text)
+	if text == "absent" {
+		return "", false, nil
+	}
+	if !core.IsWorkerBuild(text) {
+		return "", false, fmt.Errorf("the image's worker reported an unrecognized build %s", core.RustDebugString(text))
+	}
+	return text, true, nil
 }
 
 // WorkerBuildLabel is the label `containers/Containerfile.agent-dev` gives
@@ -80,5 +132,46 @@ const WorkerBuildLabel = "org.brokk.mjolnir.worker-build"
 // cannot be read. Sessions decide by asking the worker itself; this is for
 // planning before a container exists.
 func ImageWorkerLabel(inspection []byte) (string, bool) {
-	panic("unported: mj-worker-staging/src/worker_binary/image_worker.rs image_worker_label")
+	var images []json.RawMessage
+	if json.Unmarshal(inspection, &images) != nil || len(images) == 0 {
+		return "", false
+	}
+	var image any
+	if json.Unmarshal(images[0], &image) != nil {
+		return "", false
+	}
+	for _, pointer := range [][]string{{"Config", "Labels"}, {"Labels"}} {
+		labels, ok := jsonPointer(image, pointer)
+		if !ok {
+			continue
+		}
+		object, ok := labels.(map[string]any)
+		if !ok {
+			continue
+		}
+		label, ok := object[WorkerBuildLabel]
+		if !ok {
+			continue
+		}
+		build, ok := label.(string)
+		if !ok || build == "" {
+			return "", false
+		}
+		return build, true
+	}
+	return "", false
+}
+
+// jsonPointer is serde_json's `Value::pointer` over object keys.
+func jsonPointer(value any, keys []string) (any, bool) {
+	for _, key := range keys {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if value, ok = object[key]; !ok {
+			return nil, false
+		}
+	}
+	return value, true
 }

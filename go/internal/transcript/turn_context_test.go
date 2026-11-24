@@ -57,6 +57,7 @@ func TestDiagnosticLoggingDoesNotChangeEvidenceOrGenerationAndSurvivesReset(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer log.Close()
 	context.SetDecisionLog(log)
 	attempt := log.Start("s", "activity", "Who acts?", "Current request")
 	attempt.Finish("unchanged", "Kept runtime facts")

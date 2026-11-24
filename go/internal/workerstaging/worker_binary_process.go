@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -198,11 +199,37 @@ MJ_ENTRIES
 // ancestor: if its listing contains the next component, the failed lookup is
 // Unknown. Only a readable listing without that component proves absence.
 func provePathAbsent(path, answer string) string {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs prove_path_absent")
+	var missing strings.Builder
+	for _, ancestor := range pathAncestors(path) {
+		name, ok := pathFileName(ancestor)
+		if !ok {
+			continue
+		}
+		parent, ok := pathParent(ancestor)
+		if !ok || parent == "" {
+			parent = "."
+		}
+		fmt.Fprintf(&missing, "if entries=$(ls -1A %s); then if hel_lists \"$entries\" %s %s; then exit 1; fi; printf '%%s\\n' %s; exit 0; fi; ",
+			core.PosixQuote(parent), core.PosixQuote(name), core.PosixQuote(name), core.PosixQuote(answer))
+	}
+	return missing.String()
 }
 
 func directoryProbeCommand(locator *core.TargetsTargetLocator, directory string, relayContents bool) core.CommandSpec {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs directory_probe_command")
+	missing := provePathAbsent(directory, "absent")
+	present := "printf 'present\\n';"
+	if relayContents {
+		present = "if hel_lists \"$entries\" resume-checkout-recovery.json resume-checkout-recovery.json; then printf 'checkout-partial\\n'; " +
+			"elif hel_lists \"$entries\" resume-parent-recovery.json resume-parent-recovery.json; then printf 'partial\\n'; " +
+			"elif hel_lists \"$entries\" " + core.PosixQuote(core.RelayStateFile) + " " + core.PosixQuote(core.RelayJournalDir) + "; then " +
+			"printf 'recoverable\\n'; else printf 'nothing\\n'; fi;"
+	}
+	script := "root=" + core.PosixQuote(directory) + "; " +
+		findListedEntry + " " +
+		"if [ -d \"$root\" ]; then " +
+		"entries=$(ls -1A \"$root\") || exit 1; " + present + " " +
+		"else " + missing + " exit 1; fi"
+	return core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"sh", "-c", script})
 }
 
 // WorkerRecoveryOf is Rust's `worker_recovery` (renamed: Go cannot have a
@@ -217,14 +244,62 @@ func directoryProbeCommand(locator *core.TargetsTargetLocator, directory string,
 // running afterwards. Liveness is checked after the listing, so a worker
 // that started in between is seen.
 func WorkerRecoveryOf(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID, workerRoot string) WorkerRecovery {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs worker_recovery")
+	answer := func(command core.CommandSpec) (string, bool) {
+		output, err := executor.Execute(&command)
+		if err != nil || output.Status != 0 {
+			return "", false
+		}
+		return strings.TrimSpace(lossyText(output.Stdout)), true
+	}
+	recovery, ok := answer(WorkerRecoveryCommand(locator, workerRoot))
+	if !ok {
+		return WorkerRecoveryUnknown
+	}
+	switch recovery {
+	case "recoverable", "partial", "checkout-partial":
+		return WorkerRecoveryRecoverable
+	case "nothing", "absent":
+	default:
+		return WorkerRecoveryUnknown
+	}
+	// Unknown keeps the conservative outcome; the log says why.
+	liveness, err := func() (string, error) {
+		output, err := ProbeWorkerLiveness(executor, locator, sessionID, workerRoot)
+		if err != nil {
+			return "", err
+		}
+		if output.Status != 0 {
+			return "", fmt.Errorf("worker liveness probe exited with status %d: %s", output.Status, strings.TrimSpace(lossyText(output.Stderr)))
+		}
+		return strings.TrimSpace(lossyText(output.Stdout)), nil
+	}()
+	switch {
+	case err != nil:
+		slog.Warn("could not probe worker liveness; recovery stays undetermined",
+			"session_id", sessionID, "worker_root", workerRoot, "error", err.Error())
+		return WorkerRecoveryUnknown
+	case liveness == "dead":
+		return WorkerRecoveryNothingToRecover
+	case liveness == "alive" || liveness == "starting":
+		return WorkerRecoveryRecoverable
+	default:
+		slog.Warn("worker liveness probe gave an unrecognised answer; recovery stays undetermined",
+			"session_id", sessionID, "worker_root", workerRoot, "answer", liveness)
+		return WorkerRecoveryUnknown
+	}
 }
 
 // WorkerExitRecordCommand prints the worker's exit record, or JSON null
 // when it left none. Reads only, so it works on a target whose disk is
 // full.
 func WorkerExitRecordCommand(locator *core.TargetsTargetLocator, workerRoot string) core.CommandSpec {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs worker_exit_record_command")
+	path := workerRoot + "/" + core.WorkerExitFile
+	missing := provePathAbsent(path, "null")
+	script := "path=" + core.PosixQuote(path) + "; " + findListedEntry + " " +
+		"if [ -e \"$path\" ]; then exec cat -- \"$path\"; fi; " +
+		missing + " exit 1"
+	return core.LocatorCommand(core.SshTrafficClassControl, locator, []string{"sh", "-c", script}).
+		WithPurpose("read the Mjolnir worker's exit record")
 }
 
 // RecordedExitReason is the reason a worker recorded for its exit, and when
@@ -252,7 +327,54 @@ func ReadWorkerExitRecord(output []byte) (*WorkerExitRecord, error) {
 }
 
 func StartWorker(owner *store.WorkerPermit, executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string, github *core.GithubConfig) error {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs start_worker")
+	root, err := core.WorkerRoot(locator, owner.SessionID())
+	if err != nil {
+		return err
+	}
+	if root != workerRoot {
+		return errors.New("worker owner does not cover the selected root")
+	}
+	session, err := store.ReadDurableSessionRecord(owner.SessionID())
+	if err != nil {
+		return err
+	}
+	if session == nil {
+		return errors.New("session disappeared before worker launch admission")
+	}
+	target := session.Target
+	if target == nil {
+		return errors.New("worker has no durable placement")
+	}
+	config, err := core.ConfigLoad()
+	if err != nil {
+		return err
+	}
+	backend, err := targets.BackendLocator(target, session, &config)
+	if err != nil {
+		return err
+	}
+	if !backend.Equal(*locator) {
+		return errors.New("worker launch does not match its admitted placement")
+	}
+	if err := store.AdmitEnvironmentWorker(owner.SessionID(), target); err != nil {
+		return err
+	}
+	if github.SessionTokenPath != nil {
+		session, err := store.ReadDurableSessionRecord(owner.SessionID())
+		if err != nil {
+			return err
+		}
+		if session == nil {
+			return errors.New("session disappeared before installing its GitHub token")
+		}
+		if !session.NoGithubCredentials {
+			if err := InstallConfiguredSessionGithubToken(github, executor, locator, workerRoot); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = targets.ExecuteChecked(executor, StartWorkerCommand(locator, workerRoot))
+	return err
 }
 
 // StartWorkerDurably: every accepted boot is protected by the durable
@@ -260,11 +382,130 @@ func StartWorker(owner *store.WorkerPermit, executor core.CommandExecutor, locat
 // just automatic upgrades. ctx is the context the owner's restart records
 // are written under (Rust: worker_lifecycle's task-local).
 func StartWorkerDurably(ctx context.Context, owner *store.WorkerPermit, target core.TargetLocator, executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string, github *core.GithubConfig) error {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs start_worker_durably")
+	if err := owner.VerifyTarget(target); err != nil {
+		return err
+	}
+	id := owner.SessionID()
+	intent, err := store.LoadWorkerRestart(id)
+	if err != nil {
+		return err
+	}
+	if intent != nil && intent.OperationID != owner.OperationID() {
+		output, err := ProbeWorkerLiveness(executor, locator, id, workerRoot)
+		if err != nil {
+			return err
+		}
+		if output.Status != 0 || strings.TrimSpace(lossyText(output.Stdout)) != "dead" {
+			return errors.New("another worker replacement is still booting")
+		}
+		if err := owner.SettleDeadRestart(ctx, target); err != nil {
+			return err
+		}
+	}
+	if intent, err = store.LoadWorkerRestart(id); err != nil {
+		return err
+	}
+	if intent == nil {
+		if err := owner.BeginRestart(ctx, target, ""); err != nil {
+			return err
+		}
+	}
+	if intent, err = store.LoadWorkerRestart(id); err != nil {
+		return err
+	}
+	if intent == nil {
+		return errors.New("worker boot intent disappeared")
+	}
+	if intent.OperationID != owner.OperationID() {
+		return errors.New("another worker replacement is still pending")
+	}
+	phase, err := store.WorkerRestartPhaseOf(id)
+	if err != nil {
+		return err
+	}
+	if phase != nil && *phase == store.WorkerRestartPhasePrepared {
+		if err := store.AdvanceWorkerRestart(ctx, id, owner.OperationID(), store.WorkerRestartPhaseSwapping); err != nil {
+			return err
+		}
+	}
+	if phase, err = store.WorkerRestartPhaseOf(id); err != nil {
+		return err
+	}
+	if phase == nil || *phase != store.WorkerRestartPhaseSwapping {
+		return errors.New("worker replacement has already launched")
+	}
+	if err := StartWorker(owner, executor, locator, workerRoot, github); err != nil {
+		return err
+	}
+	return store.AdvanceWorkerRestart(ctx, id, owner.OperationID(), store.WorkerRestartPhaseAwaitingReadiness)
 }
 
 func StartWorkerCommand(locator *core.TargetsTargetLocator, workerRoot string) core.CommandSpec {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs start_worker_command")
+	binary := workerRoot + "/hel"
+	config := workerRoot + "/launch.json"
+	// A launch attempt cannot touch the incumbent's diagnostics or socket.
+	// The worker installs worker.log only after claiming worker.lock.
+	attemptLog := "hel_launch_log=$(mktemp " + core.PosixQuote(workerRoot) + "/worker-launch.XXXXXXXX) || exit $?; "
+	run := core.JoinRemoteCommand([]string{binary, "worker", "run", "--root", workerRoot, "--config", config})
+	detachedScript := attemptLog + "nohup " + run + " >\"$hel_launch_log\" 2>&1 </dev/null &"
+	// Even a loader failure is retained in the attempt-specific log.
+	execScript := attemptLog + "exec " + run + " >\"$hel_launch_log\" 2>&1"
+	var command core.CommandSpec
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalBare:
+		// The worker this launches outlives the launch, so completion must
+		// not signal the process group it inherited from this shell.
+		command = core.NewCommandSpec("sh", []string{"-c", detachedScript})
+		command.Detaches = true
+	case core.TargetsTargetLocatorLocalPodman:
+		command = core.NewCommandSpec("podman", []string{"exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	case core.TargetsTargetLocatorLocalDocker:
+		command = core.NewCommandSpec("docker", []string{"exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	case core.TargetsTargetLocatorAppleContainer:
+		command = core.NewCommandSpec("container", []string{"exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	case core.TargetsTargetLocatorAwsEc2, core.TargetsTargetLocatorSshBare:
+		command = core.SSHCommand(core.SshTrafficClassControl, locator.SSH, []string{"sh", "-c", detachedScript})
+	case core.TargetsTargetLocatorSshPodman:
+		command = core.SSHCommand(core.SshTrafficClassControl, locator.SSH,
+			[]string{"podman", "exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	case core.TargetsTargetLocatorSshDocker:
+		command = core.SSHCommand(core.SshTrafficClassControl, locator.SSH,
+			[]string{"docker", "exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	case core.TargetsTargetLocatorSshAppleContainer:
+		command = core.SSHCommand(core.SshTrafficClassControl, locator.SSH,
+			[]string{"container", "exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	case core.TargetsTargetLocatorSshNitro:
+		command = core.SSHEngineCommand(core.SshTrafficClassControl, locator.SSH, core.MicrovmEngine,
+			[]string{"exec", "--detach", locator.ContainerID, "sh", "-c", execScript})
+	}
+	// Everything before this moves data into the target and reports as
+	// Sync. Start begins here, with the daemon launch.
+	return command.WithPurpose("start detached Mjolnir worker").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageStarting})
+}
+
+// startupFailureContext is anyhow's `error.context(failure)` for a
+// WorkerHarnessStartupFailure: it reads as "message: error", and errors.As
+// finds the failure.
+type startupFailureContext struct {
+	failure core.WorkerHarnessStartupFailure
+	err     error
+}
+
+func (e *startupFailureContext) Error() string { return e.failure.Message + ": " + e.err.Error() }
+func (e *startupFailureContext) Unwrap() error { return e.err }
+
+func (e *startupFailureContext) As(target any) bool {
+	switch target := target.(type) {
+	case *core.WorkerHarnessStartupFailure:
+		*target = e.failure
+		return true
+	case **core.WorkerHarnessStartupFailure:
+		failure := e.failure
+		*target = &failure
+		return true
+	}
+	return false
 }
 
 // WorkerProbeDiagnosis enriches an opaque handshake failure by running the
@@ -272,13 +513,51 @@ func StartWorkerCommand(locator *core.TargetsTargetLocator, workerRoot string) c
 // errors (for example a glibc-linked worker inside an older-glibc
 // container) that a detached start swallows.
 func WorkerProbeDiagnosis(executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string, err error) error {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs worker_probe_diagnosis")
+	if failure, ok := WorkerBinaryProbeFailure(executor, locator, workerRoot); ok {
+		err = fmt.Errorf("%s: %w", failure, err)
+	}
+	probe, probeErr := DiagnoseWorkerReadOnly(executor, locator, workerRoot)
+	if probeErr != nil {
+		return fmt.Errorf("the worker could not be probed: %s: %w", probeErr, err)
+	}
+	diagnostic := probe.String()
+	if probe.Exit != nil && probe.Exit.HarnessStartupFailure != nil {
+		// The worker may have died after accepting the initial relay
+		// connection. Preserve its startup scope with the probe text.
+		return &startupFailureContext{
+			failure: core.WorkerHarnessStartupFailure{Message: diagnostic, Kind: probe.Exit.HarnessStartupFailure.Kind},
+			err:     err,
+		}
+	}
+	return fmt.Errorf("%s: %w", diagnostic, err)
 }
 
 // WorkerBinaryProbeFailure is why the installed worker binary fails to run
 // in the target; false when it runs.
 func WorkerBinaryProbeFailure(executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string) (string, bool) {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs worker_binary_probe_failure")
+	binary := workerRoot + "/hel"
+	command := core.LocatorCommand(core.SshTrafficClassControl, locator, []string{binary, "--version"}).
+		WithPurpose("probe installed worker binary")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return "worker probe failed: " + err.Error(), true
+	}
+	if output.Status == 0 {
+		return "", false
+	}
+	stderr := strings.TrimSpace(lossyText(output.Stderr))
+	stdout := strings.TrimSpace(lossyText(output.Stdout))
+	detail := "the process exited unsuccessfully without output"
+	if stderr != "" {
+		detail = stderr
+	} else if stdout != "" {
+		detail = stdout
+	}
+	return fmt.Sprintf("worker binary %s fails to run in the target: %s; "+
+		"if this is a loader/glibc error, provide a musl worker "+
+		"(cargo build --release --target <arch>-unknown-linux-musl "+
+		"-p brokk-mj-worker --bin mj-worker, "+
+		"or set MJ_WORKER_BINARY/MJ_WORKER_DIR)", binary, detail), true
 }
 
 // WorkerProbe is what one probe of a starting or dead worker found.
@@ -559,5 +838,34 @@ func workerProbeScript(workerRoot string) targets.ControlScript {
 // first line of each cause. A worker's exit reason can carry its bridge's
 // stderr after the first line; the caller logs the full chain.
 func FailureLine(err error) string {
-	panic("unported: mj-worker-staging/src/worker_binary/process.rs failure_line")
+	var lines []string
+	for _, cause := range failureChain(err) {
+		line, _, _ := strings.Cut(cause, "\n")
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, ": ")
+}
+
+// failureChain is err's causes from the outermost in, each without the
+// causes it wraps, as anyhow's chain() lists them: a layer `context: cause`
+// made with %w is "context" followed by the chain of cause. A layer whose
+// text does not end with its cause's is kept whole and ends the chain.
+func failureChain(err error) []string {
+	var causes []string
+	for err != nil {
+		text := err.Error()
+		next := errors.Unwrap(err)
+		if next == nil {
+			return append(causes, text)
+		}
+		own, ok := strings.CutSuffix(text, ": "+next.Error())
+		if !ok {
+			return append(causes, text)
+		}
+		causes = append(causes, own)
+		err = next
+	}
+	return causes
 }

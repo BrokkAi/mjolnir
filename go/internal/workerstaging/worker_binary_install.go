@@ -7,14 +7,27 @@
 package workerstaging
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/targets"
 )
 
 // AppendHelTargetEnvironment adds lifecycle guidance only for targets that
@@ -42,7 +55,59 @@ func AppendHelTargetEnvironment(harness core.HarnessKind, destination string, ta
 // instructions. workspace is the session's recorded container workspace, nil
 // for a session that predates per-session workspaces.
 func AppendContainerStorageGuidance(harness core.HarnessKind, destination string, target *core.TargetsTargetLocator, workspace *string, nativeTemporaryStorage bool, attachments []core.AdditionalMount) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs append_container_storage_guidance")
+	// Whether the workspace sits on storage of its own that the guidance
+	// should name: a Podman volume or helper path, or a Nitro sandbox's
+	// volume.
+	var workspaceMounted bool
+	switch target.Kind {
+	case core.TargetsTargetLocatorLocalPodman, core.TargetsTargetLocatorSshPodman:
+		workspaceMounted = target.WorkspaceStorage.EffectiveKind() != core.TargetsPodmanWorkspaceLocatorContainerLayer
+	case core.TargetsTargetLocatorSshNitro:
+		workspaceMounted = true
+	case core.TargetsTargetLocatorLocalDocker, core.TargetsTargetLocatorSshDocker,
+		core.TargetsTargetLocatorAppleContainer, core.TargetsTargetLocatorSshAppleContainer:
+		workspaceMounted = false
+	default:
+		return nil
+	}
+	const heading = "## Mjolnir container storage\n\n"
+	var guidance strings.Builder
+	guidance.WriteString(heading)
+	if nativeTemporaryStorage {
+		guidance.WriteString("`/tmp` is a private disk-backed volume outside the container's writable overlay. Use it for disposable temporary files. Its contents are excluded from checkpoints and are lost when the session stops or restarts.\n\n")
+	}
+	if workspaceMounted {
+		workspace := core.ContainerWorkspaceRoot(workspace)
+		fmt.Fprintf(&guidance, "The workspace storage is mounted at `%s`. ", workspace)
+		if workspace != core.ContainerWorkspace {
+			guidance.WriteString("The parent `/workspace` directory itself is on the container's writable overlay. ")
+		}
+		guidance.WriteString("Keep durable results inside the project repository directories; arbitrary files elsewhere on the workspace volume are not checkpointed.\n")
+	}
+	if guidance.String() != heading {
+		if err := AppendStagedInstructions(harness, destination, guidance.String()); err != nil {
+			return err
+		}
+	}
+	if len(attachments) == 0 {
+		return nil
+	}
+	var external strings.Builder
+	external.WriteString("## Mjolnir external attachments\n\nThese host directories are attached at the container paths listed below. External attachments are not included in project workspace checkpoints.\n\n")
+	for _, attachment := range attachments {
+		var behavior string
+		switch attachment.Access {
+		case core.MountAccessRo:
+			behavior = "read-only; you can read these files but cannot change them"
+		case core.MountAccessCow:
+			behavior = "copy-on-write; changes are private to this container, never change the host directory, and are lost when the container is removed or recreated"
+		case core.MountAccessRw:
+			behavior = "read-write; changes write directly to the host directory and persist after the container is removed"
+		}
+		fmt.Fprintf(&external, "- Container `%s` from host `%s`: `%s` (%s).\n",
+			attachment.Destination, attachment.Source, attachment.Access.Label(), behavior)
+	}
+	return AppendStagedInstructions(harness, destination, external.String())
 }
 
 // AppendSessionStateInstructions adds the Suspend and Move rules for every
@@ -90,7 +155,56 @@ func AppendComposedSessionInstructions(launch *core.WorkerLaunchConfig, destinat
 // AppendStagedInstructions appends text to the harness's instruction file in
 // the staged home destination, unless the file already contains it.
 func AppendStagedInstructions(harness core.HarnessKind, destination string, text string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs append_staged_instructions")
+	path := filepath.Join(destination, harness.AgentInstructionsFile())
+	separator := ""
+	contents, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if !utf8.Valid(contents) {
+			// Rust's read_to_string refuses text that is not UTF-8.
+			return errors.New("stream did not contain valid UTF-8")
+		}
+		existing := string(contents)
+		switch {
+		case strings.Contains(existing, text):
+			return nil
+		case existing != "" && !strings.HasSuffix(existing, "\n"):
+			separator = "\n\n"
+		case existing != "":
+			separator = "\n"
+		}
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return rustIOError(err)
+	}
+	// This is our fresh copy: make it owner-writable without changing the
+	// source profile or granting write access to other users. Windows files
+	// carry only a read-only attribute, which Go's owner-write bit clears.
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		mode := info.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
+		if mode&0o200 == 0 {
+			if err := os.Chmod(path, mode|0o200); err != nil {
+				return fmt.Errorf("make staged harness instructions %s writable: %w", path, rustIOError(err))
+			}
+		}
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return rustIOError(err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o666)
+	if err != nil {
+		return fmt.Errorf("open staged harness instructions %s: %w", path, rustIOError(err))
+	}
+	defer file.Close()
+	if _, err := file.WriteString(separator); err != nil {
+		return rustIOError(err)
+	}
+	if _, err := file.WriteString(text); err != nil {
+		return rustIOError(err)
+	}
+	return nil
 }
 
 // SharedLogin is a profile's own login file that a worker on this machine
@@ -107,7 +221,44 @@ type SharedLogin struct {
 // every other target, for a harness that cannot share one, and for a
 // profile that signs in some other way than the harness's login file.
 func SharedProfileLogin(profile *core.HarnessProfile, backend *core.TargetsTargetLocator) *SharedLogin {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs shared_profile_login")
+	if !(core.HostRunsWorkers &&
+		backend.Kind == core.TargetsTargetLocatorLocalBare &&
+		profile.Kind.SharesLocalLogin() &&
+		profile.AuthScheme().UsesNativeLoginFile()) {
+		return nil
+	}
+	// A relative link would resolve against the worker's home, not the
+	// directory the profile home is relative to; without an absolute path
+	// the worker keeps a copy.
+	file, ok := sharedLoginAbsolutePath(profile.AuthenticationMarker())
+	if !ok {
+		return nil
+	}
+	return &SharedLogin{Name: profile.Kind.CredentialFileName(), File: file}
+}
+
+// sharedLoginAbsolutePath is Rust's std::path::absolute on Unix: a relative path is
+// joined to the current directory without resolving links or `..`, and
+// leading `.` components are dropped. False for an empty path or an
+// unreadable current directory.
+func sharedLoginAbsolutePath(path string) (string, bool) {
+	if path == "" {
+		return "", false
+	}
+	if filepath.IsAbs(path) {
+		return path, true
+	}
+	current, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for strings.HasPrefix(path, "./") {
+		path = strings.TrimLeft(strings.TrimPrefix(path, "."), "/")
+	}
+	if path == "." || path == "" {
+		return current, true
+	}
+	return strings.TrimSuffix(current, string(filepath.Separator)) + string(filepath.Separator) + path, true
 }
 
 // InstallLocalProfileStage copies a staged home into a home on this machine,
@@ -119,7 +270,7 @@ func SharedProfileLogin(profile *core.HarnessProfile, backend *core.TargetsTarge
 func InstallLocalProfileStage(stage string, home string, sharedLogin *SharedLogin) error {
 	entries, err := os.ReadDir(stage)
 	if err != nil {
-		return err
+		return rustIOError(err)
 	}
 	for _, entry := range entries {
 		destination := filepath.Join(home, entry.Name())
@@ -139,17 +290,76 @@ func InstallLocalProfileStage(stage string, home string, sharedLogin *SharedLogi
 // LinkSharedLogin replaces the login file in home with a link to the
 // profile's own.
 func LinkSharedLogin(home string, login *SharedLogin) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs link_shared_login")
+	link := filepath.Join(home, login.Name)
+	if err := installRemoveFile(link); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove staged login copy %s: %w", link, rustIOError(err))
+	}
+	// Only Unix machines run local workers (`HOST_RUNS_WORKERS`).
+	var linked error
+	if runtime.GOOS == "windows" {
+		linked = errors.New("linking a staged login needs a Unix file system")
+	} else if err := os.Symlink(login.File, link); err != nil {
+		linked = rustIOError(err)
+	}
+	if linked != nil {
+		return fmt.Errorf("link %s to the profile login %s: %w", link, login.File, linked)
+	}
+	return nil
 }
 
 func removeLink(path string) error {
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("remove the earlier link %s: %w", path, err)
+		if err := installRemoveFile(path); err != nil {
+			return fmt.Errorf("remove the earlier link %s: %w", path, rustIOError(err))
 		}
 	}
 	return nil
 }
+
+// installRemoveFile is Rust's std::fs::remove_file: it unlinks a file or a
+// link and, unlike os.Remove, never removes a directory.
+func installRemoveFile(path string) error {
+	if err := syscall.Unlink(path); err != nil {
+		return &fs.PathError{Op: "remove", Path: path, Err: err}
+	}
+	return nil
+}
+
+// installCopyFile is Rust's std::fs::copy: the contents and permissions of
+// source, written over destination.
+func installCopyFile(source string, destination string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("the source path is neither a regular file nor a symlink to a regular file")
+	}
+	mode := info.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		output.Close()
+		return err
+	}
+	if err := output.Chmod(mode); err != nil {
+		output.Close()
+		return err
+	}
+	return output.Close()
+}
+
+// profileCopySlots is the number of directory entries copied at once beside
+// the caller's own: Rust recurses with rayon, whose global pool has one
+// thread per CPU.
+var profileCopySlots = make(chan struct{}, runtime.GOMAXPROCS(0))
 
 // CopyProfileEntry copies one profile entry; see CopyProfileEntryWithin.
 func CopyProfileEntry(source string, destination string) error {
@@ -169,7 +379,107 @@ func CopyProfileEntryExcept(source string, destination string, excluded []string
 // directories already entered on this branch of the recursion, which stops a
 // symlinked directory cycle.
 func CopyProfileEntryWithin(source string, destination string, entered map[string]struct{}, excluded []string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs copy_profile_entry_within")
+	if _, err := os.Lstat(source); err != nil {
+		return fmt.Errorf("read staged profile entry metadata %s: %w", source, rustIOError(err))
+	}
+	metadata, err := os.Stat(source)
+	if errors.Is(err, fs.ErrNotExist) {
+		// The entry exists but its link target does not; staging the rest
+		// of the profile is more useful than failing on a stale link.
+		slog.Warn("skipping staged profile entry whose symlink target is missing", "source", source)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read staged profile entry metadata %s: %w", source, rustIOError(err))
+	}
+	if metadata.Mode().IsRegular() {
+		if parent := filepath.Dir(destination); parent != destination {
+			if err := os.MkdirAll(parent, 0o777); err != nil {
+				return fmt.Errorf("create staged profile directory %s: %w", parent, rustIOError(err))
+			}
+		}
+		if err := installCopyFile(source, destination); err != nil {
+			return fmt.Errorf("copy staged profile file %s to %s: %w", source, destination, rustIOError(err))
+		}
+		return nil
+	}
+	if !metadata.IsDir() {
+		return nil
+	}
+	canonical, err := filepath.EvalSymlinks(source)
+	if err == nil {
+		canonical, err = filepath.Abs(canonical)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve staged profile directory %s: %w", source, rustIOError(err))
+	}
+	if _, ok := entered[canonical]; ok {
+		slog.Warn("skipping staged profile directory that links back into itself", "source", source, "target", canonical)
+		return nil
+	}
+	branch := make(map[string]struct{}, len(entered)+1)
+	for path := range entered {
+		branch[path] = struct{}{}
+	}
+	branch[canonical] = struct{}{}
+	if err := os.MkdirAll(destination, 0o777); err != nil {
+		return fmt.Errorf("create staged profile directory %s: %w", destination, rustIOError(err))
+	}
+	directory, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("list staged profile directory %s: %w", source, rustIOError(err))
+	}
+	entries, err := directory.ReadDir(-1)
+	directory.Close()
+	if err != nil {
+		return fmt.Errorf("read staged profile directory entries in %s: %w", source, rustIOError(err))
+	}
+	// Sibling entries in one directory are independent, so recurse in
+	// parallel; this is the level most likely to hold many files (e.g. a
+	// skills or plugins tree). An entry runs on its own goroutine when a
+	// slot is free and on this one otherwise, so a nested walk never waits
+	// for a slot its own ancestors hold.
+	var (
+		group    sync.WaitGroup
+		failure  sync.Mutex
+		firstErr error
+	)
+	record := func(err error) {
+		if err == nil {
+			return
+		}
+		failure.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		failure.Unlock()
+	}
+	for _, entry := range entries {
+		child := filepath.Join(source, entry.Name())
+		if slices.ContainsFunc(excluded, func(path string) bool { return filepath.Clean(path) == child }) {
+			continue
+		}
+		target := filepath.Join(destination, entry.Name())
+		select {
+		case profileCopySlots <- struct{}{}:
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				defer func() { <-profileCopySlots }()
+				record(CopyProfileEntryWithin(child, target, branch, excluded))
+			}()
+		default:
+			record(CopyProfileEntryWithin(child, target, branch, excluded))
+		}
+	}
+	group.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	if err := os.Chmod(destination, metadata.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)); err != nil {
+		return fmt.Errorf("set permissions for staged profile directory %s: %w", destination, rustIOError(err))
+	}
+	return nil
 }
 
 // ContainerUploadOwnershipArgs: container copies may be root-owned while the
@@ -293,23 +603,97 @@ func mbxContainer(locator *core.TargetsTargetLocator) (engine string, containerI
 // staged binary. configuration is nil when no shared machine configuration
 // is linked.
 func InstallMbxShims(executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string, mbxBinary string, configuration *string, configRoots []string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs install_mbx_shims")
+	if !core.IsAbsoluteOnHostOrTarget(mbxBinary) {
+		return fmt.Errorf("shared cache mbx path is not absolute: %s", mbxBinary)
+	}
+	bin := workerRoot + "/bin"
+	engine, containerID, ssh, err := mbxContainer(locator)
+	if err != nil {
+		return err
+	}
+	quotedBinary := core.PosixQuote(mbxBinary)
+	// mbx refuses a mise shim as the real Cargo, and a mise project image
+	// (mj-dev and every `mj image build` image) has Cargo only behind mise's
+	// shims. Under mise, take mise's environment for the build's own
+	// directory first: it puts the real toolchain on PATH and pins
+	// RUSTUP_TOOLCHAIN the way the shim would, per repository, including
+	// tools that finished installing after the session started.
+	cargoBody := "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nif command -v mise >/dev/null 2>&1; then\n    eval \"$(mise env -s bash 2>/dev/null)\" || true\nfi\nexec " + quotedBinary + " \"$@\""
+	mbxBody := "exec " + quotedBinary + " \"$@\""
+	args := []string{engine, "exec", containerID, "sh", "-c", installMbxShimsScript, "sh", bin, cargoBody, mbxBody}
+	steps := []core.CommandStep{core.NewCommandStep("install the build-cache mbx shims", core.WithEngineArgv(args))}
+	if configuration != nil {
+		steps = append(steps, core.NewCommandStep("link the shared machine mbx configuration",
+			mbxConfigurationArgv(engine, containerID, *configuration, configRoots)))
+	}
+	command := mbxCommand(ssh, core.StepScript(steps)).
+		WithPurpose("install the shared-cache mbx shims").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageSyncing})
+	_, err = targets.ExecuteChecked(executor, command)
+	return err
+}
+
+// mbxCommand runs args on this machine, or on ssh's host when the container
+// is remote.
+func mbxCommand(ssh *core.SshTarget, args []string) core.CommandSpec {
+	if ssh == nil {
+		return core.NewCommandSpec(args[0], args[1:])
+	}
+	return core.SSHCommand(core.SshTrafficClassControl, ssh, args)
 }
 
 // RemoveGeneratedMbxShims removes the marked mbx shims after cache
 // verification failed.
 func RemoveGeneratedMbxShims(executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs remove_generated_mbx_shims")
+	engine, containerID, ssh, err := mbxContainer(locator)
+	if err != nil {
+		return err
+	}
+	args := core.WithEngineArgv([]string{engine, "exec", containerID, "sh", "-c", removeMbxShimsScript, "sh", workerRoot + "/bin"})
+	command := mbxCommand(ssh, args).
+		WithPurpose("remove marked mbx shims after cache verification failed").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageSyncing})
+	_, err = targets.ExecuteChecked(executor, command)
+	return err
 }
 
 // VerifyMbxBinary checks that the synchronized mbx inside the session
 // container reports expectedVersion.
 func VerifyMbxBinary(executor core.CommandExecutor, locator *core.TargetsTargetLocator, mbxBinary string, expectedVersion string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs verify_mbx_binary")
+	if !core.IsAbsoluteOnHostOrTarget(mbxBinary) {
+		return fmt.Errorf("shared cache mbx path is not absolute: %s", mbxBinary)
+	}
+	engine, containerID, ssh, err := mbxContainer(locator)
+	if err != nil {
+		return err
+	}
+	args := core.WithEngineArgv([]string{engine, "exec", containerID, mbxBinary, "--version"})
+	command := mbxCommand(ssh, args).
+		WithPurpose("verify the synchronized mbx inside the session container").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageSyncing})
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	containerVersion, err := reportedMbxVersion(output, &command)
+	if err != nil {
+		return err
+	}
+	if expectedVersion != containerVersion {
+		return fmt.Errorf("the container reports mbx %s, but the staged binary is mbx %s", containerVersion, expectedVersion)
+	}
+	return nil
 }
 
 func reportedMbxVersion(output core.CommandOutput, command *core.CommandSpec) (string, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs reported_mbx_version")
+	if output.Status != 0 {
+		return "", fmt.Errorf("%s failed with status %d: %s", command.Purpose, output.Status, strings.TrimSpace(lossyText(output.Stderr)))
+	}
+	fields := strings.Fields(lossyText(output.Stdout))
+	if len(fields) == 0 {
+		return "", errors.New("mbx --version returned no version")
+	}
+	return fields[len(fields)-1], nil
 }
 
 // mbxConfigurationArgv upgrades configuration without touching an executable
@@ -324,7 +708,36 @@ func mbxConfigurationArgv(engine string, containerID string, configuration strin
 // them from generated shims. It reports whether the container has a legacy
 // installation.
 func LinkLegacyMbxConfiguration(executor core.CommandExecutor, locator *core.TargetsTargetLocator, workerRoot string, configuration string, configRoots []string) (bool, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs link_legacy_mbx_configuration")
+	var engine string
+	var ssh *core.SshTarget
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalPodman:
+		engine = "podman"
+	case core.TargetsTargetLocatorLocalDocker:
+		engine = "docker"
+	case core.TargetsTargetLocatorSshPodman:
+		engine, ssh = "podman", locator.SSH
+	case core.TargetsTargetLocatorSshDocker:
+		engine, ssh = "docker", locator.SSH
+	default:
+		return false, errors.New("the build cache is only installed into Podman and Docker containers")
+	}
+	args := []string{engine, "exec", locator.ContainerID, "sh", "-c", checkLegacyMbxAndLinkConfigScript, "sh", workerRoot + "/bin", configuration}
+	args = append(args, configRoots...)
+	command := mbxCommand(ssh, args).
+		WithPurpose("inspect legacy mbx and relink its shared configuration").
+		WithStage(core.ProvisionStage{Kind: core.ProvisionStageSyncing})
+	output, err := targets.ExecuteChecked(executor, command)
+	if err != nil {
+		return false, err
+	}
+	switch string(output.Stdout) {
+	case "legacy":
+		return true, nil
+	case "new":
+		return false, nil
+	}
+	return false, fmt.Errorf("container mbx scheme inspection returned unexpected output: %s", lossyText(output.Stdout))
 }
 
 // StagedWorkerProfile is the staged files a worker's profile install
@@ -341,20 +754,198 @@ type StagedWorkerProfile struct {
 // configuration, ownership marker and profile, then the worker binary as
 // `hel`.
 func InstallWorkerFiles(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, workerRoot string, profileHome string, worker WorkerInstall, launchConfig string, ownership string, profileStage string, sharedLogin *SharedLogin, sharedPaths []string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs install_worker_files")
+	if binary, ok := worker.HostBinary(); ok {
+		if err := core.VerifyWorkerBuild(binary); err != nil {
+			return err
+		}
+	}
+	if err := InstallWorkerProfileFiles(executor, locator, sessionID, workerRoot, profileHome, StagedWorkerProfile{
+		Launch:      launchConfig,
+		Ownership:   ownership,
+		Profile:     profileStage,
+		SharedLogin: sharedLogin,
+		SharedPaths: sharedPaths,
+	}); err != nil {
+		return err
+	}
+	return InstallWorkerBinary(executor, locator, sessionID, worker, "hel")
 }
 
 // InstallWorkerProfileFiles installs the staged launch configuration,
 // ownership marker and profile on the session's target.
 func InstallWorkerProfileFiles(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, workerRoot string, profileHome string, staged StagedWorkerProfile) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs install_worker_profile_files")
+	launchConfig, ownership, profileStage := staged.Launch, staged.Ownership, staged.Profile
+	switch locator.Kind {
+	case core.TargetsTargetLocatorLocalBare:
+		if info, err := os.Stat(profileStage); err == nil && info.IsDir() {
+			// A staged home that is a link to a profile home, left for a
+			// session an earlier release started there, is replaced by a
+			// directory of its own. Copying through it would write this
+			// stage over the person's own configuration.
+			if info, err := os.Lstat(profileHome); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+				if err := installRemoveFile(profileHome); err != nil {
+					return fmt.Errorf("unlink the earlier session's profile home link %s: %w", profileHome, rustIOError(err))
+				}
+			}
+			if err := os.MkdirAll(profileHome, 0o777); err != nil {
+				return fmt.Errorf("create isolated local profile: %w", rustIOError(err))
+			}
+			if err := InstallLocalProfileStage(profileStage, profileHome, staged.SharedLogin); err != nil {
+				return err
+			}
+		}
+		for _, command := range []core.CommandSpec{
+			core.NewCommandSpec("mkdir", []string{"-p", workerRoot}).
+				WithPurpose("create local bare worker directory"),
+			core.NewCommandSpec("cp", []string{launchConfig, workerRoot + "/launch.json"}).
+				WithPurpose("install local worker launch configuration"),
+			core.NewCommandSpec("cp", []string{ownership, workerRoot + "/ownership.json"}).
+				WithPurpose("install local worker ownership marker"),
+		} {
+			if _, err := targets.ExecuteChecked(executor, command); err != nil {
+				return err
+			}
+		}
+	case core.TargetsTargetLocatorLocalPodman, core.TargetsTargetLocatorLocalDocker, core.TargetsTargetLocatorAppleContainer:
+		var engine string
+		switch locator.Kind {
+		case core.TargetsTargetLocatorLocalPodman:
+			engine = "podman"
+		case core.TargetsTargetLocatorLocalDocker:
+			engine = "docker"
+		default:
+			engine = "container"
+		}
+		containerID := locator.ContainerID
+		launchInstalled := workerRoot + "/launch.json"
+		ownershipInstalled := workerRoot + "/ownership.json"
+		owned := []string{launchInstalled, ownershipInstalled, profileHome}
+		commands := []core.CommandSpec{
+			core.NewCommandSpec(engine, []string{"exec", containerID, "mkdir", "-p", workerRoot, profileHome}).
+				WithPurpose("create target worker directories"),
+			core.NewCommandSpec(engine, []string{"cp", launchConfig, containerID + ":" + launchInstalled}).
+				WithPurpose("upload worker launch configuration"),
+			core.NewCommandSpec(engine, []string{"cp", ownership, containerID + ":" + ownershipInstalled}).
+				WithPurpose("upload worker ownership marker"),
+			core.NewCommandSpec(engine, []string{"cp", profileStage + "/.", containerID + ":" + profileHome}).
+				WithPurpose("upload harness profile allowlist"),
+			core.NewCommandSpec(engine, ContainerUploadOwnershipArgs(engine, containerID, workerRoot, owned)).
+				WithPurpose("match uploaded files to the worker directory owner"),
+			core.NewCommandSpec(engine, []string{"exec", containerID, "chmod", "-R", "go-rwx", profileHome}).
+				WithPurpose("restrict harness profile permissions"),
+		}
+		for _, command := range commands {
+			if _, err := targets.ExecuteChecked(executor, command); err != nil {
+				return err
+			}
+		}
+	case core.TargetsTargetLocatorAwsEc2, core.TargetsTargetLocatorSshBare:
+		if err := InstallWorkerOverSSH(executor, locator.SSH, workerRoot, profileHome, launchConfig, ownership, profileStage, staged.SharedPaths); err != nil {
+			return err
+		}
+	case core.TargetsTargetLocatorSshPodman, core.TargetsTargetLocatorSshDocker,
+		core.TargetsTargetLocatorSshAppleContainer, core.TargetsTargetLocatorSshNitro:
+		ssh, containerID := locator.SSH, locator.ContainerID
+		engine, ok := locator.ContainerEngine()
+		if !ok {
+			panic("matched a remote container target")
+		}
+		upload := core.RemoteUploadStaging + "/" + sessionID
+		if _, err := targets.ExecuteChecked(executor,
+			core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"mkdir", "-p", upload}).
+				WithPurpose("create remote upload staging")); err != nil {
+			return err
+		}
+		for _, file := range []struct{ source, name string }{
+			{launchConfig, "launch.json"},
+			{ownership, "ownership.json"},
+		} {
+			if err := UploadWorkerFile(executor, ssh, file.source, upload+"/"+file.name, "upload remote container worker file"); err != nil {
+				return err
+			}
+		}
+		stagedProfile := upload + "/profile"
+		if locator.Kind == core.TargetsTargetLocatorSshNitro {
+			// A Nitro guest does not share its profile objects with the
+			// hypervisor account or another guest.
+			if err := uploadLegacyProfileArchive(executor, ssh, profileStage, stagedProfile, nil); err != nil {
+				return err
+			}
+		} else if err := uploadProfileArchive(executor, ssh, profileStage, stagedProfile, staged.SharedPaths); err != nil {
+			return err
+		}
+		launchInstalled := workerRoot + "/launch.json"
+		ownershipInstalled := workerRoot + "/ownership.json"
+		owned := []string{launchInstalled, ownershipInstalled, profileHome}
+		remote := [][]string{
+			{engine, "exec", containerID, "mkdir", "-p", workerRoot, profileHome},
+			{engine, "cp", upload + "/launch.json", containerID + ":" + launchInstalled},
+			{engine, "cp", upload + "/ownership.json", containerID + ":" + ownershipInstalled},
+			// Apple's `container cp` copies a relative `dir/.` as `dir`
+			// itself, nesting the profile one level too deep; only an
+			// absolute source copies the contents, as Docker and Podman do
+			// for either form. The staging path is home-relative.
+			{"sh", "-c", fmt.Sprintf(`exec %s cp "$HOME/$1/." "$2"`, core.EngineShellWords(engine)),
+				"mj-profile-copy", upload + "/profile", containerID + ":" + profileHome},
+			append([]string{engine}, ContainerUploadOwnershipArgs(engine, containerID, workerRoot, owned)...),
+			{engine, "exec", containerID, "chmod", "-R", "go-rwx", profileHome},
+			{"rm", "-rf", "--", upload},
+		}
+		// Staging removal stays a final success-only step, as before.
+		steps := make([]core.CommandStep, 0, len(remote))
+		for _, args := range remote {
+			steps = append(steps, core.NewCommandStep("install remote container worker", core.WithEngineArgv(args)))
+		}
+		if _, err := targets.ExecuteChecked(executor,
+			core.SSHCommandOwned(core.SshTrafficClassBulk, ssh, core.StepScript(steps)).
+				WithPurpose("install remote container worker")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ClearProfileConfiguration refreshes configuration without removing native
 // history or skills the harness maintains itself. Absent destination
 // settings must not inherit the source's.
 func ClearProfileConfiguration(executor core.CommandExecutor, locator *core.TargetsTargetLocator, sessionID string, home string, harness core.HarnessKind) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs clear_profile_configuration")
+	paths := slices.Clone(ProfileConfigurationPaths(harness))
+	paths = append(paths, harness.CredentialFileName())
+	paths = append(paths, core.AwsCredentialsFiles[:]...)
+	if harness == core.HarnessKindCodex {
+		paths = append(paths, StagedCatalogFile)
+	}
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+	var script strings.Builder
+	script.WriteString("set -eu\n")
+	for _, relative := range paths {
+		path := core.Join(home, relative)
+		quoted := core.PosixQuote(core.Text(path))
+		var protected []string
+		for _, owned := range harness.HarnessOwnedSkillPaths() {
+			tail, ok := pathStripPrefix(owned, relative)
+			if !ok {
+				continue
+			}
+			if components := pathComponents(tail); len(components) > 0 {
+				protected = append(protected, core.PosixQuote(components[0]))
+			}
+		}
+		if len(protected) == 0 {
+			fmt.Fprintf(&script, "rm -rf -- %s\n", quoted)
+		} else {
+			fmt.Fprintf(&script, "if [ -L %s ]; then rm -f -- %s; else\nfor entry in %s/* %s/.[!.]* %s/..?*; do\ncase \"${entry##*/}\" in %s) continue ;; esac\nrm -rf -- \"$entry\"\ndone\nfi\n",
+				quoted, quoted, quoted, quoted, quoted, strings.Join(protected, "|"))
+		}
+	}
+	command, err := core.CommandOnLocator(core.SshTrafficClassControl, locator, sessionID,
+		[]string{"sh", "-c", script.String()}, "replace profile configuration while retaining native state")
+	if err != nil {
+		return err
+	}
+	_, err = targets.ExecuteChecked(executor, command)
+	return err
 }
 
 // UploadWorkerFile streams a file into private staging, where the caller
@@ -367,7 +958,7 @@ func UploadWorkerFile(executor core.CommandExecutor, ssh *core.SshTarget, source
 	}).WithPurpose(purpose)
 	input, err := os.Open(source)
 	if err != nil {
-		return fmt.Errorf("open worker upload %s: %w", source, err)
+		return fmt.Errorf("open worker upload %s: %w", source, rustIOError(err))
 	}
 	defer input.Close()
 	output, err := executor.ExecuteWithStdin(&command, input)
@@ -382,7 +973,36 @@ func UploadWorkerFile(executor core.CommandExecutor, ssh *core.SshTarget, source
 // installation is shared with creation, upgrades and recovery in
 // InstallWorkerBinary.
 func InstallWorkerOverSSH(executor core.CommandExecutor, ssh *core.SshTarget, workerRoot string, profileHome string, launchConfig string, ownership string, profileStage string, sharedPaths []string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs install_worker_over_ssh")
+	if _, err := targets.ExecuteChecked(executor,
+		core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"mkdir", "-p", workerRoot, profileHome}).
+			WithPurpose("create SSH worker directories")); err != nil {
+		return err
+	}
+	for _, file := range []struct{ source, remote string }{
+		{launchConfig, workerRoot + "/launch.json"},
+		{ownership, workerRoot + "/ownership.json"},
+	} {
+		if err := UploadWorkerFile(executor, ssh, file.source, file.remote, "upload SSH worker file"); err != nil {
+			return err
+		}
+	}
+	incomingProfile := profileHome + ".incoming"
+	if err := uploadProfileArchive(executor, ssh, profileStage, incomingProfile, sharedPaths); err != nil {
+		return err
+	}
+	for _, command := range []core.CommandSpec{
+		core.SSHCommand(core.SshTrafficClassBulk, ssh, []string{"cp", "-R", incomingProfile + "/.", profileHome}).
+			WithPurpose("install SSH harness profile allowlist"),
+		core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"rm", "-rf", "--", incomingProfile}).
+			WithPurpose("remove SSH profile staging"),
+		core.SSHCommand(core.SshTrafficClassControl, ssh, []string{"chmod", "-R", "go-rwx", profileHome}).
+			WithPurpose("restrict SSH harness profile permissions"),
+	} {
+		if _, err := targets.ExecuteChecked(executor, command); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const profileContentStore = ".cache/mjolnir/profile-content"
@@ -692,27 +1312,287 @@ type profileArchiveEntry struct {
 // the regular files below sharedPaths. The root itself is the first entry,
 // with an empty path.
 func profileArchiveEntries(source string, sharedPaths []string) ([]profileArchiveEntry, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs profile_archive_entries")
+	var entries []profileArchiveEntry
+	var visit func(path string) error
+	visit = func(path string) error {
+		absolute := filepath.Join(source, path)
+		// Like the previous tar builder, materialize staged links.
+		metadata, err := os.Stat(absolute)
+		if err != nil {
+			return rustIOError(err)
+		}
+		directory := metadata.IsDir()
+		var key *string
+		if !directory && slices.ContainsFunc(sharedPaths, func(shared string) bool { return pathStartsWith(path, shared) }) {
+			if !metadata.Mode().IsRegular() {
+				return fmt.Errorf("profile entry is not a regular file: %s", path)
+			}
+			digest, err := core.FileSHA256(absolute)
+			if err != nil {
+				return err
+			}
+			if metadata.Mode().Perm()&0o100 != 0 {
+				digest += ".x"
+			}
+			key = &digest
+		}
+		entries = append(entries, profileArchiveEntry{path: path, directory: directory, key: key})
+		if directory {
+			children, err := os.ReadDir(absolute)
+			if err != nil {
+				return rustIOError(err)
+			}
+			for _, child := range children {
+				if err := visit(filepath.Join(path, child.Name())); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := visit(""); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // profileContentKeys is the content keys the host reported, one per line;
 // every one must be among expected.
 func profileContentKeys(output []byte, expected map[string]struct{}) (map[string]struct{}, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs profile_content_keys")
+	text, err := installFromUTF8(output)
+	if err != nil {
+		return nil, fmt.Errorf("decode missing profile content: %w", err)
+	}
+	keys := map[string]struct{}{}
+	for _, key := range installLines(text) {
+		if _, ok := expected[key]; !ok {
+			return nil, fmt.Errorf("host reported unexpected profile content key %s", core.RustDebugString(key))
+		}
+		keys[key] = struct{}{}
+	}
+	return keys, nil
+}
+
+// installFromUTF8 is Rust's `std::str::from_utf8`, failing with the text of
+// Rust's Utf8Error.
+func installFromUTF8(text []byte) (string, error) {
+	index := 0
+	for index < len(text) {
+		first := text[index]
+		if first < 0x80 {
+			index++
+			continue
+		}
+		width := 0
+		switch {
+		case first >= 0xC2 && first <= 0xDF:
+			width = 2
+		case first >= 0xE0 && first <= 0xEF:
+			width = 3
+		case first >= 0xF0 && first <= 0xF4:
+			width = 4
+		}
+		if width == 0 {
+			return "", fmt.Errorf("invalid utf-8 sequence of 1 bytes from index %d", index)
+		}
+		low, high := byte(0x80), byte(0xBF)
+		switch first {
+		case 0xE0:
+			low = 0xA0
+		case 0xED:
+			high = 0x9F
+		case 0xF0:
+			low = 0x90
+		case 0xF4:
+			high = 0x8F
+		}
+		for offset := 1; offset < width; offset++ {
+			if index+offset >= len(text) {
+				return "", fmt.Errorf("incomplete utf-8 byte sequence from index %d", index)
+			}
+			next := text[index+offset]
+			if offset == 1 && (next < low || next > high) || offset > 1 && (next < 0x80 || next > 0xBF) {
+				return "", fmt.Errorf("invalid utf-8 sequence of %d bytes from index %d", offset, index)
+			}
+		}
+		index += width
+	}
+	return string(text), nil
+}
+
+// installLines is Rust's `str::lines`: lines split on `\n`, each without a
+// trailing `\r`, and no empty last line after a final newline.
+func installLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 // buildProfileArchive writes the legacy profile archive into a private
 // temporary file, rewound to its start: the profile under `profile/`, the
 // missing content under `.mj-content/`, and `.mj-keys`.
 func buildProfileArchive(source string, entries []profileArchiveEntry, missing map[string]struct{}) (*os.File, error) {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs build_profile_archive")
+	file, err := profileArchiveSpool()
+	if err != nil {
+		return nil, fmt.Errorf("create private profile archive: %w", rustIOError(err))
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			file.Close()
+		}
+	}()
+	// flate2's Compression::fast is level 1.
+	gzipWriter, err := gzip.NewWriterLevel(file, gzip.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	archive := tar.NewWriter(gzipWriter)
+	sent := map[string]struct{}{}
+	for _, entry := range entries {
+		// Profile names live under `profile/`, so no profile file can
+		// collide with `.mj-content` or `.mj-keys` at the archive root.
+		path := profileArchiveName(entry.path)
+		absolute := filepath.Join(source, entry.path)
+		switch {
+		case entry.directory:
+			if err := appendProfileArchivePath(archive, absolute, path); err != nil {
+				return nil, err
+			}
+		case entry.key != nil:
+			key := *entry.key
+			if _, needed := missing[key]; needed {
+				if _, already := sent[key]; !already {
+					sent[key] = struct{}{}
+					if err := appendProfileArchivePath(archive, absolute, ".mj-content/"+key); err != nil {
+						return nil, err
+					}
+				}
+			}
+			// Relative to the link's directory: one `..` per path component
+			// reaches the work directory that holds `.mj-store`.
+			depth := 0
+			if entry.path != "" {
+				depth = len(strings.Split(filepath.ToSlash(entry.path), "/"))
+			}
+			if err := archive.WriteHeader(&tar.Header{
+				Typeflag: tar.TypeSymlink,
+				Name:     path,
+				Linkname: strings.Repeat("../", depth) + ".mj-store/" + key,
+				Mode:     0o700,
+				Format:   tar.FormatGNU,
+			}); err != nil {
+				return nil, rustIOError(err)
+			}
+		default:
+			if err := appendProfileArchivePath(archive, absolute, path); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var keys []string
+	for _, entry := range entries {
+		if entry.key != nil {
+			keys = append(keys, *entry.key)
+		}
+	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
+	var list strings.Builder
+	for _, key := range keys {
+		list.WriteString(key + "\n")
+	}
+	if err := archive.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     ".mj-keys",
+		Size:     int64(list.Len()),
+		Mode:     0o600,
+		Format:   tar.FormatGNU,
+	}); err != nil {
+		return nil, rustIOError(err)
+	}
+	if _, err := io.WriteString(archive, list.String()); err != nil {
+		return nil, rustIOError(err)
+	}
+	if err := archive.Close(); err != nil {
+		return nil, rustIOError(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return nil, fmt.Errorf("finish profile archive: %w", rustIOError(err))
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, rustIOError(err)
+	}
+	finished = true
+	return file, nil
+}
+
+// profileArchiveName is where a profile entry sits in the archive: under
+// `profile/`, written with `/` between components as tar names are, and
+// without a trailing separator for the root.
+func profileArchiveName(path string) string {
+	if path == "" {
+		return "profile"
+	}
+	return "profile/" + filepath.ToSlash(path)
+}
+
+// appendProfileArchivePath is the tar crate's `append_path_with_name` on a
+// builder that follows symlinks: absolute's metadata and, for a regular
+// file, its contents, under name.
+func appendProfileArchivePath(archive *tar.Writer, absolute, name string) error {
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return rustIOError(err)
+	}
+	header, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		return rustIOError(err)
+	}
+	header.Name = name
+	header.Format = tar.FormatGNU
+	header.ModTime = info.ModTime().Truncate(time.Second)
+	header.AccessTime, header.ChangeTime = time.Time{}, time.Time{}
+	header.Uname, header.Gname = "", ""
+	if !info.Mode().IsRegular() {
+		header.Size = 0
+		return rustIOError(archive.WriteHeader(header))
+	}
+	file, err := os.Open(absolute)
+	if err != nil {
+		return rustIOError(err)
+	}
+	defer file.Close()
+	if err := archive.WriteHeader(header); err != nil {
+		return rustIOError(err)
+	}
+	if _, err := io.CopyN(archive, file, header.Size); err != nil {
+		return rustIOError(err)
+	}
+	return nil
 }
 
 // uploadProfileArchive transfers the staged profile through the receiver
 // negotiation, or through the legacy archive when the host lacks the
 // receiver runtime.
 func uploadProfileArchive(executor core.CommandExecutor, ssh *core.SshTarget, source string, destination string, sharedPaths []string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs upload_profile_archive")
+	manifest, err := ProfileContentManifestFromStaged(source, sharedPaths)
+	if err != nil {
+		return err
+	}
+	transferred, err := manifest.TryTransfer(executor, ssh, &destination)
+	if err != nil {
+		return err
+	}
+	if transferred {
+		return nil
+	}
+	return uploadLegacyProfileArchive(executor, ssh, source, destination, sharedPaths)
 }
 
 // uploadLegacyProfileArchive: one transfer per shared content set; unrelated
@@ -720,5 +1600,174 @@ func uploadProfileArchive(executor core.CommandExecutor, ssh *core.SshTarget, so
 // publishing/pinning share the store-wide gate. The destination is staging
 // only: callers copy it into a private profile, then remove it.
 func uploadLegacyProfileArchive(executor core.CommandExecutor, ssh *core.SshTarget, source string, destination string, sharedPaths []string) error {
-	panic("unported: mj-worker-staging/src/worker_binary/install.rs upload_legacy_profile_archive")
+	entries, err := profileArchiveEntries(source, sharedPaths)
+	if err != nil {
+		return err
+	}
+	keys := map[string]struct{}{}
+	for _, entry := range entries {
+		if entry.key != nil {
+			keys[*entry.key] = struct{}{}
+		}
+	}
+	host := core.TargetsTargetLocator{Kind: core.TargetsTargetLocatorSshBare, SSH: ssh, Workspace: ""}
+	sortedKeys := make([]string, 0, len(keys))
+	for key := range keys {
+		sortedKeys = append(sortedKeys, key)
+	}
+	slices.Sort(sortedKeys)
+	contentDigest := sha256.Sum256([]byte(strings.Join(sortedKeys, "\n")))
+	gate := StoreGateFor(&host, profileContentStore+"/"+core.LowerHex(contentDigest[:]))
+	storeGate := StoreGateFor(&host, profileContentStore)
+	registryKey := StoreKey(&host, profileContentStore)
+	syncing := core.ProvisionStage{Kind: core.ProvisionStageSyncing}
+	queryMissing := func() (map[string]struct{}, error) {
+		var input strings.Builder
+		for _, key := range sortedKeys {
+			input.WriteString(key + "\n")
+		}
+		store, err := LockGate(executor, storeGate, destination, "query and collect profile content")
+		if err != nil {
+			return nil, err
+		}
+		defer store.Release()
+		args := []string{"sh", "-c", profileScript(queryProfileContent), "mj-profile-content", profileContentStore}
+		args = append(args, activeProfileUploadTokens(registryKey)...)
+		query := core.SSHCommand(core.SshTrafficClassControl, ssh, args).
+			WithPurpose("query host profile content").
+			WithWarnOnStderr().
+			WithStage(syncing)
+		output, err := executor.ExecuteWithStdin(&query, strings.NewReader(input.String()))
+		if err != nil {
+			return nil, err
+		}
+		output, err = core.CheckedCommandOutput(&query, output)
+		if err != nil {
+			return nil, err
+		}
+		return profileContentKeys(output.Stdout, keys)
+	}
+	missing, err := queryMissing()
+	if err != nil {
+		return err
+	}
+	// Cached profiles send only private bytes and need no content owner. If
+	// content is missing, one uploader decides again after taking its owner:
+	// the preceding uploader may already have supplied everything it needs.
+	var contentOwner *GateGuard
+	defer func() { contentOwner.Release() }()
+	if len(missing) > 0 {
+		contentOwner, err = LockGate(executor, gate, destination, "send profile content")
+		if err != nil {
+			return err
+		}
+	}
+	if contentOwner != nil {
+		missing, err = queryMissing()
+		if err != nil {
+			return err
+		}
+		if len(missing) == 0 {
+			contentOwner.Release()
+			contentOwner = nil
+		}
+	}
+	// attemptTransfer sends the archive once. Its staging registration and
+	// spool last until it returns, as Rust's live through one loop pass.
+	attemptTransfer := func() (core.CommandOutput, error) {
+		file, err := buildProfileArchive(source, entries, missing)
+		if err != nil {
+			return core.CommandOutput{}, err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return core.CommandOutput{}, rustIOError(err)
+		}
+		slog.Info("send profile content", "bytes_sent", info.Size(), "objects_sent", len(missing), "legacy", true, "destination", destination)
+		token, err := core.NewCommandID("profile-stage")
+		if err != nil {
+			return core.CommandOutput{}, err
+		}
+		work := profileContentStore + "/.stage-" + token
+		store, err := LockGate(executor, storeGate, destination, "register private profile staging")
+		if err != nil {
+			return core.CommandOutput{}, err
+		}
+		active := registerProfileUpload(registryKey, token)
+		store.Release()
+		defer active.drop()
+		output, transferErr := func() (core.CommandOutput, error) {
+			command := core.SSHCommand(core.SshTrafficClassBulk, ssh, []string{
+				"sh", "-c", profileScript(stageProfileContent), "mj-profile-stage", work,
+			}).WithPurpose("send profile content").WithStage(syncing)
+			// The byte stream takes as long as the link needs; an operation
+			// deadline would cut a progressing transfer off (#1571). A
+			// cancellation still stops it.
+			output, err := executor.ExecuteWithStdinWithoutDeadline(&command, file)
+			if err != nil {
+				return core.CommandOutput{}, fmt.Errorf("stream staged harness profile archive: %w", err)
+			}
+			if _, err := core.CheckedCommandOutput(&command, output); err != nil {
+				return core.CommandOutput{}, err
+			}
+			// Collection cannot unlink between publication and pinning. The
+			// network transfer has already finished before taking this
+			// owner.
+			store, err := LockGate(executor, storeGate, destination, "publish and pin profile content")
+			if err != nil {
+				return core.CommandOutput{}, err
+			}
+			publish := core.SSHCommand(core.SshTrafficClassBulk, ssh, []string{
+				"sh", "-c", profileScript(installProfileContent), "mj-profile-archive", destination, profileContentStore, work,
+			}).WithPurpose("publish profile content").WithStage(syncing)
+			output, err = executor.Execute(&publish)
+			store.Release()
+			if err != nil {
+				return core.CommandOutput{}, err
+			}
+			if output.Status != 0 {
+				return output, nil
+			}
+			materialize := core.SSHCommand(core.SshTrafficClassBulk, ssh, []string{
+				"sh", "-c", profileScript(materializeProfileContent), "mj-profile-materialize", work, destination,
+			}).WithPurpose("materialize profile content").WithStage(syncing)
+			return executor.Execute(&materialize)
+		}()
+		if transferErr != nil || output.Status != 0 {
+			slog.Warn("profile preparation failed; collector will reclaim staging after verified quiescence", "work", work)
+		}
+		return output, transferErr
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		output, err := attemptTransfer()
+		if err != nil {
+			return err
+		}
+		if output.Status == 0 {
+			return nil
+		}
+		if attempt == 0 && (output.Status == profileContentMissing || output.Status == profileStageMissing) {
+			if output.Status == profileStageMissing {
+				// Another daemon may collect the completed prior phase. A
+				// fresh query and transfer use the existing retry slot.
+				missing, err = queryMissing()
+				if err != nil {
+					return err
+				}
+			} else {
+				missing, err = profileContentKeys(output.Stdout, keys)
+				if err != nil {
+					return err
+				}
+				if len(missing) == 0 {
+					return errors.New("host reported missing profile content without any keys")
+				}
+			}
+			continue
+		}
+		return fmt.Errorf("publish profile content failed with status %d: %s%s", output.Status,
+			strings.TrimSpace(lossyText(output.Stderr)), strings.TrimSpace(lossyText(output.Stdout)))
+	}
+	panic("both upload attempts return or report failure")
 }

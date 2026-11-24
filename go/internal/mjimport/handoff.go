@@ -15,6 +15,7 @@ package mjimport
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -24,7 +25,21 @@ import (
 // the canonical handoff intact (nil, nil); only a cancellation (ctx) is an
 // error once reading has started.
 func NativePriorFromArchive(ctx context.Context, sessionID string, archivePath string, manifest *core.ArchiveManifest, snapshot *core.CanonicalSessionSnapshot) (*PriorCompaction, error) {
-	panic("unported: mj-import/src/handoff.rs native_prior_from_archive")
+	if manifest.Session.HarnessKind != core.HarnessKindClaude {
+		return nil, nil
+	}
+	// Rust moves this blocking read onto a blocking thread. The calling
+	// goroutine is already off any event loop, so it reads here.
+	prior, err := priorCompaction(ctx, archivePath, manifest, snapshot)
+	switch {
+	case err == nil:
+		return prior, nil
+	case ctx.Err() != nil:
+		return nil, err
+	}
+	slog.Warn("could not use Claude native compaction; using canonical history",
+		"session_id", sessionID, "error", err.Error())
+	return nil, nil
 }
 
 // ProfileHandoffBytes is the handoff byte budget for a target profile: its
@@ -53,7 +68,22 @@ func BuildHandoffContext(ctx context.Context, sessionID string, config *core.Con
 // BuildHandoffContextWithPrior is BuildHandoffContext continuing from an
 // earlier compaction prior, when there is one.
 func BuildHandoffContextWithPrior(ctx context.Context, sessionID string, config *core.Config, snapshot *core.CanonicalSessionSnapshot, contextBytes int, prior *PriorCompaction) (string, error) {
-	panic("unported: mj-import/src/handoff.rs build_handoff_context_with_prior")
+	candidates, err := UtilityLlmRuntimeShared().Resolve(ctx, config)
+	if err != nil {
+		// A cancelled discovery is the caller's own doing; report it.
+		if ctx.Err() != nil {
+			return "", err
+		}
+		// No utility model is configured, credentialed, or in quota. The
+		// handoff still has to happen, so send the shared recent transcript
+		// view instead of failing.
+		slog.Warn("no utility model is available for the handoff; handing over the shared recent transcript view",
+			"session_id", sessionID, "error", err.Error())
+		return RenderRecentSnapshot(snapshot, contextBytes), nil
+	}
+	backend := NewUtilityCompactionBackend(ctx, candidates)
+	pageBytes := backend.PageBytes()
+	return summarizeOrRecent(ctx, sessionID, snapshot, contextBytes, backend, pageBytes, prior)
 }
 
 // summarizeOrRecent summarizes the snapshot through an already-resolved
@@ -68,5 +98,19 @@ func BuildHandoffContextWithPrior(ctx context.Context, sessionID string, config 
 // context before this code was shared, and must keep that floor. A
 // cancellation (ctx) is the caller's own doing and propagates.
 func summarizeOrRecent(ctx context.Context, sessionID string, snapshot *core.CanonicalSessionSnapshot, contextBytes int, backend CompactionBackend, pageBytes int, prior *PriorCompaction) (string, error) {
-	panic("unported: mj-import/src/handoff.rs summarize_or_recent")
+	// Pages are sized by what the summarizer can read; the handoff is sized
+	// by what the target harness accepts. They are unrelated numbers, and
+	// using the target's for both is what made one incident shard a
+	// transcript into 33 pages.
+	budget := CompactionBudget{PageBytes: pageBytes, HandoffBytes: contextBytes}
+	handoff, err := CompactSnapshotSince(ctx, snapshot, budget, backend, prior)
+	switch {
+	case err == nil:
+		return handoff, nil
+	case ctx.Err() != nil:
+		return "", err
+	}
+	slog.Warn("utility summarizer failed; handing over the shared recent transcript view",
+		"session_id", sessionID, "error", err.Error())
+	return RenderRecentSnapshot(snapshot, contextBytes), nil
 }
