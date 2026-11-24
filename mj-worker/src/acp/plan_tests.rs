@@ -2078,6 +2078,7 @@ fn offered(request: &Value, policy: ExecutionPolicy) -> Vec<(String, String)> {
         &request,
         PlanPermission::recognize(&request, HarnessKind::Claude),
         HarnessKind::Claude.execution_enforcement(policy),
+        false,
     )
     .choices
     .into_iter()

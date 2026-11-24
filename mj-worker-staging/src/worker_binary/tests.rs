@@ -1259,7 +1259,7 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
 
 #[cfg(unix)]
 #[test]
-fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
+fn dsh_preflight_requires_compatible_node_even_with_a_current_binary() {
     let directory = tempfile::tempdir().unwrap();
     let current = format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp {}'; fi\n",
@@ -1275,18 +1275,6 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
         ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, directory.path().to_path_buf())
     };
 
-    preflight_harness(
-        &mj_core::config::TargetTemplate::LocalBare,
-        &profile,
-        &ProcessExecutor,
-    )
-    .unwrap();
-
-    mj_core::test_hooks::install_fake_command(
-        directory.path(),
-        "dsh-acp",
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; fi\n",
-    );
     let error = format!(
         "{:#}",
         preflight_harness(
@@ -1297,10 +1285,29 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
         .unwrap_err()
     );
     assert!(
-        error.contains("provide Node.js 22+ with npm and npx")
+        error.contains("provide Node.js 24.9.0+ with npm and npx")
             && error.contains("managed Node.js has no artifact"),
         "{error}"
     );
+
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "node",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.21.0; fi\nexit 0\n",
+    );
+    for command in ["npm", "npx"] {
+        mj_core::test_hooks::install_fake_command(
+            directory.path(),
+            command,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.19.0; fi\nexit 0\n",
+        );
+    }
+    preflight_harness(
+        &mj_core::config::TargetTemplate::LocalBare,
+        &profile,
+        &ProcessExecutor,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -2675,9 +2682,14 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     let bin = root.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n"
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\" \"$DSH_ACP_DSH_HOME\"\n"
     );
     mj_core::test_hooks::install_fake_command(&bin, "dsh-acp", &script);
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "node",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.21.0; fi\nexit 0\n",
+    );
     let staged = root.path().join("staged");
     std::fs::create_dir_all(&staged).unwrap();
     let instructions =
@@ -2703,7 +2715,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("||{}", staged.display())
+        format!("||{}|{}/dsh-home", staged.display(), staged.display())
     );
 
     // The native loader accepts instruction files up to 1 MiB. Mjolnir checks
@@ -2744,7 +2756,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("||{}", staged.display())
+        format!("||{}|{}/dsh-home", staged.display(), staged.display())
     );
     std::fs::write(&own, format!("{largest}x")).unwrap();
     // Hard-won: DSH campaign 2026-10-23: one byte too many reached the user only as relay noise naming the staged copy
@@ -2825,7 +2837,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("||{}", staged.display())
+        format!("||{}|{}/dsh-home", staged.display(), staged.display())
     );
 
     let output = launch(None);
@@ -2897,8 +2909,23 @@ fn dsh_launch_does_not_select_a_pre_native_loader() {
         stderr.contains(&format!(
             "requires dsh-acp {} or newer",
             mj_core::harness_runtime::DSH_ACP_VERSION
-        )) && stderr.contains("upgrade it or install Node.js 22+, npm, and npx"),
+        )) && stderr.contains(
+            "install or upgrade dsh-acp, Node.js, npm, and npx in the target environment"
+        ),
         "{stderr}"
+    );
+
+    mj_core::test_hooks::install_fake_command(
+        &tools_bin,
+        "node",
+        "#!/bin/sh\nif [ \"$1\" = -e ]; then exit 1; fi\nexit 0\n",
+    );
+    let output = launch(&fallback_path);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Node.js 24.9.0+") && stderr.contains("npm, and npx"),
+        "{output:?}"
     );
 }
 
@@ -4056,7 +4083,7 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 }
 
 #[test]
-fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_path() {
+fn installing_the_build_cache_places_marked_session_mbx_shims_on_the_session_path() {
     #[derive(Default)]
     struct RecordingExecutor {
         commands: std::sync::Mutex<Vec<String>>,
@@ -4117,9 +4144,7 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
         &executor,
         &locator,
         "/home/hel/.hel/worker",
-        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
-        Some(Path::new("/cache/.mjolnir/config/mbx")),
-        &[],
+        Path::new("/home/hel/.hel/worker/mbx"),
     )
     .unwrap();
 
@@ -4134,22 +4159,20 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     );
     assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        shim.contains(&targets::posix_quote(
-            "exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""
-        )),
-        "both wrappers execute the synchronized cache copy: {shim}"
+        shim.matches("exec '/home/hel/.hel/worker/mbx' \"$@\"")
+            .count()
+            == 2,
+        "both wrappers execute the session's private mbx: {shim}"
     );
     assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
-        commands.iter().any(|line| {
-            line.contains("'exec' '-i' 'hel-session' 'sh' '-c'") && line.contains("config/mbx")
-        }),
-        "the machine mbx configuration is linked into the container: {commands:#?}"
+        commands.iter().all(|line| !line.contains(".mjolnir")),
+        "nothing refers to the shared cache mount: {commands:#?}"
     );
 }
 
 #[test]
-fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
+fn container_mbx_version_must_match_the_staged_copy_before_shim_installation() {
     #[derive(Default)]
     struct VersionExecutor {
         commands: std::sync::Mutex<Vec<String>>,
@@ -4202,7 +4225,7 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     let error = verify_mbx_binary(
         &executor,
         &locator,
-        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
+        Path::new("/var/lib/hel/workers/session/mbx"),
         "1.22.0",
     )
     .unwrap_err();
@@ -4210,8 +4233,7 @@ fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
     let commands = executor.commands.lock().unwrap();
     assert_eq!(commands.len(), 1);
     assert!(
-        commands[0]
-            .contains("podman exec hel-session /mnt/fast/mbx-cache/.mjolnir/bin/mbx --version")
+        commands[0].contains("podman exec hel-session /var/lib/hel/workers/session/mbx --version")
     );
 }
 /// A Codex profile whose `auth.json` records this `auth_mode`, and whose own
@@ -4477,6 +4499,67 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
     .unwrap()
     .0;
     assert_eq!(launch.environment["IS_SANDBOX"], "1");
+}
+
+#[test]
+fn a_cached_container_launch_pins_the_recorded_target_root_and_container_policy() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(session_id).unwrap();
+    let docker = mj_core::config::TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
+            build_cache: None,
+            image: mj_core::config::DEFAULT_SESSION_IMAGE.to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    // The root lies in the cache directory, so nothing extra is mounted, yet
+    // the container still names it.
+    for target_root in ["/srv/cache/views", "/mnt/slow/targets"] {
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(session_id);
+        session.project_directory = None;
+        session.container_workspace = Some(workspace.clone());
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "local".into(),
+            directory: "/srv/cache".into(),
+            max_size: None,
+            target_root: Some(target_root.into()),
+        });
+        let launch = worker_launch_config(
+            &session,
+            &profile,
+            Some(&crate::database::test_fixtures::local_bundle(Path::new(
+                "/src/project",
+            ))),
+            &targets::TargetLocator::LocalDocker {
+                container_id: targets::resource_name(session_id).unwrap(),
+                borrowed_from: None,
+            },
+            LaunchWorkspace {
+                session_id,
+                container: Some(&workspace),
+                parent_worktree: None,
+                owner: None,
+                working_directories: &[],
+            },
+            &mj_core::state::TargetRuntimeSettings::from(&docker),
+            &mj_core::config::Config::default(),
+        )
+        .unwrap()
+        .0;
+        let environment = &launch.target_environment;
+        assert_eq!(environment["MBX_TARGET_ROOT"], target_root);
+        assert_eq!(environment["MBX_CACHE_DIR"], "/srv/cache");
+        // One container-scoped snapshot, never a worker directory's.
+        assert_eq!(environment["MJ_MBX_CONFIG_DIR"], "/var/lib/hel/mbx-config");
+    }
 }
 
 #[test]
@@ -6703,4 +6786,210 @@ fn session_state_instructions_are_appended_once_for_every_harness() {
         );
         assert!(actual.contains(text), "{harness:?}");
     }
+}
+
+/// Records every command with its input, and answers `--version` as the
+/// container would.
+struct MbxStagingRecorder {
+    commands: std::sync::Mutex<Vec<CommandSpec>>,
+    container_version: &'static str,
+}
+
+impl MbxStagingRecorder {
+    fn new(container_version: &'static str) -> Self {
+        Self {
+            commands: Default::default(),
+            container_version,
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+            .collect()
+    }
+}
+
+impl CommandExecutor for MbxStagingRecorder {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        _input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.lock().unwrap().push(command.clone());
+        let line = format!("{} {}", command.program, command.args.join(" "));
+        let stdout = if line.contains("--version") {
+            format!("mbx {}", self.container_version).into_bytes()
+        } else {
+            Vec::new()
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout,
+            stderr: Vec::new(),
+        })
+    }
+}
+
+const SESSION_WORKER_ROOT: &str = "/var/lib/hel/workers/0123456789abcdef0123456789abcdef";
+
+fn ssh_podman_locator() -> targets::TargetLocator {
+    targets::TargetLocator::SshPodman {
+        ssh: SshTarget {
+            destination: "builder@container-host.test".into(),
+            ssh_args: Vec::new(),
+        },
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        borrowed_from: None,
+    }
+}
+
+#[test]
+fn a_local_container_mbx_is_copied_checked_and_only_then_published() {
+    let executor = MbxStagingRecorder::new("1.30.0");
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+
+    let installed = stage_container_mbx(
+        &executor,
+        &locator,
+        SESSION_WORKER_ROOT,
+        Path::new("/home/dev/.local/bin/mbx"),
+        "1.30.0",
+    )
+    .unwrap();
+
+    assert_eq!(installed, Path::new(SESSION_WORKER_ROOT).join("mbx"));
+    let lines = executor.lines();
+    let staged = lines[0]
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .strip_prefix("hel-session:")
+        .unwrap()
+        .to_owned();
+    assert!(
+        staged.starts_with(&format!("{SESSION_WORKER_ROOT}/.mbx.mj-mbx-")),
+        "{staged}"
+    );
+    assert!(
+        lines[0].starts_with("podman cp /home/dev/.local/bin/mbx "),
+        "{lines:#?}"
+    );
+    assert!(lines[1].contains("chown"), "{lines:#?}");
+    assert!(
+        lines[2].ends_with(&format!("chmod 755 {staged}")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[3].ends_with(&format!("hel-session {staged} --version")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[4].ends_with(&format!(
+            "mv -f -- {staged} {installed}",
+            installed = installed.display()
+        )),
+        "the executable is verified before it takes the stable path: {lines:#?}"
+    );
+    assert_eq!(lines.len(), 5, "{lines:#?}");
+}
+
+#[test]
+fn a_ssh_container_mbx_is_copied_by_the_engine_on_the_container_host() {
+    let executor = MbxStagingRecorder::new("1.30.0");
+
+    stage_container_mbx(
+        &executor,
+        &ssh_podman_locator(),
+        SESSION_WORKER_ROOT,
+        Path::new("/home/dev/.local/bin/mbx"),
+        "1.30.0",
+    )
+    .unwrap();
+
+    let commands = executor.commands.lock().unwrap().clone();
+    let copy = &commands[0];
+    assert_eq!(copy.program, "ssh");
+    // Drop the shell quoting around each word of the remote step script.
+    let script = copy
+        .args
+        .last()
+        .unwrap()
+        .replace("'\\''", "")
+        .replace('\'', "");
+    assert!(
+        script.contains("( podman cp /home/dev/.local/bin/mbx hel-session:"),
+        "the host engine reads the host's own file: {script}"
+    );
+    assert!(script.contains("chmod 755"), "{script}");
+    assert!(
+        commands
+            .iter()
+            .all(|command| !matches!(command.program.as_str(), "scp" | "rsync")),
+        "no bytes pass through the daemon: {:#?}",
+        executor.lines()
+    );
+    assert!(
+        commands
+            .iter()
+            .flat_map(|command| command.args.iter())
+            .all(|arg| !arg.contains("rm") || !arg.contains("/home/dev/.local/bin/mbx")),
+        "the host's native mbx is never part of cleanup"
+    );
+}
+
+#[test]
+fn a_container_mbx_that_reports_another_version_never_replaces_the_stable_path() {
+    let executor = MbxStagingRecorder::new("1.29.0");
+
+    let error = stage_container_mbx(
+        &executor,
+        &ssh_podman_locator(),
+        SESSION_WORKER_ROOT,
+        Path::new("/home/dev/.local/bin/mbx"),
+        "1.30.0",
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("container reports mbx 1.29.0"),
+        "{error:#}"
+    );
+    let lines = executor.lines();
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("'mv'") && !line.contains(" mv ")),
+        "{lines:#?}"
+    );
+    let last = lines.last().unwrap();
+    assert!(
+        last.contains("rm") && last.contains(".mbx.mj-mbx-"),
+        "the failed staging file is removed: {lines:#?}"
+    );
+    assert!(!last.contains("/home/dev/.local/bin/mbx"), "{last}");
 }

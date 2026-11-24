@@ -19,6 +19,7 @@ pub use mj_core::relay::*;
 mod background;
 #[cfg(test)]
 pub(crate) use background::AirTaskFixture;
+pub(crate) use background::ReserveIdleAntigravityCheck;
 mod checkpoint_hold;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InPlaceHarnessRestartDecision {

@@ -140,12 +140,19 @@ pub(super) struct PermissionAnswers {
 /// option that continues under that policy becomes a plain "Yes" and hides
 /// other modes. When Claude omits the policy's mode, lower modes stay available
 /// for approval. Guardian keeps bypassPermissions hidden.
+///
+/// On a guardian-flagged request, standing `AllowAlways` options are omitted
+/// whenever the harness offers an `AllowOnce` option so later matching calls
+/// still pass through the guardian. When no `AllowOnce` option is present, all
+/// options stay so the person can still approve.
 pub(super) fn permission_choices(
     request: &RequestPermissionRequest,
     plan_permission: Option<PlanPermission>,
     enforcement: Option<ExecutionEnforcement>,
+    guardian_flagged: bool,
 ) -> PermissionAnswers {
-    let choices = offered_permission_choices(request, plan_permission, enforcement);
+    let choices =
+        offered_permission_choices(request, plan_permission, enforcement, guardian_flagged);
     let skip = request
         .options
         .iter()
@@ -163,11 +170,20 @@ fn offered_permission_choices(
     request: &RequestPermissionRequest,
     plan_permission: Option<PlanPermission>,
     enforcement: Option<ExecutionEnforcement>,
+    guardian_flagged: bool,
 ) -> Vec<PermissionChoice> {
     if plan_permission != Some(PlanPermission::Claude) {
+        let drop_allow_always = guardian_flagged
+            && request
+                .options
+                .iter()
+                .any(|option| option.kind == PermissionOptionKind::AllowOnce);
         return request
             .options
             .iter()
+            .filter(|option| {
+                !(drop_allow_always && option.kind == PermissionOptionKind::AllowAlways)
+            })
             .map(|option| PermissionChoice {
                 option_id: option.option_id.clone(),
                 title: option.name.clone(),

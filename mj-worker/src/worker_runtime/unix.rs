@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use mj_core::local_sockets::{bind_unix_listener, connect_unix_stream};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::review_capture::ReviewCapture;
@@ -184,6 +184,7 @@ enum PreparationStop {
 
 struct HarnessPreparationSetup {
     shared_subagents: SharedSubagents,
+    antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     root: PathBuf,
     config: WorkerLaunchConfig,
     relay: Arc<RelayCell>,
@@ -541,6 +542,7 @@ fn publish_started(
 #[allow(clippy::too_many_arguments)]
 fn start_bridge(
     setup: PreparedAcpSetup,
+    antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     relay: Arc<RelayCell>,
     dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
     task_monitors: TaskMonitors,
@@ -603,6 +605,7 @@ fn start_bridge(
         task_monitors,
         capture,
         HarnessStartup::new(),
+        Some(antigravity_refresh),
     )));
     Ok(started)
 }
@@ -1975,6 +1978,7 @@ pub async fn run_daemon_owned(
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
     let subagent_role = config.subagent_mcp_role();
     let has_subagent_tools = subagent_role.is_some();
+    let (antigravity_refresh_tx, antigravity_refresh_rx) = mpsc::channel(16);
     let task_monitors = TaskMonitors::new(config.harness, &credentials);
     let shared_credentials = SharedCredentials::new(credentials);
     let mut client_task = mj_core::runtime::spawn(accept_worker_clients(
@@ -1984,6 +1988,7 @@ pub async fn run_daemon_owned(
         dispatch_wake_tx.clone(),
         shared_credentials,
         ConnectionRuntime {
+            antigravity_refresh: Some(antigravity_refresh_tx),
             project_memory,
             cpu: Some(cpu_rx),
             shared_subagents: shared_subagents.clone(),
@@ -1999,6 +2004,7 @@ pub async fn run_daemon_owned(
 
     let preparation_setup = HarnessPreparationSetup {
         shared_subagents: shared_subagents.clone(),
+        antigravity_refresh: antigravity_refresh_rx,
         root: root.clone(),
         config,
         relay: relay.clone(),
@@ -3289,6 +3295,7 @@ async fn prepare_and_start_harness(
 ) -> Result<RunningHarness> {
     let HarnessPreparationSetup {
         shared_subagents,
+        antigravity_refresh,
         root: root_path,
         mut config,
         relay,
@@ -3371,6 +3378,7 @@ async fn prepare_and_start_harness(
     // thread, so it needs no bound of its own.
     let started = start_bridge(
         prepared_acp,
+        antigravity_refresh,
         relay,
         dispatch_wake_rx,
         task_monitors,
@@ -3489,6 +3497,7 @@ pub(super) async fn serve_terminal_relay(
 pub(super) struct ConnectionRuntime {
     pub(super) shared_subagents: SharedSubagents,
     pub(super) preparation_tx: Option<watch::Sender<PreparationSnapshot>>,
+    pub(super) antigravity_refresh: Option<mpsc::Sender<oneshot::Sender<Option<u64>>>>,
     pub(super) project_memory: ProjectMemoryEndpoint,
     /// The ACP coordinator's command channel, or `None` once the session is
     /// sealed and no ACP runtime is left to serve scratch prompts.
@@ -3555,6 +3564,7 @@ pub(super) async fn serve_client_with_shared_credentials(
     let ConnectionRuntime {
         shared_subagents,
         preparation_tx,
+        antigravity_refresh,
         project_memory,
         commands,
         reviewer,
@@ -4179,7 +4189,29 @@ pub(super) async fn serve_client_with_shared_credentials(
             let attach_preparation = preparation
                 .as_ref()
                 .and_then(|receiver| receiver.borrow().state.clone());
-            let result = if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
+            let reservation_response = if let RelayRequest::ReserveIdle { command_id } = &envelope.request {
+                use crate::relay::ReserveIdleAntigravityCheck;
+                let immediate = {
+                    let mut state = relay.lock().expect("relay state lock poisoned");
+                    if let Some(body) = state.envelope_rejection(&envelope) {
+                        Some(RelayResponseEnvelope { request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version, body })
+                    } else { match state.reserve_idle_antigravity_check(command_id) {
+                        ReserveIdleAntigravityCheck::ProceedDirectly => Some(state.handle(envelope.clone())),
+                        ReserveIdleAntigravityCheck::RejectNow => Some(state.reserve_idle_after_antigravity_refresh(envelope.clone(), None)),
+                        ReserveIdleAntigravityCheck::RefreshFirst => None,
+                    } }
+                };
+                if let Some(response) = immediate { Some(response) } else {
+                    let synced_epoch = if let Some(tx) = &antigravity_refresh {
+                        let (reply, result) = oneshot::channel();
+                        if tx.send(reply).await.is_ok() { result.await.ok().flatten() } else { None }
+                    } else { None };
+                    Some(relay.lock().expect("relay state lock poisoned")
+                        .reserve_idle_after_antigravity_refresh(envelope.clone(), synced_epoch))
+                }
+            } else { None };
+            let result = if let Some(response) = reservation_response { Ok(response) }
+            else if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
                 Ok(handle_antigravity_stop(&relay, envelope, &credentials).await)
             } else {
                 handle_request(&relay, envelope, attach_preparation).await
