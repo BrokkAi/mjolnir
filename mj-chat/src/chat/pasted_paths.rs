@@ -1,8 +1,8 @@
-//! Image files named by pasted or dropped text.
+//! Files named by pasted or dropped text.
 //!
 //! A terminal delivers a dropped file, and Explorer's "Copy as path", as text.
 //! A container or remote session cannot open a path on this machine, so a
-//! paste made only of image paths becomes image attachments instead. The
+//! paste made only of file paths becomes attachments instead. The
 //! files are read later, on the attachment task.
 
 use std::ffi::OsStr;
@@ -70,19 +70,20 @@ fn windows_path_on_this_host(path: &str) -> Result<PathBuf> {
     bail!("{path} is a Windows path, which this machine cannot open")
 }
 
-/// One image path in pasted text. `range` covers it as pasted, quotes and
+/// One file path in pasted text. `range` covers it as pasted, quotes and
 /// escapes included, so a failed read can put back exactly what was pasted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PastedImagePath {
+pub struct PastedFilePath {
     pub(crate) range: Range<usize>,
     pub(crate) path: PastedPath,
+    pub(crate) is_image: bool,
 }
 
-/// The image paths `pasted` consists of, or `None` when it holds anything
-/// else. Every non-blank line must be one or more absolute PNG, JPEG or WebP
+/// The file paths `pasted` consists of, or `None` when it holds anything
+/// else. Every non-blank line must be one or more absolute file
 /// paths: quoted, backslash-escaped as macOS terminals drop them, `file://`
 /// URLs, or Windows drive and UNC paths.
-pub(crate) fn image_paths(pasted: &str) -> Option<Vec<PastedImagePath>> {
+pub(crate) fn file_paths(pasted: &str) -> Option<Vec<PastedFilePath>> {
     let mut found = Vec::new();
     let mut line_offset = 0;
     for line in pasted.split('\n') {
@@ -92,7 +93,10 @@ pub(crate) fn image_paths(pasted: &str) -> Option<Vec<PastedImagePath>> {
             .and_then(|tokens| {
                 tokens
                     .into_iter()
-                    .map(|(range, text)| image_path(&text).map(|path| (range, path)))
+                    .map(|(range, text)| {
+                        file_path(&text, line[range.clone()].starts_with(['"', '\'']))
+                            .map(|path| (range, path))
+                    })
                     .collect::<Option<Vec<_>>>()
             })
             // An unquoted path with spaces, as a Windows path is often pasted,
@@ -100,10 +104,14 @@ pub(crate) fn image_paths(pasted: &str) -> Option<Vec<PastedImagePath>> {
             .or_else(|| {
                 let trimmed = line.trim();
                 let start = line.len() - line.trim_start().len();
-                image_path(trimmed).map(|path| vec![(start..start + trimmed.len(), path)])
+                if !is_windows_path(trimmed) || trimmed.starts_with(['"', '\'']) {
+                    return None;
+                }
+                file_path(trimmed, false).map(|path| vec![(start..start + trimmed.len(), path)])
             })?;
-        found.extend(paths.into_iter().map(|(range, path)| PastedImagePath {
+        found.extend(paths.into_iter().map(|(range, path)| PastedFilePath {
             range: range.start + offset..range.end + offset,
+            is_image: path.is_image_extension(),
             path,
         }));
     }
@@ -122,20 +130,62 @@ pub(crate) fn path_argument(argument: &str) -> PastedPath {
     path_from(argument).unwrap_or_else(|| PastedPath::Local(PathBuf::from(argument)))
 }
 
-fn image_path(text: &str) -> Option<PastedPath> {
+impl PastedPath {
+    fn filename(&self) -> Option<&str> {
+        match self {
+            Self::Local(path) => path.file_name().and_then(OsStr::to_str),
+            Self::Windows(path) => path
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty()),
+        }
+    }
+
+    pub(crate) fn display_filename(&self) -> String {
+        mj_core::attachment::sanitize_filename(self.filename().unwrap_or_default())
+    }
+
+    pub(crate) fn is_image_extension(&self) -> bool {
+        self.filename()
+            .and_then(|name| Path::new(name).extension())
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| {
+                IMAGE_EXTENSIONS
+                    .iter()
+                    .any(|image| extension.eq_ignore_ascii_case(image))
+            })
+    }
+}
+
+fn file_path(text: &str, quoted: bool) -> Option<PastedPath> {
     let path = path_from(text)?;
-    let name = match &path {
-        PastedPath::Local(path) => path.as_path(),
-        PastedPath::Windows(path) => Path::new(path),
-    };
-    name.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            IMAGE_EXTENSIONS
-                .iter()
-                .any(|image| extension.eq_ignore_ascii_case(image))
-        })
-        .then_some(path)
+    let filename = path.filename()?;
+    if matches!(filename, "." | "..")
+        || text.ends_with('/')
+        || (is_windows_path(text) && text.ends_with('\\'))
+    {
+        return None;
+    }
+    if let Some(unc) = text.strip_prefix(r"\\") {
+        if unc
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .count()
+            < 3
+        {
+            return None;
+        }
+    } else if text.starts_with('/')
+        && !quoted
+        && Path::new(text)
+            .components()
+            .filter(|component| matches!(component, std::path::Component::Normal(_)))
+            .count()
+            < 2
+    {
+        return None;
+    }
+    Some(path)
 }
 
 /// An absolute path named by one token, or `None`.
@@ -230,7 +280,7 @@ mod tests {
     use super::*;
 
     fn found(pasted: &str) -> Option<Vec<(&str, PastedPath)>> {
-        image_paths(pasted).map(|paths| {
+        file_paths(pasted).map(|paths| {
             paths
                 .into_iter()
                 .map(|found| (&pasted[found.range], found.path))
@@ -243,6 +293,29 @@ mod tests {
             PastedPath::Local(PathBuf::from(path))
         } else {
             PastedPath::Windows(path.to_owned())
+        }
+    }
+
+    #[test]
+    fn arbitrary_paths_preserve_source_ranges_and_distinguish_image_extensions() {
+        let input = r#""C:\Documents\draft report.pdf" \\server\share\photo.WeBP"#;
+        let paths = file_paths(input).unwrap();
+        assert_eq!(paths[0].path.display_filename(), "draft report.pdf");
+        assert!(!paths[0].is_image);
+        assert_eq!(paths[1].path.display_filename(), "photo.WeBP");
+        assert!(paths[1].is_image);
+        if cfg!(unix) {
+            let input = r"/tmp/My\ Doc.pdf file:///tmp/b%C3%A9.txt '/tmp/no extension'";
+            let paths = file_paths(input).unwrap();
+            assert_eq!(
+                paths
+                    .iter()
+                    .map(|entry| entry.path.display_filename())
+                    .collect::<Vec<_>>(),
+                ["My Doc.pdf", "bé.txt", "no extension"]
+            );
+            assert_eq!(&input[paths[2].range.clone()], "'/tmp/no extension'");
+            assert!(paths.iter().all(|entry| !entry.is_image));
         }
     }
 
@@ -314,7 +387,13 @@ mod tests {
             "\n\n",
             r#""C:\Users\me\shot.png" we have a graphical bug"#,
             "look at /tmp/shot.png",
-            "/tmp/notes.txt",
+            "/",
+            "/clear",
+            "C:\\",
+            r"\\server\share",
+            "https://example.com/image.png",
+            "http://example.com/notes.txt",
+            "/tmp/shot.png please review",
             "relative/shot.png",
             r#""C:\unterminated.png"#,
         ] {

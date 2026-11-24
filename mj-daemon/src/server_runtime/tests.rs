@@ -2215,11 +2215,46 @@ async fn phone_projects_log_a_repeated_failure_once() {
     );
 }
 
+#[test]
+fn phone_file_only_prompt_carries_a_resource_link_and_history_label() {
+    let file = mj_core::attachment::FileAttachmentRef::new(
+        b"notes",
+        "review notes.txt",
+        "text/plain".into(),
+    )
+    .unwrap();
+    let body = serde_json::json!({
+        "action": "prompt",
+        "session_id": "session-1",
+        "text": "",
+        "files": [file],
+    });
+    let ControllerAction::Prompt {
+        text,
+        images,
+        files,
+        ..
+    } = serde_json::from_value(body).unwrap()
+    else {
+        panic!("expected a prompt");
+    };
+    let (command, history) = super::actions::prepare_phone_prompt(text, images, files).unwrap();
+    let RelayCommand::Prompt { prompt } = command else {
+        panic!("expected a relay prompt");
+    };
+    assert_eq!(
+        mj_core::attachment::file_references(&prompt).unwrap(),
+        vec![file]
+    );
+    assert_eq!(history, "[file: review notes.txt]");
+}
+
 fn prompt_action() -> ControllerAction {
     ControllerAction::Prompt {
         command_id: None,
         session_id: "session-1".into(),
         text: "ship it".into(),
+        files: Vec::new(),
         images: Vec::new(),
     }
 }
@@ -2420,6 +2455,7 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
         let action = ControllerAction::Prompt {
             session_id: session_id.clone(),
             text: "continue".into(),
+            files: Vec::new(),
             images: Vec::new(),
             command_id: None,
         };

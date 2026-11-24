@@ -154,7 +154,7 @@ enum OriginAdmission {
 
 enum TrackedPrompt {
     Waiting {
-        prompt: StartupPrompt,
+        prompt: Box<StartupPrompt>,
         inherited_draft: Option<String>,
         recalled: bool,
         admission_error: Option<String>,
@@ -327,7 +327,7 @@ impl StartupPrompts {
                         name: io::session_notice_name(state, &session_id),
                         id: session_id,
                     },
-                    prompt,
+                    *prompt,
                     inherited_draft,
                     updates.clone(),
                     tracker.clone(),
@@ -362,11 +362,11 @@ impl StartupPrompts {
                         .get_mut(session_id)
                         .filter(|_| !dashboard.has_standby_composer(session_id))
                     {
-                        chat.retain_startup_receipt(prompt.clone(), inherited_draft.clone());
+                        chat.retain_startup_receipt((**prompt).clone(), inherited_draft.clone());
                     } else {
                         dashboard.retain_startup_receipt(
                             session_id,
-                            prompt.clone(),
+                            (**prompt).clone(),
                             inherited_draft.clone(),
                         );
                     }
@@ -463,7 +463,7 @@ impl StartupPrompts {
             self.pending.entry(session_id).or_default().insert(
                 prompt.command_id.clone(),
                 TrackedPrompt::Waiting {
-                    prompt,
+                    prompt: Box::new(prompt),
                     inherited_draft,
                     recalled: false,
                     admission_error: None,
@@ -546,7 +546,7 @@ impl StartupPrompts {
                 self.pending.entry(error_session).or_default().insert(
                     pending_prompt.command_id.clone(),
                     TrackedPrompt::Waiting {
-                        prompt: pending_prompt,
+                        prompt: Box::new(pending_prompt),
                         inherited_draft: saved_inherited_draft,
                         recalled: false,
                         admission_error: None,
@@ -564,7 +564,7 @@ impl StartupPrompts {
                     .insert(
                         error_prompt.command_id.clone(),
                         TrackedPrompt::Waiting {
-                            prompt: error_prompt.clone(),
+                            prompt: Box::new(error_prompt.clone()),
                             inherited_draft: saved_inherited_draft,
                             recalled: false,
                             admission_error: None,
@@ -873,7 +873,7 @@ impl StartupPrompts {
         match self.pending.get(session_id)?.get(command_id)? {
             TrackedPrompt::Waiting {
                 prompt, recalled, ..
-            } => Some((prompt.clone(), *recalled)),
+            } => Some(((**prompt).clone(), *recalled)),
             TrackedPrompt::Settled => None,
         }
     }
@@ -967,7 +967,7 @@ mod tests {
         pending.pending.entry("session".into()).or_default().insert(
             prompt.command_id.clone(),
             TrackedPrompt::Waiting {
-                prompt: prompt.clone(),
+                prompt: Box::new(prompt.clone()),
                 inherited_draft: Some("inherited-before-admission".into()),
                 recalled: false,
                 admission_error: None,
@@ -1155,7 +1155,7 @@ mod tests {
             .insert(
                 prompt.command_id.clone(),
                 TrackedPrompt::Waiting {
-                    prompt: prompt.clone(),
+                    prompt: Box::new(prompt.clone()),
                     inherited_draft: None,
                     recalled: true,
                     admission_error: None,
@@ -1232,7 +1232,7 @@ mod tests {
                         .insert(
                             prompt.command_id.clone(),
                             TrackedPrompt::Waiting {
-                                prompt: prompt.clone(),
+                                prompt: Box::new(prompt.clone()),
                                 inherited_draft: None,
                                 recalled: false,
                                 admission_error: None,

@@ -55,6 +55,7 @@ mj-github-relevance.workspace = true
 mj-github-watch.workspace = true
 
 [dev-dependencies]
+mj-chat = { path = "../mj-chat", package = "brokk-mj-chat" }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
 tar.workspace = true
