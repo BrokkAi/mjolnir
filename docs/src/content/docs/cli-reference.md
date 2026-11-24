@@ -776,7 +776,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
-| `DSH_ACP_DATA_DIR` | DSH home used by setup discovery. |
+| `DSH_ACP_DATA_DIR` | DSH profile home used by setup discovery and sessions; native DSH state lives in its `dsh-home/` subdirectory. |
 | `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when DSH's own credentials hold none. It outranks the profile's `environment`. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |

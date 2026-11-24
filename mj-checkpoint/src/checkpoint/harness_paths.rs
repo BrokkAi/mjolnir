@@ -84,8 +84,8 @@ pub(super) fn rewrite_kimi_session_index(
 /// the directory the worker launches it in. Grok Build encodes the cwd text it
 /// receives, so `<dir>/` and `<dir>` are different storage keys to it; Claude
 /// Code and Kimi Code key by the directory itself (Kimi hashes it without the
-/// trailing separator even though its registry records the text), and Muse
-/// only records it.
+/// trailing separator even though its registry records the text). DSH keys
+/// its native log by the cwd, while Muse only records it.
 pub(super) fn harness_storage_cwd(harness: HarnessKind, launch_cwd: &Path) -> PathBuf {
     match harness {
         HarnessKind::Grok => launch_cwd.to_path_buf(),
