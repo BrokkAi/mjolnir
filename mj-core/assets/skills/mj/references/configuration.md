@@ -962,10 +962,11 @@ configuration. In C/C++ projects, private `cmake`, `make`, `gmake` and `ninja`
 launchers use `mbx exec`, including the CMake configuration step.
 For Autoconf projects, run `mbx exec ./configure` so configuration records the
 cached compiler launchers before running `make`.
-The host executable is atomically refreshed at `<cache>/.mjolnir/bin/mbx` inside
-the read-write shared cache mount. Mjolnir checks that copy in the container
-before adding its marked Cargo and `mbx` launchers; periodic reconciliation
-refreshes it after host upgrades without interrupting running processes.
+Each session copies the host executable to `mbx` under its own worker directory
+and takes a snapshot of the host's mbx configuration there; the shared cache
+mount holds neither. Mjolnir checks the copy in the container before adding its
+marked Cargo and `mbx` launchers. Both are refreshed when the session's worker is
+launched, upgraded or restored, without interrupting running processes.
 In Settings, open **Machines → [machine] → Build caches**, or search for
 **mbx**, **cache**, or **build cache**. The machine row shows its configured
 state and total budget; opening it resolves the host's actual defaults and

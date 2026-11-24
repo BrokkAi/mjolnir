@@ -2272,11 +2272,11 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
     let arguments = release_arguments(release);
     assert_eq!(arguments[0], "native", "{release:?}");
     let checkout = checkout.to_string_lossy().into_owned();
-    // `$6` is the root newer mbx cleans with `clean --under`; the paths after
+    // `$5` is the root newer mbx cleans with `clean --under`; the paths after
     // it are the fallback for older mbx. A clone's root is its checkout.
-    assert_eq!(arguments[5], checkout, "the clone is the released root");
+    assert_eq!(arguments[4], checkout, "the clone is the released root");
     assert_eq!(
-        &arguments[6..],
+        &arguments[5..],
         [checkout],
         "the clone is the only fallback workspace"
     );
@@ -2462,27 +2462,20 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         executor.commands.lock().unwrap().clone()
     );
     let arguments = release_arguments(&releases[0]);
+    // Mode, the recorded store, and no relocated target root.
+    assert_eq!(&arguments[..3], ["shared", "/srv/mbx-cache", ""]);
     assert_eq!(
-        &arguments[..4],
-        [
-            "shared",
-            "/srv/mbx-cache",
-            "/srv/mbx-cache/.mjolnir/config",
-            "/srv/mbx-cache/.mjolnir/bin/mbx"
-        ]
-    );
-    assert_eq!(
-        arguments[4],
+        arguments[3],
         mj_core::config::data_dir()
             .join("mbx")
             .to_string_lossy()
             .as_ref()
     );
-    // `$6` is the session's own root for `mbx clean --under`; the
+    // `$5` is the session's own root for `mbx clean --under`; the
     // repository paths after it are the fallback for older mbx.
-    assert_eq!(arguments[5], format!("/workspace/{session_id}"));
+    assert_eq!(arguments[4], format!("/workspace/{session_id}"));
     assert_eq!(
-        &arguments[6..],
+        &arguments[5..],
         [
             format!("/workspace/{session_id}/app"),
             format!("/workspace/{session_id}/lib"),

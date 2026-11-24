@@ -345,22 +345,25 @@ Mjolnir turns this on for a session when all of the following hold:
   leaves sessions on that host without the shared cache.
 
 The cache directory lives on the container host and is mounted read-write into
-the container at the same absolute path. Mjolnir atomically copies the resolved
-host executable to `<cache>/.mjolnir/bin/mbx` inside that directory, then checks
-that this copy runs in the container and reports the expected version before
-installing mbx's Cargo launcher. Session start and resume refresh the copy
-when the native mbx version or file size changes. So does applying a machine's
-build cache settings, which happens when the daemon starts, when the settings
-or the sessions using the cache change, and after an mbx install. A
-replacement uses a same-directory temporary file and atomic rename, so running
-processes keep using the inode they already opened. If native mbx
-is absent or too old, the old copy is left in place and new sessions run
-without the cache. Nothing is synchronized between hosts, and Mjolnir never
-runs mbx garbage collection: the host's own mbx and the automatic collection
-inside containers are the only collectors.
+the container at the same absolute path. Nothing else of Mjolnir's is stored in
+it. Each session gets its own copy of the host executable at `mbx` under its
+worker directory, which the container engine copies on the container host
+(never through the machine running Mjolnir), checks in the container for the
+expected version, and renames into place before installing mbx's Cargo
+launcher. The copy is refreshed whenever the session's worker is started,
+upgraded or restored, so a host mbx upgrade reaches a running session at its
+next such restart; a running build keeps the executable it already opened. If
+native mbx is absent or too old, the session runs without the cache. Nothing is
+synchronized between hosts, and Mjolnir never runs mbx garbage collection: the
+host's own mbx and the automatic collection inside containers are the only
+collectors.
 
-Containers read the host's mbx configuration as-is. Leave the linker out of
-it: any mbx linker selection, managed (`mold@<version>`) or `path:`, makes rustc
+Containers read a snapshot of the host's mbx configuration, taken each time the
+session's worker is launched and stored under the session's worker directory.
+Edit the host configuration as usual; sessions pick the change up at their next
+restart.
+
+Leave the linker out of the host configuration: any mbx linker selection, managed (`mold@<version>`) or `path:`, makes rustc
 link through `clang`, so every image on the host would need clang, and a
 `path:` linker would also have to exist at that path inside each image. A
 project that wants a faster linker selects a managed one in its workspace
@@ -405,13 +408,13 @@ warning that sessions will run without the shared cache and points to **Settings
 › Setup › Machines**. The warning does not make doctor fail because the cache
 is optional.
 
-When the host has `~/.config/mbx/config.toml`, Mjolnir mirrors it into the
-shared cache and links it into the container so mbx uses the host's own
+When the host has `~/.config/mbx/config.toml`, Mjolnir stages a private copy of
+it for the session and links it into the container so mbx uses the host's own
 settings. If that file
 relocates `[target] root` outside the cache directory, that directory is
 mounted read-write at its own path too.
 
-Inside the session, `cargo` is a small launcher that invokes the shared-cache
+Inside the session, `cargo` is a small launcher that invokes the session's
 mbx through its supported Cargo-shim mode; mbx finds the image's real Cargo
 underneath. The session PATH also includes an `mbx` launcher for that same
 cache copy.

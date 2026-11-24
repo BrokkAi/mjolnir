@@ -349,11 +349,13 @@ pub fn worker_launch_config_with_checkout(
         if nitro_build_cache {
             target_environment.remove("MJ_MBX_CONFIG_DIR");
         } else {
+            // A private snapshot of the host's policy, staged before launch.
             target_environment.insert(
                 "MJ_MBX_CONFIG_DIR".into(),
-                mj_core::config::build_cache_configuration_directory(&build_cache.directory)
-                    .to_string_lossy()
-                    .into_owned(),
+                mj_core::target_path::text(&mj_core::target_path::join(
+                    Path::new(&targets::worker_root(backend, session_id)?),
+                    Path::new("mbx-config"),
+                )),
             );
         }
         // Compiler symlinks name this worker's private executable. Sharing

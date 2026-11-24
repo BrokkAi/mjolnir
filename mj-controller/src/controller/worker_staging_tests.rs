@@ -361,94 +361,126 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
     cleanup.unwrap();
 }
 
+/// Runs a podman container's commands in a local directory standing for its
+/// worker root, and answers the container host's mbx probe and configuration
+/// read with fixed values.
 #[cfg(target_os = "linux")]
-// Hard-won: 6fb245e38: legacy mbx relinking appended config.toml to a configuration filename.
-#[test]
-fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
-    use std::cell::RefCell;
+struct LocalContainerExecutor {
+    commands: std::cell::RefCell<Vec<CommandSpec>>,
+    /// The worker root as the container names it, and the directory standing
+    /// for it.
+    container_root: String,
+    local_root: PathBuf,
+    home: PathBuf,
+    host_mbx: PathBuf,
+    host_config: String,
+}
 
+#[cfg(target_os = "linux")]
+impl LocalContainerExecutor {
+    fn translate(&self, argument: &str) -> String {
+        argument.replace(&self.container_root, &self.local_root.to_string_lossy())
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.commands
+            .borrow()
+            .iter()
+            .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl CommandExecutor for LocalContainerExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
+        use crate::targets::CommandOutput;
+        self.commands.borrow_mut().push(command.clone());
+        if command.program != "podman" {
+            // The container host's own commands: the mbx probe and the read of
+            // its configuration file.
+            let script = command.args.get(1).map(String::as_str).unwrap_or_default();
+            let stdout = if script.contains("command -v mbx") {
+                format!(
+                    "{}\nmbx {}",
+                    self.host_mbx.display(),
+                    mj_core::config::MBX_VERSION
+                )
+            } else if script.contains("cat -- \"$1\"") {
+                self.host_config.clone()
+            } else {
+                panic!("unexpected host command: {command:?}");
+            };
+            return Ok(CommandOutput {
+                status: 0,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            });
+        }
+        let args: Vec<String> = command
+            .args
+            .iter()
+            .map(|argument| self.translate(argument))
+            .collect();
+        let local = match args[0].as_str() {
+            "cp" => {
+                let destination = args[2].split_once(':').expect("container:path").1;
+                CommandSpec::new("cp", [args[1].clone(), destination.to_owned()])
+            }
+            "exec" => {
+                let mut index = 1;
+                while args[index].starts_with("--") || args[index] == "-i" {
+                    index += if args[index] == "--user" { 2 } else { 1 };
+                }
+                // `args[index]` is the container.
+                CommandSpec::new(args[index + 1].clone(), args[index + 2..].iter().cloned())
+            }
+            other => panic!("unexpected podman verb {other}"),
+        };
+        let mut local = local;
+        local
+            .env
+            .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+        if let Some(input) = command.sensitive_stdin() {
+            local = local.with_sensitive_stdin(input.to_vec());
+        }
+        ProcessExecutor.execute(&local)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cache_test_launch(
+    directory: &Path,
+    session_id: &str,
+    target_environment: std::collections::BTreeMap<String, String>,
+) -> WorkerLaunchConfig {
     use mj_core::config::ExecutionPolicy;
     use mj_core::worker_launch::HarnessRuntimePolicy;
 
-    use crate::targets::CommandOutput;
-
-    struct CacheLinkExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
-        worker_bin: PathBuf,
-        home: PathBuf,
-    }
-
-    impl CommandExecutor for CacheLinkExecutor {
-        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-            mj_core::targets::DeadlinePause::none()
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            self.cancellation_requested()
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute_with_stdin(command, input)
-        }
-
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            let mut args = command.args[3..].to_vec();
-            // Translate only the container's worker directory; run the shell
-            // with the configuration path supplied by the production caller.
-            args[3] = self.worker_bin.to_string_lossy().into_owned();
-            let mut local = CommandSpec::new("/bin/sh", args);
-            local
-                .env
-                .insert("HOME".into(), self.home.to_string_lossy().into_owned());
-            targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(5))
-                .execute(&local)
-        }
-    }
-
-    let directory = tempfile::tempdir().unwrap();
-    let shared_cache = directory.path().join("shared cache");
-    let configuration = shared_cache.join(".mjolnir/config/mbx");
-    std::fs::create_dir_all(&configuration).unwrap();
-    std::fs::write(
-        configuration.join("config.toml"),
-        "[gc]\nmax_total_size = '50GB'\n",
-    )
-    .unwrap();
-    let worker_bin = directory.path().join("worker/bin");
-    std::fs::create_dir_all(&worker_bin).unwrap();
-    let legacy_binary = worker_bin.join("mbx");
-    std::fs::write(&legacy_binary, b"legacy copied mbx executable").unwrap();
-    let home = directory.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let controller = crate::controller::Controller {
-        config: mj_core::config::Config::default(),
-        state: mj_core::state::State::default(),
-    };
-    let mut session = crate::controller::test_support::checkpoint_test_session("legacy-cache");
-    session.build_cache = Some(mj_core::state::SessionBuildCache {
-        host: "local".into(),
-        directory: shared_cache,
-        max_size: None,
-        target_root: None,
-    });
-    let backend = targets::TargetLocator::LocalPodman {
-        container_id: targets::resource_name(&session.id).unwrap(),
-        workspace_storage: Default::default(),
-        borrowed_from: None,
-    };
-    let launch = WorkerLaunchConfig {
+    WorkerLaunchConfig {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -459,7 +491,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         goal_resume_request: None,
         run_mode: Default::default(),
         suspend_capture: None,
-        session_id: session.id.clone(),
+        session_id: session_id.to_owned(),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         subagent_kind: None,
@@ -468,17 +500,17 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         initial_model: None,
         review_capture: false,
         review_trigger: Default::default(),
-        target_environment: Default::default(),
+        target_environment,
         seed_image_environment: true,
         harness: HarnessKind::Codex,
-        harness_home: directory.path().join("profile"),
+        harness_home: directory.join("profile"),
         authentication_marker: None,
         bridge_command: "codex".into(),
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Ambient,
         environment: Default::default(),
         excluded_environment: Vec::new(),
-        cwd: directory.path().to_path_buf(),
+        cwd: directory.to_path_buf(),
         additional_directories: Vec::new(),
         native_session_id: None,
         project_memory: None,
@@ -486,45 +518,217 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         claude_permission_mode: Default::default(),
         mjolnir_guardian: true,
         observe_policy: None,
-    };
-    let executor = CacheLinkExecutor {
-        commands: RefCell::new(Vec::new()),
-        worker_bin,
-        home: home.clone(),
-    };
+    }
+}
+
+/// A retained cached session and the container-side layout the executor
+/// stands in for. The shared cache directory deliberately does not exist.
+#[cfg(target_os = "linux")]
+struct CachedSessionFixture {
+    directory: tempfile::TempDir,
+    shared_cache: PathBuf,
+    local_root: PathBuf,
+    home: PathBuf,
+    reviewer_config_root: PathBuf,
+    session: mj_core::state::SessionRecord,
+    backend: targets::TargetLocator,
+    launch: WorkerLaunchConfig,
+    executor: LocalContainerExecutor,
+}
+
+#[cfg(target_os = "linux")]
+const HOST_MBX_CONFIG: &str = "[gc]\nmax_total_size = '50GB'\n";
+
+#[cfg(target_os = "linux")]
+impl CachedSessionFixture {
+    fn new(id: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let shared_cache = directory.path().join("shared cache");
+        let local_root = directory.path().join("worker");
+        std::fs::create_dir_all(local_root.join("bin")).unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let reviewer_config_root = directory.path().join("reviewer-xdg");
+        let host_mbx = directory.path().join("host-bin/mbx");
+        std::fs::create_dir_all(host_mbx.parent().unwrap()).unwrap();
+        std::fs::write(
+            &host_mbx,
+            format!("#!/bin/sh\necho 'mbx {}'\n", mj_core::config::MBX_VERSION),
+        )
+        .unwrap();
+        std::fs::set_permissions(&host_mbx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut session = crate::controller::test_support::checkpoint_test_session(id);
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "local".into(),
+            directory: shared_cache.clone(),
+            max_size: None,
+            target_root: None,
+        });
+        let backend = targets::TargetLocator::LocalPodman {
+            container_id: targets::resource_name(&session.id).unwrap(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let launch = cache_test_launch(
+            directory.path(),
+            &session.id,
+            std::collections::BTreeMap::from([(
+                "XDG_CONFIG_HOME".to_owned(),
+                reviewer_config_root.to_string_lossy().into_owned(),
+            )]),
+        );
+        let executor = LocalContainerExecutor {
+            commands: Default::default(),
+            container_root: targets::worker_root(&backend, &session.id).unwrap(),
+            local_root: local_root.clone(),
+            home: home.clone(),
+            host_mbx,
+            host_config: HOST_MBX_CONFIG.to_owned(),
+        };
+        Self {
+            directory,
+            shared_cache,
+            local_root,
+            home,
+            reviewer_config_root,
+            session,
+            backend,
+            launch,
+            executor,
+        }
+    }
+
+    fn controller(&self) -> crate::controller::Controller {
+        crate::controller::Controller {
+            config: mj_core::config::Config::default(),
+            state: mj_core::state::State::default(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+// Hard-won: 6fb245e38: legacy mbx relinking appended config.toml to a configuration filename.
+#[test]
+fn legacy_worker_upgrade_links_the_private_policy_snapshot_and_keeps_its_own_mbx() {
+    let fixture = CachedSessionFixture::new("legacy-cache");
+    let legacy_binary = fixture.local_root.join("bin/mbx");
+    std::fs::write(&legacy_binary, b"legacy copied mbx executable").unwrap();
 
     // This is the cache-configuration preflight called by
     // upgrade_session_worker before it prepares or swaps the worker.
-    controller
-        .prepare_build_cache_links(&session, &backend, &launch, &executor)
+    fixture
+        .controller()
+        .prepare_build_cache_links(
+            &fixture.session,
+            &fixture.backend,
+            &fixture.launch,
+            &fixture.executor,
+        )
         .unwrap();
 
-    let commands = executor.commands.borrow();
-    assert_eq!(
-        commands.len(),
-        1,
-        "legacy preparation must not probe the host"
+    let lines = fixture.executor.lines();
+    assert!(
+        lines.iter().any(|line| line.contains("mj-mbx-config")),
+        "the snapshot is staged first: {lines:#?}"
     );
-    assert_eq!(
-        commands[0].purpose,
-        "inspect legacy mbx and relink its shared configuration"
+    assert!(
+        fixture
+            .executor
+            .commands
+            .borrow()
+            .last()
+            .unwrap()
+            .purpose
+            .contains("inspect legacy mbx and relink"),
+        "a legacy private mbx ends the preparation after its link: {lines:#?}"
     );
-    assert_eq!(commands[0].program, "podman");
-    assert!(commands[0].args.iter().any(|argument| {
-        argument.ends_with("/bin") && argument.starts_with("/var/lib/hel/workers/")
-    }));
     assert_eq!(
         std::fs::read(&legacy_binary).unwrap(),
         b"legacy copied mbx executable"
     );
+    let snapshot = fixture.local_root.join("mbx-config/config.toml");
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), HOST_MBX_CONFIG);
     assert_eq!(
-        std::fs::read_link(home.join(".config/mbx/config.toml")).unwrap(),
-        configuration.join("config.toml")
+        std::fs::read_link(fixture.home.join(".config/mbx/config.toml")).unwrap(),
+        snapshot
     );
+    assert!(!fixture.local_root.join("mbx").exists());
+    assert!(!fixture.shared_cache.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_retained_session_moves_off_its_in_cache_launcher_with_no_shared_cache_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = CachedSessionFixture::new("retained-cache");
+    // What an earlier release installed: marked launchers that run the copy in
+    // the shared cache, and a policy file there.
+    for name in ["cargo", "mbx"] {
+        let launcher = fixture.local_root.join("bin").join(name);
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\n# mjolnir-mbx-shim\nexec /cache/.mjolnir/bin/mbx \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fixture
+        .controller()
+        .prepare_build_cache_links(
+            &fixture.session,
+            &fixture.backend,
+            &fixture.launch,
+            &fixture.executor,
+        )
+        .unwrap();
+
+    let private_mbx = fixture.local_root.join("mbx");
     assert_eq!(
-        std::fs::read_to_string(home.join(".config/mbx/config.toml")).unwrap(),
-        "[gc]\nmax_total_size = '50GB'\n"
+        std::fs::metadata(&private_mbx)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
     );
+    for name in ["cargo", "mbx"] {
+        let launcher = std::fs::read_to_string(fixture.local_root.join("bin").join(name)).unwrap();
+        assert!(launcher.contains("# mjolnir-mbx-shim"), "{launcher}");
+        assert!(
+            launcher.contains(&format!("exec '{}' \"$@\"", private_mbx.display())),
+            "{launcher}"
+        );
+        assert!(!launcher.contains(".mjolnir"), "{launcher}");
+    }
+    let snapshot = fixture.local_root.join("mbx-config/config.toml");
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), HOST_MBX_CONFIG);
+    // The container's own lookup and a late reviewer home both follow it.
+    for link in [
+        fixture.home.join(".config/mbx/config.toml"),
+        fixture.reviewer_config_root.join("mbx/config.toml"),
+    ] {
+        assert_eq!(std::fs::read_link(&link).unwrap(), snapshot);
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), HOST_MBX_CONFIG);
+    }
+    assert!(
+        !fixture.shared_cache.exists(),
+        "nothing was written under the shared cache directory"
+    );
+    assert!(
+        std::fs::read_dir(&fixture.local_root)
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".mbx.mj-")),
+        "no staging file remains"
+    );
+    drop(fixture.directory);
 }
 
 #[cfg(unix)]

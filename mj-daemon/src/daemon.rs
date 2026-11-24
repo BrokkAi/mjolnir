@@ -305,7 +305,6 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
     inactivity_changed: tokio::sync::Notify,
-    mbx_install_wake: crate::daemon::mbx_service::InstallWake,
     projects: Arc<mj_controller::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     session_gate: Arc<RecoveryGate>,
@@ -883,7 +882,6 @@ mod close_workspace;
 pub(crate) mod create;
 mod lifecycle;
 pub(crate) mod mailbox_delivery;
-pub(crate) mod mbx_service;
 mod purge;
 pub(crate) mod push_delivery;
 mod resume;

@@ -42,8 +42,8 @@ impl Controller {
     ) -> Result<()> {
         use super::worker_binary::{
             WorkerInstall, install_staged_worker_binary, probe_worker_liveness,
-            replace_installed_worker_launch_config, stage_worker_binary_for_upgrade,
-            start_worker_durably, stop_worker_after_target_recovery,
+            stage_worker_binary_for_upgrade, start_worker_durably,
+            stop_worker_after_target_recovery,
         };
         let record = self
             .state
@@ -121,7 +121,7 @@ impl Controller {
                         let launch = self.current_worker_launch_config(session_id, &backend)?;
                         executor.end_resumable_work("start container worker")?;
                         install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)?;
-                        replace_installed_worker_launch_config(executor, &backend, session_id, &launch)?;
+                        self.install_launch_config(session_id, &backend, &launch, executor)?;
                         owner.begin_restart(target, mj_core::worker_build::worker_build_id().into())?;
                         start_worker_durably(&owner, target, executor, &backend, &root, &self.config.github)?;
                     }

@@ -3528,6 +3528,14 @@ impl Controller {
                             )?;
                             self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = staged.aws_profile;
                             let launch_config = self.current_worker_launch_config(&id, &backend)?;
+                            // The restarted harness reads this configuration, so
+                            // the mbx and policy it names must exist first.
+                            self.prepare_build_cache_links(
+                                &self.state.sessions[&id],
+                                &backend,
+                                &launch_config,
+                                executor,
+                            )?;
                             rpc_sent = true;
                             conn.client
                                 .restart_harness_in_place(

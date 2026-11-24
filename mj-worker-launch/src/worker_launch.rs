@@ -406,6 +406,11 @@ pub fn stage_worker_files_for(
         } else {
             None
         };
+        // The profile install below also replaces `launch.json`, whose
+        // `MJ_MBX_CONFIG_DIR` names this session's private policy snapshot.
+        // Stage it, and the mbx the launchers run, before the file names them.
+        install_build_cache_shim(session, backend, &launch, executor)
+            .context("stage the session's mbx and configuration")?;
         clear_profile_configuration(
             executor,
             backend,
@@ -449,7 +454,7 @@ pub fn stage_worker_files_for(
         &shared_paths,
     )?;
     if session.build_cache.is_some() {
-        install_build_cache_shim(config, state, session, backend, &launch, executor)
+        install_build_cache_shim(session, backend, &launch, executor)
             .context("install shared machine build cache configuration")?;
     }
     Ok((Some(launch), staged_profile))
@@ -458,16 +463,14 @@ pub fn stage_worker_files_for(
 /// Stage and verify the session's mbx, then install marked launchers in
 /// the session's `bin` directory on the worker PATH.
 pub fn install_build_cache_shim(
-    config: &Config,
-    state: &State,
     session: &mj_core::state::SessionRecord,
     backend: &targets::TargetLocator,
     launch: &WorkerLaunchConfig,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    let Some(cache) = session.build_cache.as_ref() else {
+    if session.build_cache.is_none() {
         return Ok(());
-    };
+    }
     let worker_root = targets::worker_root(backend, &session.id)?;
     if matches!(backend, targets::TargetLocator::SshNitro { .. }) {
         let _timing = crate::launch_timing::LaunchPhaseTimer::new(&session.id, "stage Nitro mbx");
@@ -485,7 +488,7 @@ pub fn install_build_cache_shim(
             Ok::<_, anyhow::Error>(binary)
         })();
         return match staged {
-            Ok(binary) => install_mbx_shims(executor, backend, &worker_root, &binary, None, &[]),
+            Ok(binary) => install_mbx_shims(executor, backend, &worker_root, &binary),
             Err(error) => {
                 disable_mbx_cache_shims(
                     &session.id,
@@ -499,26 +502,47 @@ pub fn install_build_cache_shim(
         };
     }
     let config_roots = build_cache_config_roots(launch);
-    let configuration = mj_core::config::build_cache_configuration_directory(&cache.directory);
-    if link_legacy_mbx_configuration(
+    // The policy snapshot goes first: an older private mbx, which keeps its
+    // own executable, is linked to it below. A host whose policy cannot be read
+    // or staged fails the launch rather than starting with stale policy.
+    let configuration = mj_build_cache::mbx::native_config_for_container(backend, executor)
+        .context("read the container host's mbx configuration")?;
+    let configuration_directory = stage_mbx_configuration(
         executor,
         backend,
         &worker_root,
         &configuration,
         &config_roots,
+    )?;
+    if link_legacy_mbx_configuration(
+        executor,
+        backend,
+        &worker_root,
+        &configuration_directory,
+        &config_roots,
     )? {
         return Ok(());
     }
-    let binary = match mj_build_cache::mbx::sync_mbx_binary_for_container(
-        backend,
-        &cache.directory,
-        executor,
-    ) {
-        Ok(mj_build_cache::mbx::CachedMbxSync::Ready(binary)) => binary,
-        Ok(mj_build_cache::mbx::CachedMbxSync::Unavailable(reason)) => {
-            disable_mbx_cache_shims(&session.id, backend, &worker_root, executor, &reason);
-            return Ok(());
-        }
+    let staged = (|| -> Result<Option<PathBuf>> {
+        let native = match mj_build_cache::mbx::native_mbx_for_container(backend, executor)? {
+            mj_build_cache::mbx::NativeMbxLookup::Ready(native) => native,
+            mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => {
+                disable_mbx_cache_shims(&session.id, backend, &worker_root, executor, &reason);
+                return Ok(None);
+            }
+        };
+        stage_container_mbx(
+            executor,
+            backend,
+            &worker_root,
+            &native.program,
+            &native.version,
+        )
+        .map(Some)
+    })();
+    match staged {
+        Ok(Some(binary)) => install_mbx_shims(executor, backend, &worker_root, &binary),
+        Ok(None) => Ok(()),
         Err(error) => {
             disable_mbx_cache_shims(
                 &session.id,
@@ -527,61 +551,18 @@ pub fn install_build_cache_shim(
                 executor,
                 &format!("{error:#}"),
             );
-            return Ok(());
+            Ok(())
         }
-    };
-    if let Err(error) = verify_mbx_binary(executor, backend, &binary.path, &binary.version) {
-        disable_mbx_cache_shims(
-            &session.id,
-            backend,
-            &worker_root,
-            executor,
-            &format!("{error:#}"),
-        );
-        return Ok(());
     }
-    let (configuration, config_roots) =
-        build_cache_configuration(config, state, session, backend, launch, executor)?;
-    install_mbx_shims(
-        executor,
-        backend,
-        &worker_root,
-        &binary.path,
-        Some(&configuration),
-        &config_roots,
-    )
 }
 
 pub fn prepare_build_cache_links(
-    config: &Config,
-    state: &State,
     session: &mj_core::state::SessionRecord,
     backend: &targets::TargetLocator,
     launch: &WorkerLaunchConfig,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    install_build_cache_shim(config, state, session, backend, launch, executor)
-}
-
-pub fn build_cache_configuration(
-    config: &Config,
-    _state: &State,
-    session: &mj_core::state::SessionRecord,
-    backend: &targets::TargetLocator,
-    launch: &WorkerLaunchConfig,
-    executor: &impl CommandExecutor,
-) -> Result<(PathBuf, Vec<PathBuf>)> {
-    let configuration = mj_build_cache::mbx::prepare_session_configuration(
-        config,
-        backend,
-        session
-            .build_cache
-            .as_ref()
-            .context("session has no build cache")?,
-        executor,
-    )?;
-    let config_roots = build_cache_config_roots(launch);
-    Ok((configuration, config_roots))
+    install_build_cache_shim(session, backend, launch, executor)
 }
 
 /// Probe the installed binary and the worker's recorded state after a

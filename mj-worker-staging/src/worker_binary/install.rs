@@ -451,16 +451,23 @@ pub fn container_upload_ownership_args(
     args
 }
 
-/// Link every mbx lookup to the one policy already reachable through the
-/// shared cache mount. File symlinks follow atomic replacements at the source.
+/// Write the session's private mbx policy snapshot, then link every mbx
+/// lookup to it. The snapshot is replaced atomically, so a reader sees the
+/// whole old or whole new document; links follow the replacement.
 const MBX_CONFIG_SCRIPT: &str = r#"set -eu
-source=$1
+directory=$1
 shift
-[ -r "$source/config.toml" ] || { echo 'shared machine mbx configuration is missing' >&2; exit 1; }
+mkdir -p -- "$directory"
+temporary=$(mktemp "$directory/.config.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+cat > "$temporary"
+chmod 644 -- "$temporary"
+mv -f -- "$temporary" "$directory/config.toml"
+trap - EXIT HUP INT TERM
 for root in "$HOME/.config" "$@"; do
     mkdir -p -- "$root/mbx"
     link="$root/mbx/.config.mj-$$"
-    ln -s -- "$source/config.toml" "$link"
+    ln -s -- "$directory/config.toml" "$link"
     mv -Tf -- "$link" "$root/mbx/config.toml"
 done
 "#;
@@ -557,12 +564,10 @@ pub fn install_mbx_shims(
     locator: &targets::TargetLocator,
     worker_root: &str,
     mbx_binary: &Path,
-    configuration: Option<&Path>,
-    config_roots: &[PathBuf],
 ) -> Result<()> {
     ensure!(
         mj_core::target_path::is_absolute_on_host_or_target(mbx_binary),
-        "shared cache mbx path is not absolute: {}",
+        "staged mbx path is not absolute: {}",
         mbx_binary.display()
     );
     let bin = format!("{worker_root}/bin");
@@ -590,22 +595,12 @@ pub fn install_mbx_shims(
         cargo_body,
         mbx_body,
     ];
-    let steps = std::iter::once(targets::CommandStep::new(
-        "install the build-cache mbx shims",
-        targets::with_engine_argv(args),
-    ))
-    .chain(configuration.map(|configuration| {
-        targets::CommandStep::new(
-            "link the shared machine mbx configuration",
-            mbx_configuration_argv(engine, container_id, configuration, config_roots),
-        )
-    }));
-    let args = targets::step_script(steps);
+    let args = targets::with_engine_argv(args);
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
     }
-    .purpose("install the shared-cache mbx shims")
+    .purpose("install the session mbx shims")
     .stage(ProvisionStage::Syncing);
     execute_checked(executor, command)?;
     Ok(())
@@ -646,7 +641,7 @@ pub fn verify_mbx_binary(
 ) -> Result<()> {
     ensure!(
         mj_core::target_path::is_absolute_on_host_or_target(mbx_binary),
-        "shared cache mbx path is not absolute: {}",
+        "staged mbx path is not absolute: {}",
         mbx_binary.display()
     );
     let (engine, container_id, ssh) = mbx_container(locator)?;
@@ -662,7 +657,7 @@ pub fn verify_mbx_binary(
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
     }
-    .purpose("verify the synchronized mbx inside the session container")
+    .purpose("verify the staged mbx inside the session container")
     .stage(ProvisionStage::Syncing);
     let output = executor.execute(&command)?;
     let container_version = reported_mbx_version(output, &command)?;
@@ -688,30 +683,176 @@ fn reported_mbx_version(output: CommandOutput, command: &CommandSpec) -> Result<
         .context("mbx --version returned no version")
 }
 
-/// Upgrade configuration without touching an executable a live build may use.
-fn mbx_configuration_argv(
-    engine: &str,
-    container_id: &str,
-    configuration: &Path,
+/// Where a session keeps its private mbx executable.
+pub fn session_mbx_path(worker_root: &str) -> PathBuf {
+    mj_core::target_path::join(Path::new(worker_root), Path::new("mbx"))
+}
+
+/// Where a session keeps its private mbx policy snapshot directory.
+pub fn session_mbx_configuration_directory(worker_root: &str) -> PathBuf {
+    mj_core::target_path::join(Path::new(worker_root), Path::new("mbx-config"))
+}
+
+/// Write `configuration` as the session's mbx policy snapshot, and link the
+/// container's `$HOME/.config` and every `config_roots` entry to it. Nothing is
+/// written into the shared cache mount.
+pub fn stage_mbx_configuration(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    configuration: &str,
     config_roots: &[PathBuf],
-) -> Vec<String> {
+) -> Result<PathBuf> {
+    mbx_container(locator)?;
+    let directory = session_mbx_configuration_directory(worker_root);
     let mut args = vec![
-        engine.to_owned(),
-        "exec".into(),
-        "-i".into(),
-        container_id.to_owned(),
-        "sh".into(),
-        "-c".into(),
+        "sh".to_owned(),
+        "-c".to_owned(),
         MBX_CONFIG_SCRIPT.to_owned(),
-        "mj-mbx-config".into(),
-        configuration.to_string_lossy().into_owned(),
+        "mj-mbx-config".to_owned(),
+        directory.to_string_lossy().into_owned(),
     ];
     args.extend(
         config_roots
             .iter()
             .map(|path| path.to_string_lossy().into_owned()),
     );
-    args
+    let command = targets::locator_command(SshTrafficClass::Control, locator, args)
+        .with_sensitive_stdin(configuration.as_bytes().to_vec())
+        .purpose("stage the session mbx configuration")
+        .stage(ProvisionStage::Syncing);
+    execute_checked(executor, command)?;
+    Ok(directory)
+}
+
+/// The commands that copy `host_binary` from the container's own host into
+/// `staged` inside the container. On an SSH target they run as one script on
+/// that host, so the bytes never pass through the daemon.
+fn mbx_binary_stage_commands(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    host_binary: &Path,
+    staged: &str,
+) -> Result<Vec<CommandSpec>> {
+    let (engine, container_id, ssh) = mbx_container(locator)?;
+    ensure!(
+        engine != targets::MICROVM_ENGINE,
+        "Nitro sessions install their own pinned mbx"
+    );
+    let commands = vec![
+        CommandSpec::new(
+            engine,
+            [
+                "cp".to_owned(),
+                host_binary.to_string_lossy().into_owned(),
+                format!("{container_id}:{staged}"),
+            ],
+        )
+        .purpose("copy the host mbx into the session container"),
+        CommandSpec::new(
+            engine,
+            container_upload_ownership_args(engine, container_id, worker_root, &[staged]),
+        )
+        .purpose("match the staged mbx to the worker directory owner"),
+        CommandSpec::new(engine, ["exec", container_id, "chmod", "755", staged])
+            .purpose("make the staged mbx executable"),
+    ];
+    Ok(match ssh {
+        None => commands
+            .into_iter()
+            .map(|command| command.stage(ProvisionStage::Syncing))
+            .collect(),
+        Some(ssh) => {
+            let steps = commands.into_iter().map(|command| {
+                targets::CommandStep::new(
+                    command.purpose,
+                    std::iter::once(command.program)
+                        .chain(command.args)
+                        .collect::<Vec<_>>(),
+                )
+            });
+            vec![
+                targets::ssh_command_owned(SshTrafficClass::Bulk, ssh, targets::step_script(steps))
+                    .purpose("stage the host mbx in the session container")
+                    .stage(ProvisionStage::Syncing),
+            ]
+        }
+    })
+}
+
+fn mbx_container_command(
+    locator: &targets::TargetLocator,
+    verbs: &[&str],
+    purpose: &'static str,
+) -> Result<CommandSpec> {
+    let (engine, container_id, ssh) = mbx_container(locator)?;
+    let mut args = vec![engine.to_owned(), "exec".to_owned(), container_id.clone()];
+    args.extend(verbs.iter().map(|verb| (*verb).to_owned()));
+    let args = targets::with_engine_argv(args);
+    Ok(match ssh {
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+        Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
+    }
+    .purpose(purpose)
+    .stage(ProvisionStage::Syncing))
+}
+
+/// Stage the container host's own `host_binary` as `<worker_root>/mbx`.
+///
+/// The executable is copied under a unique sibling name by the engine on the
+/// host that owns the container, checked there against `expected_version`, and
+/// only then renamed over the stable path, so a running launcher always finds a
+/// whole executable. The host's `host_binary` is only ever read.
+pub fn stage_container_mbx(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    host_binary: &Path,
+    expected_version: &str,
+) -> Result<PathBuf> {
+    ensure!(
+        mj_core::target_path::is_absolute_on_host_or_target(host_binary),
+        "host mbx path is not absolute: {}",
+        host_binary.display()
+    );
+    let destination = session_mbx_path(worker_root);
+    let staged = mj_core::target_path::text(&mj_core::target_path::join(
+        Path::new(worker_root),
+        Path::new(&format!(
+            ".mbx.mj-{}",
+            mj_core::relay::new_command_id("mbx")?
+        )),
+    ));
+    let stage = (|| -> Result<()> {
+        for command in mbx_binary_stage_commands(locator, worker_root, host_binary, &staged)? {
+            execute_checked(executor, command)?;
+        }
+        verify_mbx_binary(executor, locator, Path::new(&staged), expected_version)?;
+        execute_checked(
+            executor,
+            mbx_container_command(
+                locator,
+                &["mv", "-f", "--", &staged, &destination.to_string_lossy()],
+                "publish the staged mbx",
+            )?,
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = stage {
+        // Remove only the private staging name; the host executable is never
+        // part of cleanup.
+        let cleanup = mbx_container_command(
+            locator,
+            &["rm", "-f", "--", &staged],
+            "remove the failed mbx staging file",
+        )
+        .and_then(|command| execute_checked(executor, command).map(|_| ()));
+        if let Err(cleanup) = cleanup {
+            tracing::warn!("could not remove the failed mbx staging file {staged}: {cleanup:#}");
+        }
+        return Err(error);
+    }
+    Ok(destination)
 }
 
 /// Preserve legacy private mbx installations and link their shared config in
@@ -1852,6 +1993,67 @@ mod mbx_shim_tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn the_session_policy_snapshot_is_replaced_whole_under_every_linked_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let reviewer = root.path().join("reviewer-xdg");
+        let directory = root.path().join("worker/mbx-config");
+        let stage = |text: &str| {
+            let mut command = CommandSpec::new(
+                "sh",
+                [
+                    "-c".to_owned(),
+                    MBX_CONFIG_SCRIPT.to_owned(),
+                    "mj-mbx-config".to_owned(),
+                    directory.to_string_lossy().into_owned(),
+                    reviewer.to_string_lossy().into_owned(),
+                ],
+            )
+            .with_sensitive_stdin(text.as_bytes().to_vec());
+            command
+                .env
+                .insert("HOME".into(), home.to_string_lossy().into_owned());
+            let output = targets::ProcessExecutor.execute(&command).unwrap();
+            assert_eq!(
+                output.status,
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let first = "[gc]\nmax_total_size = '500GiB'\n";
+        stage(first);
+        let links = [
+            home.join(".config/mbx/config.toml"),
+            reviewer.join("mbx/config.toml"),
+        ];
+        for link in &links {
+            assert_eq!(std::fs::read_to_string(link).unwrap(), first);
+        }
+        // More than a pipe buffer, so the snapshot cannot be truncated by a
+        // reader that stops at 64 KiB.
+        let second = format!(
+            "[gc]\nmax_total_size = '100GB'\n# {}\n",
+            "x".repeat(256 * 1024)
+        );
+        stage(&second);
+        for link in &links {
+            assert!(std::fs::symlink_metadata(link).unwrap().is_symlink());
+            assert_eq!(std::fs::read_to_string(link).unwrap(), second);
+        }
+        let file = directory.join("config.toml");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let leftovers = std::fs::read_dir(&directory).unwrap().count();
+        assert_eq!(leftovers, 1, "no temporary snapshot files remain");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn only_marked_mbx_shims_are_removed() {
         let root = tempfile::tempdir().unwrap();
         let generated = root.path().join("generated");
@@ -1859,8 +2061,8 @@ mod mbx_shim_tests {
             INSTALL_MBX_SHIMS_SCRIPT,
             [
                 generated.to_string_lossy().into_owned(),
-                "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nexec /cache/.mjolnir/bin/mbx \"$@\"".into(),
-                "exec /cache/.mjolnir/bin/mbx \"$@\"".into(),
+                "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nexec /var/lib/hel/workers/session/mbx \"$@\"".into(),
+                "exec /var/lib/hel/workers/session/mbx \"$@\"".into(),
             ],
         );
         for name in ["cargo", "mbx"] {
@@ -2000,7 +2202,7 @@ mod mbx_shim_tests {
                 workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
             },
             "/worker",
-            Path::new("/cache/.mjolnir/config/mbx"),
+            Path::new("/var/lib/hel/workers/session/mbx-config"),
             &[],
         )
         .unwrap_err();
