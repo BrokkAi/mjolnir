@@ -22,6 +22,34 @@ pub fn is_absolute_on_host_or_target(path: &Path) -> bool {
     path.is_absolute() || is_absolute(path)
 }
 
+/// `path` with `.` removed and `..` resolved lexically, without touching the
+/// filesystem. A `..` at the root is dropped, as the OS does; a leading `..` of
+/// a relative path is kept. Use it before comparing target paths, so that
+/// `/cache/../outside` is not taken for a path under `/cache`.
+pub fn normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => normalized.push(".."),
+            },
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Whether `path` lies at or below `base`, compared lexically after
+/// [`normalize`].
+pub fn is_within(path: &Path, base: &Path) -> bool {
+    normalize(path).starts_with(normalize(base))
+}
+
 /// Join `relative` onto `base`. When `base` is a target path, absolute or
 /// relative to the target user's home (as SSH and EC2 worker roots are), the
 /// result keeps POSIX separators on a Windows controller too, so it reads the
@@ -100,5 +128,32 @@ mod tests {
                 .to_string_lossy(),
             "/home/dev/project/.git/info/exclude"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod normalize_tests {
+    use super::*;
+
+    #[test]
+    fn dot_dot_cannot_make_an_outside_path_look_inside() {
+        assert_eq!(
+            normalize(Path::new("/cache/./a/../targets")),
+            Path::new("/cache/targets")
+        );
+        assert_eq!(normalize(Path::new("/cache/../../x")), Path::new("/x"));
+        assert_eq!(normalize(Path::new("../a/../../b")), Path::new("../../b"));
+        assert!(is_within(
+            Path::new("/cache/views/../targets"),
+            Path::new("/cache")
+        ));
+        assert!(!is_within(
+            Path::new("/cache/../outside"),
+            Path::new("/cache")
+        ));
+        assert!(!is_within(
+            Path::new("/cache2/targets"),
+            Path::new("/cache")
+        ));
     }
 }

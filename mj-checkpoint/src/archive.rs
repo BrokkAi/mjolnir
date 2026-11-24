@@ -465,11 +465,34 @@ pub(crate) fn read_archive_for_restore(path: &Path) -> Result<VerifiedArchive> {
 }
 
 pub(crate) fn read_archive_repositories(path: &Path) -> Result<VerifiedArchive> {
-    let contents = read_verified_zip(path, PayloadRetention::Repositories)?;
+    read_archive_repositories_unless(path, None)
+}
+
+/// [`read_archive_repositories`] that stops on any physical read once `probe`
+/// returns true.
+pub(crate) fn read_archive_repositories_unless(
+    path: &Path,
+    probe: Option<&ArchivePurgeCancel>,
+) -> Result<VerifiedArchive> {
+    let contents = read_verified_zip_cancellable(
+        path,
+        PayloadRetention::Repositories,
+        None,
+        probe.map(std::sync::Arc::clone),
+    )?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = ArchiveFile {
+        len: file.metadata()?.len(),
+        file: std::sync::Arc::new(file),
+        position: 0,
+        start: 0,
+        cancelled: None,
+        probe: probe.map(std::sync::Arc::clone),
+    };
     Ok(VerifiedArchive {
         manifest: contents.manifest,
         payloads: contents.payloads,
-        archive_sha256: digest_reader(&mut File::open(path)?)?,
+        archive_sha256: digest_reader(&mut reader)?,
     })
 }
 
@@ -491,7 +514,19 @@ impl CheckpointPayloadReader {
         descriptor: &PayloadDescriptor,
         writer: &mut dyn Write,
     ) -> Result<()> {
-        copy_payload_from_archive(&mut self.archive, descriptor, writer)
+        copy_payload_from_archive(&mut self.archive, descriptor, writer, None)
+    }
+
+    /// Like [`Self::copy_payload`], stopping with [`ArchiveReadCancelled`]
+    /// once `cancelled` returns true. The probe runs before every write, so
+    /// a large payload stops promptly.
+    pub fn copy_payload_unless(
+        &mut self,
+        descriptor: &PayloadDescriptor,
+        writer: &mut dyn Write,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<()> {
+        copy_payload_from_archive(&mut self.archive, descriptor, writer, Some(cancelled))
     }
 }
 
@@ -499,14 +534,19 @@ fn copy_payload_from_archive(
     archive: &mut Archive,
     descriptor: &PayloadDescriptor,
     writer: &mut dyn Write,
+    cancelled: Option<&dyn Fn() -> bool>,
 ) -> Result<()> {
     struct Destination<'a> {
         writer: &'a mut dyn Write,
+        cancelled: Option<&'a dyn Fn() -> bool>,
         digest: Sha256,
         size: u64,
     }
     impl Write for Destination<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.cancelled.is_some_and(|cancelled| cancelled()) {
+                return Err(std::io::Error::other(ArchiveReadCancelled));
+            }
             let count = self.writer.write(bytes)?;
             self.digest.update(&bytes[..count]);
             self.size += count as u64;
@@ -518,6 +558,7 @@ fn copy_payload_from_archive(
     }
     let mut output = Destination {
         writer,
+        cancelled,
         digest: Sha256::new(),
         size: 0,
     };
@@ -2004,7 +2045,7 @@ fn read_verified_zip_cancellable(
         // Per-part hashes do not prove the whole-payload digest. Verify omitted
         // sharded bodies in order before returning any trusted archive state.
         if !descriptor.parts.is_empty() && !retains_parts(retention, &descriptor.role) {
-            copy_payload_from_archive(&mut archive, descriptor, &mut std::io::sink())?;
+            copy_payload_from_archive(&mut archive, descriptor, &mut std::io::sink(), None)?;
         }
         let bytes = reassemble_payload(descriptor, &mut bodies, retention)?;
         if let Some(validate) = tar_payload_validator(&descriptor.role)
@@ -3031,9 +3072,9 @@ pub use git::{
     empty_tree_id, has_origin_refs, hidden_tracked_paths, managed_base_is_available,
     migrate_review_ref, numstat_between_trees, pin_review_tree, push_branch, push_review_base_ref,
     read_head_reflog, read_review_point, record_overridden_tree, record_review_point,
-    record_reviewed_tree, remote_workspace_base, restore_git_snapshot, session_diff,
-    session_diff_details, session_diff_patch, session_start_scope, tree_without_paths,
-    validate_symlink_target,
+    record_reviewed_tree, remote_workspace_base, restore_git_snapshot, session_bundle_bytes,
+    session_diff, session_diff_details, session_diff_patch, session_diff_patch_bytes,
+    session_start_scope, tree_without_paths, validate_symlink_target,
 };
 pub(crate) use git::{
     LegacyRestoreOptions, ensure_no_symlink_ancestors, restore_git_snapshot_for_session,

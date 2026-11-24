@@ -10,7 +10,7 @@ use mj_controller::session_manager::SessionManagerControl;
 pub use mj_review_host::review_host::*;
 
 mod controller_environment;
-mod selection;
+pub(crate) mod selection;
 pub use controller_environment::*;
 pub(crate) use controller_environment::{SharedProfileCatalog, SharedReviewerRuntime};
 

@@ -1573,6 +1573,16 @@ pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
 ) -> Result<VerifiedResumeArchive> {
+    verify_resume_checkpoint_unless(session_id, checkpoint, None)
+}
+
+/// [`verify_resume_checkpoint`] that stops reading the archive once `cancel`
+/// returns true, for work that runs for a client that can leave.
+pub(super) fn verify_resume_checkpoint_unless(
+    session_id: &str,
+    checkpoint: &mj_core::state::CheckpointMetadata,
+    cancel: Option<&mj_checkpoint::archive::ArchivePurgeCancel>,
+) -> Result<VerifiedResumeArchive> {
     let archive_path = {
         let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive");
         checkpoint.archive_path.canonicalize().with_context(|| {
@@ -1593,7 +1603,12 @@ pub(super) fn verify_resume_checkpoint(
         archive_sha256,
     } = {
         let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive contents");
-        verify_archive_streaming(&archive_path)?
+        match cancel {
+            Some(cancel) => {
+                mj_checkpoint::archive::verify_archive_streaming_unless(&archive_path, cancel)?
+            }
+            None => verify_archive_streaming(&archive_path)?,
+        }
     };
     if archive_sha256 != checkpoint.sha256 || manifest.session.id != session_id {
         bail!("persisted checkpoint verification failed");
@@ -2600,6 +2615,7 @@ impl Controller {
                     upgraded_clone,
                     &archive_path,
                     archive_manifest,
+                    None,
                 )?);
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 if !transferring_workspace
@@ -3745,6 +3761,12 @@ async fn native_prior_while_cancellable(
     .await
 }
 
+/// POSIX scripts that print a source session's native transcript, taking the
+/// harness home as `$1` and the native session ID as `$2`. They follow no
+/// symlink and print nothing when the transcript is absent.
+const CLAUDE_TRANSCRIPT_READ_SCRIPT: &str = r#"if [ -d "$1/projects" ] && [ ! -L "$1/projects" ]; then for d in "$1"/projects/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ "${d##*/}" != subagents ] && f="$d/$2.jsonl" && [ -f "$f" ] && [ ! -L "$f" ] && exec cat -- "$f"; done; fi; exit 0"#;
+const ANTIGRAVITY_TRANSCRIPT_READ_SCRIPT: &str = r#"d="$1"; for part in antigravity-cli brain "$2" .system_generated logs; do d="$d/$part"; [ -d "$d" ] && [ ! -L "$d" ] || exit 0; done; f="$d/transcript_full.jsonl"; [ -f "$f" ] && [ ! -L "$f" ] && exec cat -- "$f"; exit 0"#;
+
 pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
     session_id: &str,
     source_backend: &targets::TargetLocator,
@@ -3753,9 +3775,11 @@ pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
     snapshot: &Arc<CanonicalSessionSnapshot>,
     executor: &impl CommandExecutor,
 ) -> Result<Option<crate::compaction::PriorCompaction>> {
-    if source_harness_kind != HarnessKind::Claude {
-        return Ok(None);
-    }
+    let script = match source_harness_kind {
+        HarnessKind::Claude => CLAUDE_TRANSCRIPT_READ_SCRIPT,
+        HarnessKind::Antigravity => ANTIGRAVITY_TRANSCRIPT_READ_SCRIPT,
+        _ => return Ok(None),
+    };
     let Some(id) = native_session_id.filter(|id| {
         !id.is_empty()
             && !id.contains('/')
@@ -3770,7 +3794,8 @@ pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
     if matches!(source_backend, targets::TargetLocator::LocalBare { .. }) {
         return native_prior_source_while_cancellable(
             session_id,
-            NativePriorSource::ClaudeHome {
+            NativePriorSource::Home {
+                harness_kind: source_harness_kind,
                 harness_home: PathBuf::from(harness_home),
                 native_session_id: id.to_owned(),
             },
@@ -3791,13 +3816,13 @@ pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
         vec![
             "sh".into(),
             "-c".into(),
-            r#"if [ -d "$1/projects" ] && [ ! -L "$1/projects" ]; then for d in "$1"/projects/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ "${d##*/}" != subagents ] && f="$d/$2.jsonl" && [ -f "$f" ] && [ ! -L "$f" ] && exec cat -- "$f"; done; fi; exit 0"#.into(),
-            "mj-read-claude-transcript".into(),
+            script.into(),
+            "mj-read-native-transcript".into(),
             harness_home,
             id.to_owned(),
         ],
     )
-    .purpose("read source Claude transcript for compaction");
+    .purpose("read source native transcript for compaction");
     let output = match executor.execute_to_file(&command, &spool) {
         Ok(output) => output,
         Err(error) if executor.cancellation_requested() => {
@@ -3807,7 +3832,7 @@ pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
             tracing::warn!(
                 session_id,
                 error = format!("{error:#}"),
-                "could not read source Claude transcript; using canonical history"
+                "could not read source native transcript; using canonical history"
             );
             return Ok(None);
         }
@@ -3821,7 +3846,7 @@ pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
             session_id,
             status = output.status,
             stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "could not read source Claude transcript; using canonical history"
+            "could not read source native transcript; using canonical history"
         );
         return Ok(None);
     }
@@ -3831,7 +3856,10 @@ pub(in crate::controller) async fn native_prior_from_target_while_cancellable(
     }
     native_prior_source_while_cancellable(
         session_id,
-        NativePriorSource::ClaudeFile { file: spool },
+        NativePriorSource::File {
+            harness_kind: source_harness_kind,
+            file: spool,
+        },
         snapshot,
         executor,
     )

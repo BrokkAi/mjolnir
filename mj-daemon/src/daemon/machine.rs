@@ -57,7 +57,6 @@ impl MachinesOperations for RuntimeState {
                     message.push(' ');
                     message.push_str(&path_line);
                 }
-                self.notify_mbx_installed(&machine);
                 Ok(message)
             }).await
         })

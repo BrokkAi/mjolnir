@@ -1372,7 +1372,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
@@ -1491,10 +1491,31 @@ impl Assessment {
     }
 }
 
-/// The transcript notice for a denied action: what was refused, as the
-/// permission form would show it, then Codex's "Reason:" line.
-pub fn denial_notice(subject: &str, rationale: &str) -> String {
-    format!("Mjolnir guardian denied {subject}\nReason: {rationale}")
+/// The line the person's form opens with when the guardian flagged a request
+/// instead of allowing it.
+///
+/// Kept to a single line with `rationale` bounded by `trim_middle` so compact
+/// push/desktop alerts (`phone_line`) carry the risk and reason, and so a long
+/// rationale cannot evict older human answers from `retained_count`.
+///
+/// Corpus builders consuming stored permission form messages must strip this
+/// preface: `wolf_action_text` only strips form headers whose first line ends
+/// with `" requests permission:"`, so leaving this line attached would leak
+/// the guardian's own verdict and rationale into offline training/eval inputs.
+pub fn denied_escalation_preface(risk_level: Option<RiskLevel>, rationale: &str) -> String {
+    let collapsed = rationale.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reason = if collapsed.is_empty() {
+        "auto-review did not approve this action".to_owned()
+    } else {
+        crate::assessment::trim_middle(&collapsed)
+    };
+    match risk_level {
+        Some(risk) => format!(
+            "Mjolnir guardian flagged this as {} risk: {reason}\n",
+            risk.as_str()
+        ),
+        None => format!("Mjolnir guardian flagged this request: {reason}\n"),
+    }
 }
 
 /// The line the person's form opens with when the guardian handed the

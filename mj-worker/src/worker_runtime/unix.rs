@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use mj_core::local_sockets::{bind_unix_listener, connect_unix_stream};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::review_capture::ReviewCapture;
@@ -72,13 +72,85 @@ struct PreparedConnectionServices {
     subagents: Option<super::subagents::SubagentEndpoint>,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct SharedSubagents(Arc<Mutex<SharedSubagentsState>>);
+
+#[derive(Default)]
+struct SharedSubagentsState {
+    endpoint: Option<super::subagents::SubagentEndpoint>,
+    guard: Option<super::subagents::SubagentSocketGuard>,
+    closed: bool,
+}
+
+impl SharedSubagents {
+    fn endpoint(&self) -> Option<super::subagents::SubagentEndpoint> {
+        self.0
+            .lock()
+            .expect("sub-agent owner lock poisoned")
+            .endpoint
+            .clone()
+    }
+
+    fn ensure_serving(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        root: &std::path::Path,
+        relay: Arc<RelayCell>,
+        harness: HarnessKind,
+        subagent_kind: Option<mj_core::subagent::SubagentKind>,
+        preparation: Option<&watch::Sender<PreparationSnapshot>>,
+    ) -> Result<super::subagents::SubagentEndpoint> {
+        let endpoint = {
+            let mut state = self.0.lock().expect("sub-agent owner lock poisoned");
+            if let Some(endpoint) = &state.endpoint {
+                return Ok(endpoint.clone());
+            }
+            if state.closed {
+                bail!("worker is closing; cannot start sub-agent socket");
+            }
+            let (endpoint, guard) =
+                super::subagents::serve(runtime, root, relay, harness, subagent_kind)?;
+            state.endpoint = Some(endpoint.clone());
+            state.guard = Some(guard);
+            endpoint
+        };
+        if let Some(preparation) = preparation {
+            preparation.send_modify(|snapshot| {
+                if let Some(services) = snapshot.services.as_mut() {
+                    let mut updated = (**services).clone();
+                    updated.subagents = Some(endpoint.clone());
+                    *services = Arc::new(updated);
+                }
+            });
+        }
+        Ok(endpoint)
+    }
+
+    fn stop(&self) {
+        let guard = {
+            let mut state = self.0.lock().expect("sub-agent owner lock poisoned");
+            state.closed = true;
+            state.guard.take()
+        };
+        drop(guard);
+    }
+}
+
+struct SharedSubagentsShutdownGuard(SharedSubagents);
+
+impl Drop for SharedSubagentsShutdownGuard {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+
 struct RunningHarness {
     acp_task: tokio::task::JoinHandle<Result<()>>,
     event_task: tokio::task::JoinHandle<Result<()>>,
     acp_shutdown: CancellationToken,
     commands: mpsc::Sender<CommandRequest>,
     _reviewer: Arc<ReviewCapture>,
-    subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
+    subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
     _subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     shell_cleanup: tokio_util::task::TaskTracker,
@@ -111,6 +183,8 @@ enum PreparationStop {
 }
 
 struct HarnessPreparationSetup {
+    shared_subagents: SharedSubagents,
+    antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     root: PathBuf,
     config: WorkerLaunchConfig,
     relay: Arc<RelayCell>,
@@ -157,6 +231,7 @@ impl PreparationStepBudget {
 }
 
 struct AcpPreparationSetup {
+    shared_subagents: SharedSubagents,
     root: PathBuf,
     config: WorkerLaunchConfig,
     session_environment: BTreeMap<String, String>,
@@ -182,7 +257,7 @@ struct PreparedAcpSetup {
     user_shells: crate::user_shell::UserShellRegistry,
     reviewer: Arc<ReviewCapture>,
     subagents: Option<super::subagents::SubagentEndpoint>,
-    subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
+    subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
     acp_spec: LaunchSpec,
     shell_cleanup: tokio_util::task::TaskTracker,
     managed_cache_root: Option<PathBuf>,
@@ -196,7 +271,7 @@ struct StartedBridgeTasks {
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     commands: Option<mpsc::Sender<CommandRequest>>,
     reviewer: Option<Arc<ReviewCapture>>,
-    subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
+    subagent_socket_guard: Option<SharedSubagentsShutdownGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     shell_cleanup: Option<tokio_util::task::TaskTracker>,
 }
@@ -248,6 +323,7 @@ impl Drop for StartedBridgeTasks {
 
 fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     let AcpPreparationSetup {
+        shared_subagents,
         root,
         config,
         session_environment,
@@ -277,7 +353,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
     publish_git_setup(&root, git_setup)?;
-    let review_tools = config.review_tools();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let reviewer = Arc::new(ReviewCapture {
         session_id: config.session_id.clone(),
@@ -286,17 +361,18 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         primary_relay: relay.clone(),
         operation: tokio::sync::Mutex::new(()),
     });
-    let (subagents, subagent_socket_guard) = if subagent_role.is_some() {
-        let (endpoint, guard) = super::subagents::serve(
+    let subagent_socket_guard = Some(SharedSubagentsShutdownGuard(shared_subagents.clone()));
+    let subagents = if subagent_role.is_some() {
+        Some(shared_subagents.ensure_serving(
             &runtime,
             &root,
             relay.clone(),
             config.harness,
             config.subagent_kind,
-        )?;
-        (Some(endpoint), Some(guard))
+            None,
+        )?)
     } else {
-        (None, None)
+        None
     };
 
     let (
@@ -372,36 +448,18 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         ],
         environment: session_environment,
         bridge_spec_path: Some(supervisor_path.clone()),
-        cwd: config.cwd,
+        cwd: config.cwd.clone(),
         additional_directories,
-        extra_mcp_servers: config
-            .reviewer_launch
-            .as_ref()
-            .map(|reviewer| {
-                reviewer
-                    .mcp_servers
-                    .iter()
-                    .cloned()
-                    .map(crate::acp::ReviewerMcpServer::new)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        subagent_policy: if config.handback_tool {
-            mj_core::subagent::SubagentPolicy::None
-        } else {
-            config.subagents.clone()
-        },
+        extra_mcp_servers: crate::acp::launch_extra_mcp_servers(&config),
+        subagent_policy: crate::acp::launch_subagent_policy(&config),
         managed_subagent,
         instruction_role,
-        subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
-            path: root.join(super::subagents::SUBAGENT_SOCKET),
-            role,
-            oracle: config.oracle,
-            orchestrators_enabled: config.orchestrators_enabled,
-            subtle_subagents: config.subtle_subagents,
-            review_tools,
+        subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
+            &root,
+            &config,
+            subagent_role,
             profile_registration,
-        }),
+        ),
         project_memory: config.project_memory,
         resume_session,
         native_session_history,
@@ -484,6 +542,7 @@ fn publish_started(
 #[allow(clippy::too_many_arguments)]
 fn start_bridge(
     setup: PreparedAcpSetup,
+    antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     relay: Arc<RelayCell>,
     dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
     task_monitors: TaskMonitors,
@@ -546,6 +605,7 @@ fn start_bridge(
         task_monitors,
         capture,
         HarnessStartup::new(),
+        Some(antigravity_refresh),
     )));
     Ok(started)
 }
@@ -635,7 +695,10 @@ pub(crate) async fn wait_for_change(
     // A finished preparation closes its channel but keeps its last value,
     // which an attach still reads; keep reading it, stop awaiting it.
     let mut preparation_open = preparation.is_some();
-    let mut generations = subagents.map(super::subagents::SubagentEndpoint::generations);
+    let mut subagents = subagents.cloned();
+    let mut generations = subagents
+        .as_ref()
+        .map(super::subagents::SubagentEndpoint::generations);
     let deadline = tokio::time::Instant::now() + mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
     loop {
         // Mark each signal seen before looking, so a change while looking
@@ -644,13 +707,23 @@ pub(crate) async fn wait_for_change(
         if let Some(releases) = &mut releases {
             releases.borrow_and_update();
         }
+        let prep_snapshot = preparation
+            .as_mut()
+            .map(|receiver| receiver.borrow_and_update().clone());
+        if subagents.is_none()
+            && let Some(endpoint) = prep_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.services.as_ref())
+                .and_then(|services| services.subagents.clone())
+        {
+            generations = Some(endpoint.generations());
+            subagents = Some(endpoint);
+        }
         if let Some(generations) = &mut generations {
             generations.borrow_and_update();
         }
         jev.borrow_and_update();
-        let harness_preparation = preparation
-            .as_mut()
-            .and_then(|receiver| receiver.borrow_and_update().state.clone());
+        let harness_preparation = prep_snapshot.and_then(|snapshot| snapshot.state);
         let mut state = relay
             .observe()
             .expect("relay state lock poisoned")
@@ -658,7 +731,9 @@ pub(crate) async fn wait_for_change(
         state.harness_preparation = harness_preparation;
         let latest_ordinal = state.latest_ordinal;
         let digest = mj_core::relay::relay_state_digest(&state)?;
-        let subagent_queue_changed = subagents.is_some_and(|endpoint| feed.has_unpolled(endpoint));
+        let subagent_queue_changed = subagents
+            .as_ref()
+            .is_some_and(|endpoint| feed.has_unpolled(endpoint));
         let generation = *guardian.borrow_and_update();
         let guardian_queue_changed = generation != *guardian_generation;
         *guardian_generation = generation;
@@ -853,6 +928,8 @@ async fn restart_harness_in_place_response(
     relay: &Arc<RelayCell>,
     credentials: &SharedCredentials,
     relay_root: &std::path::Path,
+    shared_subagents: &SharedSubagents,
+    preparation_tx: Option<&watch::Sender<PreparationSnapshot>>,
 ) -> RelayResponseEnvelope {
     if let Some(body) = mj_core::relay::protocol::relay_protocol_rejection(&envelope) {
         return RelayResponseEnvelope {
@@ -957,7 +1034,12 @@ async fn restart_harness_in_place_response(
         git_setup,
         boundary_mailbox_hook_available,
         mailbox_delivery_mode: updated_mailbox_delivery_mode,
-        ..
+        profile_registration,
+        managed_subagent,
+        subagent_role,
+        // Project tools belong to the retained environment's startup lifecycle,
+        // rather than to each bridge reload.
+        project_tools_install: _,
     } = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -971,6 +1053,25 @@ async fn restart_harness_in_place_response(
             };
         }
     };
+    if subagent_role.is_some()
+        && let Err(error) = shared_subagents.ensure_serving(
+            &tokio::runtime::Handle::current(),
+            relay_root,
+            relay.clone(),
+            launch_config.harness,
+            launch_config.subagent_kind,
+            preparation_tx,
+        )
+    {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                &format!("start sub-agent socket: {error:#}"),
+            ),
+        };
+    }
     let supervisor_path = relay_root.join("acp-supervisor.json");
     let mut additional_directories = acp_additional_directories(&launch_config);
     super::tool_cache::extend_writable_directories(
@@ -994,6 +1095,13 @@ async fn restart_harness_in_place_response(
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
+            subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
+                relay_root,
+                &launch_config,
+                subagent_role,
+                profile_registration,
+            ),
+            managed_subagent,
             launch_config,
             environment: prepared.environment,
             command: None,
@@ -1846,6 +1954,7 @@ pub async fn run_daemon_owned(
         unreachable!("unsupported suspend signal is always pending")
     }
 
+    let shared_subagents = SharedSubagents::default();
     let initial_step = "login-resolve";
     let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
         state: Some(mj_core::relay::HarnessPreparation::Preparing {
@@ -1869,6 +1978,7 @@ pub async fn run_daemon_owned(
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
     let subagent_role = config.subagent_mcp_role();
     let has_subagent_tools = subagent_role.is_some();
+    let (antigravity_refresh_tx, antigravity_refresh_rx) = mpsc::channel(16);
     let task_monitors = TaskMonitors::new(config.harness, &credentials);
     let shared_credentials = SharedCredentials::new(credentials);
     let mut client_task = mj_core::runtime::spawn(accept_worker_clients(
@@ -1878,8 +1988,11 @@ pub async fn run_daemon_owned(
         dispatch_wake_tx.clone(),
         shared_credentials,
         ConnectionRuntime {
+            antigravity_refresh: Some(antigravity_refresh_tx),
             project_memory,
             cpu: Some(cpu_rx),
+            shared_subagents: shared_subagents.clone(),
+            preparation_tx: Some(preparation_tx.clone()),
             preparation: Some(preparation_rx),
             preparation_cancel: Some(preparation_cancel.clone()),
             has_subagent_tools,
@@ -1890,6 +2003,8 @@ pub async fn run_daemon_owned(
     let _abort_clients_on_drop = AbortTaskOnDrop(client_task.abort_handle());
 
     let preparation_setup = HarnessPreparationSetup {
+        shared_subagents: shared_subagents.clone(),
+        antigravity_refresh: antigravity_refresh_rx,
         root: root.clone(),
         config,
         relay: relay.clone(),
@@ -2671,6 +2786,7 @@ async fn prepare_harness_environment(
     session_environment.remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
+    super::restore_mbx_launcher(root, worker_home.as_deref(), &mut session_environment)?;
     let github_root = root.to_owned();
     let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();
@@ -3178,6 +3294,8 @@ async fn prepare_and_start_harness(
     cancel: &CancellationToken,
 ) -> Result<RunningHarness> {
     let HarnessPreparationSetup {
+        shared_subagents,
+        antigravity_refresh,
         root: root_path,
         mut config,
         relay,
@@ -3223,6 +3341,7 @@ async fn prepare_and_start_harness(
     )
     .await?;
     let acp_setup = AcpPreparationSetup {
+        shared_subagents,
         root: root.to_owned(),
         config,
         session_environment: prepared_harness.environment,
@@ -3259,6 +3378,7 @@ async fn prepare_and_start_harness(
     // thread, so it needs no bound of its own.
     let started = start_bridge(
         prepared_acp,
+        antigravity_refresh,
         relay,
         dispatch_wake_rx,
         task_monitors,
@@ -3375,6 +3495,9 @@ pub(super) async fn serve_terminal_relay(
 /// everything answered on the connection instead of being journaled.
 #[derive(Clone, Default)]
 pub(super) struct ConnectionRuntime {
+    pub(super) shared_subagents: SharedSubagents,
+    pub(super) preparation_tx: Option<watch::Sender<PreparationSnapshot>>,
+    pub(super) antigravity_refresh: Option<mpsc::Sender<oneshot::Sender<Option<u64>>>>,
     pub(super) project_memory: ProjectMemoryEndpoint,
     /// The ACP coordinator's command channel, or `None` once the session is
     /// sealed and no ACP runtime is left to serve scratch prompts.
@@ -3439,6 +3562,9 @@ pub(super) async fn serve_client_with_shared_credentials(
     fatal: mpsc::Sender<anyhow::Error>,
 ) -> Result<()> {
     let ConnectionRuntime {
+        shared_subagents,
+        preparation_tx,
+        antigravity_refresh,
         project_memory,
         commands,
         reviewer,
@@ -3520,6 +3646,7 @@ pub(super) async fn serve_client_with_shared_credentials(
             let request_subagents = prepared_services
                 .as_ref()
                 .and_then(|services| services.subagents.clone())
+                .or_else(|| shared_subagents.endpoint())
                 .or_else(|| subagents.clone());
             if let RelayRequest::WaitForChange {
                 after_ordinal,
@@ -4028,6 +4155,8 @@ pub(super) async fn serve_client_with_shared_credentials(
                         &relay,
                         &credentials,
                         &relay_root,
+                        &shared_subagents,
+                        preparation_tx.as_ref(),
                     )
                     .await
                 };
@@ -4060,7 +4189,29 @@ pub(super) async fn serve_client_with_shared_credentials(
             let attach_preparation = preparation
                 .as_ref()
                 .and_then(|receiver| receiver.borrow().state.clone());
-            let result = if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
+            let reservation_response = if let RelayRequest::ReserveIdle { command_id } = &envelope.request {
+                use crate::relay::ReserveIdleAntigravityCheck;
+                let immediate = {
+                    let mut state = relay.lock().expect("relay state lock poisoned");
+                    if let Some(body) = state.envelope_rejection(&envelope) {
+                        Some(RelayResponseEnvelope { request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version, body })
+                    } else { match state.reserve_idle_antigravity_check(command_id) {
+                        ReserveIdleAntigravityCheck::ProceedDirectly => Some(state.handle(envelope.clone())),
+                        ReserveIdleAntigravityCheck::RejectNow => Some(state.reserve_idle_after_antigravity_refresh(envelope.clone(), None)),
+                        ReserveIdleAntigravityCheck::RefreshFirst => None,
+                    } }
+                };
+                if let Some(response) = immediate { Some(response) } else {
+                    let synced_epoch = if let Some(tx) = &antigravity_refresh {
+                        let (reply, result) = oneshot::channel();
+                        if tx.send(reply).await.is_ok() { result.await.ok().flatten() } else { None }
+                    } else { None };
+                    Some(relay.lock().expect("relay state lock poisoned")
+                        .reserve_idle_after_antigravity_refresh(envelope.clone(), synced_epoch))
+                }
+            } else { None };
+            let result = if let Some(response) = reservation_response { Ok(response) }
+            else if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
                 Ok(handle_antigravity_stop(&relay, envelope, &credentials).await)
             } else {
                 handle_request(&relay, envelope, attach_preparation).await
@@ -5479,6 +5630,8 @@ mod preparation_tests {
             &relay,
             &credentials,
             root,
+            &SharedSubagents::default(),
+            None,
         ))
         .await;
         drop(commands);
@@ -5619,6 +5772,8 @@ mod preparation_tests {
                 &relay,
                 &credentials,
                 root,
+                &SharedSubagents::default(),
+                None,
             ),
         )
         .await
@@ -5683,6 +5838,8 @@ mod preparation_tests {
             &relay,
             &credentials,
             root,
+            &SharedSubagents::default(),
+            None,
         )
         .await;
         drop(commands);
@@ -5696,6 +5853,262 @@ mod preparation_tests {
             "{response:?}"
         );
         accepted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_change_subscribes_to_lazily_started_subagents() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let (commands, _receiver) = mpsc::channel(1);
+        let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
+            services: Some(Arc::new(PreparedConnectionServices {
+                commands,
+                reviewer: Arc::new(ReviewCapture {
+                    session_id: "session-1".into(),
+                    cwd: root.path().into(),
+                    additional_directories: vec![],
+                    primary_relay: relay.clone(),
+                    operation: tokio::sync::Mutex::new(()),
+                }),
+                subagents: None,
+            })),
+            ..Default::default()
+        });
+        let mut state = relay.observe().unwrap().operational_state();
+        state.harness_preparation = None;
+        let digest = mj_core::relay::relay_state_digest(&state).unwrap();
+        let mut feed = super::super::subagents::SubagentFeed::default();
+        // Acknowledge the durable queue's empty generation without starting
+        // a listener, so publication alone does not complete this wait.
+        let empty = super::super::subagents::SubagentEndpoint::open(root.path()).unwrap();
+        let page = feed.poll(Some(&empty), None).unwrap();
+        feed.poll(Some(&empty), Some(page.sequence)).unwrap();
+        assert!(!feed.has_unpolled(&empty));
+        drop(empty);
+        let mut guardian_generation = 0;
+        let wait = wait_for_change(
+            &relay,
+            Some(&preparation_rx),
+            None,
+            &feed,
+            &mut guardian_generation,
+            state.latest_ordinal,
+            Some(&digest),
+        );
+        tokio::pin!(wait);
+        tokio::select! {
+            biased;
+            result = &mut wait => panic!("wait returned before socket creation: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        let owner = SharedSubagents::default();
+        let _shutdown = SharedSubagentsShutdownGuard(owner.clone());
+        let endpoint = owner
+            .ensure_serving(
+                &tokio::runtime::Handle::current(),
+                root.path(),
+                relay.clone(),
+                HarnessKind::Antigravity,
+                None,
+                Some(&preparation_tx),
+            )
+            .unwrap();
+        // Consume the publication without a queued request: the existing wait
+        // must subscribe to the new endpoint's generation changes.
+        tokio::select! {
+            biased;
+            result = &mut wait => panic!("empty socket publication changed state: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        endpoint
+            .enqueue(mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "lazy-queue".into(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            })
+            .unwrap();
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), wait)
+            .await
+            .expect("new endpoint queue must wake the active wait promptly")
+            .unwrap();
+        assert!(
+            matches!(
+                observed,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ChangeObserved {
+                        subagent_queue_changed: true,
+                        ..
+                    }
+                }
+            ),
+            "{observed:?}"
+        );
+    }
+
+    // Hard-won: d796c7d91: in-place reload discarded the new MCP registration mode.
+    #[tokio::test]
+    async fn restart_harness_in_place_lazily_starts_subagent_socket() {
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let store_id = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .store_id
+            .clone()
+            .unwrap();
+        let mut config = super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        config.cwd = root.path().to_path_buf();
+        config.harness = HarnessKind::Antigravity;
+        config.subagents = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+            orchestrators: false,
+        };
+        config.review_trigger = mj_core::config::ReviewTrigger::Push;
+        let home = root.path().join("agy-home");
+        config
+            .environment
+            .insert("MJ_ANTIGRAVITY_HOME".into(), home.to_str().unwrap().into());
+        config
+            .environment
+            .insert("MJ_SESSION_MESSAGE_MCP".into(), "1".into());
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&config));
+        let request = || RelayRequestEnvelope {
+            request_id: "restart".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::RestartHarnessInPlace {
+                operation_id: "move".into(),
+                expected_store_id: store_id.clone(),
+                launch_config: Box::new(config.clone()),
+            },
+        };
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        let shared_subagents = SharedSubagents::default();
+        let _shutdown = SharedSubagentsShutdownGuard(shared_subagents.clone());
+        let (commands, mut receiver) = mpsc::channel(1);
+        let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
+            state: Some(mj_core::relay::HarnessPreparation::Started),
+            services: Some(Arc::new(PreparedConnectionServices {
+                commands: commands.clone(),
+                reviewer: Arc::new(ReviewCapture {
+                    session_id: "session-1".into(),
+                    cwd: root.path().into(),
+                    additional_directories: vec![],
+                    primary_relay: relay.clone(),
+                    operation: tokio::sync::Mutex::new(()),
+                }),
+                subagents: None,
+            })),
+            ..Default::default()
+        });
+        // A malformed destination must fail before the lazy listener is bound.
+        std::fs::write(root.path().join(".claude.json"), b"not json").unwrap();
+        let mut malformed = request();
+        if let RelayRequest::RestartHarnessInPlace { launch_config, .. } = &mut malformed.request {
+            launch_config.harness = HarnessKind::Claude;
+        }
+        let response = restart_harness_in_place_response(
+            malformed,
+            Some(&commands),
+            &relay,
+            &credentials,
+            root.path(),
+            &shared_subagents,
+            Some(&preparation_tx),
+        )
+        .await;
+        let RelayResponseBody::Error { error } = response.body else {
+            panic!("expected malformed profile failure")
+        };
+        assert_eq!(error.code, RelayErrorCode::Internal);
+        assert!(
+            error.message.contains("prepare Claude profile"),
+            "{error:?}"
+        );
+        let socket_path = root.path().join(super::super::subagents::SUBAGENT_SOCKET);
+        assert!(!socket_path.exists());
+        assert!(shared_subagents.endpoint().is_none());
+        assert!(receiver.try_recv().is_err());
+        std::fs::write(root.path().join(".claude.json"), b"{}").unwrap();
+        let closed = SharedSubagents::default();
+        closed.stop();
+        let refused = restart_harness_in_place_response(
+            request(),
+            Some(&commands),
+            &relay,
+            &credentials,
+            root.path(),
+            &closed,
+            Some(&preparation_tx),
+        )
+        .await;
+        let RelayResponseBody::Error { error } = refused.body else {
+            panic!("expected closed owner refusal")
+        };
+        assert_eq!(error.code, RelayErrorCode::InvalidState);
+        assert!(error.message.contains("worker is closing"), "{error:?}");
+        assert!(receiver.try_recv().is_err());
+        assert!(!socket_path.exists());
+        let acceptor = mj_core::runtime::spawn(async move {
+            let Some(CommandRequest::ReloadLaunchConfig {
+                subagent_mcp_socket,
+                managed_subagent,
+                resolved,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("expected reload")
+            };
+            let socket = subagent_mcp_socket.unwrap();
+            assert!(!socket.profile_registration);
+            assert_eq!(socket.role, mj_core::subagent::SubagentMcpRole::Parent);
+            assert!(socket.review_tools);
+            assert!(!managed_subagent);
+            resolved.send(Ok(())).unwrap();
+        });
+        let response = restart_harness_in_place_response(
+            request(),
+            Some(&commands),
+            &relay,
+            &credentials,
+            root.path(),
+            &shared_subagents,
+            Some(&preparation_tx),
+        )
+        .await;
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { .. }),
+            "{response:?}"
+        );
+        acceptor.await.unwrap();
+        assert!(socket_path.exists());
+        assert!(shared_subagents.endpoint().is_some());
+        assert!(
+            preparation_rx
+                .borrow()
+                .services
+                .as_ref()
+                .unwrap()
+                .subagents
+                .is_some()
+        );
+        assert!(preparation_rx.has_changed().unwrap());
+        shared_subagents.stop();
+        assert!(!socket_path.exists());
     }
 
     // Hard-won: e2c147489: an in-place profile switch discarded Claude's agent and review tools.
@@ -5744,6 +6157,8 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            &SharedSubagents::default(),
+            None,
         )
         .await;
         assert!(matches!(
@@ -5792,6 +6207,8 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            &SharedSubagents::default(),
+            None,
         )
         .await;
         drop(commands_tx);
@@ -5920,6 +6337,8 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            &SharedSubagents::default(),
+            None,
         )
         .await;
         let RelayResponseBody::Error { error } = failed.body else {
@@ -5955,6 +6374,8 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            &SharedSubagents::default(),
+            None,
         )
         .await;
         drop(ok_tx);

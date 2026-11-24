@@ -50,13 +50,16 @@ const FAILURES_MAX_BYTES: u64 = 256 * 1024;
 pub const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// `$1` mode (`native` or `shared`), `$2` the shared cache directory, `$3`
-/// its configuration home, `$4` the preferred in-cache mbx path, `$5` the
-/// old local binary root, `$6` the optional workspace root; the remaining
+/// the session's recorded target root (empty in `native` mode, or for a legacy
+/// shared-cache record that predates recording in-cache target roots), `$4` the
+/// old local binary root, `$5` the optional workspace root; the remaining
 /// arguments are workspaces for older mbx versions.
 ///
-/// A shared cache prefers the host executable its container mounted, then
-/// searches the same locations as the native host probe. A bare host uses
-/// that search directly.
+/// Both modes search the host's own mbx in the same locations as the native
+/// host probe. A shared cache then runs it with the recorded `MBX_CACHE_DIR`
+/// and `MBX_TARGET_ROOT` over the host's ordinary configuration, so cleanup
+/// reaches the store the session's container mounted and needs nothing from
+/// the container, which can already be gone.
 ///
 /// A bare workspace path is resolved through its nearest existing ancestor,
 /// because mbx records the physical path Cargo reported from inside the
@@ -69,8 +72,8 @@ pub const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 const RELEASE_SCRIPT: &str = r#"cd "${HOME:-/}" 2>/dev/null || cd / || exit 1
 trap '' HUP
 set -u
-mode=$1 cache=$2 config=$3 preferred=$4 legacy_root=$5 under_root=$6
-shift 6
+mode=$1 cache=$2 target_root=$3 legacy_root=$4 under_root=$5
+shift 5
 mbx=
 consider() {
     [ -z "$mbx" ] || return 0
@@ -89,9 +92,6 @@ physical() {
     resolved=$(CDPATH= cd -- "$dir" && pwd -P) || return 1
     printf '%s%s\n' "${resolved%/}" "$rest"
 }
-if [ "$mode" = shared ]; then
-    consider "$preferred"
-fi
 consider "$(command -v mbx 2>/dev/null || true)"
 consider "$HOME/.local/bin/mbx"
 consider "$HOME/.cargo/bin/mbx"
@@ -114,17 +114,38 @@ if [ -z "$mbx" ]; then
     echo 'no mbx on this host can release the shared build cache' >&2
     exit 3
 fi
+if [ "$mode" = shared ] && [ -z "$target_root" ]; then
+    configured=$(unset MBX_TARGET_ROOT; MBX_CACHE_DIR=$cache "$mbx" settings get target.root 2>/dev/null || true)
+    case "$configured" in
+        ''|..|../*|*/..|*/../*) ;;
+        /*)
+            case "${configured%/}/" in
+                "${cache%/}/"*) target_root=$configured ;;
+            esac
+            ;;
+        *)
+            target_root=${cache%/}/$configured
+            ;;
+    esac
+    if [ -z "$target_root" ]; then
+        target_root=${cache%/}/targets
+    fi
+fi
+run_mbx() {
+    if [ "$mode" != shared ]; then
+        "$mbx" "$@"
+    elif [ -n "$target_root" ]; then
+        MBX_CACHE_DIR=$cache MBX_TARGET_ROOT=$target_root "$mbx" "$@"
+    else
+        MBX_CACHE_DIR=$cache "$mbx" "$@"
+    fi
+}
 run_clean() (
     output_dir=$(mktemp -d "${TMPDIR:-/tmp}/mj-mbx-release.XXXXXX") || {
         echo 'could not create temporary output directory for mbx clean' >&2
         return 1
     }
-    if [ "$mode" = shared ]; then
-        MBX_CACHE_DIR=$cache XDG_CONFIG_HOME=$config "$mbx" clean "$@" </dev/null \
-            >"$output_dir/stdout" 2>"$output_dir/stderr"
-    else
-        "$mbx" clean "$@" </dev/null >"$output_dir/stdout" 2>"$output_dir/stderr"
-    fi
+    run_mbx clean "$@" </dev/null >"$output_dir/stdout" 2>"$output_dir/stderr"
     clean_status=$?
     cat "$output_dir/stdout"
     cat "$output_dir/stderr" >&2
@@ -133,11 +154,7 @@ run_clean() (
 )
 status=0
 if [ -n "$under_root" ]; then
-    if [ "$mode" = shared ]; then
-        help=$(MBX_CACHE_DIR=$cache XDG_CONFIG_HOME=$config "$mbx" clean --help 2>&1 || true)
-    else
-        help=$("$mbx" clean --help 2>&1 || true)
-    fi
+    help=$(run_mbx clean --help 2>&1 || true)
     case "$help" in
         *--under*)
             if [ "$mode" = shared ]; then
@@ -170,8 +187,25 @@ exit "$status""#;
 enum Store {
     /// A bare host's own mbx, with its own configuration.
     Native,
-    /// The cache directory a host's containers mount at the same path.
-    Shared { directory: PathBuf },
+    /// The cache directory a host's containers mount at the same path, and
+    /// the session's recorded target root. A legacy record with `None` predates
+    /// recording in-cache roots, so the release script resolves any in-cache
+    /// host `target.root` and falls back to `<directory>/targets` otherwise.
+    Shared {
+        directory: PathBuf,
+        target_root: Option<PathBuf>,
+    },
+}
+
+impl Store {
+    /// The recorded target root passed to `RELEASE_SCRIPT`, or `None` for
+    /// native hosts and legacy records that predate recording in-cache roots.
+    fn release_target_root(&self) -> Option<&Path> {
+        match self {
+            Store::Native => None,
+            Store::Shared { target_root, .. } => target_root.as_deref(),
+        }
+    }
 }
 
 /// The build state of workspaces Mjolnir has removed, and where it lives.
@@ -179,7 +213,6 @@ enum Store {
 pub struct BuildStateRelease {
     host: CacheHost,
     store: Store,
-    preferred_mbx: Option<PathBuf>,
     /// The old per-version cache used by local shared-cache sessions. Remote
     /// copies remain under the SSH user's home directory.
     legacy_mbx_root: Option<PathBuf>,
@@ -197,7 +230,6 @@ impl BuildStateRelease {
         Self {
             host: ssh.map_or(CacheHost::Local, CacheHost::Ssh),
             store: Store::Native,
-            preferred_mbx: None,
             legacy_mbx_root: None,
             cleanup_root: Some(root.to_path_buf()),
             workspaces: vec![root.to_path_buf()],
@@ -229,8 +261,8 @@ impl BuildStateRelease {
         config: &Config,
     ) -> Option<Self> {
         let (host, root) = environment_workspace_root(session_id, placement, backend)?;
-        let (store, preferred_mbx) = match backend {
-            targets::TargetLocator::SshBare { .. } => (Store::Native, None),
+        let store = match backend {
+            targets::TargetLocator::SshBare { .. } => Store::Native,
             _ => {
                 let cache = placement.build_cache.as_ref()?;
                 if host.key() != cache.host {
@@ -242,12 +274,10 @@ impl BuildStateRelease {
                     );
                     return None;
                 }
-                (
-                    Store::Shared {
-                        directory: cache.directory.clone(),
-                    },
-                    Some(super::cache_binary_path(&cache.directory)),
-                )
+                Store::Shared {
+                    directory: cache.directory.clone(),
+                    target_root: cache.target_root.clone(),
+                }
             }
         };
         let repositories = placement.repositories.clone().or_else(|| {
@@ -272,7 +302,6 @@ impl BuildStateRelease {
         (!workspaces.is_empty()).then_some(Self {
             host,
             store,
-            preferred_mbx,
             legacy_mbx_root,
             cleanup_root: Some(root),
             workspaces,
@@ -389,22 +418,19 @@ impl BuildStateRelease {
     }
 
     fn command(&self) -> targets::CommandSpec {
-        let (mode, directory, config_home) = match &self.store {
-            Store::Native => ("native", String::new(), String::new()),
-            Store::Shared { directory } => (
-                "shared",
-                directory.to_string_lossy().into_owned(),
-                configuration_home(directory).to_string_lossy().into_owned(),
-            ),
+        let target_root = self
+            .store
+            .release_target_root()
+            .map(|root| root.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (mode, directory) = match &self.store {
+            Store::Native => ("native", String::new()),
+            Store::Shared { directory, .. } => ("shared", directory.to_string_lossy().into_owned()),
         };
         let arguments = [
             mode.to_owned(),
             directory,
-            config_home,
-            self.preferred_mbx
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            target_root,
             self.legacy_mbx_root
                 .as_ref()
                 .map(|root| root.to_string_lossy().into_owned())
@@ -436,11 +462,18 @@ impl BuildStateRelease {
     fn remediation(&self) -> String {
         let environment = match &self.store {
             Store::Native => String::new(),
-            Store::Shared { directory } => format!(
-                "MBX_CACHE_DIR={} XDG_CONFIG_HOME={} ",
+            Store::Shared {
+                directory,
+                target_root: Some(root),
+            } => format!(
+                "MBX_CACHE_DIR={} MBX_TARGET_ROOT={} ",
                 directory.display(),
-                configuration_home(directory).display()
+                root.display()
             ),
+            Store::Shared {
+                directory,
+                target_root: None,
+            } => format!("MBX_CACHE_DIR={} ", directory.display()),
         };
         let fallback = self
             .workspaces
@@ -503,15 +536,6 @@ fn environment_workspace_root(
         }
         _ => None,
     }
-}
-
-/// The `XDG_CONFIG_HOME` under which the containers' mbx finds the machine
-/// policy Mjolnir publishes in the shared cache, `<home>/mbx/config.toml`.
-fn configuration_home(directory: &Path) -> PathBuf {
-    let configuration = mj_core::config::build_cache_configuration_directory(directory);
-    configuration
-        .parent()
-        .map_or_else(|| configuration.clone(), Path::to_path_buf)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -643,11 +667,12 @@ mod tests {
             let contents = if with_mbx {
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
+                         if [ \"$1\" = settings ]; then exit 0; fi\n\
                          if [ \"$1\" = clean ] && [ \"${{2:-}}\" = --help ]; then\n\
                              {}\n\
                              exit 0\n\
                          fi\n\
-                         printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                         printf '%s|%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{MBX_TARGET_ROOT:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
                     if supports_under {
                         "echo 'Usage: mbx clean [--under ROOT] [WORKSPACE]'"
                     } else {
@@ -679,7 +704,11 @@ mod tests {
                 .env
                 .insert("HOME".into(), self.path("home").display().to_string());
             command.env.insert("MBX_CACHE_DIR".into(), String::new());
-            command.env.insert("XDG_CONFIG_HOME".into(), String::new());
+            command.env.insert("MBX_TARGET_ROOT".into(), String::new());
+            // The host's own configuration home must reach mbx untouched.
+            command
+                .env
+                .insert("XDG_CONFIG_HOME".into(), "/host/xdg".into());
             command
         }
 
@@ -698,7 +727,8 @@ mod tests {
                 path,
                 format!(
                     "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx 1.19.0'; exit 0; }}\n\
-                     printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                     [ \"$1\" = settings ] && exit 0\n\
+                     printf '%s|%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{MBX_TARGET_ROOT:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
                     self.path("log").display()
                 ),
             )
@@ -713,10 +743,8 @@ mod tests {
             host: CacheHost::Local,
             store: Store::Shared {
                 directory: "/srv/cache".into(),
+                target_root: None,
             },
-            // Exercise PATH and legacy fallbacks without ever probing a
-            // possibly live cache binary on the test host.
-            preferred_mbx: None,
             legacy_mbx_root: None,
             cleanup_root: None,
             workspaces: workspaces.iter().map(PathBuf::from).collect(),
@@ -806,7 +834,7 @@ mod tests {
         let physical = std::fs::canonicalize(sandbox.path("real")).unwrap();
         assert_eq!(
             sandbox.log(),
-            format!("clean {}/clones/gone||\n", physical.display())
+            format!("clean {}/clones/gone|||/host/xdg\n", physical.display())
         );
     }
 
@@ -823,7 +851,10 @@ mod tests {
         let physical = std::fs::canonicalize(sandbox.path("real")).unwrap();
         assert_eq!(
             sandbox.log(),
-            format!("clean --under {}/clones/gone||\n", physical.display())
+            format!(
+                "clean --under {}/clones/gone|||/host/xdg\n",
+                physical.display()
+            )
         );
     }
 
@@ -839,7 +870,7 @@ mod tests {
             format!(
                 "#!/bin/sh\nif [ \"$1\" = --version ]; then pwd >/dev/null 2>&1 || exit 1; echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
                  if [ \"$1\" = clean ] && [ \"$2\" = --help ]; then echo 'Usage: mbx clean WORKSPACE'; exit 0; fi\n\
-                 pwd >> '{}'\nprintf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                 pwd >> '{}'\nprintf '%s|%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{MBX_TARGET_ROOT:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
                 cwd_log.display(),
                 sandbox.path("log").display()
             ),
@@ -881,6 +912,7 @@ mod tests {
             sandbox.path("bin/mbx"),
             format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 [ \"$1\" = settings ] && exit 0\n\
                  echo 'clean output'\necho 'clean warning' >&2\n"
             ),
         )
@@ -927,6 +959,7 @@ mod tests {
             sandbox.path("bin/mbx"),
             format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 [ \"$1\" = settings ] && exit 0\n\
                  : > '{}'\nwaited=0\n\
                  while [ ! -e '{}' ] && [ \"$waited\" -lt 3000 ]; do sleep 0.02; waited=$((waited + 1)); done\n\
                  printf done > '{}'/completed\nprintf 'mbx output\\n'\nprintf 'mbx warning\\n' >&2\n",
@@ -990,8 +1023,8 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n\
-             clean /workspace/abc/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n\
+             clean /workspace/abc/lib|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1008,7 +1041,7 @@ mod tests {
         assert_eq!(
             sandbox.log(),
             format!(
-                "clean --under {}|/srv/cache|/srv/cache/.mjolnir/config\n",
+                "clean --under {}|/srv/cache|/srv/cache/targets|/host/xdg\n",
                 session.container_workspace.as_ref().unwrap().display()
             )
         );
@@ -1036,39 +1069,103 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n\
-             clean /workspace/abc/nested/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n\
+             clean /workspace/abc/nested/lib|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
     #[test]
-    fn shared_cache_cleanup_prefers_the_recorded_host_mbx_path() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+    fn shared_cache_cleanup_passes_the_recorded_store_and_target_root_over_host_configuration() {
         let sandbox = Sandbox::new(true);
-        let preferred = sandbox.path("preferred/mbx");
-        std::fs::create_dir_all(preferred.parent().unwrap()).unwrap();
-        std::fs::write(
-            &preferred,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
-                 printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
-                sandbox.path("preferred.log").display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&preferred, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut release = shared(&["/workspace/abc/app"]);
-        release.preferred_mbx = Some(preferred.clone());
+        release.store = Store::Shared {
+            directory: "/srv/cache".into(),
+            target_root: Some("/mnt/targets".into()),
+        };
 
         let output = sandbox.run(&release);
 
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
-            std::fs::read_to_string(sandbox.path("preferred.log")).unwrap(),
-            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n"
+            sandbox.log(),
+            "clean /workspace/abc/app|/srv/cache|/mnt/targets|/host/xdg\n"
         );
-        assert_eq!(sandbox.log(), "");
+        let remediation = release.remediation();
+        assert!(
+            remediation.contains("MBX_CACHE_DIR=/srv/cache MBX_TARGET_ROOT=/mnt/targets mbx clean"),
+            "{remediation}"
+        );
+        assert!(!remediation.contains("XDG_CONFIG_HOME"), "{remediation}");
+    }
+
+    #[test]
+    fn shared_cache_cleanup_always_names_the_sessions_target_root_even_in_the_cache() {
+        let sandbox = Sandbox::new(true);
+        // A root recorded inside the cache releases what the session wrote,
+        // wherever the host's configuration points today.
+        let mut release = shared(&["/workspace/abc/app"]);
+        release.store = Store::Shared {
+            directory: "/srv/cache".into(),
+            target_root: Some("/srv/cache/views".into()),
+        };
+        let output = sandbox.run(&release);
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/views|/host/xdg\n"
+        );
+        assert!(
+            release
+                .remediation()
+                .contains("MBX_TARGET_ROOT=/srv/cache/views mbx clean"),
+            "{}",
+            release.remediation()
+        );
+
+        // A legacy record (`target_root: None`) honors a configured host
+        // `target.root` inside the cache (such as `views`) and falls back to
+        // `<cache>/targets` when the host root is unset or escapes the cache.
+        for (configured, expected) in [
+            ("", "/srv/cache/targets"),
+            ("views", "/srv/cache/views"),
+            ("/srv/cache/views", "/srv/cache/views"),
+            ("/mnt/new-targets", "/srv/cache/targets"),
+            ("../outside", "/srv/cache/targets"),
+            ("/srv/cache/../outside", "/srv/cache/targets"),
+        ] {
+            let legacy_sandbox = Sandbox::new(true);
+            std::fs::write(
+                legacy_sandbox.path("bin/mbx"),
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
+                     if [ \"$1\" = settings ] && [ \"$2\" = get ] && [ \"$3\" = target.root ]; then printf '%s\\n' '{configured}'; exit 0; fi\n\
+                     printf '%s|%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{MBX_TARGET_ROOT:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                    legacy_sandbox.path("log").display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                legacy_sandbox.path("bin/mbx"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let legacy = shared(&["/workspace/abc/app"]);
+            let output = legacy_sandbox.run(&legacy);
+            assert_eq!(output.status, 0, "configured={configured:?}: {output:?}");
+            assert_eq!(
+                legacy_sandbox.log(),
+                format!("clean /workspace/abc/app|/srv/cache|{expected}|/host/xdg\n"),
+                "configured={configured:?}"
+            );
+            assert!(
+                legacy
+                    .remediation()
+                    .contains("MBX_CACHE_DIR=/srv/cache mbx clean"),
+                "{}",
+                legacy.remediation()
+            );
+        }
     }
 
     #[test]
@@ -1084,7 +1181,7 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1099,7 +1196,7 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n"
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1229,7 +1326,7 @@ mod tests {
         assert_eq!(output.status, 0, "{output:?}");
         assert_eq!(
             sandbox.log(),
-            "clean /workspace/other/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
+            "clean /workspace/other/lib|/srv/cache|/srv/cache/targets|/host/xdg\n"
         );
     }
 
@@ -1328,7 +1425,7 @@ mod tests {
         assert_eq!(
             sandbox.log(),
             format!(
-                "clean --under {}/.local/share/hel/workspaces/gone||\n",
+                "clean --under {}/.local/share/hel/workspaces/gone|||/host/xdg\n",
                 home.display()
             )
         );

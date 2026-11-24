@@ -644,6 +644,103 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
+/// Reviewer model selection reports why a profile could not be checked
+/// instead of folding discovery failures into "no profile offers the model".
+#[tokio::test]
+async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
+    if !isolated_spawn_test("reviewer_model_selection_reports_profiles_that_fail_discovery") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+
+    // Every enabled profile fails discovery.
+    let (backend, _) = selection_backend(&[], None).await;
+    let error = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+    assert!(!error.contains("no further enabled"), "{error}");
+    let error = backend
+        .reviewer_autoconfigure_candidates()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("deepseek (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+
+    // Two profiles answer without the model; one fails discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &["flash"]), ("deepseek", &["flash"])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let candidates = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap();
+    assert!(candidates.offered.is_empty());
+    assert_eq!(candidates.unavailable.len(), 1);
+    assert_eq!(candidates.unavailable[0].0, "codex-high");
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let error = crate::server::api::resolve_reviewer_model_profile_selection(
+        &backend,
+        "luna",
+        None,
+        mj_core::config::ExecutionPolicy::Unconstrained,
+        "reviewer",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.message.contains("Could not check: codex-high (")
+            && error.message.contains("cannot be discovered"),
+        "{}",
+        error.message
+    );
+}
+
+/// Automatic reviewer selection that ends with no reviewers names the profiles
+/// that could not be checked, not only the ones that answered.
+#[tokio::test]
+async fn autoconfigure_without_reviewers_names_profiles_that_failed_discovery() {
+    if !isolated_spawn_test("autoconfigure_without_reviewers_names_profiles_that_failed_discovery")
+    {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    // `parent` answers but offers no model to configure a reviewer from; the
+    // others fail discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &[])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let settings = mj_core::config::ReviewConfig {
+        legacy: Some(Default::default()),
+        ..Default::default()
+    };
+
+    let error =
+        crate::review_host::selection::configured_choices(settings, &selection_config(), &backend)
+            .await
+            .map_err(|error| error.to_string())
+            .expect_err("autoconfigure should find no reviewers");
+
+    assert!(error.contains("No reviewers are configured"), "{error}");
+    assert!(
+        error.contains("Could not check:")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+}
+
 /// A close is accepted long before the child is gone: it cancels whatever owned
 /// the session, checkpoints, seals the relay and tears the process tree down,
 /// and the record only says `Closing` once that is under way. A child that had
@@ -1590,6 +1687,229 @@ async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
         finished.load(Ordering::Acquire),
         "the supervised checkpoint ran to its end without its requester"
     );
+}
+
+/// A stopped session whose cleanup is deferred keeps its locator. Its work is
+/// in the checkpoint, so a patch export reads that instead of addressing a
+/// target that no longer runs it, and a stopped session with nothing saved is
+/// told so rather than told to export a bundle.
+#[tokio::test]
+async fn a_stopped_sessions_patch_export_reads_its_checkpoint_even_with_a_locator() {
+    struct StoppedWithLocator(SessionRecord);
+    impl ExportRuntime for StoppedWithLocator {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.0.id).then(|| self.0.clone())
+        }
+        fn checkpoint_now(
+            &self,
+            _session_id: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            Box::pin(async { bail!("an export of a stopped session takes no checkpoint") })
+        }
+    }
+
+    let mut record = mj_controller::controller::test_support::checkpoint_test_session("stopped-1");
+    record.state = SessionState::Stopped;
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/nonexistent/worker-root".into(),
+    }));
+    let (submitted_tx, _submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "stopped-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: None,
+        })),
+        running_states(),
+        Arc::new(StoppedWithLocator(record)),
+    );
+    match backend.export_patch("stopped-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("no checkpoint"), "{reason}");
+            assert!(!reason.contains("bundle"), "{reason}");
+        }
+        other => panic!("expected a refusal naming the missing checkpoint, got {other:?}"),
+    }
+    match backend.export_patch("unknown".into()).await {
+        Err(ExportError::Refused(reason)) => assert!(reason.contains("unknown session")),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A live export runs a worker command on the target. When its request is
+/// dropped (the client left, or the daemon is stopping) that command must stop
+/// at once rather than run on to its five-minute timeout.
+// Hard-won: review of b5c722d: dropped live export requests left their target Git/SSH subprocess running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_live_export_request_stops_its_worker_command() {
+    use std::os::unix::fs::PermissionsExt;
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    let directory = tempfile::tempdir().unwrap();
+    // The worker root is named for its session.
+    let worker_root = directory.path().join(SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let script = worker_root.join("hel");
+    let pid_file = worker_root.join("pid");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let layout = SessionExportLayout {
+        backend: mj_core::targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_str().unwrap().to_owned(),
+        },
+        workspace_root: String::new(),
+        primary_repository: "project".into(),
+        repositories: Vec::new(),
+        report_root: String::new(),
+        managed_worktree: None,
+    };
+    let request = mj_core::runtime::spawn(worker_command(
+        layout,
+        SESSION.into(),
+        vec!["diff".into()],
+        "session diff",
+    ));
+    let started = std::time::Instant::now();
+    let pid = loop {
+        assert!(
+            !request.is_finished(),
+            "the command ended before it was dropped: {:?}",
+            request.await
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no command started"
+        );
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    assert!(alive(pid));
+    request.abort();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker command outlived its request"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A bundle of a session with no checkout comes from its stored checkpoint, as
+/// does one of a live session whose own lifecycle operation is busy: neither
+/// asks the worker for a fresh checkpoint, and both rebuild the work in a
+/// scratch checkout (#1674).
+#[tokio::test]
+async fn a_bundle_export_without_a_fresh_checkpoint_reads_the_stored_checkpoint() {
+    struct Records {
+        record: SessionRecord,
+        busy: bool,
+        checkpoints_taken: std::sync::atomic::AtomicUsize,
+    }
+    impl ExportRuntime for Records {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.record.id).then(|| self.record.clone())
+        }
+        fn checkpoint_now(
+            &self,
+            session_id: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            self.checkpoints_taken
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let busy = self.busy;
+            Box::pin(async move {
+                if busy {
+                    return Err(anyhow::Error::new(crate::daemon::SessionLifecycleBusy {
+                        session_id,
+                        operation: "resume",
+                        age_seconds: 3,
+                    }));
+                }
+                bail!("an export of a stopped session takes no checkpoint")
+            })
+        }
+    }
+    let backend_for = |record: SessionRecord, busy: bool| {
+        let (submitted_tx, _submitted) = mpsc::unbounded_channel();
+        let exports = Arc::new(Records {
+            record: record.clone(),
+            busy,
+            checkpoints_taken: Default::default(),
+        });
+        let backend = ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: record.id.clone(),
+                accepted_ordinal: 1,
+                submitted: submitted_tx,
+                view: None,
+            })),
+            running_states(),
+            exports.clone(),
+        );
+        (backend, exports)
+    };
+    let local = Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/nonexistent/worker-root".into(),
+    });
+    let missing_archive = Box::new(mj_core::state::CheckpointMetadata {
+        archive_path: "/nonexistent/checkpoint.hel.zip".into(),
+        sha256: "0".repeat(64),
+        created_at: "2026-08-14T12:00:00Z".into(),
+        event_frontier: 0,
+    });
+
+    // Stopped with a locator: no fresh checkpoint, and the stored one is read.
+    let mut stopped = mj_controller::controller::test_support::checkpoint_test_session("stopped-1");
+    stopped.state = SessionState::Stopped;
+    stopped.target = Some(local.clone());
+    stopped.checkpoint = Some(missing_archive.clone());
+    let (backend, exports) = backend_for(stopped, false);
+    match backend.bundle("stopped-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("checkpoint archive"), "{reason}")
+        }
+        other => panic!("expected the stored checkpoint to be read, got {other:?}"),
+    }
+    assert_eq!(
+        exports
+            .checkpoints_taken
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+
+    // Live and busy: the last durable checkpoint is read the same way.
+    let mut busy = mj_controller::controller::test_support::checkpoint_test_session("busy-1");
+    busy.state = SessionState::Running;
+    busy.target = Some(local);
+    busy.checkpoint = Some(missing_archive);
+    let (backend, _) = backend_for(busy.clone(), true);
+    match backend.bundle("busy-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("checkpoint archive"), "{reason}")
+        }
+        other => panic!("expected the stored checkpoint to be read, got {other:?}"),
+    }
+    busy.checkpoint = None;
+    let (backend, _) = backend_for(busy, true);
+    match backend.bundle("busy-1".into()).await {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("no earlier checkpoint"), "{reason}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 /// A relative export path resolves against the directory the agent runs in,
@@ -9256,6 +9576,7 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
     projection.records.insert(parked.id.clone(), parked);
     projection.metadata.host_capacities = vec![RuntimeHostCapacity {
         reading: HostCapacityRow {
+            storage_warning: None,
             id: "host".into(),
             host: "builder".into(),
             target_ids: vec!["nitro".into()],

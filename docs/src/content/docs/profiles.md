@@ -779,12 +779,14 @@ For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
 so a key alone is enough to be offered a profile. DSH runs BrokkAi's
-[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.4.0, a DeepSeek coding agent
-that speaks ACP itself, so there is no separate bridge. It is not the DeepSeek
-harness earlier releases offered as `kind = "deepseek"`; that kind still fails
-to load. The home is a `DSH_ACP_DATA_DIR` root. It holds an optional
-`AGENTS.md` and dsh-acp's native session records, `sessions/<id>.json`; there
-is no configuration file, no login file, and no skills support. dsh-acp reads
+[dsh-acp](https://github.com/BrokkAi/dsh-acp) 0.8.0, which serves the pinned
+official DSH runtime over ACP. DSH owns model calls, the agent loop, tools,
+permissions, MCP clients, session persistence, and plugins; dsh-acp owns the
+ACP protocol and replay projection. It is not the DeepSeek harness earlier
+releases offered as `kind = "deepseek"`; that kind still fails to load. The
+profile home is `DSH_ACP_DATA_DIR`; Mjolnir puts the native DSH home in its
+`dsh-home/` subdirectory. The profile home holds an optional `AGENTS.md`,
+dsh-acp's session projection, and that native DSH state. dsh-acp reads
 `AGENTS.md` itself from the data directory, the session working directory, and
 each additional workspace root. An existing `AGENTS.md` must be a regular
 UTF-8 file of at most 1 MiB. Mjolnir checks the staged data-directory file,
@@ -837,10 +839,10 @@ supply it. Other dsh-acp settings can go in `environment`:
 `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`), `DEEPSEEK_MODEL`
 (default `deepseek-flash`), and `DSH_ACP_MODELS` (default
 `deepseek-flash,deepseek-v4-pro`). Mjolnir owns `DSH_ACP_DATA_DIR` (set `home`
-instead), `DSH_ACP_SYSTEM_PROMPT` (put instructions in `AGENTS.md` in the
-profile home instead), and `DSH_ACP_PERMISSION_MODE` (the target's permission
-mode decides it). A profile that sets any of them in `environment` fails to
-load.
+instead), `DSH_ACP_DSH_HOME` (native state lives under the profile home),
+`DSH_ACP_SYSTEM_PROMPT` (put instructions in `AGENTS.md` in the profile home
+instead), and `DSH_ACP_PERMISSION_MODE` (the target's permission mode decides
+it). A profile that sets any of them in `environment` fails to load.
 
 Run:
 
@@ -1004,8 +1006,8 @@ Mjolnir then adds its own files to the staged home:
   settings file is edited. OpenCode reads its configuration documents in order
   and takes the last matching rule, so its approval goes in
   `OPENCODE_CONFIG_CONTENT`, the document Mjolnir supplies last, where a
-  project's or profile's later rule cannot shadow it. DSH has no configuration
-  file, so its `gh` permission requests are answered by the worker;
+  project's or profile's later rule cannot shadow it. DSH's `gh` permission
+  requests are answered by the worker;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an
@@ -1080,11 +1082,12 @@ The GitHub token is also excluded from checkpoints and archives.
 
 ## Skills synchronization
 
-Every supported harness except DSH, which has no skills support, resolves user
-skills from `skills/` beneath its profile home. Mjolnir treats the controller
-copy as authoritative and pushes it to live sessions on the same reconciliation
-cycle. This direction is deliberate: a
-session cannot overwrite the canonical skills tree on your machine.
+Every supported harness except DSH resolves Mjolnir-managed skills from
+`skills/` beneath its profile home. Mjolnir treats the controller copy as
+authoritative and pushes it to live sessions on the same reconciliation cycle.
+This direction is deliberate: a session cannot overwrite the canonical skills
+tree on your machine. DSH can load skills from its own `.agents/skills` trees,
+but Mjolnir does not manage those yet.
 
 Claude Code and Codex also keep skills of their own under `skills/`. Claude
 Code provisions `skills/synced/` from your claude.ai account and moves skills it
@@ -1191,15 +1194,15 @@ Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 only the resulting absolute path—never an arbitrary compatible executable from
 `PATH`. DSH is the exception and is never installed; see below.
 
-For Codex, Claude, Muse, and DSH's npx fallback, Mjolnir uses Node.js 22
-or newer with npm and npx when the session `PATH` already provides that stack.
-Otherwise it downloads the pinned Node.js 24.22.1 distribution with its internal
-HTTPS client, verifies its published SHA-256 checksum, and installs it under
-`$XDG_CACHE_HOME/mjolnir/node` (or `$HOME/.cache/mjolnir/node`). The managed
-`bin` directory is prepended for the harness and its child processes. A target
-that mirrors the Node.js distribution can set `NODEJS_ORG_MIRROR` (or the
-compatible `NVM_NODEJS_ORG_MIRROR`) to an HTTPS base URL; Mjolnir still checks
-the pinned digest.
+For Codex, Claude, and Muse, Mjolnir uses Node.js 22 or newer with npm and npx
+when the session `PATH` already provides that stack. DSH's npx fallback needs
+Node.js 24.9 or newer. Otherwise Mjolnir downloads the pinned Node.js 24.22.1
+distribution with its internal HTTPS client, verifies its published SHA-256
+checksum, and installs it under `$XDG_CACHE_HOME/mjolnir/node` (or
+`$HOME/.cache/mjolnir/node`). The managed `bin` directory is prepended for the
+harness and its child processes. A target that mirrors the Node.js distribution
+can set `NODEJS_ORG_MIRROR` (or the compatible `NVM_NODEJS_ORG_MIRROR`) to an
+HTTPS base URL; Mjolnir still checks the pinned digest.
 
 Kimi Code and Grok Build install from their direct per-platform release
 artifacts, with pinned SHA-256 checksums. Mjolnir launches the pinned
@@ -1212,9 +1215,10 @@ and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
-it is 0.7.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.7.0` package
+it is 0.8.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.8.0` package
 through `npx`, using the compatible system runtime or the managed Node
-described above; the npm package bundles the release binaries. An older
+described above; the npm package bundles the native bridge and pinned DSH
+runtime. An older
 `dsh-acp` on `PATH` is not used: Mjolnir falls back to `npx` when Node.js, npm,
 and npx are available, and otherwise refuses the launch with an upgrade
 instruction. Linux and macOS, on x86-64 and ARM64, are supported. Linux needs

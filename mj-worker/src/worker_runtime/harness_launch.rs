@@ -1,13 +1,11 @@
 //! Select the concrete executable before starting a harness.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
 use mj_core::harness_runtime::harness_uses_node_runtime;
 use mj_core::worker_launch::HarnessRuntimePolicy;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use super::{AcpSupervisorSpec, harness};
 
@@ -144,7 +142,7 @@ pub async fn prepare_harness_launch(
     // The image's harnesses bring their own Node.js; only a source that may
     // install prepares Mjolnir's.
     let managed_node = if policy.may_install() && needs_node_runtime(harness, &environment).await? {
-        let node = harness::ensure_node_runtime(&mut environment)
+        let node = harness::ensure_node_runtime_for(harness, &mut environment)
             .await
             .with_context(|| format!("prepare Node.js for {}", harness.display_name()))?;
         if let Some(node) = &node {
@@ -329,46 +327,13 @@ async fn uses_env_node(path: &Path) -> Result<bool> {
         || prefix.starts_with(b"#!/usr/bin/env node\r\n"))
 }
 
-/// DSH can launch its own native binary. Its npm fallback is the only branch
-/// that needs Node.js. Other Node-using harnesses always need the runtime,
-/// even when their adapter is already installed.
+/// Every Node-using harness needs the runtime even when its adapter is already
+/// installed. dsh-acp 0.8 always drives the JavaScript DSH runtime.
 pub(super) async fn needs_node_runtime(
     harness: HarnessKind,
-    environment: &BTreeMap<String, String>,
+    _environment: &BTreeMap<String, String>,
 ) -> Result<bool> {
-    let dsh_is_native = if harness == HarnessKind::Dsh {
-        if environment.contains_key("PATH") {
-            match find_command_path(Path::new("dsh-acp"), environment)? {
-                Some(command) => {
-                    let mut probe = tokio::process::Command::new(command);
-                    probe.arg("--version").env_clear().envs(environment);
-                    match mj_core::subprocess::run_bounded(&mut probe, 4096, Duration::from_secs(5))
-                        .await
-                    {
-                        Ok(output) if output.status.success() => {
-                            mj_core::harness_runtime::dsh_acp_version_supports_native_instructions(
-                                &String::from_utf8_lossy(&output.stdout),
-                            )
-                        }
-                        Ok(_) => false,
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "could not read dsh-acp version; using the pinned Node.js fallback"
-                            );
-                            false
-                        }
-                    }
-                }
-                None => false,
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    Ok(harness_uses_node_runtime(harness) && !dsh_is_native)
+    Ok(harness_uses_node_runtime(harness))
 }
 
 /// Reviewer homes can be created after provisioning. Link their mbx lookup to
@@ -459,15 +424,14 @@ fn resolve_command(command: &Path, environment: &BTreeMap<String, String>) -> Re
 }
 
 pub(super) use harness::find_command;
-use harness::find_command_path;
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    // Hard-won: 7da1ad2bc: a pre-native dsh-acp incorrectly skipped managed Node provisioning.
+    // Hard-won: dsh-acp 0.8 always drives the JavaScript DSH runtime.
     #[tokio::test]
-    async fn dsh_uses_the_managed_node_runtime_without_a_native_loader() {
+    async fn dsh_always_prepares_a_compatible_node_runtime() {
         assert!(
             needs_node_runtime(HarnessKind::Dsh, &BTreeMap::new())
                 .await
@@ -486,21 +450,10 @@ mod tests {
             tools.path().to_string_lossy().into_owned(),
         )]);
         assert!(
-            !needs_node_runtime(HarnessKind::Dsh, &environment)
-                .await
-                .unwrap()
-        );
-
-        mj_core::test_hooks::install_fake_command(
-            tools.path(),
-            "dsh-acp",
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; fi\n",
-        );
-        assert!(
             needs_node_runtime(HarnessKind::Dsh, &environment)
                 .await
                 .unwrap(),
-            "a pre-native loader needs the pinned Node.js npx fallback"
+            "even a current ambient dsh-acp needs the JavaScript DSH runtime"
         );
     }
 
