@@ -21,7 +21,7 @@ The daemon and TUI already transport the remembered delegation policies correctl
 ## Decision Log
 
 - Decision: Resolve provider groups through the daemon's existing quota scheduler when Next leaves the profile page; keep named-profile and Auto (Primary) launches otherwise unchanged.
-  Rationale: The daemon owns selection. The TUI's prediction is explicitly best effort and must not become a second selector. Once chosen, use ordinary named-profile creation. Do not retain a quota reservation while a person browses later pages; the selection request releases its temporary reservation when it returns.
+  Rationale: The daemon owns selection. The TUI's prediction is explicitly best effort and must not become a second selector. Once chosen, pin its name and retain its provider scope for target validation and quota placement at Create. Do not retain a quota reservation while a person browses later pages; the selection request releases its temporary reservation when it returns.
   Date/Author: 2026-11-24 14:03Z, Codex.
 - Decision: Reuse the existing session preflight generation for asynchronous reply identity and keep a pending request identity on the new-session draft.
   Rationale: Cancel, selection changes, and a newer request must prevent old replies from advancing a different wizard. Keep navigation and cancellation responsive.
@@ -29,7 +29,7 @@ The daemon and TUI already transport the remembered delegation policies correctl
 
 ## Outcomes & Retrospective
 
-Implemented early provider resolution through the daemon scheduler. The profile transition regressions (3), delegation regressions including the Create golden (3), and HTTP client contract test (1) pass. Clippy passed on all five affected crates. The existing provider scheduler regression also passes (1). Review and push remain.
+Implemented early provider resolution through the daemon scheduler. The profile transition regressions (3), delegation regressions including the Create golden (3), and HTTP client contract test (1) pass. Clippy passed on all five affected crates. The existing provider scheduler regression also passes (1). The isolated daemon approval-policy regression also passes (1), and profile transitions (3) and Clippy passed again after retaining provider origin. Second review and push remain.
 
 ## Context and Orientation
 
@@ -49,7 +49,7 @@ Run all commands from the repository root. Use `mbx test -p brokk-mj-tui new_ses
 
 ## Validation and Acceptance
 
-A provider-group Next waits asynchronously for a concrete profile. Returning a profile whose saved policy is Mjolnir with Orchestrators enabled displays and submits both choices. A saved None mode stays None. Creation carries that concrete profile and no provider selection. A late completion after cancel, selecting another row, or opening a new wizard has no effect. Failure leaves the first page usable. Existing profile navigation and golden output must continue to pass except where the intended concrete-profile behavior changes.
+A provider-group Next waits asynchronously for a concrete profile. Returning a profile whose saved policy is Mjolnir with Orchestrators enabled displays and submits both choices. A saved None mode stays None. Creation carries that concrete profile and its provider scope; admission validates and reserves that exact profile against the final target and current quota without selecting another profile. A late completion after cancel, selecting another row, or opening a new wizard has no effect. Failure leaves the first page usable. Existing profile navigation and golden output must continue to pass except where the intended concrete-profile behavior changes.
 
 ## Idempotence and Recovery
 
@@ -61,8 +61,11 @@ Issue: https://github.com/BrokkAi/mjolnir/issues/1681. Validation receipts will 
 
 ## Interfaces and Dependencies
 
-Extend `DashboardBackend` and `HttpDaemonClient` with `select_provider_profile(provider: QuotaProvider) -> Result<String>` using `/api/v1/profiles/select`. Add a `SelectProviderProfile` dashboard action carrying provider and generation, and a matching I/O completion. Add `NewWizard::profile_selection_request: Option<u64>`. Apply completion through a public dashboard method returning the next `DashboardAction`.
+Extend `DashboardBackend` and `HttpDaemonClient` with `select_provider_profile(provider: QuotaProvider) -> Result<String>` using `/api/v1/profiles/select`. Add a `SelectProviderProfile` dashboard action carrying provider and generation, and a matching I/O completion. Add `NewWizard::profile_selection_request: Option<u64>` and `resolved_provider: Option<QuotaProvider>`. Apply completion through a public dashboard method returning the next `DashboardAction`.
 
 Initial plan written after the user clarified provider-group selection as the trigger.
 
 2026-11-24 14:09Z: Updated progress after the first-page transition, cancellation/retry tests, and client contract passed.
+
+Review identified two consequences of treating an automatically resolved profile as an ordinary explicit pin: guardian eligibility could be bypassed on the final target, and placement accounting was skipped. Retain the provider origin with the concrete profile, and run the existing provider admission against a configuration narrowed to that profile. This reuses the existing policy filter and quota reservation owner, commits the reservation after registration, and cannot silently select a different profile. Browsing holds no reservation; Create rechecks current quota and reports a refusal if the pinned profile is no longer eligible.
+2026-11-24 14:13Z: Revised the Create boundary after the first review; targeted validation passed (three profile tests and the isolated approval-policy test); Clippy passed again.

@@ -1878,7 +1878,7 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
         action,
         DashboardAction::CreateSession {
             ref profile_id,
-            provider: None,
+            provider: Some(mj_core::config::QuotaProvider::OpenAI),
             subagents: Some(ref policy),
             ..
         } if profile_id == "codex-1" && policy == &remembered

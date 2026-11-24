@@ -182,7 +182,9 @@ impl DashboardState {
         });
         match result {
             Ok(index) => {
+                let provider = wizard.selected_provider(self);
                 wizard.set_profile(index);
+                wizard.resolved_provider = provider;
                 let profile = wizard.selected_profile_id(self).expect("selected above");
                 let remembered = self.state.remembered_subagent_policy_for(&profile);
                 wizard.subagents.refresh_create(
@@ -403,7 +405,9 @@ impl DashboardState {
             // A profile that vanished after the launch was submitted is
             // refused by name by the controller.
             profile_id: wizard.selected_profile_id(self).unwrap_or_default(),
-            provider: wizard.selected_provider(self),
+            provider: wizard
+                .selected_provider(self)
+                .or_else(|| wizard.resolved_provider.clone()),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {

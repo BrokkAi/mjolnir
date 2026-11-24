@@ -156,6 +156,8 @@ pub(crate) struct NewWizard {
     pub(crate) focused_provider: Option<QuotaProvider>,
     /// Only this background selection may advance the profile page.
     pub(crate) profile_selection_request: Option<u64>,
+    /// Provider placement still validates and accounts for this named choice at Create.
+    pub(crate) resolved_provider: Option<QuotaProvider>,
     bundle: usize,
     pub(crate) target: usize,
     /// Whether the draft passed the target step without showing it, because
@@ -338,6 +340,7 @@ impl PartialEq for NewWizard {
             && self.expanded_providers == other.expanded_providers
             && self.focused_provider == other.focused_provider
             && self.profile_selection_request == other.profile_selection_request
+            && self.resolved_provider == other.resolved_provider
             && self.bundle == other.bundle
             && self.target == other.target
             && self.profile_step_skipped == other.profile_step_skipped

@@ -247,6 +247,7 @@ impl WizardDraft for NewWizard {
         self.profile = index;
         self.focused_provider = None;
         self.profile_selection_request = None;
+        self.resolved_provider = None;
     }
 
     fn target(&self) -> usize {
@@ -679,6 +680,7 @@ impl WizardDraft for NewWizard {
         toggle_provider: bool,
     ) {
         self.profile_selection_request = None;
+        self.resolved_provider = None;
         let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
         match items.get(row) {
             Some(ProfilePickerItem::Auto) => {
