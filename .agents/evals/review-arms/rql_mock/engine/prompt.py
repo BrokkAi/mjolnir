@@ -109,6 +109,13 @@ Do not include prose outside the structured output.
 Read the catalogue and menu semantics files. Distinguish lexical matches from
 executed events. For execution claims in menu rows, apply the frozen rules for
 entering closures and futures within the seed and bound.
+For documented `uses` (and symmetrically `used-by`), target workspace declarations
+include not only callables, types, constants, and enum variants, but also
+referenced struct and enum-variant fields (in explicit or shorthand initializers,
+field accesses, and patterns) and referenced workspace module declarations named
+as path segments (for example `crate::a::b::T` or `my_crate::a::T` references
+workspace modules `a` and `b` as well as `T`). Do not include an input declaration
+itself in `uses` unless an input declaration's body actually references it.
 Evaluate the whole query at once. The menu's notes about separate single-site
 classification, candidate tags and gold adjudication concern the full study design.
 """
