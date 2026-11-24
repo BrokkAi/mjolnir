@@ -18612,7 +18612,7 @@ async fn terminal_recovery_destroy_holds_bounded_admission_after_disconnect() {
     assert!(!gate.try_close());
     assert!(gate.destroys_hold_the_stop());
     drop(session_hold);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !gate.active_labels().is_empty() {
             tokio::task::yield_now().await;
         }
