@@ -869,6 +869,130 @@ async fn independent_pages_run_at_the_compaction_concurrency_limit() {
     assert_eq!(backend.active.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test]
+async fn stalled_first_page_does_not_block_refill_or_reorder_reduction() {
+    struct RefillBackend {
+        later_page_started: tokio::sync::Notify,
+        reduction: Mutex<Option<String>>,
+    }
+
+    impl CompactionBackend for RefillBackend {
+        fn compact<'a>(
+            &'a self,
+            prompt: String,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            Box::pin(async move {
+                if prompt.contains("<historical_transcript>") {
+                    let page = (0..COMPACTION_CONCURRENCY + 2)
+                        .find(|page| prompt.contains(&format!("page-marker-{page:02}")))
+                        .expect("each page has a marker");
+                    if page == 0 {
+                        self.later_page_started.notified().await;
+                    } else if page == COMPACTION_CONCURRENCY {
+                        self.later_page_started.notify_one();
+                    }
+                    Ok(format!("summary-{page:02}"))
+                } else {
+                    assert!(self.reduction.lock().unwrap().replace(prompt).is_none());
+                    Ok("merged".into())
+                }
+            })
+        }
+    }
+
+    let backend = RefillBackend {
+        later_page_started: tokio::sync::Notify::new(),
+        reduction: Mutex::new(None),
+    };
+    let pages = (0..COMPACTION_CONCURRENCY + 2)
+        .map(|page| format!("page-marker-{page:02}"))
+        .collect();
+    let requests = Requests::new(&backend);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let summaries = summarize_pages(pages, requests).await?;
+        reduce_summaries(summaries, MIN_CONTEXT_BYTES, requests).await
+    })
+    .await
+    .expect("the first page cannot finish until a request beyond the initial window starts")
+    .unwrap();
+
+    let expected = (0..COMPACTION_CONCURRENCY + 2)
+        .map(|page| format!("summary-{page:02}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        backend.reduction.into_inner().unwrap().unwrap(),
+        reduction_prompt(&expected)
+    );
+}
+
+#[tokio::test]
+async fn oversize_reduction_splits_into_ordered_pairs_then_merges() {
+    struct PairBackend {
+        split_barrier: tokio::sync::Barrier,
+        prompts: Mutex<Vec<String>>,
+    }
+
+    impl CompactionBackend for PairBackend {
+        fn compact<'a>(
+            &'a self,
+            prompt: String,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            Box::pin(async move {
+                let parts = prompt
+                    .split("</snapshot>")
+                    .filter_map(|part| part.split_once("\">\n"))
+                    .map(|(_, summary)| summary.trim())
+                    .collect::<Vec<_>>();
+                let result = if parts.len() > 2 {
+                    Err(anyhow::anyhow!("maximum context length exceeded"))
+                } else {
+                    assert_eq!(parts.len(), 2);
+                    if parts.iter().all(|part| !part.contains('+')) {
+                        // Proves the split halves run concurrently rather than
+                        // serially inside one worker future.
+                        self.split_barrier.wait().await;
+                    }
+                    Ok(parts.join("+"))
+                };
+                self.prompts.lock().unwrap().push(prompt);
+                result
+            })
+        }
+    }
+
+    let backend = PairBackend {
+        split_barrier: tokio::sync::Barrier::new(2),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let summaries = ["a", "b", "c", "d"].map(str::to_owned);
+    let full = reduction_prompt(&summaries);
+    assert!(full.len() < MIN_CONTEXT_BYTES);
+    let merged = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reduce_summaries(
+            summaries.to_vec(),
+            MIN_CONTEXT_BYTES,
+            Requests::new(&backend),
+        ),
+    )
+    .await
+    .expect("split reduction halves must run concurrently")
+    .unwrap();
+    assert_eq!(merged, "a+b+c+d");
+    let prompts = backend.prompts.into_inner().unwrap();
+    assert_eq!(prompts.len(), 4);
+    assert_eq!(prompts[0], full);
+    assert_eq!(prompts[3], reduction_prompt(&["a+b".into(), "c+d".into()]));
+    let mut split_prompts = prompts[1..3].to_vec();
+    split_prompts.sort();
+    let mut expected_splits = vec![
+        reduction_prompt(&summaries[..2]),
+        reduction_prompt(&summaries[2..]),
+    ];
+    expected_splits.sort();
+    assert_eq!(split_prompts, expected_splits);
+}
+
 /// Merging two summaries at a time cost one request per pair and a round
 /// per level of the tree: 33 pages became 32 further requests, run two at
 /// a time. Packing a whole round into one prompt is the fix.

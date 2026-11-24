@@ -192,22 +192,6 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let children_not_handed_back: Vec<String> = self
-            .state
-            .subagents
-            .values()
-            .filter(|sub| {
-                sub.parent_session_id == session_id
-                    && self.state.owns_environment(&sub.child_session_id) == Some(false)
-            })
-            .filter(|sub| {
-                self.state
-                    .sessions
-                    .get(&sub.child_session_id)
-                    .is_some_and(|child| child.state.is_active())
-            })
-            .map(|sub| sub.child_session_id.clone())
-            .collect();
         let existing_checkpoint = session.checkpoint.as_deref().map(|checkpoint| {
             let verified = verify_installed_checkpoint_gate(session_id, checkpoint).is_ok();
             let age_seconds = chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
@@ -227,7 +211,6 @@ impl Controller {
 
         let mut preflight = mj_core::suspend_consent::SuspendPreflight {
             session_id: session_id.to_owned(),
-            children_not_handed_back,
             owning_children_to_suspend: self.state.suspendable_owned_child_ids(session_id).len(),
             existing_checkpoint,
             ..Default::default()

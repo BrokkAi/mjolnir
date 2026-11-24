@@ -250,7 +250,7 @@ impl Controller {
                 // Adoption records its session before projection attachment, so a
                 // failed attachment leaves a tracked session that never connected. That
                 // record is the one to finish, not a reason to refuse the retry.
-                Some(existing) if adoption_unfinished(&existing, target_id) => {
+                Some(existing) if adoption_unfinished(&existing, target_id)? => {
                     for (flag, requested, adopted) in [
                         ("profile", profile_override, existing.last_profile.as_str()),
                         ("bundle", bundle_override, existing.bundle_id.as_str()),
@@ -672,7 +672,7 @@ impl Controller {
             {
                 anyhow::ensure!(
                     current.id == expected.id
-                        && adoption_unfinished(current, &expected.target_template_id)
+                        && adoption_unfinished(current, &expected.target_template_id)?
                         && current.target == expected.target
                         && current.last_profile == expected.last_profile
                         && current.bundle_id == expected.bundle_id,
@@ -684,7 +684,7 @@ impl Controller {
         }
         if let Some(current) = state.sessions.get(&expected.id) {
             anyhow::ensure!(
-                adoption_unfinished(current, &expected.target_template_id)
+                adoption_unfinished(current, &expected.target_template_id)?
                     && current.target == expected.target,
                 "session {} changed before adoption; cut discarded",
                 expected.id
@@ -1035,11 +1035,13 @@ fn adopted_session_record(
 /// it names this target, carries the locator the scan found, and no harness
 /// session has ever been observed on it. Such a record is the retry, so
 /// adoption completes it instead of refusing it as already tracked.
-fn adoption_unfinished(record: &SessionRecord, target_id: &str) -> bool {
-    record.state == SessionState::Disconnected
+fn adoption_unfinished(record: &SessionRecord, target_id: &str) -> Result<bool> {
+    Ok(!record.archived
+        && record.state == SessionState::Disconnected
         && record.native_session_id.is_none()
         && record.target_template_id == target_id
         && record.target.is_some()
+        && !crate::database::has_session_create_intent(&record.id)?)
 }
 
 fn scan_target_workers(
@@ -1774,7 +1776,7 @@ mod tests {
             },
         );
         assert!(
-            adoption_unfinished(&record, "local-bare"),
+            adoption_unfinished(&record, "local-bare").unwrap(),
             "the record adoption commits must be the record adoption can retry"
         );
         record.last_error = Some("the original worker failure".into());
@@ -1960,6 +1962,43 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_create_cannot_be_retried_as_an_orphan_adoption() {
+        const CHILD: &str = "MJ_TEST_CREATE_ADOPTION_FENCE";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "interrupted_create_cannot_be_retried_as_an_orphan_adoption",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "create-adoption-fence")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let record = adopted_session_record(
+            "0123456789abcdef0123456789abcdef",
+            "local-bare",
+            "codex".into(),
+            HarnessKind::Codex,
+            "project".into(),
+            mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+            TargetLocator::LocalBare {
+                worker_root: "/workers/0123456789abcdef0123456789abcdef".into(),
+            },
+        );
+        crate::database::save_new_session(&record, None, false, false).unwrap();
+        assert!(!adoption_unfinished(&record, "local-bare").unwrap());
+
+        let intent = crate::database::load_session_create_intents()
+            .unwrap()
+            .remove(0);
+        crate::database::discard_session_create_intent(&record.id, &intent.operation_id).unwrap();
+        assert!(adoption_unfinished(&record, "local-bare").unwrap());
+    }
+
+    #[test]
     fn a_session_that_completed_its_handshake_is_not_adoptable_again() {
         let mut record = adopted_session_record(
             "0123456789abcdef0123456789abcdef",
@@ -1973,11 +2012,11 @@ mod tests {
             },
         );
         record.native_session_id = Some("native-session".into());
-        assert!(!adoption_unfinished(&record, "local-bare"));
+        assert!(!adoption_unfinished(&record, "local-bare").unwrap());
 
         record.native_session_id = None;
         assert!(
-            !adoption_unfinished(&record, "other-target"),
+            !adoption_unfinished(&record, "other-target").unwrap(),
             "a record adopted onto another target is not this target's retry"
         );
     }

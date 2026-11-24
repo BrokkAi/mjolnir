@@ -4048,6 +4048,7 @@ fn harness_restarting_interrupts_in_flight_commands() {
             &relay,
             &mut in_flight,
             RuntimeEvent::HarnessRestarting {
+                reload: None,
                 message: "ACP bridge exited; reloading the native session".into(),
             },
         )
@@ -4150,6 +4151,7 @@ fn harness_restarting_retires_dead_questions_before_a_live_cut() {
         &relay,
         &mut in_flight,
         RuntimeEvent::HarnessRestarting {
+            reload: None,
             message: "ACP bridge exited; reloading the native session".into(),
         },
     )
@@ -4615,6 +4617,7 @@ async fn a_bridge_restart_releases_a_held_prompt_after_session_readiness() {
 
     event_tx
         .send(RuntimeEvent::HarnessRestarting {
+            reload: None,
             message: "test bridge restart".into(),
         })
         .unwrap();

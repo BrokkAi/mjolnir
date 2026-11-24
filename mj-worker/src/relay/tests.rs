@@ -11409,7 +11409,7 @@ fn forms_opened_during_bridge_startup_survive_session_open_and_ack_pruning() {
 #[cfg(unix)]
 #[test]
 fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
-    use mj_core::acp::RuntimeEvent;
+    use crate::acp::RuntimeEvent;
     for replacement_succeeds in [false, true] {
         for replacement_has_resume in [false, true] {
             let temp = tempfile::tempdir().unwrap();
@@ -11484,9 +11484,10 @@ fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
 #[cfg(unix)]
 #[test]
 fn old_bridge_retirement_preserves_replacement_terminal_admission() {
-    use mj_core::acp::RuntimeEvent;
+    use crate::acp::RuntimeEvent;
     for lifecycle in [
         RuntimeEvent::HarnessRestarting {
+            reload: None,
             message: "old bridge exited".into(),
         },
         RuntimeEvent::ContextClearing {

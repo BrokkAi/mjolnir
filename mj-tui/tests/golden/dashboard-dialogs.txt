@@ -118,6 +118,36 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │Nothing needs you                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+
+=== suspend dialog with backend-only warnings (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮             │
+│hel ───────  │Session: session-1                                                    │  on.        │
+│› · ACP pre  │Save a recovery copy and release the environment.                     │             │
+│  Idle  pod  │You can resume this session later.                                    │             │
+│  │ No mess  │The current turn will be interrupted.                                 │             │
+│  │          │Sub-agent "native-child" has not handed back; suspending stops it.    │             │
+│             │                                                                      │  ───────────╯
+│             │c Cancel  ·  a Continue anyway                                        │  ───────────╮
+│             │                                                                      │             │
+│             │                                                                      │  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│ + refreshi  │                                                                      │             │
+│OPENAI       │  Cancel     Continue anyway                                          │             │
+│ + 2 refres  ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: None
 
 === target actions (120x34) ===

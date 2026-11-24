@@ -9,46 +9,256 @@
 //! executor and cancellation-poll wrapper that keeps a cancelled operation from
 //! waiting out several network requests belongs to each caller.
 
+use std::fs::File;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
+use mj_transcript::handoff::reusable_handoff;
 use tokio_util::sync::CancellationToken;
 
-use mj_checkpoint::archive::CanonicalSessionSnapshot;
-use mj_core::config::{Config, HarnessProfile};
+use mj_checkpoint::archive::{ArchiveManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody};
+use mj_core::config::{Config, HarnessKind, HarnessProfile};
 
+pub mod antigravity;
 pub mod claude;
 
-/// Checkpoint native history is optional evidence for a cross-harness handoff.
-/// A missing or unusable native summary leaves the canonical handoff intact.
-pub async fn native_prior_from_archive(
+#[allow(clippy::large_enum_variant)] // The archive source owns its manifest.
+pub enum NativePriorSource {
+    Archive {
+        archive_path: PathBuf,
+        manifest: ArchiveManifest,
+    },
+    Home {
+        harness_kind: HarnessKind,
+        harness_home: PathBuf,
+        native_session_id: String,
+    },
+    File {
+        harness_kind: HarnessKind,
+        file: File,
+    },
+}
+
+impl NativePriorSource {
+    fn harness_kind(&self) -> HarnessKind {
+        match self {
+            Self::Archive { manifest, .. } => manifest.session.harness_kind,
+            Self::Home { harness_kind, .. } | Self::File { harness_kind, .. } => *harness_kind,
+        }
+    }
+}
+
+/// Read optional native compaction evidence for a canonical handoff.
+pub async fn native_prior(
     session_id: &str,
-    archive_path: &std::path::Path,
-    manifest: &mj_checkpoint::archive::ArchiveManifest,
-    snapshot: &std::sync::Arc<CanonicalSessionSnapshot>,
+    source: NativePriorSource,
+    snapshot: &Arc<CanonicalSessionSnapshot>,
     cancel: CancellationToken,
 ) -> Result<Option<crate::compaction::PriorCompaction>> {
-    if manifest.session.harness_kind != mj_core::config::HarnessKind::Claude {
+    let harness_kind = source.harness_kind();
+    if !matches!(harness_kind, HarnessKind::Claude | HarnessKind::Antigravity) {
         return Ok(None);
     }
     let session_id = session_id.to_owned();
-    let archive_path = archive_path.to_owned();
-    let manifest = manifest.clone();
-    let snapshot = std::sync::Arc::clone(snapshot);
+    let snapshot = Arc::clone(snapshot);
     mj_core::runtime::spawn_blocking(move || {
-        match claude::prior_compaction(&archive_path, &manifest, &snapshot, &cancel) {
+        let prior = match (harness_kind, source) {
+            (
+                HarnessKind::Claude,
+                NativePriorSource::Archive {
+                    archive_path,
+                    manifest,
+                },
+            ) => {
+                claude::prior_compaction_from_archive(&archive_path, &manifest, &snapshot, &cancel)
+            }
+            (
+                _,
+                NativePriorSource::Archive {
+                    archive_path,
+                    manifest,
+                },
+            ) => antigravity::prior_compaction_from_archive(
+                &archive_path,
+                &manifest,
+                &snapshot,
+                &cancel,
+            ),
+            (
+                HarnessKind::Claude,
+                NativePriorSource::Home {
+                    harness_home,
+                    native_session_id,
+                    ..
+                },
+            ) => claude::prior_compaction_from_home(
+                &harness_home,
+                &native_session_id,
+                &snapshot,
+                &cancel,
+            ),
+            (
+                _,
+                NativePriorSource::Home {
+                    harness_home,
+                    native_session_id,
+                    ..
+                },
+            ) => antigravity::prior_compaction_from_home(
+                &harness_home,
+                &native_session_id,
+                &snapshot,
+                &cancel,
+            ),
+            (HarnessKind::Claude, NativePriorSource::File { file, .. }) => {
+                claude::prior_compaction_from_reader(file, &snapshot, &cancel)
+            }
+            (_, NativePriorSource::File { file, .. }) => {
+                antigravity::prior_compaction_from_reader(file, &snapshot, &cancel)
+            }
+        };
+        match prior {
             Ok(prior) => Ok(prior),
             Err(error) if cancel.is_cancelled() => Err(error),
             Err(error) => {
                 tracing::warn!(
                     session_id,
+                    harness = ?harness_kind,
                     error = format!("{error:#}"),
-                    "could not use Claude native compaction; using canonical history"
+                    "could not use native compaction; using canonical history"
                 );
                 Ok(None)
             }
         }
     })
     .await
-    .context("join Claude native compaction read")?
+    .context("join native compaction read")?
+}
+
+fn check_cancel(cancel: &CancellationToken) -> io::Result<()> {
+    if cancel.is_cancelled() {
+        // Interrupted errors are retryable by I/O helpers.
+        return Err(io::Error::other("native compaction preparation cancelled"));
+    }
+    Ok(())
+}
+
+/// Splits a streamed native transcript into non-blank lines. The caller's
+/// handler sees each line and its 1-based number; cancellation is checked on
+/// every chunk and line so a huge line cannot delay it.
+struct LineScanner<'a, F> {
+    cancel: &'a CancellationToken,
+    line_buf: Vec<u8>,
+    line_number: usize,
+    on_line: F,
+}
+
+impl<'a, F: FnMut(&[u8], usize) -> io::Result<()>> LineScanner<'a, F> {
+    fn new(cancel: &'a CancellationToken, on_line: F) -> Self {
+        Self {
+            cancel,
+            line_buf: Vec::new(),
+            line_number: 0,
+            on_line,
+        }
+    }
+
+    /// Handle an unterminated final line.
+    fn finish(mut self) -> io::Result<()> {
+        check_cancel(self.cancel)?;
+        if !self.line_buf.is_empty() {
+            self.end_line()?;
+        }
+        Ok(())
+    }
+
+    fn end_line(&mut self) -> io::Result<()> {
+        check_cancel(self.cancel)?;
+        self.line_number += 1;
+        if !self.line_buf.iter().all(u8::is_ascii_whitespace) {
+            (self.on_line)(&self.line_buf, self.line_number)?;
+        }
+        self.line_buf.clear();
+        Ok(())
+    }
+}
+
+impl<F: FnMut(&[u8], usize) -> io::Result<()>> Write for LineScanner<'_, F> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        check_cancel(self.cancel)?;
+        for line in bytes.split_inclusive(|&byte| byte == b'\n') {
+            if let Some(line) = line.strip_suffix(b"\n") {
+                self.line_buf.extend_from_slice(line);
+                self.end_line()?;
+            } else {
+                self.line_buf.extend_from_slice(line);
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The last position that a native compaction must not reach back across: the
+/// current context start or a validated generic handoff, whichever is later.
+fn lineage_start(snapshot: &CanonicalSessionSnapshot) -> u64 {
+    let context_start = snapshot.current_context_start();
+    reusable_handoff(snapshot).map_or(context_start, |state| {
+        context_start.max(state.through_position)
+    })
+}
+
+/// Canonical positions before `anchor_position` that a native summary does not
+/// cover and the handoff must replay: tools it does not cover, agent text that
+/// changed at or after the anchor, and the latest plan.
+fn collect_retained_positions(
+    snapshot: &CanonicalSessionSnapshot,
+    lineage_start: u64,
+    anchor_position: u64,
+    is_covered_tool: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<u64> {
+    let mut retained_positions = Vec::new();
+    let mut latest_plan = None;
+    for item in snapshot
+        .transcript
+        .iter()
+        .filter(|item| lineage_start < item.position && item.position < anchor_position)
+    {
+        match &item.body {
+            CanonicalTranscriptBody::Tool { call, .. } if !is_covered_tool(call) => {
+                retained_positions.push(item.position);
+            }
+            CanonicalTranscriptBody::Agent { .. }
+                if item
+                    .latest_content_event_ordinal
+                    .is_none_or(|ordinal| ordinal >= anchor_position) =>
+            {
+                retained_positions.push(item.position);
+            }
+            CanonicalTranscriptBody::Plan { .. } => {
+                latest_plan = latest_plan.max(Some(item.position));
+            }
+            _ => {}
+        }
+    }
+    retained_positions.extend(latest_plan);
+    retained_positions.sort_unstable();
+    retained_positions
+}
+
+/// Whether `id` is exactly one ordinary path component without control
+/// characters, so joining it to a directory cannot leave that directory.
+fn is_single_path_component(id: &str) -> bool {
+    let mut components = Path::new(id).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !id.chars().any(char::is_control)
 }
 
 /// The handoff byte budget for a target profile: its configured context window,

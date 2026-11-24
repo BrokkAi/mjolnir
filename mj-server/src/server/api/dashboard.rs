@@ -16,6 +16,7 @@ use mj_core::workspace::{ConversationLayout, PaneSize, PaneSizes};
 pub(super) fn dashboard_routes() -> Router<ServerState> {
     Router::new()
         .route("/dashboard/startup", post(dashboard_startup))
+        .route("/profiles/select", post(select_provider_profile))
         .route("/workspaces/layouts", post(workspace_layouts))
         .route("/sessions/stored-metadata", get(stored_session_metadata))
         .route(
@@ -87,6 +88,10 @@ pub(super) fn dashboard_backend(
 
 /// Dashboard operations owned by the daemon runtime.
 pub trait DashboardBackend: TerminalOperations {
+    fn select_provider_profile(
+        &self,
+        request: mj_client::http::ProviderProfileSelectionRequest,
+    ) -> BoxFuture<'_, AnyResult<String>>;
     fn dashboard_startup(
         &self,
         client_id: String,
@@ -178,6 +183,19 @@ pub trait DashboardBackend: TerminalOperations {
 struct DashboardStartupRequest {
     client_id: String,
     workspace_id: String,
+}
+
+async fn select_provider_profile(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<mj_client::http::ProviderProfileSelectionRequest>,
+) -> Result<Json<String>, ApiFailure> {
+    require_terminal(&state, &headers)?;
+    Ok(Json(
+        dashboard_backend(&state)?
+            .select_provider_profile(request)
+            .await?,
+    ))
 }
 
 async fn dashboard_startup(

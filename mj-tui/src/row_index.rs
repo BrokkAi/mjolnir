@@ -129,14 +129,6 @@ impl DashboardState {
         }
     }
 
-    pub(crate) fn managed_active_child_ids(&self, parent: &str) -> Vec<String> {
-        self.synchronized_row_index()
-            .active_children
-            .get(parent)
-            .map(|ids| ids.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
     pub(crate) fn managed_child_ids(&self, parent: &str) -> Vec<String> {
         self.synchronized_row_index()
             .children

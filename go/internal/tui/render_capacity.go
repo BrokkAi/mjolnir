@@ -154,7 +154,7 @@ func capacityCPUAndMemory(detail *client.RuntimeHostCapacity, stale bool) (chat.
 // anchored dropdown.
 func capacityDisksCell(dashboard *DashboardState, detail *client.RuntimeHostCapacity) chat.Line {
 	reading := &detail.Reading
-	if len(reading.Filesystems) == 0 {
+	if len(reading.Filesystems) == 0 && reading.StorageWarning == nil {
 		return chat.Line{}
 	}
 	mark := chat.ThemeGlyphs().Dropdown
@@ -182,6 +182,9 @@ func capacityDisksCell(dashboard *DashboardState, detail *client.RuntimeHostCapa
 		}
 	}
 	if worst == nil {
+		if reading.StorageWarning != nil {
+			return chat.StyledLine("Disks ! "+mark, chat.Style{}.Foreground(chat.ThemePalette().Warning))
+		}
 		return chat.RawLine("Disks " + mark)
 	}
 	return chat.StyledLine(
@@ -215,6 +218,9 @@ func capacityDisksMenuLines(detail *client.RuntimeHostCapacity) []chat.Line {
 				formatResourceBytes(filesystem.TotalBytes),
 				core.StorageConditionFlag(filesystem.Condition)),
 			storageConditionStyle(filesystem.Condition))
+	}
+	if reading.StorageWarning != nil {
+		lines = append(lines, chat.StyledLine(*reading.StorageWarning, chat.Style{}.Foreground(chat.ThemePalette().Warning)))
 	}
 	return lines
 }

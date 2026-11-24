@@ -1701,6 +1701,7 @@ fn new_session_profile_step_aligns_its_columns() {
     }
 }
 
+// Hard-won: #1681: provider groups read delegation preferences before resolving their profile.
 #[test]
 fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
     let mut config = config();
@@ -1716,7 +1717,20 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
         HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi")),
     );
     let claude_key = config.profiles["claude-1"].capabilities_key("claude-1");
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    config.subagents.straightforward = config.subagents.primary.clone();
+    let remembered = mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: true,
+        straightforward: None,
+        subtle: None,
+    };
+    let mut state = State::default();
+    state
+        .last_subagent_policies
+        .insert("codex-1".into(), remembered.clone());
+    state
+        .last_subagent_policies
+        .insert("claude-1".into(), mj_core::subagent::SubagentPolicy::None);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     dashboard.set_profile_capabilities(
         mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
             profiles: BTreeMap::from([(
@@ -1829,8 +1843,8 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
     )));
 
     // Clicking the arrow on a collapsed provider expands it; clicking the
-    // provider name selects it without collapsing, and Enter advances with that
-    // provider selected for load-balancing.
+    // provider name selects it without collapsing, and Enter asks the daemon
+    // to resolve it before the next page loads the chosen profile's settings.
     click_project_text(&mut dashboard, &mut terminal, "▸ OPENAI");
     assert!(has_expanded_codex(&draw_lines(
         &mut dashboard,
@@ -1845,21 +1859,139 @@ fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
         new_wizard(&dashboard).selected_provider(&dashboard),
         Some(mj_core::config::QuotaProvider::OpenAI)
     );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let DashboardAction::SelectProviderProfile {
+        request,
+        generation,
+    } = ready_key(&mut dashboard, key(KeyCode::Enter))
+    else {
+        panic!("provider selection must resolve before advancing")
+    };
+    assert_eq!(request.provider, mj_core::config::QuotaProvider::OpenAI);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert!(!new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    dashboard.apply_provider_profile_selection(generation, Ok("codex-1".into()));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
-    assert_eq!(
-        new_wizard(&dashboard).selected_provider(&dashboard),
-        Some(mj_core::config::QuotaProvider::OpenAI)
+    assert_eq!(new_wizard(&dashboard).selected_provider(&dashboard), None);
+    assert_eq!(new_wizard(&dashboard).subagents.selected(), remembered);
+    // Refreshing the profile list must not substitute an earlier profile at
+    // the old index after the daemon resolved the launch identity.
+    let mut refreshed = (*dashboard.config).clone();
+    refreshed.profiles.insert(
+        "codex-0".into(),
+        HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/profiles/codex-0")),
     );
+    dashboard.set_config(refreshed);
+    dashboard.take_subagent_discovery();
     let action = dashboard.create_session_action_without_closing(new_wizard(&dashboard));
     assert!(matches!(
         action,
         DashboardAction::CreateSession {
             ref profile_id,
             provider: Some(mj_core::config::QuotaProvider::OpenAI),
+            subagents: Some(ref policy),
             ..
-        } if profile_id.is_empty()
+        } if profile_id == "codex-1" && policy == &remembered
     ));
+}
+
+#[test]
+fn new_session_profile_step_ignores_replaced_provider_requests_and_retries_failures() {
+    use mj_core::config::QuotaProvider;
+    use mj_core::subagent::SubagentPolicy;
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard
+        .state
+        .last_subagent_policies
+        .insert("claude-1".into(), SubagentPolicy::None);
+    ready_open_new_wizard(&mut dashboard);
+    let request = |dashboard: &mut DashboardState, provider| {
+        let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+            panic!("new");
+        };
+        wizard.step = WizardStep::Profile;
+        wizard.focused_provider = Some(provider);
+        wizard.profile_selection_request = None;
+        let DashboardAction::SelectProviderProfile { generation, .. } =
+            dashboard.advance_new_wizard(wizard)
+        else {
+            panic!("select");
+        };
+        generation
+    };
+    let old = request(&mut dashboard, QuotaProvider::OpenAI);
+    let current = request(&mut dashboard, QuotaProvider::Anthropic);
+    dashboard.apply_provider_profile_selection(old, Ok("codex-1".into()));
+    assert_eq!(
+        new_wizard(&dashboard).profile_selection_request,
+        Some(current)
+    );
+    dashboard.apply_provider_profile_selection(current, Err("quota unavailable".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert!(dashboard.notice().unwrap().contains("quota unavailable"));
+
+    let current = request(&mut dashboard, QuotaProvider::Anthropic);
+    dashboard.apply_provider_profile_selection(current, Ok("claude-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(
+        new_wizard(&dashboard).subagents.create_selection(),
+        Some(SubagentPolicy::None)
+    );
+    // Target selection is another daemon decision. A replacement profile's
+    // saved policy must reach the review before Create can use it.
+    dashboard
+        .state
+        .last_subagent_policies
+        .insert("codex-1".into(), SubagentPolicy::Native);
+    let Mode::New(wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    let DashboardAction::SelectProviderProfile {
+        request: check,
+        generation,
+    } = dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("target check");
+    };
+    assert_eq!(check.profile_id.as_deref(), Some("claude-1"));
+    assert!(check.target_template_id.is_some());
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.set_step(WizardStep::Profile);
+    dashboard.apply_provider_profile_selection(generation, Ok("codex-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    wizard.set_step(WizardStep::Target);
+    let DashboardAction::SelectProviderProfile { generation, .. } =
+        dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("target check");
+    };
+    dashboard.apply_provider_profile_selection(generation, Ok("codex-1".into()));
+    assert_eq!(
+        new_wizard(&dashboard).subagents.create_selection(),
+        Some(SubagentPolicy::Native)
+    );
+    assert_ne!(new_wizard(&dashboard).step, WizardStep::Target);
+
+    let cancelled = request(&mut dashboard, QuotaProvider::OpenAI);
+    dashboard.cancel_modal();
+    ready_open_new_wizard(&mut dashboard);
+    dashboard.apply_provider_profile_selection(cancelled, Ok("codex-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    assert_eq!(new_wizard(&dashboard).profile_selection_request, None);
+
+    let old = request(&mut dashboard, QuotaProvider::OpenAI);
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.set_profile(0);
+    dashboard.apply_provider_profile_selection(old, Ok("codex-1".into()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
 }
 
 #[test]
@@ -3460,6 +3592,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         local: true,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(
