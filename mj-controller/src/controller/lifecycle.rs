@@ -824,12 +824,33 @@ impl Controller {
             let result = mj_core::runtime::off_async_worker(|| {
                 targets::ensure_recovery_target_running(executor, Some(&plan))
             });
+            // User cancellation has already stopped the original executor.
+            // Keep handoff cancellation through recovery and the marker write.
+            let cancellation_cleanup = || {
+                let gate = crate::upgrade::gate();
+                let cancelled = tokio_util::sync::CancellationToken::new();
+                if gate.is_draining() {
+                    cancelled.cancel();
+                }
+                let watch = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn({
+                    let cancelled = cancelled.clone();
+                    async move {
+                        gate.wait_until_draining().await;
+                        cancelled.cancel();
+                    }
+                }));
+                let executor = targets::CancellableProcessExecutor::new(Default::default())
+                    .with_cancellation(cancelled);
+                (executor, watch)
+            };
+            let mut cleanup = None;
             // Cancellation can interrupt the probe or start before the
             // accepted operation is reachable. Confirm ownership and state
             // again before touching its records.
             let recovered_after_cancel = if result.is_err() && user_cancelled() {
+                let (executor, _) = cleanup.get_or_insert_with(cancellation_cleanup);
                 match mj_core::runtime::off_async_worker(|| {
-                    targets::ensure_recovery_target_running(&ProcessExecutor, Some(&plan))
+                    targets::ensure_recovery_target_running(executor, Some(&plan))
                 }) {
                     Ok(outcome) => Some(outcome),
                     Err(error) => {
@@ -855,9 +876,14 @@ impl Controller {
             ) && user_cancelled();
             readmission?;
             if record_cancellation {
-                let attempt = OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?;
+                let (executor, _) = cleanup.get_or_insert_with(cancellation_cleanup);
+                let attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
                 if attempt.accepted() {
-                    Self::record_suspend_cancellation(&attempt)?;
+                    Self::record_suspend_cancellation(&attempt, executor)?;
+                    ensure!(
+                        !executor.cancellation_requested() && !crate::upgrade::is_draining(),
+                        "daemon handoff interrupted suspend cancellation cleanup"
+                    );
                     return Ok(observed);
                 }
             }
@@ -876,8 +902,11 @@ impl Controller {
         Ok(())
     }
 
-    fn record_suspend_cancellation(attempt: &OriginDeltaSuspend) -> Result<String> {
-        if let Some(reason) = attempt.restart_reason(&ProcessExecutor)? {
+    fn record_suspend_cancellation(
+        attempt: &OriginDeltaSuspend,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<String> {
+        if let Some(reason) = attempt.restart_reason(executor)? {
             return Ok(reason);
         }
         let reason = if attempt.already_quiescent() {
@@ -885,7 +914,7 @@ impl Controller {
         } else {
             "suspend was cancelled"
         };
-        attempt.record_restart(&anyhow::anyhow!(reason), &ProcessExecutor)?;
+        attempt.record_restart(&anyhow::anyhow!(reason), executor)?;
         Ok(reason.to_owned())
     }
 
@@ -1207,7 +1236,7 @@ impl Controller {
             if !user_cancelled() {
                 attempt.restart_reason(executor)
             } else if owning_suspend {
-                Self::record_suspend_cancellation(attempt).map(Some)
+                Self::record_suspend_cancellation(attempt, &ProcessExecutor).map(Some)
             } else {
                 attempt.restart_reason(&ProcessExecutor)
             }

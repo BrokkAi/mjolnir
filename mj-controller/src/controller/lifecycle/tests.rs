@@ -4418,7 +4418,7 @@ async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() 
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
     use mj_core::worker_suspend::{self as wire, SuspendReceipt};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -4437,13 +4437,24 @@ async fn cancelled_container_suspend_probe_records_rollback_for_recovery() {
             r#"set -eu
 root=$MJ_CANCELLED_CONTAINER_SUSPEND_FIXTURE
 cd "$root"
+stall_at() {
+    if [ -f stall ] && [ "$(cat stall)" = "$1" ]; then
+        touch stalled
+        # Bound the failing case if the executor ignores handoff.
+        sleep 15
+        touch finished_stall
+    fi
+}
 case "$1 $2" in
-    "container exists") exit 0 ;;
+    "container exists") stall_at probe ;;
     "container inspect") cat inspect.json ;;
     "exec -i")
         shift 3
         case "$1 $2" in
             "sh -c")
+                case "$3" in
+                    *suspend-restart.json*"cat >"*) stall_at restart ;;
+                esac
                 script=$(printf '%s' "$3" | sed 's|/var/lib/hel/workers/|workers/|g')
                 exec sh -c "$script"
                 ;;
@@ -4589,6 +4600,43 @@ esac
         Some(&LifecycleFailureReason::SuspendPending)
     );
     assert!(!worker_root.join(wire::RESTART).exists());
+
+    // The operation already yielded control admission for the retry. Even
+    // after readmission succeeds, handoff can interrupt the marker I/O.
+    for phase in ["probe", "restart"] {
+        std::fs::write(root.join("stall"), phase).unwrap();
+        let stalled = root.join("stalled");
+        let drain = mj_core::runtime::spawn({
+            let stalled = stalled.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !stalled.is_file() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("container command reached the stall");
+                crate::upgrade::gate().begin_draining();
+            }
+        });
+        let outcome = interrupt_probe(false);
+        drain.await.unwrap();
+        let error = outcome.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<LifecycleFailureReason>(),
+            Some(&LifecycleFailureReason::SuspendPending),
+            "{phase}: {error:#}"
+        );
+        assert!(!root.join("finished_stall").exists(), "{phase}");
+        assert!(!worker_root.join(wire::RESTART).exists(), "{phase}");
+        assert_eq!(
+            wire::read::<String>(&worker_root, wire::ACCEPTED).unwrap(),
+            Some(accepted.clone())
+        );
+        std::fs::remove_file(stalled).unwrap();
+        std::fs::remove_file(root.join("stall")).unwrap();
+        crate::upgrade::gate().expire_drain_for_test();
+    }
 
     interrupt_probe(false).unwrap();
     let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
