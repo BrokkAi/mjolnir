@@ -1524,6 +1524,7 @@ def test_non_read_only_inline_python_still_blocks_subsequent_structured_edit(tmp
     (("encodings/__init__.py",), (), "print(b'a'.decode('ascii'))"),
     (("_internal.py",), (), "import pathlib; print(pathlib.Path('brief.md').exists())"),
     (("src/lib.rs",), (shell("cat > selectors.py <<'EOF'\nprint(1)\nEOF"),), "import subprocess; print(subprocess.PIPE)"),
+    (("src/lib.rs",), (shell(f"git show --output=selectors.py {PIN}"),), "import subprocess; print(subprocess.PIPE)"),
 ])
 def test_shadowed_python_import_blocks_subsequent_structured_edit(tmp_path, tracked_paths, setup_calls, snippet):
     cwd = clean_writer_inventory(tmp_path, tracked_paths=tracked_paths)

@@ -2397,8 +2397,28 @@ def record_script_write(scripts, written, words, redirections, source, cwd, stag
         written.add(posixpath.basename(words[-1]))
     if program == "touch":
         written.update(posixpath.basename(path) for path in file_operands(words[1:]))
-    if program in {"cp", "mv", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
+    if program in {"cp", "mv", "ln"}:
         scripts.clear()  # A destination can name a directory or be a symlink.
+    elif program == "git":
+        git_args, git_cwd = list(words[1:]), cwd
+        while git_args[:1] == ["-C"] and len(git_args) > 1:
+            git_cwd = one_or_many(resolve_paths(git_args[1], git_cwd))
+            git_args = git_args[2:]
+        if git_args[:1] in (["checkout"], ["switch"]):
+            scripts.clear()
+        elif git_args:
+            split = git_args.index("--") if "--" in git_args else len(git_args)
+            tokens = iter(git_args[1:split])
+            for token in tokens:
+                name, equals, value = token.partition("=")
+                if name == "--output":
+                    out_path = value if equals else next(tokens, None)
+                    if out_path:
+                        written.add(posixpath.basename(out_path))
+                        forget_script(scripts, out_path, git_cwd)
+                    else:
+                        scripts.clear()
+                        break
     elif program == "rm":
         dict.clear(scripts)  # Directory operands may remove more than the named path.
         for path in file_operands(words[1:]):
