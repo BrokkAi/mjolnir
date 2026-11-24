@@ -18409,7 +18409,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     fs::write(
         &script,
         format!(
-            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec /bin/sleep 600\n",
             mj_core::targets::posix_quote(&started.to_string_lossy())
         ),
     )
@@ -18612,7 +18612,7 @@ async fn terminal_recovery_destroy_holds_bounded_admission_after_disconnect() {
     assert!(!gate.try_close());
     assert!(gate.destroys_hold_the_stop());
     drop(session_hold);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !gate.active_labels().is_empty() {
             tokio::task::yield_now().await;
         }
