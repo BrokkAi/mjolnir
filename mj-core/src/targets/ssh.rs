@@ -41,6 +41,19 @@ pub struct SshSessionRequest {
 /// would leave an `ssh` process behind for the whole `ControlPersist` window
 /// even though the user asked only for a diagnosis.
 pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
+    ssh_probe_command(ssh, vec!["true".to_owned()], "verify SSH connectivity")
+}
+
+/// A read-only `remote_args` command that runs as a probe session on the
+/// shared connection, with the overrides of [`ssh_connectivity_probe`]: it
+/// never prompts and never accepts an unknown host key. A caller that has other
+/// read-only questions for the host can ask them in the same round trip as
+/// the reachability check.
+pub fn ssh_probe_command(
+    ssh: &SshTarget,
+    remote_args: Vec<String>,
+    purpose: &'static str,
+) -> CommandSpec {
     let mut args = vec![
         "-o".to_owned(),
         "BatchMode=yes".to_owned(),
@@ -49,12 +62,25 @@ pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
     ];
     args.extend(ssh.ssh_args.iter().cloned());
     args.push(ssh.destination.clone());
-    args.push(join_remote_command(&["true".to_owned()]));
+    args.push(join_remote_command(&remote_args));
     // The socket is named after the target as configured, not after these
     // probe-only overrides, so the probe finds the daemon's master.
     CommandSpec::new("ssh", args)
         .ssh_probe_session(ssh)
-        .purpose("verify SSH connectivity")
+        .purpose(purpose)
+}
+
+/// Fail with the one message every SSH reachability check reports when the
+/// probe command did not exit successfully.
+pub fn ensure_ssh_connectivity(ssh: &SshTarget, output: &CommandOutput) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        output.status == 0,
+        "SSH connectivity test failed for {} with status {}: {}",
+        ssh.destination,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 pub fn ssh_command(

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 pub use crate::targets::backend_locator;
 pub(super) use crate::targets::recorded_backend_locator;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 
 use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
@@ -511,6 +511,24 @@ pub(super) fn preflight_target(
     }
 }
 
+/// [`preflight_target`] for a launch that is about to create `target`.
+///
+/// An SSH Podman host that will be asked which limits its engine can enforce
+/// answers that in the same SSH command as the reachability check, so the
+/// launch pays one round trip for both.
+pub(super) fn preflight_launch_target(
+    template: &TargetTemplate,
+    target: &targets::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<Option<targets::CgroupCapabilities>> {
+    if let TargetTemplate::SshPodman { ssh, .. } = template
+        && targets::CgroupLimit::any_requested_by(target)
+    {
+        return targets::verify_ssh_podman_launch(&SshTarget::from(ssh), executor).map(Some);
+    }
+    preflight_target(template, executor, TargetCheck::Launch)
+}
+
 pub use mj_targets::command_checks::is_missing_command;
 
 /// Check that a target's host and runtime can run sessions.
@@ -624,14 +642,7 @@ pub(super) fn verify_target(
 
 fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> Result<()> {
     let output = executor.execute(&targets::ssh_connectivity_probe(ssh))?;
-    ensure!(
-        output.status == 0,
-        "SSH connectivity test failed for {} with status {}: {}",
-        ssh.destination,
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(())
+    targets::ensure_ssh_connectivity(ssh, &output)
 }
 
 #[cfg(test)]

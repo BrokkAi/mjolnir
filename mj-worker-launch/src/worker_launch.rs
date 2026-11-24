@@ -160,6 +160,7 @@ pub fn prepare_worker_files_for(
         executor,
         preparation,
         history,
+        None,
     )?;
     if let Some(launch) = launch {
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
@@ -180,6 +181,7 @@ pub fn stage_worker_files_for(
     executor: &impl CommandExecutor,
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
+    created_container: Option<&targets::CreationObservation>,
 ) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
     let _timing = crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
     let owner = crate::worker_lifecycle::require(session_id)?;
@@ -316,7 +318,12 @@ pub fn stage_worker_files_for(
     // Edits to attachment settings apply on the next container creation;
     // describe this container's creation snapshot while it is retained.
     let attachments = mj_core::state::applied_container_settings(session).additional_mounts;
-    let storage = targets::inspect_container_storage(backend, attachments, executor)?;
+    let storage = targets::inspect_container_storage_observed(
+        backend,
+        attachments,
+        created_container,
+        executor,
+    )?;
     append_container_storage_guidance(
         profile.kind,
         &profile_stage,

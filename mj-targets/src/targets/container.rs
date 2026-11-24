@@ -1,4 +1,5 @@
 use super::*;
+use crate::image_pull_gate::{IMAGE_MISSING_MARKER, IMAGE_MISSING_STATUS, LaunchImageGate};
 use mj_core::targets::SshTrafficClass;
 
 pub fn container_temporary_volume_name(container: &str) -> String {
@@ -11,9 +12,40 @@ pub struct ContainerStorage {
     pub attachments: Vec<AdditionalMount>,
 }
 
+/// What the creation command of an SSH Podman container reported about the
+/// container it made: the mounts the engine gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreationObservation {
+    mounts: Vec<u8>,
+}
+
+/// The observation in the output of a creation command, or `None` when the
+/// command did not report one. A creation script reports it only after the
+/// container is running and its HOME exists (see [`ssh_podman_started_hook`]),
+/// so its presence also says the HOME step is done.
+pub fn creation_observation(output: &CommandOutput) -> Option<CreationObservation> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix(CONTAINER_MOUNTS_PREFIX))
+        .map(|mounts| CreationObservation {
+            mounts: mounts.as_bytes().to_vec(),
+        })
+}
+
 pub fn inspect_container_storage(
     locator: &TargetLocator,
     attachments: &[AdditionalMount],
+    executor: &impl CommandExecutor,
+) -> Result<ContainerStorage> {
+    inspect_container_storage_observed(locator, attachments, None, executor)
+}
+
+/// [`inspect_container_storage`] that reads the mounts from `observed`, which
+/// the creation of this same container reported, instead of asking the engine.
+pub fn inspect_container_storage_observed(
+    locator: &TargetLocator,
+    attachments: &[AdditionalMount],
+    observed: Option<&CreationObservation>,
     executor: &impl CommandExecutor,
 ) -> Result<ContainerStorage> {
     // The engine's full `container inspect` JSON carries the mounts too, so a
@@ -87,22 +119,31 @@ pub fn inspect_container_storage(
             });
         }
     };
-    let command = CommandSpec::new(
-        engine,
-        [
-            "container",
-            "inspect",
-            "--format",
-            "{{json .Mounts}}",
-            container,
-        ],
-    )
-    .purpose("inspect session container storage");
-    let command = match ssh {
-        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
-        None => command,
+    let output = match observed {
+        Some(observed) => CommandOutput {
+            status: 0,
+            stdout: observed.mounts.clone(),
+            stderr: Vec::new(),
+        },
+        None => {
+            let command = CommandSpec::new(
+                engine,
+                [
+                    "container",
+                    "inspect",
+                    "--format",
+                    "{{json .Mounts}}",
+                    container,
+                ],
+            )
+            .purpose("inspect session container storage");
+            let command = match ssh {
+                Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
+                None => command,
+            };
+            executor.execute(&command)?
+        }
     };
-    let output = executor.execute(&command)?;
     ensure!(
         output.status == 0,
         "inspect session container storage failed: {}",
@@ -156,15 +197,14 @@ pub fn inspect_container_storage(
 pub(super) const TEMPORARY_VOLUME_FUNCTIONS: &str = r#"
 prepare_temporary_volume() {
     [ -n "$temporary_volume" ] || return 0
-    if ! "$engine" volume inspect "$temporary_volume" >/dev/null 2>&1; then
-        "$engine" info >/dev/null
+    if identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume" 2>/dev/null); then
+        [ "$identity" = "true|$session" ] || {
+            echo "refusing foreign $engine temporary volume $temporary_volume" >&2
+            return 1
+        }
+    else
         "$engine" volume create --driver local --label "dev.mj.managed=true" --label "dev.mj.session=$session" "$temporary_volume" >/dev/null
     fi
-    identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume")
-    [ "$identity" = "true|$session" ] || {
-        echo "refusing foreign $engine temporary volume $temporary_volume" >&2
-        return 1
-    }
 }
 remove_temporary_volume() {
     [ -n "$temporary_volume" ] || return 0
@@ -189,6 +229,7 @@ remove_failed_container() {
         "$engine" info >/dev/null
     fi
 }
+after_container_started() { :; }
 start_container() {
     "$@"
     if [ -n "$temporary_volume" ]; then
@@ -198,13 +239,44 @@ start_container() {
             "$engine" exec "$container" sh -c 'set -eu; chown 0:0 /tmp; chmod 1777 /tmp'
         fi
     fi
+    after_container_started
 }
 "#;
 
+/// What the creation script of an SSH Podman container prints on stdout after
+/// the container id: the container's mounts, as the one line
+/// `MJ_CONTAINER_MOUNTS=<json>`. The script reads them in the same SSH command
+/// that creates the container, because the launch needs them before it starts
+/// the worker.
+pub const CONTAINER_MOUNTS_PREFIX: &str = "MJ_CONTAINER_MOUNTS=";
+
+/// Steps an SSH Podman creation runs once the container is up, in the same
+/// script and under the same rollback: the user's HOME is made to exist
+/// ([`CONTAINER_HOME_INIT_STEPS`]), then the container's mounts are reported.
+/// A failure of either removes the container and its new volumes, as a
+/// failure of the start itself does.
+fn ssh_podman_started_hook() -> String {
+    format!(
+        r#"mj_home_engine() {{ "$engine" "$@"; }}
+after_container_started() {{
+{CONTAINER_HOME_INIT_STEPS}mounts=$("$engine" container inspect --format '{{{{json .Mounts}}}}' "$container")
+printf '{CONTAINER_MOUNTS_PREFIX}%s\n' "$mounts"
+}}
+"#
+    )
+}
+
 fn container_launch_script(engine: &str, script: &str) -> String {
+    launch_script(engine, script, "")
+}
+
+/// [`container_launch_script`] with `before_script` between the shared
+/// functions and `script`: shell text that redefines those functions or checks
+/// the launch's preconditions before anything is created.
+fn launch_script(engine: &str, script: &str, before_script: &str) -> String {
     let exec_user = if engine == "docker" { "0" } else { "" };
     format!(
-        "set -eu\nengine={engine}\nexec_user={exec_user}\n{TEMPORARY_VOLUME_FUNCTIONS}\n{script}"
+        "set -eu\nengine={engine}\nexec_user={exec_user}\n{TEMPORARY_VOLUME_FUNCTIONS}\n{before_script}\n{script}"
     )
 }
 
@@ -303,13 +375,7 @@ elif identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"
         exit 1
     }
 else
-    podman info >/dev/null
     podman volume create --label "dev.mj.managed=true" --label "dev.mj.session=$session" "$volume" >/dev/null
-    identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume")
-    [ "$identity" = "true|$session" ] || {
-        echo "Podman volume $volume does not carry the expected Mjolnir identity" >&2
-        exit 1
-    }
 fi
 start_container "$@"
 "#;
@@ -362,8 +428,55 @@ pub(super) fn podman_container_run(
     ssh: Option<&SshTarget>,
     workspace_root: &str,
 ) -> Result<CommandSpec> {
+    podman_container_run_gated(
+        template,
+        name,
+        session_id,
+        additional_mounts,
+        ssh,
+        workspace_root,
+        LaunchImageGate::Exclusive,
+    )
+}
+
+/// The shell text that makes a creation report an absent image instead of
+/// downloading it: status [`IMAGE_MISSING_STATUS`] and
+/// [`IMAGE_MISSING_MARKER`] on stderr, before anything is created. Only an
+/// exit status of 1 from `image exists` means absent; any other failure is the
+/// engine's own and is reported as such.
+fn image_presence_check(image: &str) -> String {
+    format!(
+        r#"mj_image={}
+if "$engine" image exists "$mj_image"; then :; else
+    status=$?
+    if [ "$status" -eq 1 ]; then
+        echo '{IMAGE_MISSING_MARKER}' >&2
+        exit {IMAGE_MISSING_STATUS}
+    fi
+    exit "$status"
+fi
+"#,
+        mj_core::targets::posix_quote(image)
+    )
+}
+
+/// [`podman_container_run`] for a creation that holds the image lock as `gate`
+/// says. [`LaunchImageGate::SharedPullOnMiss`] never lets `podman run`
+/// download the image: the script reports an absent image, and the launch
+/// downloads it under the exclusive lock and runs the script again. On an
+/// SSH host the script also finishes what a launch needs from the new container
+/// (see [`ssh_podman_started_hook`]).
+pub(super) fn podman_container_run_gated(
+    template: &ContainerTemplate,
+    name: &str,
+    session_id: &str,
+    additional_mounts: &[AdditionalMount],
+    ssh: Option<&SshTarget>,
+    workspace_root: &str,
+    gate: LaunchImageGate,
+) -> Result<CommandSpec> {
     let workspace = podman_workspace_locator_named(template, name)?;
-    let run_args = container_run_args(
+    let mut run_args = container_run_args(
         "podman",
         template,
         name,
@@ -373,6 +486,24 @@ pub(super) fn podman_container_run(
         workspace_root,
         true,
     )?;
+    let mut before_script = String::new();
+    if gate == LaunchImageGate::SharedPullOnMiss {
+        // The default policy is the one that downloads a missing image, and
+        // it adds no flag of its own.
+        ensure!(
+            !run_args.iter().any(|arg| arg.starts_with("--pull")),
+            "a creation that may not download its image must not choose a pull policy"
+        );
+        let detach = run_args
+            .iter()
+            .position(|arg| arg == "--detach")
+            .context("the Podman run arguments have no --detach")?;
+        run_args.insert(detach, "--pull=never".to_owned());
+        before_script.push_str(&image_presence_check(&template.image));
+    }
+    if ssh.is_some() {
+        before_script.push_str(&ssh_podman_started_hook());
+    }
     let mut wrapped = match &workspace {
         PodmanWorkspaceLocator::ContainerLayer | PodmanWorkspaceLocator::Volume { .. } => {
             let volume = match &workspace {
@@ -382,7 +513,7 @@ pub(super) fn podman_container_run(
             let mut command = vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
-                container_launch_script("podman", PODMAN_VOLUME_RUN_SCRIPT),
+                launch_script("podman", PODMAN_VOLUME_RUN_SCRIPT, &before_script),
                 "mj-podman-run".to_owned(),
                 session_id.to_owned(),
                 name.to_owned(),
@@ -399,7 +530,11 @@ pub(super) fn podman_container_run(
             let mut command = vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
-                container_launch_script("podman", &podman_host_helper_run_script(helper)),
+                launch_script(
+                    "podman",
+                    &podman_host_helper_run_script(helper),
+                    &before_script,
+                ),
                 "mj-podman-run".to_owned(),
                 session_id.to_owned(),
                 name.to_owned(),

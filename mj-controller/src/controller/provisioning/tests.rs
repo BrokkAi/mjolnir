@@ -14,6 +14,7 @@ use crate::targets::{self, AdditionalMount, ContainerTemplate, ProjectBundleSpec
 use crate::controller::SessionLaunchOptions;
 
 use super::*;
+use crate::controller::backend::{TargetCheck, preflight_target};
 
 /// Answers the filesystem probe, and records every notice provisioning
 /// reported while it ran.
@@ -2651,4 +2652,125 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         root.join("nested/file.txt").is_file(),
         "source remains intact"
     );
+}
+
+/// Answers every command with success and a home directory, and holds the
+/// cache cleanup's container listing until the test lets it go.
+struct GitCacheGcExecutor {
+    purposes: std::sync::Arc<Mutex<Vec<String>>>,
+    listing_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    release_listing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CommandExecutor for GitCacheGcExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        use std::sync::atomic::Ordering;
+        self.purposes.lock().unwrap().push(command.purpose.clone());
+        if command.purpose == "find live container Git cache snapshots" {
+            self.listing_started.store(true, Ordering::Release);
+            while !self.release_listing.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        Ok(CommandOutput {
+            status: 0,
+            stdout: b"/home/test".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// The deferred cleanup is daemon-owned work: a handoff waits for it while it
+/// runs, and once a handoff is draining it is not started at all, because the
+/// next launch owes the same cleanup.
+#[tokio::test]
+async fn the_git_cache_cleanup_holds_handoff_admission_and_yields_to_a_draining_handoff() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let purposes = Arc::new(Mutex::new(Vec::new()));
+    let listing_started = Arc::new(AtomicBool::new(false));
+    let release_listing = Arc::new(AtomicBool::new(false));
+    let executor = || GitCacheGcExecutor {
+        purposes: purposes.clone(),
+        listing_started: listing_started.clone(),
+        release_listing: release_listing.clone(),
+    };
+    let target = targets::TargetTemplate::LocalPodman(ContainerTemplate {
+        build_cache: None,
+        image: "ubuntu:24.04".to_owned(),
+        pull_policy: Default::default(),
+        extra_run_args: Vec::new(),
+        workspace_storage: Default::default(),
+    });
+    let mut bundle = ProjectBundleSpec {
+        primary: "app".to_owned(),
+        repositories: vec![targets::RepositorySpec {
+            url: Some("https://github.com/example/app.git".to_owned()),
+            push_urls: Vec::new(),
+            destination: "app".to_owned(),
+            git_ref: None,
+            reference: None,
+            history_cutoff: None,
+        }],
+    };
+    let mut prepared = git_cache::prepare(
+        &target,
+        "session-12345678",
+        &mut bundle,
+        &mut Vec::new(),
+        None,
+        None,
+        &executor(),
+    )
+    .unwrap()
+    .expect("the fake host has Git");
+    let gc = prepared.pending_gc.take().unwrap();
+    purposes.lock().unwrap().clear();
+
+    let gate = Arc::new(mj_core::upgrade::Gate::default());
+    let task = defer_git_cache_gc(&gate, gc.clone(), executor()).expect("an open gate admits it");
+    while !listing_started.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(gate.active_labels(), ["container Git cache GC"]);
+    assert!(!gate.try_close(), "a handoff waits for the running cleanup");
+
+    gate.begin_draining();
+    assert!(
+        defer_git_cache_gc(&gate, gc, executor()).is_none(),
+        "a draining handoff must not start more cleanup"
+    );
+    release_listing.store(true, Ordering::Release);
+    task.await.unwrap();
+    assert!(gate.active_labels().is_empty());
+    assert_eq!(
+        *purposes.lock().unwrap(),
+        [
+            "find live container Git cache snapshots",
+            "prune the container host Git cache"
+        ]
+    );
+    assert!(gate.try_close());
 }
