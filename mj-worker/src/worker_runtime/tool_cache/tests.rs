@@ -511,3 +511,17 @@ fn fixture(root: &Path, modules: &Path) -> Result<()> {
     std::os::unix::fs::symlink(modules, root.join("node_modules"))?;
     Ok(())
 }
+
+// Hard-won: #1589: the stable mbx launcher directory leaked into Bazel action keys.
+#[test]
+fn bazel_path_removes_mbx_launchers() {
+    let output = std::process::Command::new("/bin/sh")
+        .env_clear()
+        .env("PATH", "/stable/bin:/usr/bin")
+        .env("MJ_MBX_BIN", "/stable/bin")
+        .args(["-c", &(bazel_path() + "printf '%s' \"$PATH\"")])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"/usr/bin");
+}

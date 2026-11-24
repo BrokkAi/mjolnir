@@ -30,17 +30,8 @@ if [ -n "${MJ_GITHUB_CLI_BIN:-}" ]; then
         GIT_ASKPASS=/bin/false
         export GH_CONFIG_DIR GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT GIT_ASKPASS
     fi
-    case ":${PATH:-}:" in
-        *:"${MJ_GITHUB_CLI_BIN}":*) ;;
-        *) PATH="${MJ_GITHUB_CLI_BIN}${PATH:+:${PATH}}"; export PATH ;;
-    esac
 fi
-if [ -n "${MJ_BUILD_TOOL_BIN:-}" ]; then
-    case ":${PATH:-}:" in
-        *:"${MJ_BUILD_TOOL_BIN}":*) ;;
-        *) PATH="${MJ_BUILD_TOOL_BIN}${PATH:+:${PATH}}"; export PATH ;;
-    esac
-fi
+
 `
 
 // shellEnvironmentConfigure installs the session's BASH_ENV hook at `path`
@@ -53,7 +44,7 @@ func shellEnvironmentConfigure(path string, environment map[string]string) error
 	if metadata, err := os.Lstat(path); err == nil && metadata.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("session shell environment %s is a symbolic link", path)
 	}
-	if err := core.AtomicWriteExisting(path, []byte(shellEnvironmentScript)); err != nil {
+	if err := core.AtomicWriteExisting(path, []byte(shellEnvironmentScript+launcherPathShell())); err != nil {
 		return err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {

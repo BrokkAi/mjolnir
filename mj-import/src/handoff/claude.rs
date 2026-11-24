@@ -10,11 +10,11 @@ use mj_checkpoint::archive::{
     ArchiveManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody, CheckpointPayloadReader,
     PayloadRole,
 };
-use mj_transcript::handoff::reusable_handoff;
 use serde::Deserialize;
 use serde_json::{Value, value::RawValue};
 use tokio_util::sync::CancellationToken;
 
+use super::{LineScanner, check_cancel, collect_retained_positions, lineage_start};
 use crate::compaction::PriorCompaction;
 
 struct NativeCompaction {
@@ -43,9 +43,10 @@ pub(super) fn prior_compaction_from_archive(
     let Some(descriptor) = descriptor else {
         return Ok(None);
     };
-    let mut scanner = ClaudeCompactionScanner::new(cancel);
-    CheckpointPayloadReader::open(archive_path)?.copy_payload(descriptor, &mut scanner)?;
-    prior_compaction_from_transcript(scanner.finish()?, snapshot)
+    let transcript = scan_transcript(cancel, |writer| {
+        CheckpointPayloadReader::open(archive_path)?.copy_payload(descriptor, writer)
+    })?;
+    prior_compaction_from_transcript(transcript, snapshot, cancel)
 }
 
 pub(super) fn prior_compaction_from_home(
@@ -95,40 +96,46 @@ pub(super) fn prior_compaction_from_reader(
     cancel: &CancellationToken,
 ) -> Result<Option<PriorCompaction>> {
     check_cancel(cancel)?;
-    let mut scanner = ClaudeCompactionScanner::new(cancel);
-    io::copy(&mut reader, &mut scanner)?;
-    prior_compaction_from_transcript(scanner.finish()?, snapshot)
+    let transcript = scan_transcript(
+        cancel,
+        |writer| Ok(io::copy(&mut reader, writer).map(drop)?),
+    )?;
+    prior_compaction_from_transcript(transcript, snapshot, cancel)
+}
+
+fn scan_transcript(
+    cancel: &CancellationToken,
+    feed: impl FnOnce(&mut dyn Write) -> Result<()>,
+) -> Result<ClaudeTranscript> {
+    let mut transcript = ClaudeTranscript::default();
+    let mut scanner = LineScanner::new(cancel, |line, line_number| {
+        transcript
+            .parse_record(line)
+            .with_context(|| format!("parse Claude native transcript line {line_number}"))
+            .map_err(io::Error::other)
+    });
+    feed(&mut scanner)?;
+    scanner.finish()?;
+    Ok(transcript)
 }
 
 fn prior_compaction_from_transcript(
-    scanner: ClaudeCompactionScanner<'_>,
+    transcript: ClaudeTranscript,
     snapshot: &CanonicalSessionSnapshot,
+    cancel: &CancellationToken,
 ) -> Result<Option<PriorCompaction>> {
-    let context_start = snapshot.current_context_start();
-    let lineage_start = reusable_handoff(snapshot).map_or(context_start, |state| {
-        context_start.max(state.through_position)
-    });
+    let lineage_start = lineage_start(snapshot);
     let mut prior = None;
-    for native in scanner.compactions.into_iter().rev() {
-        check_cancel(scanner.cancel)?;
-        let (preceding, following) = scanner.events.split_at(native.before_event);
+    for native in transcript.compactions.into_iter().rev() {
+        check_cancel(cancel)?;
+        let (preceding, following) = transcript.events.split_at(native.before_event);
         prior = map_compaction(native, preceding, following, snapshot, lineage_start);
         if prior.is_some() {
             break;
         }
     }
-    check_cancel(scanner.cancel)?;
+    check_cancel(cancel)?;
     Ok(prior)
-}
-
-fn check_cancel(cancel: &CancellationToken) -> io::Result<()> {
-    if cancel.is_cancelled() {
-        // Interrupted errors are retryable by I/O helpers.
-        return Err(io::Error::other(
-            "Claude native compaction preparation cancelled",
-        ));
-    }
-    Ok(())
 }
 
 fn map_compaction(
@@ -183,32 +190,8 @@ fn map_compaction(
     if cutoff <= lineage_start {
         return None;
     }
-    let mut retained_positions = Vec::new();
-    let mut latest_plan = None;
-    for item in snapshot
-        .transcript
-        .iter()
-        .filter(|item| lineage_start < item.position && item.position < tool_position)
-    {
-        match &item.body {
-            CanonicalTranscriptBody::Tool { call, .. } if !covered_tool(call) => {
-                retained_positions.push(item.position);
-            }
-            CanonicalTranscriptBody::Agent { .. }
-                if item
-                    .latest_content_event_ordinal
-                    .is_none_or(|ordinal| ordinal >= tool_position) =>
-            {
-                retained_positions.push(item.position);
-            }
-            CanonicalTranscriptBody::Plan { .. } => {
-                latest_plan = latest_plan.max(Some(item.position));
-            }
-            _ => {}
-        }
-    }
-    retained_positions.extend(latest_plan);
-    retained_positions.sort_unstable();
+    let retained_positions =
+        collect_retained_positions(snapshot, lineage_start, tool_position, covered_tool);
     Some(PriorCompaction {
         through_position: cutoff,
         summary: native.summary,
@@ -267,51 +250,16 @@ fn summary_text(content: &RawValue) -> serde_json::Result<String> {
     }
 }
 
-struct ClaudeCompactionScanner<'a> {
-    cancel: &'a CancellationToken,
-    line_buf: Vec<u8>,
-    line_number: usize,
+#[derive(Default)]
+struct ClaudeTranscript {
     pending_boundary: bool,
     events: Vec<ToolEvent>,
     compactions: Vec<NativeCompaction>,
 }
 
-impl<'a> ClaudeCompactionScanner<'a> {
-    fn new(cancel: &'a CancellationToken) -> Self {
-        Self {
-            cancel,
-            line_buf: Vec::new(),
-            line_number: 0,
-            pending_boundary: false,
-            events: Vec::new(),
-            compactions: Vec::new(),
-        }
-    }
-
-    fn finish(mut self) -> io::Result<Self> {
-        check_cancel(self.cancel)?;
-        if !self.line_buf.is_empty() {
-            self.parse_line()?;
-        }
-        Ok(self)
-    }
-
-    fn parse_line(&mut self) -> io::Result<()> {
-        check_cancel(self.cancel)?;
-        self.line_number += 1;
-        if !self.line_buf.iter().all(u8::is_ascii_whitespace) {
-            self.parse_record()
-                .with_context(|| {
-                    format!("parse Claude native transcript line {}", self.line_number)
-                })
-                .map_err(io::Error::other)?;
-        }
-        self.line_buf.clear();
-        Ok(())
-    }
-
-    fn parse_record(&mut self) -> serde_json::Result<()> {
-        let record: RawRecord<'_> = serde_json::from_slice(&self.line_buf)?;
+impl ClaudeTranscript {
+    fn parse_record(&mut self, line: &[u8]) -> serde_json::Result<()> {
+        let record: RawRecord<'_> = serde_json::from_slice(line)?;
         if record.is_meta == Some(true) || record.is_sidechain == Some(true) {
             return Ok(());
         }
@@ -364,25 +312,6 @@ impl<'a> ClaudeCompactionScanner<'a> {
                 }
             }
         }
-        Ok(())
-    }
-}
-
-impl Write for ClaudeCompactionScanner<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        check_cancel(self.cancel)?;
-        for line in bytes.split_inclusive(|&byte| byte == b'\n') {
-            if let Some(line) = line.strip_suffix(b"\n") {
-                self.line_buf.extend_from_slice(line);
-                self.parse_line()?;
-            } else {
-                self.line_buf.extend_from_slice(line);
-            }
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -504,15 +433,14 @@ mod tests {
         preceding: impl IntoIterator<Item = ToolEvent>,
         following: impl IntoIterator<Item = ToolEvent>,
     ) -> Option<PriorCompaction> {
-        let cancel = CancellationToken::new();
-        let mut scanner = ClaudeCompactionScanner::new(&cancel);
-        scanner.events.extend(preceding);
-        scanner.compactions.push(NativeCompaction {
+        let mut transcript = ClaudeTranscript::default();
+        transcript.events.extend(preceding);
+        transcript.compactions.push(NativeCompaction {
             summary: "prior state".into(),
-            before_event: scanner.events.len(),
+            before_event: transcript.events.len(),
         });
-        scanner.events.extend(following);
-        prior_compaction_from_transcript(scanner, canonical).unwrap()
+        transcript.events.extend(following);
+        prior_compaction_from_transcript(transcript, canonical, &CancellationToken::new()).unwrap()
     }
 
     #[test]
@@ -534,9 +462,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let cancel = CancellationToken::new();
-        let mut scanner = ClaudeCompactionScanner::new(&cancel);
-        scanner.write_all(body.as_bytes()).unwrap();
-        let parsed = scanner.finish().unwrap();
+        let parsed =
+            scan_transcript(&cancel, |writer| Ok(writer.write_all(body.as_bytes())?)).unwrap();
         assert_eq!(parsed.compactions.len(), 2);
         assert_eq!(parsed.compactions[1].summary, "new state");
         assert_eq!(parsed.compactions[1].before_event, 2);

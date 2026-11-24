@@ -2677,6 +2677,7 @@ async fn prepare_harness_environment(
     session_environment.remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
+    super::restore_mbx_launcher(root, worker_home.as_deref(), &mut session_environment)?;
     let github_root = root.to_owned();
     let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();

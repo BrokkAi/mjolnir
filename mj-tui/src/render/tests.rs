@@ -1919,6 +1919,7 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
         local: false,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }]);
     let draw = |dashboard: &mut DashboardState| {
@@ -1993,6 +1994,7 @@ fn precision_capacity_target() -> mj_core::targets::DeploymentCapacityTarget {
         local: false,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }
 }
@@ -2001,6 +2003,21 @@ fn precision_capacity_target() -> mj_core::targets::DeploymentCapacityTarget {
 /// on filesystems that are fine answers no question. Clicking the cell, or
 /// `d` on the selected row, opens its details in a dropdown without changing
 /// the one-line table layout.
+// Hard-won: #1597: config failures must remain visible with no sampled disks.
+#[test]
+fn capacity_disks_warning_opens_without_filesystems() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut target = precision_capacity_target();
+    target.storage_warning = Some("mbx config: broken file".into());
+    dashboard.set_deployment_capacity_targets(vec![target]);
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    assert!(rendered.contains("Disks ! ▾"), "{rendered}");
+    dashboard.begin_capacity_disks_menu(0);
+    assert!(dashboard.pane_menu.is_some());
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    assert!(rendered.contains("mbx config: broken file"), "{rendered}");
+}
+
 #[test]
 fn capacity_disks_cell_opens_a_dropdown_and_keeps_the_table_one_line_per_target() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -2267,6 +2284,7 @@ fn a_one_line_targets_viewport_keeps_a_stale_reading_on_screen() {
                 local: false,
                 probes: Vec::new(),
                 local_storage_paths: Vec::new(),
+                storage_warning: None,
                 probe_error: None,
             })
             .collect(),
@@ -2592,6 +2610,7 @@ fn two_machine_cpu_report() -> (
                 local: true,
                 probes: Vec::new(),
                 local_storage_paths: Vec::new(),
+                storage_warning: None,
                 probe_error: None,
             })
             .collect(),
@@ -2791,6 +2810,7 @@ fn session_cpu_report_opens_on_the_selected_sessions_machine() {
                 local: true,
                 probes: Vec::new(),
                 local_storage_paths: Vec::new(),
+                storage_warning: None,
                 probe_error: None,
             })
             .collect(),
@@ -3454,6 +3474,7 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         local: false,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }]);
     golden.push_str(&format!(
@@ -4668,6 +4689,7 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
             local: false,
             probes: Vec::new(),
             local_storage_paths: Vec::new(),
+            storage_warning: None,
             probe_error: None,
         },
         precision_capacity_target(),

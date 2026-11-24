@@ -487,6 +487,7 @@ where
                     // Review permissions that reached ACP after the existing
                     // native and owned-tool approvals.
                     let mut guardian_preface = None;
+                    let mut escalated_denial = None;
                     if plan_permission.is_none()
                         && let Some(guardian) = permission_guardian
                     {
@@ -506,9 +507,10 @@ where
                             () = cancellation.cancelled() => None,
                             decision = guardian.review(&request, input.as_ref(), native_child, &permission_id_prefix) => Some(decision),
                         };
-                        let title = request.tool_call.fields.title.as_deref().map(str::trim)
-                            .filter(|title| !title.is_empty()).unwrap_or("a tool call");
-                        let subject = permission_title_with_command(title, input.as_ref());
+                        enum ReviewOutcome {
+                            Allow(mj_core::guardian::PriorGuardianReview, RequestPermissionResponse),
+                            EscalateDeny(mj_core::guardian::PriorGuardianReview, String),
+                        }
                         let settlement = match decision {
                             None => {
                                 return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
@@ -516,7 +518,7 @@ where
                             // An allow the harness remembers would let later calls skip review.
                             Some(guardian::GuardianDecision::Allow { review }) => {
                                 match guardian::allow_once_response(&request) {
-                                    Some(response) => Some((review, response, None)),
+                                    Some(response) => Some(ReviewOutcome::Allow(review, response)),
                                     None => {
                                         guardian_preface = Some(guardian::ask_person_preface(
                                             "the guardian allowed it, but the harness offered no way to allow it once",
@@ -526,7 +528,7 @@ where
                                 }
                             }
                             Some(guardian::GuardianDecision::Deny { rationale, review }) => {
-                                Some((review, guardian::rejection_response(&request), Some(rationale)))
+                                Some(ReviewOutcome::EscalateDeny(review, rationale))
                             }
                             // A turn withdrawn from here on still reaches the
                             // form: registering it answers `cancelled`.
@@ -535,7 +537,7 @@ where
                                 None
                             }
                         };
-                        if let Some((review, response, rationale)) = settlement {
+                        if let Some(outcome) = settlement {
                             // Reserve room before settling. Publication to the live context
                             // and the journal queue share the ticket's withdrawal decision.
                             let reserved = tokio::select! {
@@ -548,27 +550,48 @@ where
                                 return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                             };
                             let journal = reserved.map_err(|_| relay_event_channel_error())?;
-                            let (settled, tripped, answered) = ticket.settle(|withdrawn| {
-                                let withdrawn = withdrawn || cancellation.is_cancelled();
-                                let answered = responder.respond(if withdrawn {
-                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                                } else {
-                                    response
-                                });
-                                let settled = !withdrawn && answered.is_ok();
-                                let tripped = settled && guardian.record_settled_review(review, journal);
-                                (settled, tripped, answered)
-                            });
-                            if settled && let Some(mut rationale) = rationale {
-                                if tripped {
-                                    rationale.push_str(" The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.");
+                            match outcome {
+                                ReviewOutcome::Allow(review, response) => {
+                                    let answered = ticket.settle(|withdrawn| {
+                                        let withdrawn = withdrawn || cancellation.is_cancelled();
+                                        let answered = responder.respond(if withdrawn {
+                                            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                        } else {
+                                            response
+                                        });
+                                        if !withdrawn && answered.is_ok() {
+                                            guardian.record_settled_review(review, journal);
+                                        }
+                                        answered
+                                    });
+                                    return answered;
                                 }
-                                permission_events
-                                    .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
-                                    .await
-                                    .map_err(|_| relay_event_channel_error())?;
+                                ReviewOutcome::EscalateDeny(review, rationale) => {
+                                    let risk_level = review.risk_level;
+                                    let review_id = review.review_id.clone().unwrap_or_default();
+                                    let withdrawn = ticket.settle(|withdrawn| {
+                                        let withdrawn = withdrawn || cancellation.is_cancelled();
+                                        if !withdrawn {
+                                            guardian.record_escalated_review(review, journal);
+                                        }
+                                        withdrawn
+                                    });
+                                    if withdrawn {
+                                        return responder.respond(RequestPermissionResponse::new(
+                                            RequestPermissionOutcome::Cancelled,
+                                        ));
+                                    }
+                                    guardian_preface = Some(guardian::denied_escalation_preface(
+                                        risk_level,
+                                        &rationale,
+                                    ));
+                                    escalated_denial = Some((
+                                        guardian.clone(),
+                                        review_id,
+                                        request.tool_call.tool_call_id.to_string(),
+                                    ));
+                                }
                             }
-                            return answered;
                         }
                     }
                     let native_child = permission_native_agents.lock().expect("native agent router poisoned")
@@ -706,8 +729,12 @@ where
                     let id = format!("{permission_id_prefix}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                     // The worker alone decides which answers this form offers, and
                     // accepts only those (see `permission_choices`).
-                    let PermissionAnswers { choices, skip } =
-                        permission_choices(&request, plan_permission, permission_enforcement);
+                    let PermissionAnswers { choices, skip } = permission_choices(
+                        &request,
+                        plan_permission,
+                        permission_enforcement,
+                        escalated_denial.is_some(),
+                    );
                     let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
                         "const": choice.option_id.to_string(), "title": choice.title,
                     })).collect();
@@ -805,6 +832,36 @@ where
                         {
                             plan.decline(&request)
                         } else { RequestPermissionResponse::new(outcome) };
+                        if let Some((guardian, review_id, tool_call_id)) = escalated_denial {
+                            let outcome = if cancellation.is_cancelled() {
+                                "cancelled"
+                            } else if matches!(
+                                permission_decision,
+                                Some(ManualPermissionDecision::Allowed)
+                            ) {
+                                guardian.record_breaker_outcome(false);
+                                "allowed"
+                            } else if matches!(
+                                permission_decision,
+                                Some(ManualPermissionDecision::Rejected)
+                            ) {
+                                guardian.record_breaker_outcome(true);
+                                "rejected"
+                            } else if matches!(response, Some(PendingAnswer::OperatorAway)) {
+                                guardian.record_breaker_outcome(true);
+                                "away"
+                            } else {
+                                "cancelled"
+                            };
+                            tracing::info!(
+                                target: "mj_guardian",
+                                %review_id,
+                                form_id = %id,
+                                %tool_call_id,
+                                outcome,
+                                "guardian-flagged permission request resolved"
+                            );
+                        }
                         let result = responder.respond(answer);
                         if let Err(error) = result {
                             tracing::debug!(%error, "harness permission responder closed");
