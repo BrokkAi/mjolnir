@@ -84,9 +84,13 @@ pub fn reconcile_container_config(text: &str, cache: &SessionBuildCache) -> Resu
     use mj_core::target_path::{is_within, join, normalize, text as path_text};
 
     let mut document: toml::Table = toml::from_str(text).map_err(|error| {
-        let line = error
-            .span()
-            .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1);
+        let line = error.span().map(|span| {
+            text.as_bytes()[..span.start.min(text.len())]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+                + 1
+        });
         match line {
             Some(line) => {
                 anyhow::anyhow!("the host mbx configuration is not valid TOML (line {line})")
