@@ -32,11 +32,11 @@ pub(super) fn unfinished_suspend_children(
     runtime: &RuntimeProjection,
     parent: &str,
 ) -> Vec<String> {
-    let unfinished = |id: &str| {
+    let unfinished_branch = |id: &str| {
         runtime
             .verdicts
             .get(id)
-            .is_some_and(|verdict| verdict.unfinished)
+            .is_some_and(|verdict| verdict.unfinished || verdict.unfinished_children > 0)
     };
     let mut borrowed: Vec<_> = runtime
         .subagents
@@ -47,7 +47,7 @@ pub(super) fn unfinished_suspend_children(
                     .environment_owners
                     .get(*id)
                     .is_some_and(|owner| owner != *id)
-                && unfinished(id)
+                && unfinished_branch(id)
         })
         .filter_map(|(id, _)| runtime.records.get(id))
         .filter(|record| !record.archived)
@@ -61,7 +61,7 @@ pub(super) fn unfinished_suspend_children(
         .native_agents
         .keys_with_prefix(&prefix)
         .filter(|id| {
-            runtime.native_agents[*id].agent.parent_session_id.is_none() && unfinished(id)
+            runtime.native_agents[*id].agent.parent_session_id.is_none() && unfinished_branch(id)
         });
     borrowed
         .into_iter()
@@ -1038,6 +1038,18 @@ mod tests {
         active.agent.availability = mj_core::native_agent::NativeAgentAvailability::Available;
         project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        let before = capture.clone();
+        let mut descendant = native("descendant", true, NativeAgentState::Running);
+        descendant.agent.parent_session_id = Some("finished".into());
+        capture
+            .native_agents
+            .insert(descendant.agent.view_id(), descendant);
+        project(&mut capture, &before, None, None);
+        assert_eq!(
+            unfinished_suspend_children(&capture, "parent"),
+            [id, mj_core::native_agent::view_id("parent", "finished")]
+        );
     }
 
     #[test]

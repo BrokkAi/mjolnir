@@ -533,6 +533,7 @@ pub enum DashboardAction {
     },
     SuspendPreflight {
         session_id: String,
+        request_id: u64,
     },
     Suspend {
         session_id: String,
@@ -1213,6 +1214,7 @@ pub struct DashboardState {
     suppress_modal_release: bool,
     pub(crate) spinner_save_pending: bool,
     session_preflight_generation: u64,
+    next_suspend_preflight_request_id: u64,
     pub(crate) wiki_search_generation: u64,
     /// Monotonic identity for move preparation requests. This lives outside
     /// the wizard so a late reply cannot match a newly opened wizard.
@@ -1475,6 +1477,7 @@ impl DashboardState {
             suppress_modal_release: false,
             spinner_save_pending: false,
             session_preflight_generation: 0,
+            next_suspend_preflight_request_id: 0,
             wiki_search_generation: 0,
             next_move_preparation_request_id: 0,
             archive_restores_in_flight: BTreeSet::new(),

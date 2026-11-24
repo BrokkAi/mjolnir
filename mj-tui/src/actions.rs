@@ -2042,20 +2042,26 @@ impl DashboardState {
             CommandId::RenameWorkspace => self.begin_workspace_command(false),
             CommandId::CloseWorkspace => self.begin_workspace_command(true),
             CommandId::SuspendSession => {
-                if let Some(session) = self.selected_session() {
-                    let session_id = session.id.clone();
-                    self.mode = crate::Mode::Confirm(
-                        ConfirmDialog::new(Confirmation::SuspendSession {
-                            session_id: session_id.clone(),
-                            child_warning_titles: Vec::new(),
-                            preflight: None,
-                            viewing_all_untracked: false,
-                        })
-                        .naming_session(crate::render::session_name(session)),
-                    );
-                    return DashboardAction::SuspendPreflight { session_id };
+                let Some(session) = self.selected_session() else {
+                    return DashboardAction::None;
+                };
+                let session_id = session.id.clone();
+                let request_id = self.next_suspend_preflight_request_id.wrapping_add(1);
+                self.mode = crate::Mode::Confirm(
+                    ConfirmDialog::new(Confirmation::SuspendSession {
+                        session_id: session_id.clone(),
+                        request_id,
+                        child_warning_titles: Vec::new(),
+                        preflight: None,
+                        viewing_all_untracked: false,
+                    })
+                    .naming_session(crate::render::session_name(session)),
+                );
+                self.next_suspend_preflight_request_id = request_id;
+                DashboardAction::SuspendPreflight {
+                    session_id,
+                    request_id,
                 }
-                DashboardAction::None
             }
             CommandId::ResizePaneLeft => self.resize_pane_command(NavDirection::Left),
             CommandId::ResizePaneDown => self.resize_pane_command(NavDirection::Down),

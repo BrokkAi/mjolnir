@@ -388,6 +388,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     SuspendPreflight {
         session_id: String,
+        request_id: u64,
         result: std::result::Result<mj_core::suspend_consent::SuspendPreflight, String>,
     },
     ContainerUpgradeQueued {
@@ -1581,16 +1582,20 @@ impl DashboardContext {
                     else { self.dashboard.show_normal_restart(session_id); }
                 }
             },
-            DashboardIoUpdate::SuspendPreflight { session_id, result } => match result {
+            DashboardIoUpdate::SuspendPreflight {
+                session_id,
+                request_id,
+                result,
+            } => match result {
                 Ok(preflight) => {
                     if let DashboardAction::Suspend { session_id, consent } =
-                        self.dashboard.apply_suspend_preflight(preflight)
+                        self.dashboard.apply_suspend_preflight(request_id, preflight)
                     {
                         super::actions::start_suspension(self, session_id, consent);
                     }
                 }
                 Err(error) => {
-                    if self.dashboard.dismiss_suspend_preflight(&session_id) {
+                    if self.dashboard.dismiss_suspend_preflight(&session_id, request_id) {
                         self.dashboard.set_failure_notice(format!(
                             "Could not check workspace for {}: {error}",
                             self.session_notice_name(&session_id)

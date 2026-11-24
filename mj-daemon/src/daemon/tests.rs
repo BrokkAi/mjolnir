@@ -17476,22 +17476,46 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
     let parent = "preflight-parent";
+    let clean_parent = "preflight-clean";
     let active_child = "preflight-working";
-    mj_controller::database::save_session(&runtime_test_session(
-        parent,
-        "default",
-        SessionState::Running,
-    ))
-    .unwrap();
-    for (id, status, owns_environment) in [
-        ("preflight-parked", SessionState::Parked, false),
-        ("preflight-idle", SessionState::Running, false),
-        (active_child, SessionState::Running, false),
-        ("preflight-owned", SessionState::Provisioning, true),
+    let idle_child_with_descendant = "preflight-branch";
+    let active_descendant = "preflight-grandchild";
+    for id in [parent, clean_parent] {
+        mj_controller::database::save_session(&runtime_test_session(
+            id,
+            "default",
+            SessionState::Running,
+        ))
+        .unwrap();
+    }
+    for (id, child_parent, status, owns_environment) in [
+        (
+            "preflight-parked",
+            clean_parent,
+            SessionState::Parked,
+            false,
+        ),
+        ("preflight-idle", clean_parent, SessionState::Running, false),
+        (active_child, parent, SessionState::Running, false),
+        (
+            idle_child_with_descendant,
+            parent,
+            SessionState::Running,
+            false,
+        ),
+        (
+            active_descendant,
+            idle_child_with_descendant,
+            SessionState::Running,
+            false,
+        ),
+        ("preflight-owned", parent, SessionState::Provisioning, true),
     ] {
+        let mut relation = runtime_test_subagent(id, child_parent);
+        relation.orchestrator = id == idle_child_with_descendant;
         mj_controller::database::register_subagent_with_startup(
             &runtime_test_session(id, "default", status),
-            &runtime_test_subagent(id, parent),
+            &relation,
             Vec::new(),
             None,
             None,
@@ -17503,7 +17527,10 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
     let state = test_runtime_state_loading_the_store();
     for (id, working) in [
         (parent, true),
+        (clean_parent, false),
         (active_child, true),
+        (idle_child_with_descendant, false),
+        (active_descendant, true),
         ("preflight-idle", false),
         ("preflight-owned", true),
     ] {
@@ -17521,6 +17548,18 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
     let public =
         mj_client::http::HttpDaemonClient::new(format!("http://{address}"), "public-test-token")
             .unwrap();
+    let clean = terminal
+        .suspend_preflight(
+            clean_parent.into(),
+            SuspendPreflightRequest {
+                dry_run: false,
+                without_checkpoint: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!clean.has_blockers());
+    assert!(!clean.has_warnings(), "{clean:?}");
     let from_terminal = terminal
         .suspend_preflight(
             parent.into(),
@@ -17536,7 +17575,10 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
         .await
         .unwrap();
     assert_eq!(from_terminal, from_public);
-    assert_eq!(from_terminal.children_not_handed_back, [active_child]);
+    assert_eq!(
+        from_terminal.children_not_handed_back,
+        [idle_child_with_descendant, active_child]
+    );
     assert!(from_terminal.interrupting);
     assert_eq!(from_terminal.owning_children_to_suspend, 1);
     shutdown.cancel();

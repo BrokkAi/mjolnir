@@ -928,14 +928,16 @@ fn golden_dashboard_dialogs() {
         ),
     ] {
         let mut dashboard = dashboard_with_session(running_session());
+        let request_id = 1;
         dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
             session_id: "session-1".into(),
+            request_id,
             child_warning_titles: Vec::new(),
             preflight: None,
             viewing_all_untracked: false,
         }));
         assert_eq!(
-            dashboard.apply_suspend_preflight(preflight),
+            dashboard.apply_suspend_preflight(request_id, preflight),
             DashboardAction::None
         );
         let lines = drawn(&mut dashboard, 100, 28);

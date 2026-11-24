@@ -357,6 +357,7 @@ pub(crate) enum Confirmation {
     },
     SuspendSession {
         session_id: String,
+        request_id: u64,
         /// Listed titles (or IDs) for the unfinished children in the preflight.
         child_warning_titles: Vec<String>,
         preflight: Option<mj_core::suspend_consent::SuspendPreflight>,

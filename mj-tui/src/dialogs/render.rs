@@ -1587,6 +1587,7 @@ pub(crate) fn confirmation_body(
             child_warning_titles,
             preflight,
             viewing_all_untracked,
+            ..
         } => {
             let mut lines = vec![session_line(session_id, session_name, width)];
             if let Some(preflight) = preflight {

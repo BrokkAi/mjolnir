@@ -1541,6 +1541,7 @@ impl DashboardState {
 
     pub fn apply_suspend_preflight(
         &mut self,
+        request_id: u64,
         preflight: mj_core::suspend_consent::SuspendPreflight,
     ) -> DashboardAction {
         let Mode::Confirm(dialog) = &mut self.mode else {
@@ -1548,6 +1549,7 @@ impl DashboardState {
         };
         let Confirmation::SuspendSession {
             session_id,
+            request_id: current_request_id,
             child_warning_titles,
             preflight: slot @ None,
             ..
@@ -1555,7 +1557,7 @@ impl DashboardState {
         else {
             return DashboardAction::None;
         };
-        if *session_id != preflight.session_id {
+        if *session_id != preflight.session_id || *current_request_id != request_id {
             return DashboardAction::None;
         }
         if !preflight.has_blockers() && !preflight.has_warnings() {
@@ -1582,19 +1584,19 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    /// Closes the suspend confirmation dialog if it is still waiting on
-    /// `session_id`'s preflight, leaving any unrelated modal untouched.
-    pub fn dismiss_suspend_preflight(&mut self, session_id: &str) -> bool {
+    /// Closes the suspend confirmation dialog if it is still waiting on this request.
+    pub fn dismiss_suspend_preflight(&mut self, session_id: &str, request_id: u64) -> bool {
         let matches = matches!(
             &self.mode,
             Mode::Confirm(dialog)
                 if matches!(
                     &dialog.confirmation,
                     Confirmation::SuspendSession {
-                        session_id: current,
+                        session_id: current_session_id,
+                        request_id: current_request_id,
                         preflight: None,
                         ..
-                    } if current == session_id
+                    } if current_session_id == session_id && *current_request_id == request_id
                 )
         );
         if matches {
