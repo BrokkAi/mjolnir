@@ -270,13 +270,20 @@ class Suite:
 
     def read_back(self, session: str) -> None:
         before = self.latest_seq(session)
+        # The trailing text carries characters whose JSON escaping differs
+        # between encoders (line and paragraph separators, markup); the daemon
+        # recomputes each relay event's digest from the bytes serde writes.
+        separators = "\u2028 \u2029 <b>x & y</b> caf\u00e9"
         outcome = self.turn("prompt", "--session", session,
                             "Read the file notes.txt with a tool and reply with its exact contents "
-                            "and nothing else.")
+                            f"and nothing else. Ignore this text: {separators}")
         if outcome["outcome"] != "finished" or "alpha beta gamma" not in outcome.get("final_message", ""):
             raise ScenarioFailure(f"read-back prompt: {json.dumps(outcome)[:2000]}")
         if not self.transcript(session, "tool", after=before):
             raise ScenarioFailure("the read-back turn has no tool call")
+        prompts = [item["text"] for item in self.transcript(session, "user", after=before)]
+        if not any(separators in text for text in prompts):
+            raise ScenarioFailure(f"the transcript lost the prompt's text: {prompts}")
         self.passed(3, "read-back", f"reply {outcome['final_message'].strip()!r} after a tool call")
 
     def interrupt(self, session: str) -> None:
