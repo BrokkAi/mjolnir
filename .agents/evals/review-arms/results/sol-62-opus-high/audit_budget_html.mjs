@@ -161,7 +161,7 @@ try {
     console.log(`info ${P.id}: ${tieSeen} threshold cells have a tied best set`);
     for (const [k, g] of P.greptile.entries()) {
       const [cx, cy] = await toClient(P.id, g.t, g.c); const got = await hover(cx, cy);
-      check(got.text.includes('reference, not optimized') && got.text.includes(`Actual: ${g.f.toFixed(2)} findings`) && got.text.includes(`$${g.c.toFixed(3)}`),
+      check(got.text.includes('Nearby Greptile solo reference (not optimized)') && got.text.includes(`Actual: ${g.f.toFixed(2)} findings`) && got.text.includes(`$${g.c.toFixed(3)}`),
         `${P.id}: ${g.label} hover shows its own findings ${g.f}, not the background (${got.text.slice(0, 160)})`);
     }
     for (const n of P.ever_winners) {
@@ -172,43 +172,118 @@ try {
     const out = await hover(5, 5);
     check(!out.shown, `${P.id}: tooltip hides outside the map`);
   }
-  // Marker hits snap the crosshair to the selected setup's own latency and cost, so tooltip and crosshair agree.
+  // The selected budget is always the exact pointer position. A nearby marker only adds a separate reference card.
   {
     const tipState = () => evalJs(`({ shown: document.getElementById('tip').style.display === 'block', text: document.getElementById('tip').textContent })`);
-    const crossLines = id => evalJs(`[...document.querySelectorAll('#map-${id} .cross line')].map(l => ['x1', 'y1', 'x2', 'y2'].map(k => +l.getAttribute(k)))`);
-    const snappedAt = (lines, sx, sy) => lines.length === 2 && lines.some(([x1, y1, x2, y2]) => Math.abs(x1 - sx) < 0.01 && Math.abs(x2 - sx) < 0.01) &&
-      lines.some(([x1, y1, x2, y2]) => Math.abs(y1 - sy) < 0.01 && Math.abs(y2 - sy) < 0.01);
     const press = async (x, y) => {
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
     };
     const esc = () => send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-    await esc();
-    for (const P of payload.panels) {
-      const first = P.options.find(o => o.name === P.ever_winners[0]), other = P.options.find(o => o.name === P.ever_winners[10]);
-      const cases = [[`first ${first.label}`, first, -4, 0], [`ordinary ${other.label}`, other, 3, 3],
-        ...P.greptile.map(g => [`${g.label} reference`, g, -4, 3])];
-      for (const [label, o, dx, dy] of cases) {
-        const [cx, cy, sx, sy] = await toClient(P.id, o.t, o.c);
-        const got = await hover(cx + dx, cy + dy), lines = await crossLines(P.id);
-        const isRef = !!o.name && o.name.startsWith('Greptile');
-        const tipOk = isRef ? got.text.includes('reference, not optimized') && got.text.includes(`Actual: ${o.f.toFixed(2)} findings`)
-          : got.text.startsWith(`${o.label}: ${o.f.toFixed(2)} findings`) && got.text.includes('Best:') && !got.text.includes('No priced setup fits');
-        check(tipOk && snappedAt(lines, sx, sy), `${P.id}: pointer ${dx},${dy} px from ${label} shows its tooltip with the crosshair snapped to its latency and cost`);
+    // One probe: move the pointer, then read the pointer budget as the page derives it, the primary and nearby
+    // cards, and the crosshair. Both commands are sent back to back, so many probes can be pipelined in order.
+    const stateExpr = id => `(() => { const t = document.getElementById('tip'), kids = [...t.children];
+      const svg = document.getElementById('map-${id}');
+      return { shown: t.style.display === 'block', primary: kids[0] ? kids[0].textContent : '',
+        primaryLabels: kids[0] ? [...kids[0].querySelectorAll('li b')].map(b => b.textContent).sort() : [],
+        nearby: kids.slice(1).map(k => ({ cls: k.className, text: k.textContent })),
+        lines: [...svg.querySelectorAll('.cross line')].map(l => ['x1', 'y1', 'x2', 'y2'].map(k => +l.getAttribute(k))) }; })()`;
+    const probeState = id => evalJs(stateExpr(id));
+    const budgetExpr = (id, cx, cy) => `(() => { const svg = document.getElementById('map-${id}'); const g = k => +svg.dataset[k];
+      const pt = svg.createSVGPoint(); pt.x = ${cx}; pt.y = ${cy}; const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+      const d = D.domain; const [t0, t1, c0, c1] = [...d.t, ...d.c].map(Math.log);
+      return [p.x, p.y, Math.exp(t0 + (p.x - g('x0')) / g('w') * (t1 - t0)), Math.exp(c0 + (1 - (p.y - g('y0')) / g('h')) * (c1 - c0)),
+        p.x >= g('x0') && p.x <= g('x0') + g('w') && p.y >= g('y0') && p.y <= g('y0') + g('h')]; })()`;
+    const clientBudget = (id, cx, cy) => evalJs(budgetExpr(id, cx, cy));
+    // Real mouse movement through Chrome's input pipeline, one position at a time.
+    const probeAt = async (id, cx, cy) => {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cx, y: cy });
+      const r = await evalJs(`({ b: ${budgetExpr(id, cx, cy)}, s: ${stateExpr(id)} })`);
+      return { cx, cy, budget: r.b, st: r.s };
+    };
+    // Dense scans dispatch pointermove events into the page's own handler in batches. Chrome does not order
+    // pipelined input commands against evaluations, and a mouse move per position costs minutes.
+    const probeMany = async (id, pts) => {
+      const out = [];
+      for (let k = 0; k < pts.length; k += 1500) {
+        const chunk = pts.slice(k, k + 1500);
+        const res = await evalJs(`(() => { const svg = document.getElementById('map-${id}');
+          const probe = (cx, cy) => ({ b: ${budgetExpr(id, 'cx', 'cy')}, s: ${stateExpr(id)} });
+          return ${JSON.stringify(chunk)}.map(([cx, cy]) => {
+            svg.dispatchEvent(new PointerEvent('pointermove', { clientX: cx, clientY: cy, bubbles: true })); return probe(cx, cy); }); })()`);
+        res.forEach((r, n) => out.push({ cx: chunk[n][0], cy: chunk[n][1], budget: r.b, st: r.s }));
       }
-      // Click near the marker pins that same snapped selection against later movement.
-      const [cx, cy, sx, sy] = await toClient(P.id, first.t, first.c);
-      await press(cx - 4, cy);
-      const pinnedText = (await tipState()).text;
-      await hover(cx + 200, cy - 100);
-      check((await tipState()).text === pinnedText && pinnedText.startsWith(first.label) && snappedAt(await crossLines(P.id), sx, sy),
-        `${P.id}: a click near ${first.label} pins the snapped selection`);
-      await esc();
-      // Outside the hit radius the pointer stays the budget: infeasible just left of the first marker.
-      const far = await hover(cx - 14, cy), farLines = await crossLines(P.id);
-      check(far.text.includes('No priced setup fits') && !snappedAt(farLines, sx, sy) && farLines.length === 2,
-        `${P.id}: 14 px left of ${first.label} stays an infeasible budget with the crosshair at the pointer`);
+      return out;
+    };
+    const geoOf = id => evalJs(`(() => { const svg = document.getElementById('map-${id}'); const g = k => +svg.dataset[k]; return [g('x0'), g('y0'), g('w'), g('h')]; })()`);
+    await esc();
+    let totalProbes = 0, nearProbes = 0;
+    for (const P of payload.panels) {
+      const [gx0, gy0, gw, gh] = await geoOf(P.id);
+      const [lt0, lt1, lc0, lc1] = [...payload.domain.t, ...payload.domain.c].map(Math.log);
+      const sx = t => gx0 + gw * (Math.log(t) - lt0) / (lt1 - lt0), sy = c => gy0 + gh * (1 - (Math.log(c) - lc0) / (lc1 - lc0));
+      const markers = [...P.greptile.map(g => ({ ...g, ref: true })), ...P.ever_winners.map(n => P.options.find(o => o.name === n))];
+      // Oracle for one pointer position: primary card equals brute force at the pointer budget; the crosshair is at the pointer;
+      // a nearby card exists exactly when a marker is within 10 SVG units, and names the nearest one.
+      const check1 = (r, note) => {
+        const [px_, py_, T, C, inside] = r.budget, st = r.st;
+        totalProbes++;
+        if (!inside) return st.shown ? `${note}: tooltip shown outside the plot` : null;
+        const want = brute(P, T, C);
+        const dist = markers.map(m => ({ m, d: Math.hypot(sx(m.t) - px_, sy(m.c) - py_) })).sort((a, b) => a.d - b.d)[0];
+        const near = dist.d < 10; if (near) nearProbes++;
+        let err = null;
+        if (!st.shown) err = 'no tooltip';
+        else if (!st.primary.startsWith(expectedHeader(P, T, C))) err = `header ${st.primary.slice(0, 80)}`;
+        else if (want ? !st.primary.includes(`Best: ${want.best.toFixed(2)} expected findings`) || JSON.stringify(st.primaryLabels) !== JSON.stringify(want.labels)
+          : !st.primary.includes('No priced setup fits') || st.primaryLabels.length) err = `primary result ${st.primary.slice(0, 120)} want ${JSON.stringify(want)}`;
+        else if (st.primary.includes('Nearby') || st.primary.includes('within these limits')) err = 'marker text leaked into the primary card';
+        else if (st.lines.length !== 2 || !st.lines.some(([x1, , x2]) => Math.abs(x1 - px_) < 0.01 && Math.abs(x2 - px_) < 0.01)
+          || !st.lines.some(([, y1, , y2]) => Math.abs(y1 - py_) < 0.01 && Math.abs(y2 - py_) < 0.01)) err = 'crosshair is not at the pointer';
+        else if (near ? st.nearby.length !== 1 || st.nearby[0].cls !== 'nearby' ||
+          !st.nearby[0].text.includes(dist.m.ref ? `${dist.m.label} alone` : `${dist.m.label}: ${dist.m.f.toFixed(2)} findings, ${dist.m.t.toFixed(1)} s, $${dist.m.c.toFixed(3)}`) ||
+          !st.nearby[0].text.includes(dist.m.ref ? 'Nearby Greptile solo reference (not optimized)' : 'Nearby setup \u2014 at its own time and cost')
+          : st.nearby.length !== 0) err = `nearby card ${JSON.stringify(st.nearby)} for distance ${dist.d.toFixed(1)}`;
+        return err && `${note} T=${T} C=${C}: ${err}`;
+      };
+      const verify = async (cx, cy, note) => check1(await probeAt(P.id, cx, cy), note);
+      const failures_ = [];
+      // Every third SVG unit of the plot (pointer events dispatched in the page), then every pixel within 12 units of every marker, with no region excluded.
+      const [ox, oy] = await svgToClient(P.id, 0, 0), [ux, uy] = await svgToClient(P.id, 1, 1);
+      const scale = ux - ox;
+      const pts = [], notes = [];
+      for (let y = gy0 + 1; y < gy0 + gh; y += 3) for (let x = gx0 + 1; x < gx0 + gw; x += 3) { pts.push([ox + x * scale, oy + y * scale]); notes.push('lattice'); }
+      for (const m of markers) for (let dy = -12; dy <= 12; dy += 1) for (let dx = -12; dx <= 12; dx += 1)
+        if (Math.hypot(dx, dy) <= 12) { pts.push([ox + (sx(m.t) + dx) * scale, oy + (sy(m.c) + dy) * scale]); notes.push(`near ${m.label}`); }
+      const results = await probeMany(P.id, pts);
+      results.forEach((r, k) => { const e = check1(r, notes[k]); if (e) failures_.push(e); });
+      check(failures_.length === 0, `${P.id}: ${pts.length} pointer positions (lattice plus all pixels within 12 units of ${markers.length} markers) equal the oracle, with a separate nearby card ${failures_.slice(0, 3).join(' | ')}`);
+      // Pinned cases from the review.
+      const cases = [];
+      if (P.id === 'all') cases.push(['All 54.7 s, $0.198 beside the 166.44 marker', 54.7, 0.198, 156.83]);
+      const first = P.options.find(o => o.name === P.ever_winners[0]);
+      cases.push([`just left of ${first.label}`, first.t * 0.985, first.c, null]);
+      for (const g of P.greptile) cases.push([`beside ${g.label}`, g.t * 0.99, g.c * 1.01, 'any']);
+      for (const [label, T0, C0, expectBest] of cases) {
+        const [cx, cy] = await toClient(P.id, T0, C0);
+        const e = await verify(cx, cy, label);
+        const st = await probeState(P.id), [, , T, C] = await clientBudget(P.id, cx, cy), want = brute(P, T, C);
+        let ok = !e;
+        if (typeof expectBest === 'number') ok = ok && want && want.best === expectBest && st.primary.includes(`Best: ${expectBest.toFixed(2)}`) && st.nearby.length === 1 && st.nearby[0].text.includes('166.44');
+        if (expectBest === null) ok = ok && !want && st.primary.includes('No priced setup fits') && st.nearby.length === 1 && st.nearby[0].text.includes(`${first.f.toFixed(2)} findings`);
+        if (expectBest === 'any') ok = ok && st.nearby.length === 1 && st.nearby[0].text.includes('Greptile') && !st.primary.includes('Greptile');
+        check(ok, `${P.id}: ${label}: primary is the pointer's budget (${(st.primary.match(/Best: [\d.]+|No priced setup fits/) || [''])[0]}), nearby card is separate ${e || ''}`);
+        // The same selection pins on click and survives later movement.
+        await press(cx, cy);
+        const pinned = await probeState(P.id);
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cx + 200, y: cy - 120 });
+        const after = await probeState(P.id);
+        check(JSON.stringify(pinned) === JSON.stringify(after) && pinned.primary === st.primary,
+          `${P.id}: ${label}: a click pins the pointer's budget and nearby card against later movement`);
+        await esc();
+      }
     }
+    console.log(`info marker/budget probes: ${totalProbes} pointer positions (real mouse for the pinned cases, in-page events for the dense scan), ${nearProbes} with a nearby marker`);
     await hover(5, 5);
   }
   // A tied cell, hovered for real, lists every tied option.

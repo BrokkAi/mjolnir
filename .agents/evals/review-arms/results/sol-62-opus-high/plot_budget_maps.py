@@ -470,6 +470,7 @@ svg text{font-family:inherit;fill:#52514e}.tl{font-size:12px}.al{font-size:13px;
 #tip{position:fixed;display:none;pointer-events:none;background:#fff;border:1px solid #b9b8b2;
 border-radius:4px;padding:8px 10px;max-width:min(380px,calc(100vw - 16px));font-size:13px;line-height:1.35;
 box-shadow:0 2px 8px rgba(0,0,0,.18);z-index:9}
+.nearby{margin-top:8px;padding-top:6px;border-top:1px dashed #b9b8b2}.nearby .h{font-weight:600;color:#52514e}
 #tip b{font-weight:600}#tip .m{color:#52514e}#tip ul{margin:4px 0 0;padding-left:16px}
 .legend{color:#52514e;font-size:13px;margin:4px 0 16px}
 .scroll{overflow-x:auto}details{margin:12px 0}summary{cursor:pointer;font-weight:600}
@@ -529,19 +530,19 @@ function budgetTip(P, T, C) {
   box.append(el('div', 'm', r.win.length > 1 ? `${r.win.length} setups tie for the best score:` : 'Winning setup:'), ul);
   return box;
 }
-function markerTip(P, kind, index) {
-  const box = el('div');
+// Reference card for a marker near the pointer. It never replaces or alters the selected budget's result.
+function nearbyCard(P, kind, index) {
+  const box = el('div', 'nearby');
   if (kind === 'g') {
-    const g = P.greptile[index], r = tied(P, g.t, g.c);
-    box.append(el('div', '', `${g.label} alone (reference, not optimized)`));
+    const g = P.greptile[index];
+    box.append(el('div', 'h', 'Nearby Greptile solo reference (not optimized)'));
+    box.append(el('div', '', `${g.label} alone`));
     box.append(el('div', '', `Actual: ${fmtF(g.f)} findings, ${fmtT(g.t)}, ${fmtC(g.c)}`));
-    box.append(el('div', 'm', r ? `Best priced non-Greptile setup within these limits: ${fmtF(r.best)} findings` : 'No priced setup fits these limits'));
     return box;
   }
   const o = P.options.find(x => x.name === index);
+  box.append(el('div', 'h', 'Nearby setup \u2014 at its own time and cost'));
   box.append(el('div', '', `${o.label}: ${fmtF(o.f)} findings, ${fmtT(o.t)}, ${fmtC(o.c)}`));
-  box.append(el('div', 'm', 'This setup is best at some budget; the map is coloured at its own corner by the best setup within these limits.'));
-  box.append(budgetTip(P, o.t, o.c));
   return box;
 }
 function place(ev) {
@@ -565,17 +566,16 @@ function setup(P) {
   }
   function show(ev, hit) {
     const {p, T, C} = hit;
+    // The selected budget is always the exact pointer position. A marker within reach only adds a reference card.
     let best = null, bestD = 10;
-    const consider = (kind, id, t, c) => { const d = Math.hypot(px(t) - p.x, py(c) - p.y); if (d < bestD) { bestD = d; best = [kind, id, t, c]; } };
+    const consider = (kind, id, t, c) => { const d = Math.hypot(px(t) - p.x, py(c) - p.y); if (d < bestD) { bestD = d; best = [kind, id]; } };
     P.greptile.forEach((q, i) => consider('g', i, q.t, q.c));
     for (const n of P.ever_winners) { const o = P.options.find(x => x.name === n); consider('o', n, o.t, o.c); }
     clearAll();
-    tip.replaceChildren(best ? markerTip(P, best[0], best[1]) : budgetTip(P, T, C));
+    tip.replaceChildren(budgetTip(P, T, C), ...(best ? [nearbyCard(P, best[0], best[1])] : []));
     tip.style.display = 'block'; place(ev);
-    // A marker hit selects that setup's own latency and cost, so the crosshair snaps to it and agrees with the tooltip.
-    const at = best ? {x: px(best[2]), y: py(best[3])} : p;
     const ns = 'http://www.w3.org/2000/svg';
-    for (const [a, b, c, d] of [[x0, at.y, x0 + w, at.y], [at.x, y0, at.x, y0 + h]]) {
+    for (const [a, b, c, d] of [[x0, p.y, x0 + w, p.y], [p.x, y0, p.x, y0 + h]]) {
       const l = document.createElementNS(ns, 'line');
       l.setAttribute('x1', a); l.setAttribute('y1', b); l.setAttribute('x2', c); l.setAttribute('y2', d);
       l.setAttribute('stroke', '#0b0b0b'); l.setAttribute('stroke-width', '.7'); l.setAttribute('stroke-dasharray', '3 3');
@@ -653,7 +653,8 @@ def build_html(payload, vmax):
 <body><main>
 <h1>Best review findings within a latency and cost budget</h1>
 <p class="sub">Expected confirmed findings across 70 historical diffs. Hover a map for the winning setups,
-their latency and cost; click to pin, Esc to release.</p>
+their latency and cost at the pointer's budget; click to pin, Esc to release. A marker near the pointer adds a
+separate card for that setup at its own time and cost; it never changes the selected budget.</p>
 {colorbar_svg(vmax)}
 <div class="panels">
 {panels}
