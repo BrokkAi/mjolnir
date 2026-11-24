@@ -477,7 +477,17 @@ pub(super) async fn finish_wait(
         && session.lifecycle == ViewerLifecycleCategory::Live
         && !observation.resuming
         && !observation.closing;
-    session.subtree_idle = session.is_idle && !viewer_session.verdict.working;
+    let review_working = viewer_session
+        .turn_review
+        .as_deref()
+        .is_some_and(|review| review.verdict.is_none());
+    let stale_own_work = !viewer_session.verdict.idle && session.is_idle;
+    let subtree_busy = if stale_own_work {
+        viewer_session.verdict.working_descendants > 0 || review_working
+    } else {
+        viewer_session.verdict.working
+    };
+    session.subtree_idle = session.is_idle && !subtree_busy;
     session
         .background_work
         .clone_from(&observation.background_work);

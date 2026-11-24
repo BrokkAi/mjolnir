@@ -893,6 +893,50 @@ async fn a_finished_wait_does_not_report_the_session_still_running() {
     );
 }
 
+#[tokio::test]
+async fn wait_uses_fresh_worker_idle_state_and_retains_other_subtree_work() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.lifecycle = ViewerLifecycleCategory::Live;
+    session.is_idle = false;
+    session.verdict.idle = false;
+    session.verdict.working = true;
+    let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
+
+    for (working_descendants, reviewing, subtree_idle) in
+        [(0, false, true), (1, false, false), (0, true, false)]
+    {
+        session.verdict.working_descendants = working_descendants;
+        session.turn_review = reviewing.then(|| {
+            Box::new(crate::server::ViewerTurnReview {
+                child_session_id: None,
+                status: "Reviewing".into(),
+                roles: Vec::new(),
+                verdict: None,
+            })
+        });
+        let response = finish_wait(
+            &backend,
+            "session-1",
+            &session,
+            WaitObservation {
+                activity: mj_core::activity::ActivityState::Idle { since_ms: None },
+                execution: MaterializedExecutionState::Idle,
+                ..WaitObservation::default()
+            },
+            WaitDecision::simple(WaitOutcome::Finished, None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(response.session.is_idle);
+        assert_eq!(response.session.subtree_idle, subtree_idle);
+        assert_eq!(response.session.working_subagents, working_descendants);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn session_wait_settles_while_a_subagent_is_working() {
     let (app, _actions, _snapshot_tx, _bundles) =

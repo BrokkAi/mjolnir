@@ -8,7 +8,7 @@ use mj_core::subagent::SubagentKind;
 type Children<'a> = BTreeMap<String, Vec<(&'a str, Option<SubagentKind>)>>;
 
 fn is_active_member(record: &SessionRecord) -> bool {
-    (record.state.has_live_worker() || record.state == SessionState::Parked) && !record.archived
+    !record.archived
 }
 
 fn children(runtime: &RuntimeProjection) -> Children<'_> {
@@ -22,9 +22,6 @@ fn children(runtime: &RuntimeProjection) -> Children<'_> {
         }
     }
     for (id, child) in &runtime.native_agents {
-        if child.agent.state != NativeAgentState::Running {
-            continue;
-        }
         let parent = child.agent.parent_view_id();
         children.entry(parent).or_default().push((id, None));
     }
@@ -583,19 +580,18 @@ pub(crate) fn project_activity(
                 if !seen.insert(descendant) {
                     continue;
                 }
-                if let Some(native) = runtime.native_agents.get(descendant) {
-                    let agent = &native.agent;
-                    let stable_id = agent.stable_id.as_ref().unwrap_or(&agent.session_id);
-                    native_working.insert((&agent.owner_session_id, stable_id));
-                    if descendant == child {
-                        direct_native_working.insert(stable_id);
-                    }
-                    branch_working = true;
-                    branch_unfinished = true;
-                } else if let Some(own) = own_of(descendant) {
-                    verdict.working_descendants += usize::from(own.working);
+                if let Some(own) = own_of(descendant) {
                     branch_working |= own.working;
                     branch_unfinished |= own.unfinished;
+                    if own.working {
+                        if let Some(native) = runtime.native_agents.get(descendant) {
+                            let agent = &native.agent;
+                            let stable_id = agent.stable_id.as_ref().unwrap_or(&agent.session_id);
+                            native_working.insert((&agent.owner_session_id, stable_id));
+                        } else {
+                            verdict.working_descendants += 1;
+                        }
+                    }
                 }
                 pending.extend(
                     children
@@ -610,6 +606,11 @@ pub(crate) fn project_activity(
                 verdict.working_children += usize::from(
                     matches!(kind, SubagentKind::Worker | SubagentKind::Oracle) && branch_working,
                 );
+            } else if branch_working && let Some(native) = runtime.native_agents.get(child) {
+                // Count the branch once, even if its root has already settled.
+                let agent = &native.agent;
+                let stable_id = agent.stable_id.as_ref().unwrap_or(&agent.session_id);
+                direct_native_working.insert((&agent.owner_session_id, stable_id));
             }
         }
         verdict.working_descendants += native_working.len();

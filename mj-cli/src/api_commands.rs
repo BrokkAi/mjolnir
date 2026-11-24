@@ -2414,7 +2414,8 @@ fn listed_state(session: &ApiSession) -> String {
     let mut state = session.state.clone();
     if let Some(attention) = attention {
         state.push_str(&format!(" ({attention})"));
-    } else if session.working_subagents > 0 {
+    }
+    if session.working_subagents > 0 {
         let worker_state = if session.is_idle { "idle" } else { "working" };
         let subagents = mj_core::text::counted(session.working_subagents, "subagent", "subagents");
         state.push_str(&format!(" ({worker_state}, {subagents} working)"));
@@ -4971,7 +4972,16 @@ mod tests {
         );
 
         session.attention = SessionAttention::NeedsInput;
-        assert_eq!(listed_state(&session), "running (needs input)");
+        assert_eq!(
+            listed_state(&session),
+            "running (needs input) (working, 2 subagents working)"
+        );
+        session.is_idle = true;
+        session.working_subagents = 1;
+        assert_eq!(
+            listed_state(&session),
+            "running (needs input) (idle, 1 subagent working)"
+        );
     }
 
     /// precision-3260: sessions on a full disk read as "unreachable" with

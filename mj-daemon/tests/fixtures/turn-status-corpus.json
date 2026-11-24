@@ -923,6 +923,61 @@
     }
   },
   {
+    "name": "native-running-under-completed-native",
+    "description": "An idle owner has a running native grandchild beneath a completed native parent.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [
+      {
+        "owner": "parent",
+        "parent_session_id": null,
+        "session_id": "native-completed",
+        "stable_id": null,
+        "state": "completed",
+        "pending_input": false
+      },
+      {
+        "owner": "parent",
+        "parent_session_id": null,
+        "session_id": "native-disconnected",
+        "stable_id": null,
+        "state": "disconnected",
+        "pending_input": false
+      },
+      {
+        "owner": "parent",
+        "parent_session_id": "native-completed",
+        "session_id": "native-grandchild",
+        "stable_id": "nested-task",
+        "state": "running",
+        "pending_input": false
+      }
+    ],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
     "name": "native-settled-control",
     "description": "Retained completed and disconnected native tasks do not keep their owner busy.",
     "sessions": [
@@ -1535,6 +1590,74 @@
         "subtree_idle": false,
         "working_subagents": 0,
         "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-running-stopped-child",
+    "description": "An idle parent has a stopped managed child with an active review.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "stopped",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closed"
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "child-worker",
+        "phase": {
+          "phase": "running",
+          "roles": []
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "closed"
       }
     }
   },
