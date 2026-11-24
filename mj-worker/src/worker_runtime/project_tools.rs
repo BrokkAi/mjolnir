@@ -675,10 +675,7 @@ mod tests {
             let git_gh = git_bin.join("gh");
             std::fs::write(&git_gh, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(&git_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-            environment.insert(
-                "MJ_GITHUB_CLI_BIN".into(),
-                git_bin.display().to_string(),
-            );
+            environment.insert("MJ_GITHUB_CLI_BIN".into(), git_bin.display().to_string());
             super::super::restore_mbx_launcher(root, None, &mut environment).unwrap();
             let check = |env: &BTreeMap<String, String>, reset: bool| {
                 let script = "command -v cargo; command -v mbx";

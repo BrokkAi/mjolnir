@@ -18826,6 +18826,7 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
     config
         .targets
         .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.save().unwrap();
     for (id, state) in [
         ("interrupted", SessionState::Disconnected),
         ("running-peer", SessionState::Running),
@@ -18837,8 +18838,7 @@ async fn first_worker_target_publication_excludes_an_owned_interrupted_create() 
         }));
         mj_controller::database::save_new_session(&record, None, false, false).unwrap();
     }
-    let mut controller = Controller::load().unwrap();
-    controller.config = config;
+    let controller = Controller::load().unwrap();
     let mut state = test_runtime_state_with(controller);
     Arc::get_mut(&mut state).unwrap().committed =
         Some(mj_controller::database::subscribe_committed_state().unwrap());
