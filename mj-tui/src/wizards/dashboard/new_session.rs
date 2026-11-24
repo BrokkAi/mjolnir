@@ -31,6 +31,21 @@ impl DashboardState {
     ) -> DashboardAction {
         match wizard.step {
             WizardStep::Profile => {
+                if let Some(provider) = wizard.selected_provider(self) {
+                    if wizard.profile_selection_request.is_some() {
+                        self.mode = Mode::New(wizard);
+                        return DashboardAction::None;
+                    }
+                    self.invalidate_session_preflight();
+                    let generation = self.session_preflight_generation();
+                    wizard.profile_selection_request = Some(generation);
+                    self.notices.set("Selecting profile…");
+                    self.mode = Mode::New(wizard);
+                    return DashboardAction::SelectProviderProfile {
+                        provider,
+                        generation,
+                    };
+                }
                 wizard.step = WizardStep::Target;
                 if self.skip_target_step(&mut wizard) {
                     return self.advance_new_wizard(wizard);
@@ -137,6 +152,53 @@ impl DashboardState {
             WizardStep::NewBundle => unreachable!("bundle input is handled above"),
             WizardStep::ProjectDirectory => {
                 unreachable!("project directory input is handled above")
+            }
+        }
+    }
+
+    /// Only the current provider request may choose a profile or advance its page.
+    pub fn apply_provider_profile_selection(
+        &mut self,
+        generation: u64,
+        result: Result<String, String>,
+    ) -> DashboardAction {
+        if generation != self.session_preflight_generation()
+            || !matches!(&self.mode, Mode::New(wizard)
+                if wizard.step == WizardStep::Profile
+                    && wizard.profile_selection_request == Some(generation))
+        {
+            return DashboardAction::None;
+        }
+        let Mode::New(mut wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            unreachable!();
+        };
+        wizard.profile_selection_request = None;
+        let result = result.and_then(|id| {
+            (0..self.new_wizard_profile_count())
+                .find(|index| self.new_wizard_profile_id(*index).as_deref() == Some(&id))
+                .ok_or_else(|| {
+                    format!("Selected profile {id} is no longer available. Choose a profile again.")
+                })
+        });
+        match result {
+            Ok(index) => {
+                wizard.set_profile(index);
+                let profile = wizard.selected_profile_id(self).expect("selected above");
+                let remembered = self.state.remembered_subagent_policy_for(&profile);
+                wizard.subagents.refresh_create(
+                    &profile,
+                    &self.config,
+                    remembered.as_ref(),
+                    self.state.last_oracle_choice_for(&profile),
+                );
+                self.notices.clear();
+                self.advance_new_wizard(wizard)
+            }
+            Err(error) => {
+                self.notices
+                    .set(format!("Could not select profile: {error}"));
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
             }
         }
     }

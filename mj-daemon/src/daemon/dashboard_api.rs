@@ -9,6 +9,30 @@ use mj_core::state::{MaterializedSession, MaterializedSessionSummary, Transcript
 use mj_core::workspace::{ConversationLayout, PaneSize, PaneSizes};
 
 impl DashboardBackend for RuntimeState {
+    fn select_provider_profile(
+        &self,
+        provider: mj_core::config::QuotaProvider,
+    ) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let config = self.owner().controller().config.clone();
+            let backend: Arc<dyn crate::server::api::SubagentBackend> = self
+                .quota_report_backend()
+                .context("session selection backend is unavailable")?;
+            let selected = crate::server::api::resolve_provider_session_selection(
+                &backend,
+                &config,
+                &provider,
+                // The person chooses a target after choosing a profile.
+                mj_core::config::ExecutionPolicy::Unconstrained,
+                None,
+            )
+            .await
+            .map_err(|failure| anyhow::anyhow!(failure.message))?;
+            // Browsing the remaining pages must not hold quota headroom.
+            Ok(selected.profile_id)
+        })
+    }
+
     fn dashboard_startup(
         &self,
         client_id: String,

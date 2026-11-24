@@ -618,6 +618,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_profile_selection_reads_the_daemons_profile_and_surfaces_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "secret",
+        )
+        .unwrap();
+        let server = async {
+            for (status, body) in [
+                ("200 OK", "\"codex-2\""),
+                ("409 Conflict", r#"{"error":"provider unavailable"}"#),
+            ] {
+                let (request, path, _, body_bytes) = read_request(&listener).await;
+                assert_eq!(path, "POST /api/v1/profiles/select HTTP/1.1");
+                assert_eq!(
+                    serde_json::from_slice::<mj_core::config::QuotaProvider>(&body_bytes).unwrap(),
+                    mj_core::config::QuotaProvider::OpenAI
+                );
+                respond(request, status, body).await;
+            }
+        };
+        let (_, ()) = tokio::join!(server, async {
+            assert_eq!(
+                client
+                    .select_provider_profile(mj_core::config::QuotaProvider::OpenAI)
+                    .await
+                    .unwrap(),
+                "codex-2"
+            );
+            assert!(
+                client
+                    .select_provider_profile(mj_core::config::QuotaProvider::OpenAI)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("provider unavailable")
+            );
+        });
+    }
+
+    #[tokio::test]
     async fn runtime_changes_reads_reset_and_exposes_shutdown_without_replay() {
         use crate::runtime_feed::RuntimeFrame;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

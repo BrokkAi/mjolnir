@@ -246,6 +246,7 @@ impl WizardDraft for NewWizard {
     fn set_profile(&mut self, index: usize) {
         self.profile = index;
         self.focused_provider = None;
+        self.profile_selection_request = None;
     }
 
     fn target(&self) -> usize {
@@ -597,8 +598,7 @@ impl WizardDraft for NewWizard {
                         ) && let Some(ProfilePickerItem::Profile { profile_index, .. }) =
                             items.get(pos + 1)
                         {
-                            self.focused_provider = None;
-                            self.profile = *profile_index;
+                            self.set_profile(*profile_index);
                         }
                     }
                 }
@@ -666,9 +666,10 @@ impl WizardDraft for NewWizard {
     }
 
     fn profile_advance_enabled(&self, dashboard: &DashboardState) -> bool {
-        !self
-            .effective_focused_provider(dashboard)
-            .is_some_and(|provider| Self::is_resolving_provider(&provider))
+        self.profile_selection_request.is_none()
+            && !self
+                .effective_focused_provider(dashboard)
+                .is_some_and(|provider| Self::is_resolving_provider(&provider))
     }
 
     fn select_profile_row(
@@ -677,6 +678,7 @@ impl WizardDraft for NewWizard {
         row: usize,
         toggle_provider: bool,
     ) {
+        self.profile_selection_request = None;
         let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
         match items.get(row) {
             Some(ProfilePickerItem::Auto) => {

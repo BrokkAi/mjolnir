@@ -140,6 +140,7 @@ impl DashboardState {
             profile,
             expanded_providers,
             focused_provider: None,
+            profile_selection_request: None,
             bundle,
             target,
             target_step_skipped: false,

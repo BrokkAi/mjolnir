@@ -352,6 +352,10 @@ pub enum DashboardAction {
         key: String,
         config: String,
     },
+    SelectProviderProfile {
+        provider: mj_core::config::QuotaProvider,
+        generation: u64,
+    },
     /// Read the session checkout's branch and changed files on its target.
     /// The host runs it off the loop and answers with `set_git_status`.
     ProbeGitStatus {

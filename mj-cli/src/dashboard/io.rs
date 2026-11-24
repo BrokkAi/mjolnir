@@ -39,6 +39,10 @@ use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, Lifecy
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    ProviderProfileSelection {
+        generation: u64,
+        result: std::result::Result<String, String>,
+    },
     RuntimeConfirmationMissing(String),
     OperatorAway {
         away: bool,
@@ -1049,6 +1053,10 @@ impl DashboardContext {
                     }
                 }
             },
+            DashboardIoUpdate::ProviderProfileSelection { generation, result } => {
+                let action = self.dashboard.apply_provider_profile_selection(generation, result);
+                self.ui_request_actions.push(action);
+            }
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
             DashboardIoUpdate::RemotePreflight {
                 generation,

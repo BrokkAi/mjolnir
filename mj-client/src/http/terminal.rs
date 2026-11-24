@@ -33,6 +33,13 @@ pub struct ContainerSettingsResponse {
 }
 
 impl HttpDaemonClient {
+    pub async fn select_provider_profile(
+        &self,
+        provider: mj_core::config::QuotaProvider,
+    ) -> Result<String> {
+        self.post_json("/api/v1/profiles/select", &provider).await
+    }
+
     pub async fn dashboard_startup(
         &self,
         client_id: String,
