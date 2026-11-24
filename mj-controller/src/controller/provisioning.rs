@@ -22,7 +22,7 @@ use super::backend::{
     configure_github_token_environment, preflight_target, use_github_https_urls,
 };
 use super::git_cache;
-use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
+use super::readiness::{connect_started_worker_status, wait_for_native_session_in_stage};
 use super::worker_binary::{
     bridge_readiness_stage, start_worker_durably_with_aws_profile, worker_probe_diagnosis,
 };
@@ -261,6 +261,9 @@ impl Controller {
             }
             .await;
             let committed = start.and_then(|native_session_id| {
+                mj_core::runtime::off_async_worker(|| {
+                    mj_core::test_hooks::reach_test_hook("create_before_running_commit")
+                })?;
                 grant_commit()?;
                 Ok(native_session_id)
             });
@@ -427,6 +430,8 @@ impl Controller {
         }
         record.state = SessionState::Provisioning;
         record.last_error = None;
+        record.acp_session_title = None;
+        record.native_session_id = None;
         record.updated_at = now();
         crate::database::reset_session_for_create_retry(record)
     }
@@ -1226,8 +1231,14 @@ impl Controller {
                         &self.config.github,
                         Some(staged_aws_profile),
                     )?;
-                    connect_started_worker(reconnect, session_id, executor, backend, worker_root)
-                        .await?
+                    connect_started_worker_status(
+                        reconnect,
+                        session_id,
+                        executor,
+                        backend,
+                        worker_root,
+                    )
+                    .await?
                 };
                 let native_session_id = wait_for_native_session_in_stage(
                     &mut relay,
