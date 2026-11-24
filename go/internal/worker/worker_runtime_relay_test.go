@@ -6068,6 +6068,34 @@ func TestOversizedResponseIsRejectedBeforeWriting(t *testing.T) {
 	}
 }
 
+// Hard-won: 390e88f94: the Go worker answered command_retention_status with
+// "operation_ids":null, which the Rust daemon refused, so no session started.
+// The frames were recorded from the Rust worker at 3dde0c11b (a fresh OpenCode
+// session's control socket); a fresh Go relay must answer each request with
+// the same bytes.
+func TestAFreshRelayAnswersAsTheRustWorkerDid(t *testing.T) {
+	recorded := runtimeRelayReadFile(t, filepath.Join("testdata", "rust_worker_exchange", "fresh_relay_frames.txt"))
+	frames := strings.Split(strings.TrimSuffix(string(recorded), "\n"), "\n")
+	if len(frames) == 0 || len(frames)%2 != 0 {
+		t.Fatalf("the recording holds %d frames, not request and response pairs", len(frames))
+	}
+	relay := runtimeRelayCell(t, t.TempDir(), "2.74.0")
+	for pair := 0; pair < len(frames); pair += 2 {
+		request, want := frames[pair], frames[pair+1]
+		decoded, known := core.DecodeRelayRequest([]byte(request)).(core.DecodedRelayRequestKnown)
+		if !known {
+			t.Fatalf("the Go relay cannot decode %s", request)
+		}
+		response, err := handleRequest(context.Background(), relay, *decoded.Envelope, nil)
+		runtimeRelayMust(t, err)
+		var written bytes.Buffer
+		runtimeRelayMust(t, writeResponse(&written, &response))
+		if got := strings.TrimSuffix(written.String(), "\n"); got != want {
+			t.Errorf("%s\nGo answered   %s\nRust answered %s", request, got, want)
+		}
+	}
+}
+
 func TestRequestLineLimitIsEnforcedWhileTheLineIsRead(t *testing.T) {
 	maximum := 64 * 1024
 	exactInput := append(bytes.Repeat([]byte{'1'}, maximum), []byte("\nnext\n")...)
