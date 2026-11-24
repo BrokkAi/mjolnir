@@ -17281,7 +17281,10 @@ async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
             },
         }));
     mj_controller::database::save_materialized_session(&conversation).unwrap();
-    sessionwiki::index::open().unwrap();
+    // This test pauses synchronization before migration; start with the runtime tokenizer.
+    let index = sessionwiki::index::open().unwrap();
+    sessionwiki::index::set_tokenizer_spec(&index, "porter unicode61").unwrap();
+    drop(index);
     let state = test_runtime_state_loading_the_store();
     let waiting_state = Arc::clone(&state);
     let waiting =

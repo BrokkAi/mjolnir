@@ -10,6 +10,7 @@ use sessionwiki::redact::redact;
 /// One message as `read_session` shows it: `i` is its 0-based position in the
 /// session's messages ordered by row id, and `text` is already redacted.
 pub(super) struct IndexedMessage {
+    pub id: i64,
     pub i: usize,
     pub role: &'static str,
     pub text: String,
@@ -48,8 +49,9 @@ pub(super) fn load(
         .context("query session messages")?;
     let mut messages = Vec::new();
     for (i, row) in rows.enumerate() {
-        let (_, role, raw) = row.context("read a session message")?;
+        let (id, role, raw) = row.context("read a session message")?;
         messages.push(IndexedMessage {
+            id,
             i,
             role: match role.as_str() {
                 "user" => "user",

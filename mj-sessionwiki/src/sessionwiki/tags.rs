@@ -168,6 +168,8 @@ pub mod testing {
             std::env::set_var("SESSIONWIKI_DATA", directory.path());
         }
         let connection = sessionwiki::index::open().expect("open a fresh index");
+        sessionwiki::index::set_tokenizer_spec(&connection, super::super::TARGET_TOKENIZER)
+            .expect("set runtime tokenizer");
         (directory, connection)
     }
 

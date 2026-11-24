@@ -315,6 +315,7 @@ fn query(request: &HistoryRequest, budget: &QueryBudget) -> Result<Value> {
     request.query.validate()?;
     let mut connection = super::readable_index()?.with_context(super::unreadable_reason)?;
     connection.busy_timeout(Duration::from_secs(2))?;
+    super::wait_for_tokenizer(&connection, budget.deadline, &budget.cancel)?;
     budget.install(&mut connection)?;
     let ownership = super::top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
@@ -729,6 +730,7 @@ mod tests {
     #[test]
     fn transcript_pages_preserve_unicode_indices_and_continue_inside_large_messages() {
         let messages = [indexed_messages::IndexedMessage {
+            id: 1,
             i: 0,
             role: "user",
             text: "é🙂abcdef".into(),
