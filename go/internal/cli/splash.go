@@ -11,9 +11,14 @@
 package cli
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -59,11 +64,19 @@ type splashLoad[T any] struct {
 // does not load (normal startup reports that), it is the terminal's own
 // guess.
 func splashWanted() bool {
-	panic("unported: mj-cli/src/splash.rs wanted")
+	if chat.NoColorRequested() || symbolsForSplash(core.ConfigPath()) != core.SymbolSetUnicode {
+		return false
+	}
+	width, _, err := term.GetSize(os.Stdout.Fd())
+	return err == nil && tui.Fits(width)
 }
 
 func symbolsForSplash(configPath string) core.SymbolSet {
-	panic("unported: mj-cli/src/splash.rs symbols_for_splash")
+	var configured *core.SymbolSet
+	if config, err := core.ConfigLoadFrom(configPath); err == nil {
+		configured = config.Advanced.Symbols
+	}
+	return chat.SymbolsFor(configured)
 }
 
 // splashPlayback is one showing of the splash: its clock, and what it waits
@@ -110,6 +123,74 @@ func isInterrupt(event tea.Msg) bool {
 // value and the playback, still running, for the dashboard to finish.
 // background names the color the splash dissolves into, from the loaded
 // value.
+//
+// A JoinHandle cannot be aborted, so on Cancelled, Failed or an error the
+// caller cancels the context it started loading under, which is Rust's
+// `loading.abort()`.
 func playUntilLoaded[T any](screen *dashboardScreen, loading *core.JoinHandle[splashLoad[T]], background func(*T) chat.Color) (splashOutcome[T], error) {
-	panic("unported: mj-cli/src/splash.rs play_until_loaded")
+	route, notices := openStartupNoticeRoute()
+	defer route.Close()
+	playback := startSplashPlayback()
+	draw := func() error {
+		if err := screen.terminal.draw(playback.render); err != nil {
+			return fmt.Errorf("draw the startup splash: %w", err)
+		}
+		return nil
+	}
+	// A Tokio interval's first tick is immediate.
+	if err := draw(); err != nil {
+		return splashOutcome[T]{}, err
+	}
+	frames := time.NewTicker(splashFrame)
+	defer frames.Stop()
+	// The notice route is an unbounded channel read by context; forward it
+	// into the select below, and stop the forwarder when this returns.
+	noticeCtx, stopNotices := context.WithCancel(context.Background())
+	defer stopNotices()
+	noticeCh := make(chan string)
+	go func() {
+		for {
+			notice, ok := notices.Recv(noticeCtx)
+			if !ok {
+				return
+			}
+			select {
+			case noticeCh <- notice:
+			case <-noticeCtx.Done():
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-frames.C:
+			if err := draw(); err != nil {
+				return splashOutcome[T]{}, err
+			}
+		case <-loading.Done():
+			loaded, err := loading.Join(context.Background())
+			if err != nil {
+				return splashOutcome[T]{kind: splashFailed, err: fmt.Errorf("dashboard startup task failed: %w", err)}, nil
+			}
+			if loaded.err != nil {
+				return splashOutcome[T]{kind: splashFailed, err: loaded.err}, nil
+			}
+			playback.markReady(background(&loaded.value))
+			return splashOutcome[T]{kind: splashReady, value: loaded.value, playback: playback}, nil
+		case notice := <-noticeCh:
+			playback.status = &notice
+		case <-screen.termination.Done():
+			return splashOutcome[T]{kind: splashCancelled}, nil
+		case event, ok := <-screen.events:
+			switch {
+			case !ok:
+				return splashOutcome[T]{}, errors.New("terminal input closed during the startup splash")
+			case event.err != nil:
+				return splashOutcome[T]{}, fmt.Errorf("read terminal input during the startup splash: %w", event.err)
+			case isInterrupt(event.msg):
+				return splashOutcome[T]{kind: splashCancelled}, nil
+			}
+			// There is no dashboard yet to take other input.
+		}
+	}
 }

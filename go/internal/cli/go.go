@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -46,4 +47,11 @@ func resolveGoWorkspace(ctx context.Context, daemon *client.DaemonClient, mode *
 // Declared for the dashboard (slice 2b).
 func savedWorkspaceModes() ([]tui.GoMode, error) {
 	panic("unported: mj-cli/src/go.rs saved_workspace_modes")
+}
+
+// resolveGoRecipe is go.rs's resolve_recipe: a saved fast-start recipe made
+// ready to launch from directory. Blocking. Declared for the dashboard
+// (slice 2b).
+func resolveGoRecipe(config *core.Config, directory string, recipe core.GoRecipe) (core.GoRecipe, error) {
+	panic("unported: mj-cli/src/go.rs resolve_recipe")
 }

@@ -6,10 +6,17 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"log/slog"
+	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/term"
+	"golang.org/x/sys/unix"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
 )
@@ -27,7 +34,34 @@ const terminalBackgroundQuery = "\x1b]11;?\x1b\\\x1b[c"
 // is the terminal, otherwise the controlling terminal. The bytes are not
 // logged: keys typed while mj starts arrive here too.
 func askTerminalBackground() (*chat.Rgb, error) {
-	panic("unported: mj-cli/src/terminal_background.rs unix::ask")
+	input := int(os.Stdin.Fd())
+	if !term.IsTerminal(os.Stdin.Fd()) {
+		tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		defer tty.Close()
+		input = int(tty.Fd())
+	}
+	if _, err := os.Stdout.WriteString(terminalBackgroundQuery); err != nil {
+		return nil, err
+	}
+	asked := time.Now()
+	replies, err := readTerminalReplies(input, asked.Add(terminalBackgroundAnswerTimeout))
+	if err != nil {
+		return nil, err
+	}
+	background := backgroundReply(replies)
+	unread, _ := unix.IoctlGetInt(input, terminalFionread)
+	_, attributes := attributesReplyEnd(replies)
+	slog.Debug("asked the terminal for its background color",
+		"waited_ms", time.Since(asked).Milliseconds(),
+		"received_bytes", len(replies),
+		"unread_bytes", unread,
+		"attributes_reply", attributes,
+		"reported", background != nil,
+	)
+	return background, nil
 }
 
 // readTerminalReplies reads one byte at a time from input, so nothing after
@@ -39,7 +73,51 @@ func askTerminalBackground() (*chat.Rgb, error) {
 // after it asked, on a machine that is paging for instance, still finds the
 // answer the terminal gave in time.
 func readTerminalReplies(input int, deadline time.Time) ([]byte, error) {
-	panic("unported: mj-cli/src/terminal_background.rs unix::read_replies")
+	replies := []byte{}
+	for {
+		if _, done := attributesReplyEnd(replies); done {
+			return replies, nil
+		}
+		remaining := max(time.Until(deadline), 0)
+		// Zero once the deadline has passed, which asks only for what is
+		// already here.
+		wait := (remaining.Microseconds() + 999) / 1000
+		if wait > math.MaxInt32 {
+			wait = math.MaxInt32
+		}
+		poll := []unix.PollFd{{Fd: int32(input), Events: unix.POLLIN}}
+		ready, err := unix.Poll(poll, int(wait))
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return nil, err
+		}
+		if ready == 0 {
+			if remaining == 0 {
+				return replies, nil
+			}
+			continue
+		}
+		var buffer [1]byte
+		read, err := unix.Read(input, buffer[:])
+		switch {
+		case err == nil && read == 1:
+			replies = append(replies, buffer[0])
+		case err == nil:
+			return replies, nil
+		case errors.Is(err, unix.EINTR):
+			continue
+		// Readiness without a byte: wait again while there is time, and
+		// stop once there is none.
+		case errors.Is(err, unix.EAGAIN) && remaining == 0:
+			return replies, nil
+		case errors.Is(err, unix.EAGAIN):
+			continue
+		default:
+			return nil, err
+		}
+	}
 }
 
 // attributesReplyEnd is where a DA1 reply (`ESC [ ? <digits and ;> c`) ends
