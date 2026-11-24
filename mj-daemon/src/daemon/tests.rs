@@ -18409,7 +18409,7 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
     fs::write(
         &script,
         format!(
-            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec /bin/sleep 600\n",
             mj_core::targets::posix_quote(&started.to_string_lossy())
         ),
     )
