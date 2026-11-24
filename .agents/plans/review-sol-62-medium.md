@@ -20,7 +20,7 @@ The medium comparison is complete and published. The user then requested the sam
 - [x] (2026-11-24 01:32Z) Registered and audited exactly 70 Sol 6.2 low reviews as arm P, one per original diff, at executor concurrency 16. No failed jobs or retries; 70 live runtime/prompt clocks and matching completed turns, three explicit no-findings handbacks, peak 12 overlapping reviewer turns.
 - [x] (2026-11-24) Completed all 34 verify8 judges at concurrency 16 without failures or retries. Audited all 501 sessions, 881 raw findings, and 70 diffs; old rounds' checksum manifests remain intact. Scoring produced 333 groups, including 305 confirmed.
 - [x] (2026-11-24) Independently checked exact source/group mappings, all 35 severity totals, all 20 paired bootstrap comparisons, model attribution, timing/price, and published exports. The severity/price/latency readout is complete in the worktree.
-- [ ] Commit the low-effort results, obtain required review, and push.
+- [x] (2026-11-24) Committed the low-effort results in `424f9dde5`, added historical judge disclosure in `3e6b38ad3`, passed review, and pushed both to origin/master.
 
 ## Surprises & Discoveries
 
@@ -81,7 +81,7 @@ Verify8 completed all 34 judges at concurrency 16 with the same Neon/medium spec
 
 Final independently reconstructed verify8 totals are 50.00 for Sol 6.1 medium, 256.00 for Sol 6.2 medium, and 155.00 for Sol 6.2 low. With two Terra/high reviewers, the respective totals are 135.83, 278.67, and 197.67. Low has 125 high/medium findings solo and 163.17 with Terra; its high-only counts are 24.00 and 28.67. Recorded solo timing/cost is 46.0 seconds/$0.120 for low versus 106.3 seconds/$0.252 for medium. With Terra, low is 52.1 seconds/$0.207 versus medium 109.5 seconds/$0.339. These are fresh same-round comparisons; the earlier verify7 medium total of 259 must not be mixed into verify8 contrasts.
 
-The independent audit exactly reproduced all 35 severity totals and all 20 paired comparison outputs from raw inputs, including the 70 P durable low-effort selections and 34 Neon judge selections. It found no integrity defect. All 501 session clocks and usage rows match, ten exports are byte-identical, and 382 prior-round checksums pass. Low versus 6.1 medium gains 105 confirmed solo and 61.83 with Terra, while trailing 6.2 medium by 101 solo and 81 with Terra. For high-impact findings alone with Terra, the gain over 6.1 medium is only 3.00, with a 95% interval of −1.00 to +7.83. The readout and supporting data are in `.agents/evals/review-arms/results/sol-62-low/`; final commit/review/push remains.
+The independent audit exactly reproduced all 35 severity totals and all 20 paired comparison outputs from raw inputs, including the 70 P durable low-effort selections and 34 Neon judge selections. It found no integrity defect. All 501 session clocks and usage rows match, ten exports are byte-identical, and 382 prior-round checksums pass. Low versus 6.1 medium gains 105 confirmed solo and 61.83 with Terra, while trailing 6.2 medium by 101 solo and 81 with Terra. For high-impact findings alone with Terra, the gain over 6.1 medium is only 3.00, with a 95% interval of −1.00 to +7.83. The readout and supporting data are in `.agents/evals/review-arms/results/sol-62-low/`. Result commit `424f9dde5` and disclosure commit `3e6b38ad3` passed review and reached origin/master. All requested medium and low comparisons are complete.
 
 ## Context and Orientation
 
