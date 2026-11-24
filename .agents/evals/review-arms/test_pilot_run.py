@@ -1103,9 +1103,9 @@ if not (attempt / "recover").exists():
                 active_count += 1
                 max_active = max(max_active, active_count)
                 started.append(key)
-                if job["kind"] == "reviewer" and job["arm"] != "N":
-                    writer_key = f"{job['diff']}/{job['arm']}/r{job['replicate']}/writer"
-                    if writer_key not in done:
+                if job["kind"] == "reviewer":
+                    all_writers = {m["job"] for m in groups["mjolnir/first"] if m["kind"] == "writer"}
+                    if not all_writers <= done:
                         reviewer_order_ok = False
             try:
                 if job["kind"] == "writer":
@@ -1172,11 +1172,11 @@ if not (attempt / "recover").exists():
     def test_concurrent_matrix_observes_completed_failure_before_refilling(self):
         import threading
 
-        groups = pilot.select_jobs(self.manifest, diff="mjolnir/first", arms=["N", "G", "R"])
+        groups = pilot.select_jobs(self.manifest, diff="mjolnir/first", arms=["G", "R", "R-loc"])
         done = set()
         started = []
         lock = threading.Lock()
-        first_done_in_complete = threading.Event()
+        probing_third = threading.Event()
         second_finished = threading.Event()
         both_running = threading.Barrier(2, timeout=5)
 
@@ -1184,9 +1184,12 @@ if not (attempt / "recover").exists():
             key = job["job"]
             with lock:
                 is_done = key in done
-            if key == "mjolnir/first/G/r1/writer" and is_done:
-                first_done_in_complete.set()
+                g_done = "mjolnir/first/G/r1/writer" in done
+            if key == "mjolnir/first/R-loc/r1/writer" and g_done and not is_done:
+                probing_third.set()
                 second_finished.wait(timeout=5)
+                # Give the worker future a tick to mark itself done after returning.
+                threading.Event().wait(0.02)
             return is_done
 
         def execute(job):
@@ -1200,9 +1203,9 @@ if not (attempt / "recover").exists():
                 return "done"
             if key == "mjolnir/first/R/r1/writer":
                 both_running.wait()
-                first_done_in_complete.wait(timeout=5)
+                probing_third.wait(timeout=5)
                 try:
-                    return "interrupted: peer failed during validation"
+                    return "interrupted: peer failed during refill"
                 finally:
                     second_finished.set()
             with lock:
