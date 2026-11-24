@@ -1233,10 +1233,9 @@ func parseStorageConfig(text string) (mbxStorageConfig, error) {
 	var config mbxStorageConfig
 	if _, err := toml.Decode(text, &document); err != nil {
 		var parseErr toml.ParseError
-		if errors.As(err, &parseErr) {
-			return config, fmt.Errorf("parse mbx storage configuration at line %d: %s", parseErr.Position.Line, parseErr.Message)
+		if errors.As(err, &parseErr) && parseErr.Position.Line > 0 {
+			return config, fmt.Errorf("parse mbx storage configuration at line %d: invalid TOML", parseErr.Position.Line)
 		}
-		// Other decoder errors have no guaranteed source-free representation.
 		return config, fmt.Errorf("parse mbx storage configuration: invalid TOML")
 	}
 	if v, exists := document["cache_dir"]; exists {

@@ -1079,12 +1079,9 @@ fn parse_storage_config(text: &str) -> Result<MbxStorageConfig> {
                 .filter(|&&byte| byte == b'\n')
                 .count()
                 + 1;
-            anyhow::anyhow!(
-                "parse mbx storage configuration at line {line}: {}",
-                error.message()
-            )
+            anyhow::anyhow!("parse mbx storage configuration at line {line}: invalid TOML")
         } else {
-            anyhow::anyhow!("parse mbx storage configuration: {}", error.message())
+            anyhow::anyhow!("parse mbx storage configuration: invalid TOML")
         }
     })?;
     let string_path = |value: &toml::Value, name: &str| -> Result<PathBuf> {
@@ -2114,15 +2111,19 @@ mod tests {
                     .is_err()
             );
         }
-        let text = "# config\ncache_dir = \"https://user:super-secret-token@example.com\" invalid";
-        std::fs::write(&path, text).unwrap();
-        let error = resolve_local_storage_paths(None, None, Some(text), None)
-            .with_context(|| format!("resolve mbx config {}", path.display()))
-            .unwrap_err();
-        let error = format!("{error:#}");
-        assert!(error.contains(&path.display().to_string()));
-        assert!(error.contains("line 2"), "{error}");
-        assert!(!error.contains("super-secret-token"), "{error}");
+        for text in [
+            "# config\ncache_dir = \"https://user:super-secret-token@example.com\" invalid",
+            "# config\n\"https://user:super-secret-token@example.com\" = 1\n\"https://user:super-secret-token@example.com\" = 2",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let error = resolve_local_storage_paths(None, None, Some(text), None)
+                .with_context(|| format!("resolve mbx config {}", path.display()))
+                .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains(&path.display().to_string()));
+            assert!(error.contains("at line "), "{error}");
+            assert!(!error.contains("super-secret-token"), "{error}");
+        }
         std::fs::remove_file(&path).unwrap();
         #[cfg(unix)]
         {

@@ -1038,11 +1038,15 @@ func TestStorageConfigRejectsBrokenFiles(t *testing.T) {
 			t.Fatalf("accepted %q", text)
 		}
 	}
-	text := "# config\ncache_dir = \"https://user:super-secret-token@example.com\" invalid"
-	_, err := resolveLocalStoragePaths(nil, nil, &text, nil)
-	message := fmt.Sprintf("resolve mbx config %s: %v", path, err)
-	if err == nil || !strings.Contains(message, path) || !strings.Contains(message, "line 2") || strings.Contains(message, "super-secret-token") {
-		t.Fatal(message)
+	for _, text := range []string{
+		"# config\ncache_dir = \"https://user:super-secret-token@example.com\" invalid",
+		"# config\n\"https://user:super-secret-token@example.com\" = 1\n\"https://user:super-secret-token@example.com\" = 2",
+	} {
+		_, err := resolveLocalStoragePaths(nil, nil, &text, nil)
+		message := fmt.Sprintf("resolve mbx config %s: %v", path, err)
+		if err == nil || !strings.Contains(message, path) || !strings.Contains(message, "at line ") || strings.Contains(message, "super-secret-token") {
+			t.Fatal(message)
+		}
 	}
 	if runtime.GOOS != "windows" {
 		if err := os.Symlink(path+"-missing", path); err != nil {
