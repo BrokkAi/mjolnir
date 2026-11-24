@@ -200,11 +200,11 @@ def render(results, output, *, cost):
                  ha="right", va="center")
         key.text(columns["cost"], y, cost_text, fontsize=9.5, color=MUTED,
                  ha="right", va="center")
-        for label, column in (("All confirmed", "All"),
-                              ("Medium or high", "Medium or high"),
-                              ("High only", "High only")):
+        for (label, color, points), column in zip(
+                series, ("All", "Medium or high", "High only")):
+            if not points[option][2] and option not in EXTRAS:
+                continue
             value = float(key_values[label][option]["findings"])
-            color = next(color for name, color, _ in series if name == label)
             key.text(columns[column], y, format(value, finding_format), fontsize=9.5,
                      color=color, ha="right", va="center")
 
