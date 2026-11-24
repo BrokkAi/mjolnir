@@ -104,7 +104,7 @@ rusqlite = { version = "0.41", features = ["backup", "bundled", "fallible_uint",
 ruzstd = "0.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive", "rc", "alloc"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 # Names config-file keys that no field reads; see `Config::load_from`.
 serde_ignored = "0.1"
 sha2 = "0.11"

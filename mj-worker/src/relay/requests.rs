@@ -2,6 +2,7 @@ use super::*;
 
 impl DurableRelay {
     /// Validate the authoritative scan and reserve its idle state under one lock.
+    #[cfg(unix)]
     pub(crate) fn reserve_idle_after_antigravity_refresh(
         &mut self,
         envelope: RelayRequestEnvelope,
