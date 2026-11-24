@@ -720,6 +720,7 @@ pub struct DeploymentCapacityTarget {
     /// The paths on this machine whose filesystems local targets write to.
     /// Empty for every other host, whose probes carry their own paths.
     pub local_storage_paths: Vec<String>,
+    pub storage_warning: Option<String>,
     /// Prevents a partial AWS fleet sample when one live instance cannot be probed yet.
     pub probe_error: Option<String>,
 }

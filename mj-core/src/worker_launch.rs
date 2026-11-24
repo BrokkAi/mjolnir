@@ -122,6 +122,7 @@ fn is_default_subtle_subagents(value: &bool) -> bool {
 
 /// Launch directive that makes the Nitro engine's mbx settings authoritative.
 pub const SESSION_NITRO_MBX_ENV: &str = "MJ_SESSION_NITRO_MBX";
+pub const SESSION_MBX_BIN_ENV: &str = "MJ_MBX_BIN";
 pub const MBX_REMOTE_ENV_PREFIX: &str = "MBX_REMOTE_";
 pub const MBX_REMOTE_ENVIRONMENT: [&str; 3] =
     ["MBX_REMOTE_URL", "MBX_REMOTE_NAMESPACE", "MBX_REMOTE_MODE"];

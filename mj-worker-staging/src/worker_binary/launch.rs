@@ -336,6 +336,13 @@ pub fn worker_launch_config_with_checkout(
     // sidecar, all of which run Cargo through the mbx shim.
     if let Some(build_cache) = &session.build_cache {
         target_environment.insert(
+            mj_core::worker_launch::SESSION_MBX_BIN_ENV.into(),
+            mj_core::target_path::text(&mj_core::target_path::join(
+                Path::new(&targets::worker_root(backend, session_id)?),
+                Path::new("bin"),
+            )),
+        );
+        target_environment.insert(
             "MBX_CACHE_DIR".into(),
             build_cache.directory.to_string_lossy().into_owned(),
         );
@@ -375,7 +382,7 @@ pub fn worker_launch_config_with_checkout(
         let remote_prefix = mj_core::worker_launch::MBX_REMOTE_ENV_PREFIX;
         target_environment.retain(|name, _| !name.starts_with(remote_prefix));
         environment.retain(|name, _| !name.starts_with(remote_prefix));
-        for key in ["MBX_CACHE_DIR", "MBX_SHIMS_DIR"] {
+        for key in ["MBX_CACHE_DIR", "MBX_SHIMS_DIR", "MJ_MBX_BIN"] {
             environment.insert(key.into(), target_environment[key].clone());
         }
         environment.remove("MJ_MBX_CONFIG_DIR");

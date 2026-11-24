@@ -127,7 +127,7 @@ func toolCachePrepare(cwd string, environment map[string]string) error {
 				continue
 			}
 			body := fmt.Sprintf("%s\nif [ \"$#\" = 1 ] && [ \"$1\" = --version ]; then exec %s \"$@\"; fi\nexec %s --bazelrc=%s \"$@\"\n",
-				bazelPath, toolCacheQuotePath(real), toolCacheQuotePath(real), toolCacheQuotePath(rc))
+				bazelPathScript(), toolCacheQuotePath(real), toolCacheQuotePath(real), toolCacheQuotePath(rc))
 			if err := writeLauncher(core.Join(bin, tool), body); err != nil {
 				return err
 			}
@@ -227,8 +227,7 @@ while :; do
         *:*) mj_entry=${mj_rest%%:*}; mj_rest=${mj_rest#*:}; mj_more=yes ;;
         *) mj_entry=$mj_rest; mj_more= ;;
     esac
-    if { [ -z "${MJ_BUILD_TOOL_BIN:-}" ] || [ "$mj_entry" != "$MJ_BUILD_TOOL_BIN" ]; } &&
-       { [ -z "${MJ_GITHUB_CLI_BIN:-}" ] || [ "$mj_entry" != "$MJ_GITHUB_CLI_BIN" ]; }; then
+    if @LAUNCHER_FILTER@; then
         if [ -n "$mj_path_set" ]; then mj_path=$mj_path:$mj_entry; else mj_path=$mj_entry; fi
         mj_path_set=yes
     fi
@@ -447,4 +446,12 @@ func linkConfiguration(source string, destination string) error {
 		return err
 	}
 	return os.Rename(link, destination)
+}
+
+func bazelPathScript() string {
+	var conditions []string
+	for _, name := range launcherBinEnvs {
+		conditions = append(conditions, fmt.Sprintf(`{ [ -z "${%[1]s:-}" ] || [ "$mj_entry" != "${%[1]s}" ]; }`, name))
+	}
+	return strings.ReplaceAll(bazelPath, "@LAUNCHER_FILTER@", strings.Join(conditions, " && "))
 }
