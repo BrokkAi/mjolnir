@@ -115,10 +115,105 @@ use mj_core::worker_launch::ProjectMemoryLaunchConfig;
 use mj_core::worker_launch::WorkerLaunchConfig;
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
+// Highest precedence first. All launcher PATH consumers use this contract.
+// Git wrappers precede MJ_MBX_BIN so resumed workers shadow any legacy `gh`/
+// `slopcop` wrappers left in `<worker_root>/bin` before Git setup isolation.
+pub(super) const LAUNCHER_BIN_ENVS: [&str; 3] = [
+    "MJ_BUILD_TOOL_BIN",
+    GITHUB_CLI_BIN_ENV,
+    mj_core::worker_launch::SESSION_MBX_BIN_ENV,
+];
+
+pub(super) fn launcher_path_shell() -> String {
+    let mut script = String::from("mj_prefix=\n");
+    for name in LAUNCHER_BIN_ENVS {
+        script.push_str(&format!("if [ -n \"${{{name}:-}}\" ]; then case \"$mj_prefix:\" in *:\"${{{name}}}\":*|\"${{{name}}}\":*) ;; *) mj_prefix=${{mj_prefix:+$mj_prefix:}}${{{name}}} ;; esac; fi\n"));
+    }
+    let condition = LAUNCHER_BIN_ENVS
+        .iter()
+        .map(|name| {
+            format!("{{ [ -z \"${{{name}:-}}\" ] || [ \"$mj_entry\" != \"${{{name}}}\" ]; }}")
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    script.push_str(&r#"if [ -n "$mj_prefix" ]; then
+    case ":${PATH:-}:" in
+        ":${mj_prefix}:"*) ;;
+        *)
+            mj_path=
+            mj_path_set=
+            if [ -n "${PATH:-}" ]; then
+                mj_rest=${PATH}
+                while :; do
+                    case "$mj_rest" in
+                        *:*) mj_entry=${mj_rest%%:*}; mj_rest=${mj_rest#*:}; mj_more=yes ;;
+                        *) mj_entry=$mj_rest; mj_more= ;;
+                    esac
+                    if @FILTER@; then
+                        if [ -n "$mj_path_set" ]; then mj_path=$mj_path:$mj_entry; else mj_path=$mj_entry; fi
+                        mj_path_set=yes
+                    fi
+                    [ -n "$mj_more" ] || break
+                done
+            fi
+            PATH=$mj_prefix${mj_path_set:+:$mj_path}
+            export PATH
+            ;;
+    esac
+fi
+unset mj_prefix mj_path mj_path_set mj_rest mj_entry mj_more
+"#.replace("@FILTER@", &condition));
+    script
+}
+
 pub(crate) fn github_cli_login_shell_command(command: &str) -> String {
     format!(
-        "if [ -n \"${{{GITHUB_CLI_BIN_ENV}:-}}\" ]; then PATH=\"${GITHUB_CLI_BIN_ENV}:$PATH\"; export PATH; fi; unset {GITHUB_CLI_BIN_ENV} GH_TOKEN GITHUB_TOKEN; {command}"
+        "{}unset {GITHUB_CLI_BIN_ENV} GH_TOKEN GITHUB_TOKEN; {command}",
+        launcher_path_shell()
     )
+}
+
+#[cfg(unix)]
+fn restore_mbx_launcher(
+    root: &std::path::Path,
+    home: Option<&std::path::Path>,
+    environment: &mut std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    use mj_core::worker_launch::SESSION_MBX_BIN_ENV;
+    if !environment.contains_key(SESSION_MBX_BIN_ENV)
+        && environment.contains_key("MBX_SHIMS_DIR")
+        && root.join("bin").is_dir()
+    {
+        environment.insert(
+            SESSION_MBX_BIN_ENV.into(),
+            root.join("bin").to_string_lossy().into_owned(),
+        );
+    }
+    if let Some(bin) = environment
+        .get(SESSION_MBX_BIN_ENV)
+        .filter(|bin| !bin.is_empty())
+    {
+        let old = environment.get("PATH").cloned().unwrap_or_default();
+        let mut bin = std::path::PathBuf::from(bin);
+        if !bin.is_absolute() {
+            bin = home
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(&bin))
+                .unwrap_or_else(|| root.join("bin"));
+            bin = std::path::absolute(bin)?;
+        }
+        environment.insert(
+            SESSION_MBX_BIN_ENV.into(),
+            bin.to_string_lossy().into_owned(),
+        );
+        let mut entries = vec![bin.clone()];
+        if !old.is_empty() {
+            entries.extend(std::env::split_paths(&old).filter(|p| p != &bin));
+        }
+        let path = std::env::join_paths(entries)?;
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +423,10 @@ pub(crate) mod review_capture;
 pub(crate) mod subagents;
 #[cfg(unix)]
 mod unix;
+#[cfg(all(test, unix))]
+pub(crate) use unix::SharedCredentials;
+#[cfg(unix)]
+pub use unix::{HarnessReload, HarnessReloadTransition};
 
 #[cfg(not(unix))]
 pub fn lead_process_group() {}

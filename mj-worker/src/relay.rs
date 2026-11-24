@@ -19,6 +19,7 @@ pub use mj_core::relay::*;
 mod background;
 #[cfg(test)]
 pub(crate) use background::AirTaskFixture;
+pub(crate) use background::ReserveIdleAntigravityCheck;
 mod checkpoint_hold;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InPlaceHarnessRestartDecision {
@@ -2118,8 +2119,11 @@ impl DurableRelay {
     /// [`Self::offer_settle_facts`]: the same observation, taken at the same
     /// point, as for a prompt that is finishing. Each arm names the condition
     /// its settling site tests.
-    pub fn event_settles_autonomous_turn(&self, event: &mj_core::acp::RuntimeEvent) -> bool {
-        use mj_core::acp::RuntimeEvent;
+    pub fn event_settles_autonomous_turn<R>(
+        &self,
+        event: &mj_core::acp::RuntimeEventWithReload<R>,
+    ) -> bool {
+        use mj_core::acp::RuntimeEventWithReload as RuntimeEvent;
         if self.snapshot.active_prompt.is_some()
             || self.snapshot.autonomous_harness_turn().is_none()
         {

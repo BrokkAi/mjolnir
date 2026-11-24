@@ -752,14 +752,25 @@ pub async fn resolve_reviewer_model_profile_selection(
         // A profile that offers the model but cannot serve this slot does not
         // end the search: later-discovered profiles may.
         let mut tried = Vec::new();
-        let mut last_error = None;
+        let mut last_error: Option<ApiFailure> = None;
+        // The profile IDs `last_error` already lists under "Could not check:".
+        let mut last_error_listed: Vec<String> = Vec::new();
+        // Profiles whose capability check failed, kept across iterations so a
+        // later refusal for one profile never hides the others.
+        let mut unavailable_profiles: Vec<(String, String)> = Vec::new();
         loop {
             let candidates = match backend
                 .reviewer_candidates_for_model(model.to_owned(), tried.clone())
                 .await
             {
                 Ok(candidates) => candidates,
-                Err(error) => return Err(last_error.unwrap_or_else(|| error.into())),
+                Err(error) => {
+                    return Err(with_could_not_check(
+                        last_error.unwrap_or_else(|| error.into()),
+                        &unavailable_profiles,
+                        &last_error_listed,
+                    ));
+                }
             };
             let before = tried.len();
             for id in candidates
@@ -772,11 +783,33 @@ pub async fn resolve_reviewer_model_profile_selection(
                     tried.push(id.clone());
                 }
             }
-            if tried.len() == before {
-                return Err(last_error.unwrap_or_else(|| {
-                    ApiFailure::unavailable(format!("no reviewer profile offers model {model:?}"))
-                }));
+            for (id, reason) in &candidates.unavailable {
+                if !unavailable_profiles.iter().any(|(known, _)| known == id) {
+                    unavailable_profiles.push((id.clone(), reason.clone()));
+                }
             }
+            if tried.len() == before {
+                return Err(with_could_not_check(
+                    last_error.unwrap_or_else(|| {
+                        ApiFailure::unavailable(format!(
+                            "no reviewer profile offers model {model:?}"
+                        ))
+                    }),
+                    &unavailable_profiles,
+                    &last_error_listed,
+                ));
+            }
+            // Profiles that could only be reported as unavailable add no
+            // selection result; keep the earlier refusal, which has the reason
+            // a profile that did offer the model was refused.
+            if candidates.offered.is_empty() && last_error.is_some() {
+                continue;
+            }
+            let checked_ids = candidates
+                .unavailable
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
             match resolve_model_profile_selection_from(
                 backend,
                 candidates,
@@ -791,7 +824,14 @@ pub async fn resolve_reviewer_model_profile_selection(
             .await
             {
                 Ok(selected) => return Ok(selected),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    last_error_listed = if error.message.contains("Could not check:") {
+                        checked_ids
+                    } else {
+                        Vec::new()
+                    };
+                    last_error = Some(error);
+                }
             }
         }
     })
@@ -801,6 +841,39 @@ pub async fn resolve_reviewer_model_profile_selection(
             "reviewer model discovery timed out for model {model:?}"
         ))
     })?
+}
+
+/// Adds the profiles whose capabilities could not be checked to a refusal,
+/// except the `already_listed` ones its message names.
+fn with_could_not_check(
+    mut failure: ApiFailure,
+    unavailable: &[(String, String)],
+    already_listed: &[String],
+) -> ApiFailure {
+    let missing = unavailable
+        .iter()
+        .filter(|(id, _)| !already_listed.contains(id))
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if missing.is_empty() {
+        return failure;
+    }
+    if failure.message.contains("Could not check:") {
+        match failure.message.strip_suffix('.') {
+            Some(listed) => failure.message = format!("{listed}; {missing}."),
+            None => failure.message.push_str(&format!("; {missing}")),
+        }
+    } else if failure.message.ends_with('.') {
+        failure
+            .message
+            .push_str(&format!(" Could not check: {missing}."));
+    } else {
+        failure
+            .message
+            .push_str(&format!(". Could not check: {missing}."));
+    }
+    failure
 }
 
 /// A pinned reviewer still runs only a model its profile offers, as the
@@ -2187,7 +2260,9 @@ mod tests {
                     if candidates
                         .offered
                         .iter()
-                        .any(|candidate| !tried.contains(&candidate.profile_id))
+                        .map(|candidate| &candidate.profile_id)
+                        .chain(candidates.unavailable.iter().map(|(id, _)| id))
+                        .any(|id| !tried.contains(id))
                     {
                         return Ok(candidates);
                     }
@@ -2482,6 +2557,116 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(selected.profile_id, "ready");
+    }
+
+    /// A profile refused for the model must not hide another profile whose
+    /// capabilities could not be checked.
+    #[tokio::test]
+    async fn reviewer_refusal_still_lists_profiles_that_could_not_be_checked() {
+        let mut rate_limited = candidate("rate-limited", Some(70), &["fixed"]);
+        rate_limited.unhealthy.insert(
+            "fixed".into(),
+            mj_accounts::profile_health::Unhealthy {
+                fault: mj_accounts::profile_health::ProfileFault::RateLimited,
+                until: std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_792_937_100),
+                message: "exceeded retry limit, last status: 429".into(),
+            },
+        );
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: Some(vec![
+                (
+                    0,
+                    SubagentCandidates {
+                        offered: vec![rate_limited],
+                        unavailable: Vec::new(),
+                    },
+                ),
+                (
+                    0,
+                    SubagentCandidates {
+                        offered: Vec::new(),
+                        unavailable: vec![("signed-out".into(), "capability probe failed".into())],
+                    },
+                ),
+            ]),
+            discovery_fails: false,
+            telemetry_store: None,
+            quota_preferences: Vec::new(),
+            config: Default::default(),
+            candidates: SubagentCandidates::default(),
+        });
+        let error = resolve_reviewer_model_profile_selection(
+            &backend,
+            "fixed",
+            None,
+            ExecutionPolicy::Unconstrained,
+            "reviewer",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("rate-limited until 2026-10-25 14:05:00 UTC"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains("Could not check: signed-out (capability probe failed)"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A profile whose ID is the tail of an already listed one is still listed.
+    #[tokio::test]
+    async fn reviewer_refusal_lists_an_unchecked_profile_named_like_a_listed_one() {
+        let stage = |offered: Vec<SubagentCandidate>, unavailable: &[(&str, &str)]| {
+            (
+                0,
+                SubagentCandidates {
+                    offered,
+                    unavailable: unavailable
+                        .iter()
+                        .map(|(id, reason)| ((*id).into(), (*reason).into()))
+                        .collect(),
+                },
+            )
+        };
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: Some(vec![
+                stage(
+                    vec![candidate("other", Some(70), &["flash"])],
+                    &[("team-terra", "probe failed")],
+                ),
+                stage(Vec::new(), &[("terra", "login expired")]),
+            ]),
+            discovery_fails: false,
+            telemetry_store: None,
+            quota_preferences: Vec::new(),
+            config: Default::default(),
+            candidates: SubagentCandidates::default(),
+        });
+        let error = resolve_reviewer_model_profile_selection(
+            &backend,
+            "fixed",
+            None,
+            ExecutionPolicy::Unconstrained,
+            "reviewer",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.message.contains("team-terra (probe failed)")
+                && error.message.contains("terra (login expired)"),
+            "{}",
+            error.message
+        );
     }
 
     #[tokio::test]

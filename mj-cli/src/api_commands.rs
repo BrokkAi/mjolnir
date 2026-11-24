@@ -6396,6 +6396,7 @@ mod tests {
                 condition,
             };
         let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            storage_warning: None,
             ec2_instance_type: None,
             physical_memory: None,
             id: id.into(),
@@ -6424,6 +6425,19 @@ mod tests {
                 StorageCondition::Low,
             ),
         ];
+        // Hard-won: #1597: degraded storage must preserve healthy host readings.
+        assert!(
+            serde_json::to_value(&local)
+                .unwrap()
+                .get("storage_warning")
+                .is_none()
+        );
+        let mut degraded = local.clone();
+        degraded.storage_warning = Some("mbx config: invalid TOML".into());
+        let healthy = mj_core::targets::render_host_capacity(&[local.clone()], now);
+        let warning = mj_core::targets::render_host_capacity(&[degraded], now);
+        assert_eq!(warning, format!("{healthy}\n  mbx config: invalid TOML"));
+
         let mut build = row("build.example", DeploymentCapacityKind::Host, &["build"]);
         build.cpu_percent = None;
         build.sampled_at_epoch_seconds = Some(now - 600);

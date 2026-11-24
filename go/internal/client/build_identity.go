@@ -153,6 +153,29 @@ func (b BuildIdentity) SameSource(other BuildIdentity) bool {
 // Version is the release version, without build metadata.
 func (b BuildIdentity) Version() string { return b.version }
 
+// CompareRelease orders b's release version against other's (negative, zero,
+// positive), as semver's `cmp_precedence` does: build metadata takes no
+// part.
+func (b BuildIdentity) CompareRelease(other BuildIdentity) int {
+	return semverComparePrecedence(b.version, other.version)
+}
+
+// Equal is Rust's derived PartialEq: every fact, not the pointers holding
+// them.
+func (b BuildIdentity) Equal(other BuildIdentity) bool {
+	return b.version == other.version &&
+		buildIdentityOptionalEqual(b.revision, other.revision) &&
+		buildIdentityOptionalEqual(b.commitTime, other.commitTime) &&
+		buildIdentityOptionalEqual(b.executableModified, other.executableModified)
+}
+
+func buildIdentityOptionalEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // thisBuild decides this process's identity once.
 var thisBuild = sync.OnceValue(thisBuildIdentity)
 

@@ -644,6 +644,103 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
+/// Reviewer model selection reports why a profile could not be checked
+/// instead of folding discovery failures into "no profile offers the model".
+#[tokio::test]
+async fn reviewer_model_selection_reports_profiles_that_fail_discovery() {
+    if !isolated_spawn_test("reviewer_model_selection_reports_profiles_that_fail_discovery") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+
+    // Every enabled profile fails discovery.
+    let (backend, _) = selection_backend(&[], None).await;
+    let error = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+    assert!(!error.contains("no further enabled"), "{error}");
+    let error = backend
+        .reviewer_autoconfigure_candidates()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no reviewer profile is available")
+            && error.contains("deepseek (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+
+    // Two profiles answer without the model; one fails discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &["flash"]), ("deepseek", &["flash"])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let candidates = backend
+        .reviewer_candidates_for_model("luna".into(), Vec::new())
+        .await
+        .unwrap();
+    assert!(candidates.offered.is_empty());
+    assert_eq!(candidates.unavailable.len(), 1);
+    assert_eq!(candidates.unavailable[0].0, "codex-high");
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let error = crate::server::api::resolve_reviewer_model_profile_selection(
+        &backend,
+        "luna",
+        None,
+        mj_core::config::ExecutionPolicy::Unconstrained,
+        "reviewer",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.message.contains("Could not check: codex-high (")
+            && error.message.contains("cannot be discovered"),
+        "{}",
+        error.message
+    );
+}
+
+/// Automatic reviewer selection that ends with no reviewers names the profiles
+/// that could not be checked, not only the ones that answered.
+#[tokio::test]
+async fn autoconfigure_without_reviewers_names_profiles_that_failed_discovery() {
+    if !isolated_spawn_test("autoconfigure_without_reviewers_names_profiles_that_failed_discovery")
+    {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    // `parent` answers but offers no model to configure a reviewer from; the
+    // others fail discovery.
+    let offers: &[(&str, &[&str])] = &[("parent", &[])];
+    let (backend, _) = selection_backend(offers, None).await;
+    let backend: Arc<dyn crate::server::api::SubagentBackend> = backend;
+    let settings = mj_core::config::ReviewConfig {
+        legacy: Some(Default::default()),
+        ..Default::default()
+    };
+
+    let error =
+        crate::review_host::selection::configured_choices(settings, &selection_config(), &backend)
+            .await
+            .map_err(|error| error.to_string())
+            .expect_err("autoconfigure should find no reviewers");
+
+    assert!(error.contains("No reviewers are configured"), "{error}");
+    assert!(
+        error.contains("Could not check:")
+            && error.contains("codex-high (")
+            && error.contains("cannot be discovered"),
+        "{error}"
+    );
+}
+
 /// A close is accepted long before the child is gone: it cancels whatever owned
 /// the session, checkpoints, seals the relay and tears the process tree down,
 /// and the record only says `Closing` once that is under way. A child that had
@@ -9479,6 +9576,7 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
     projection.records.insert(parked.id.clone(), parked);
     projection.metadata.host_capacities = vec![RuntimeHostCapacity {
         reading: HostCapacityRow {
+            storage_warning: None,
             id: "host".into(),
             host: "builder".into(),
             target_ids: vec!["nitro".into()],

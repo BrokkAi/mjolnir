@@ -290,12 +290,13 @@ Enable Remote Login on the Mac and configure noninteractive SSH key access.
 Install working Git (including the Xcode Command Line Tools if using Apple's
 Git), curl, and the tools your project needs. Node-based harnesses reuse
 Node.js 22 or newer with npm and npx when the login environment provides them;
-otherwise the worker downloads and verifies its pinned Node.js with curl.
-Mjolnir checks the runtime through the account's login shell, so Homebrew's
-PATH setup belongs in that shell's login configuration, such as `.zprofile`
-for zsh. The worker uses the target account's login environment and then
-applies any configured profile environment overrides. Apple container commands
-run through noninteractive SSH with the Mac's system `PATH` from `/etc/paths`,
+DSH's npm fallback needs Node.js 24.9 or newer. Otherwise the worker downloads
+and verifies its pinned Node.js with curl. Mjolnir checks the runtime through
+the account's login shell, so Homebrew's PATH setup belongs in that shell's
+login configuration, such as `.zprofile` for zsh. The worker uses the target
+account's login environment and then applies any configured profile environment
+overrides. Apple container commands run through noninteractive SSH with the
+Mac's system `PATH` from `/etc/paths`,
 so the official package's `/usr/local/bin/container` is found without any
 shell configuration.
 

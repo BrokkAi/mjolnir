@@ -1,0 +1,78 @@
+Create a session through the API and print its id
+
+Usage: mj new [OPTIONS] [PROMPT]
+
+Arguments:
+  [PROMPT]  The first prompt. `-` reads it from standard input
+
+Options:
+  -i, --instance <NAME>
+          Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --profile <PROFILE>
+          Profile the session runs its harness from. Omit it to use the saved default saved by an interactive launch. This command does not change it
+      --no-splash
+          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --target <TARGET>
+          Target template the session is provisioned on. Omit it to use the saved default, as for `--profile`, without changing it
+      --bundle <BUNDLE>
+          Existing bundle to run. Bare targets use `--project-directory` instead
+      --project-directory <PROJECT_DIRECTORY>
+          Existing directory on the bare target, or a checkout on the controller host for discovering an isolated project
+      --at <SHA>
+          Start the workspace checked out at this full commit ID in the bundle's primary repository
+      --no-later-history
+          With --at, give the workspace the full history up to that commit and --base, and nothing later: no later commits, branches, tags, or origin remote. --base must then be a full commit ID. The session cannot be resumed or moved
+      --branch <BRANCH>
+          With --at, the new branch to create there; otherwise the existing branch to check out
+      --base <REV>
+          Record this Git revision as the diff base, when it should not be --at
+      --workspace-id <WORKSPACE_ID>
+          Workspace id to create the session in. `--workspace NAME` names the same workspace by name
+      --title <TITLE>
+          Title shown in session lists. Defaults to the project and profile
+      --model <MODEL>
+          Load balance across usable profiles for this model and optional effort
+      --effort <EFFORT>
+          Harness reasoning effort to select before the first prompt
+      --subagents <SUBAGENTS>
+          Delegation policy: native, mjolnir, or none (no delegation tools). Defaults to mjolnir, with a notice when unavailable and native or none is used
+      --oracle <ORACLE>
+          Oracle availability for this session [possible values: enabled, disabled]
+      --orchestrators
+          Enable orchestrators (requires Mjolnir delegation)
+      --subagent-straightforward <SUBAGENT_STRAIGHTFORWARD>
+          Override the configured model for straightforward Mjolnir sub-agents
+      --subagent-straightforward-effort <SUBAGENT_STRAIGHTFORWARD_EFFORT>
+          Override straightforward sub-agent effort (requires --subagent-straightforward)
+      --subagent-subtle <SUBAGENT_SUBTLE>
+          Override the configured model for subtle Mjolnir sub-agents
+      --subagent-subtle-effort <SUBAGENT_SUBTLE_EFFORT>
+          Override subtle sub-agent effort (requires --subagent-subtle)
+      --subagent-oracle <SUBAGENT_ORACLE>
+          Oracle model for this session, independent of delegation
+      --subagent-oracle-effort <SUBAGENT_ORACLE_EFFORT>
+          Oracle effort; requires --subagent-oracle
+      --reviewer <MODEL[:EFFORT]>
+          Reviewer model and optional effort; final colon suffix is effort only when a known effort (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times
+      --review <off|push>
+          Whether this session is reviewed before push (`push`) or not (`off`). Omitted follows `[review]`: review runs when reviewers are configured
+      --no-project-memory
+          Start this session with no project memory: nothing from the workspace's project memory is loaded into the harness, and the harness is offered no memory directory to write to. Sub-agents of the session get none either. Without this flag the session loads the workspace's project memory
+      --no-github-events
+          Exclude this session from GitHub watcher delivery targets. Sub-agents inherit the choice
+      --no-github-credentials
+          Withhold GitHub credentials from this session and its children
+      --ignore-notifications
+          Ignore notifications for this session
+      --cpus <CPUS>
+          Container CPU limit. Omitted takes the target's default size: the size last chosen for that host, else 4 CPUs, capped at the host's
+      --memory-gib <GIB>
+          Container memory limit in GiB. Omitted takes the target's default size: the size last chosen for that host, else 8 GiB, capped at the host's
+      --prompt-file <PROMPT_FILE>
+          Read the first prompt from this file instead
+      --json
+          Print the response as JSON instead of text
+      --workspace <NAME>
+          Workspace to work in, by name. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it, and need it when the instance has more than one workspace
+  -h, --help
+          Print help

@@ -153,6 +153,8 @@ pub struct HostCapacityRow {
     pub memory_total_bytes: u64,
     pub logical_cores: u64,
     pub filesystems: Vec<HostFilesystemRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_warning: Option<String>,
     pub sampled_at_epoch_seconds: Option<u64>,
     pub probe_error: Option<String>,
     pub on_demand: bool,
@@ -192,6 +194,7 @@ impl HostCapacityRow {
             memory_total_bytes: usage.map_or(0, |usage| usage.memory_total_bytes),
             logical_cores: usage.map_or(0, |usage| usage.logical_cores),
             filesystems,
+            storage_warning: target.storage_warning.clone(),
             sampled_at_epoch_seconds: state.sampled_at_epoch_seconds,
             probe_error: state.probe_error.clone(),
             on_demand: state.on_demand,
@@ -330,6 +333,9 @@ pub fn render_host_capacity(rows: &[HostCapacityRow], now_epoch_seconds: u64) ->
                 format_resource_bytes(filesystem.total_bytes),
                 storage_condition_flag(filesystem.condition)
             ));
+        }
+        if let Some(warning) = &row.storage_warning {
+            lines.push(format!("  {warning}"));
         }
         if let Some(stale) = row.staleness(now_epoch_seconds) {
             lines.push(format!("  {stale}"));

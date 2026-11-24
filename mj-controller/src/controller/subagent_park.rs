@@ -21,8 +21,8 @@ use mj_core::relay::WorkerHarnessStartupFailureKind;
 use mj_core::state::SessionState;
 
 use super::worker_binary::{
-    probe_worker_liveness, refresh_installed_worker_binary, replace_installed_worker_launch_config,
-    start_worker_durably, stop_worker_after_target_recovery,
+    probe_worker_liveness, refresh_installed_worker_binary, start_worker_durably,
+    stop_worker_after_target_recovery,
 };
 use super::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
 use super::{Controller, IdleWorkspaceLease};
@@ -534,8 +534,7 @@ impl Controller {
             let launch = staging.current_worker_launch_config(session_id, &backend)?;
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
-            replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                .context("install the current Mjolnir worker launch configuration")?;
+            staging.install_launch_config(session_id, &backend, &launch, executor)?;
             // Keep container startup concurrency bounded through native readiness,
             // while cancellation releases this observation without stopping a worker.
             let gate = super::provisioning::container_start_gate(&backend);

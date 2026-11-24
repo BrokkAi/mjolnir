@@ -60,12 +60,35 @@ impl HarnessStartup {
 }
 
 #[derive(Default)]
-struct TaskMonitors {
+pub(super) struct TaskMonitors {
     kimi: Option<KimiTaskMonitor>,
     antigravity: Option<AntigravityTaskMonitor>,
 }
 
 impl TaskMonitors {
+    pub(super) fn new(
+        harness: HarnessKind,
+        credentials: &std::result::Result<CredentialEndpoint, String>,
+    ) -> Self {
+        let home = || {
+            credentials
+                .as_ref()
+                .map(|endpoint| endpoint.home.clone())
+                .map_err(Clone::clone)
+        };
+        match harness {
+            HarnessKind::Kimi => Self {
+                kimi: Some(KimiTaskMonitor::new(home())),
+                antigravity: None,
+            },
+            HarnessKind::Antigravity => Self {
+                kimi: None,
+                antigravity: Some(AntigravityTaskMonitor::new(home())),
+            },
+            _ => Self::default(),
+        }
+    }
+
     async fn prepare_event(
         &mut self,
         relay: &Arc<RelayCell>,
@@ -83,10 +106,10 @@ pub(super) async fn run_relay_coordinator_with_shells(
     dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
-    kimi_tasks: Option<KimiTaskMonitor>,
-    antigravity_tasks: Option<AntigravityTaskMonitor>,
+    task_monitors: TaskMonitors,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
+    antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<Option<u64>>>>,
 ) -> Result<()> {
     let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
     run_relay_coordinator(
@@ -95,13 +118,11 @@ pub(super) async fn run_relay_coordinator_with_shells(
         dispatch_wakes,
         commands,
         user_shells,
-        TaskMonitors {
-            kimi: kimi_tasks,
-            antigravity: antigravity_tasks,
-        },
+        task_monitors,
         verdict,
         capture,
         Some(startup),
+        antigravity_refresh,
     )
     .await
 }
@@ -133,6 +154,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         verdict,
         capture,
         None,
+        None,
     )
     .await
 }
@@ -148,6 +170,7 @@ fn run_relay_coordinator(
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
     capture: Option<crate::work_facts::WorkObserver>,
     mut startup: Option<HarnessStartup>,
+    mut antigravity_refresh: Option<mpsc::Receiver<oneshot::Sender<Option<u64>>>>,
 ) -> impl std::future::Future<Output = Result<()>> + Send {
     // Capturing a turn's work facts makes this future large. Keep its state
     // on the heap rather than embedding it in every startup/capture wrapper;
@@ -236,6 +259,9 @@ fn run_relay_coordinator(
                 let cut_held = relay.worker_writes_held();
                 (cut_held || relay.close_pending(), cut_held)
             };
+            if held && let Some(monitor) = task_monitors.antigravity.as_mut() {
+                monitor.fail_idle_waiters();
+            }
             if !cut_held
                 && relay
                     .lock()
@@ -574,12 +600,20 @@ fn run_relay_coordinator(
                         .refresh(&relay, false)
                         .await?;
                 }
+                reply = async { antigravity_refresh.as_mut().expect("guarded refresh receiver").recv().await }, if antigravity_refresh.is_some() => {
+                    if let Some(reply) = reply {
+                        if held { let _ = reply.send(None); }
+                        else if let Some(monitor) = task_monitors.antigravity.as_mut() {
+                            monitor.request_idle_reservation_refresh(&relay, reply)?;
+                        } else {
+                            let epoch = relay.lock().expect("relay state lock poisoned").antigravity_hook_epoch();
+                            let _ = reply.send(Some(epoch));
+                        }
+                    } else { antigravity_refresh = None; }
+                }
+                result = async { task_monitors.antigravity.as_mut().expect("guarded scan").finish_in_flight_scan(&relay).await }, if task_monitors.antigravity.as_ref().is_some_and(AntigravityTaskMonitor::has_in_flight_scan) && !held => { result?; }
                 _ = antigravity_poll.tick(), if task_monitors.antigravity.is_some() && !held => {
-                    task_monitors.antigravity
-                        .as_mut()
-                        .expect("Antigravity poll branch is guarded")
-                        .refresh(&relay, false)
-                        .await?;
+                    task_monitors.antigravity.as_mut().expect("guarded poll").start_periodic_poll(&relay)?;
                 }
                 _ = verdict_poll.tick(), if verdict.is_some() => {}
                 result = login_reads.join_next(), if !login_reads.is_empty() => {
@@ -942,15 +976,67 @@ async fn observe_and_record(
             None
         }
     };
+    let reload = match &mut event {
+        RuntimeEvent::HarnessRestarting { reload, .. } => {
+            reload.take().and_then(HarnessReload::take)
+        }
+        _ => None,
+    };
     track_user_shell_completion(user_shells, &event);
-    record_runtime_event_with_startup(
+    let stopped = record_runtime_event_with_startup(
         relay,
         in_flight,
         event,
         session_configuration,
         work_facts,
         startup,
-    )
+    );
+    if let Some((transition, applied)) = reload {
+        let result = match stopped {
+            Ok(stopped) => apply_harness_reload_transition(relay, task_monitors, transition)
+                .await
+                .map(|()| stopped),
+            Err(error) => Err(error),
+        };
+        let _ = applied.send(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}")),
+        );
+        return result;
+    }
+    stopped
+}
+
+pub(super) async fn apply_harness_reload_transition(
+    relay: &Arc<RelayCell>,
+    task_monitors: &mut TaskMonitors,
+    transition: HarnessReloadTransition,
+) -> Result<()> {
+    let HarnessReloadTransition {
+        harness,
+        claude_login_path,
+        boundary_mailbox_hook_available,
+        mailbox_delivery_mode,
+        credentials,
+        shared_credentials,
+    } = transition;
+    // Stop holds the endpoint read guard until it applies its SQLite sample.
+    // Drain those hooks before retiring state they may have just written.
+    shared_credentials.set(credentials.clone()).await;
+    {
+        let mut state = relay.lock().expect("relay state lock poisoned");
+        state.set_turn_verdict_harness(harness);
+        state.authentication_login_path = claude_login_path;
+        state.set_steering_delivery_mode(harness, boundary_mailbox_hook_available);
+        state.update_mailbox_delivery_mode(mailbox_delivery_mode);
+        state.set_harness_turn_policy(harness_turn_policy_for(harness));
+        state.set_background_work_policy(background_work_policy_for(harness));
+        state.retire_harness_process_state()?;
+    }
+    *task_monitors = TaskMonitors::new(harness, &credentials);
+    Ok(())
 }
 
 fn record_runtime_event_with_startup(
@@ -1421,7 +1507,7 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::Warning { message } => {
             relay.record_observation(RelayObservation::Warning { message })?;
         }
-        RuntimeEvent::HarnessRestarting { message } => {
+        RuntimeEvent::HarnessRestarting { message, .. } => {
             // Close admission before interrupting anything: interruption may
             // otherwise promote a replacement ahead of SessionRestarted.
             relay.clear_acp_readiness();
@@ -2159,6 +2245,7 @@ mod startup_tests {
             if arrival == Arrival::BatchedRestart {
                 events
                     .send(RuntimeEvent::HarnessRestarting {
+                        reload: None,
                         message: "restart".into(),
                     })
                     .await
@@ -2183,6 +2270,7 @@ mod startup_tests {
                 None,
                 None,
                 Some(startup),
+                None,
             ));
             match arrival {
                 Arrival::AdvancesThenStalls => {
@@ -2312,6 +2400,7 @@ mod startup_tests {
                             }
                         } else {
                             RuntimeEvent::HarnessRestarting {
+                                reload: None,
                                 message: "restart".into(),
                             }
                         })

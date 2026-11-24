@@ -1147,12 +1147,7 @@ impl ApiBackend {
         if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
             bail!(
                 "no {candidate_kind} profile is available: {}",
-                candidates
-                    .unavailable
-                    .iter()
-                    .map(|(id, reason)| format!("{id} ({reason})"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                format_unavailable_reasons(&candidates.unavailable)
             );
         }
         Ok(candidates)
@@ -3370,6 +3365,15 @@ pub(crate) fn liveness_of(
     }
 }
 
+/// Lists profiles that could not be checked, each with its reason.
+fn format_unavailable_reasons(unavailable: &[(String, String)]) -> String {
+    unavailable
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Whether the parent turn that received a child's report has ended: the
 /// parent's worker accepted the event, the snapshot shows that acceptance, the
 /// event is no longer waiting for the agent, and the parent is idle. A parent
@@ -5575,31 +5579,63 @@ impl SubagentBackend for ApiBackend {
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
             use futures::StreamExt;
+            let mut ids = self.profile_catalog.candidates()?;
+            ids.retain(|(id, _)| !tried.contains(id));
+            let config = self.profile_catalog.live()?;
+            // Refused logins and missing login files fail at launch, so they
+            // are reported instead of probed.
+            let (ids, mut unavailable) = self.filter_eligible_profiles(ids, &config).await?;
             let mut pending = futures::stream::FuturesUnordered::new();
-            for (id, _) in self.profile_catalog.candidates()? {
+            for (id, _) in ids {
                 let catalog = &self.profile_catalog;
                 pending.push(async move {
                     let result = catalog.capabilities(std::slice::from_ref(&id)).await;
                     (id, result)
                 });
             }
+            let mut checked_without_match = false;
             while let Some((id, result)) = pending.next().await {
-                if !tried.contains(&id)
-                    && let Ok(choices) = result
-                    && choices.iter().any(|choice| {
-                        mj_core::model_catalog::resolve(&choice.models, &model).is_some()
-                    })
-                {
-                    drop(pending);
-                    let mut candidates = self.reviewer_ready_candidates(model).await?;
-                    candidates
-                        .offered
-                        .retain(|candidate| !tried.contains(&candidate.profile_id));
-                    candidates.unavailable.retain(|(id, _)| !tried.contains(id));
-                    return Ok(candidates);
+                match result {
+                    Ok(choices)
+                        if choices.iter().any(|choice| {
+                            mj_core::model_catalog::resolve(&choice.models, &model).is_some()
+                        }) =>
+                    {
+                        drop(pending);
+                        let mut candidates = self.reviewer_ready_candidates(model).await?;
+                        candidates
+                            .offered
+                            .retain(|candidate| !tried.contains(&candidate.profile_id));
+                        candidates.unavailable.retain(|(id, _)| !tried.contains(id));
+                        return Ok(candidates);
+                    }
+                    Ok(choices) if choices.is_empty() => {
+                        unavailable.push((id, "its discovery returned nothing".to_owned()));
+                    }
+                    Ok(_) => checked_without_match = true,
+                    Err(error) => {
+                        tracing::warn!(
+                            profile_id = %id,
+                            %error,
+                            "reviewer profile left out of model selection"
+                        );
+                        unavailable.push((id, format!("{error:#}")));
+                    }
                 }
             }
-            anyhow::bail!("no further enabled reviewer profile offers model {model:?}")
+            if unavailable.is_empty() {
+                anyhow::bail!("no further enabled reviewer profile offers model {model:?}");
+            }
+            if tried.is_empty() && !checked_without_match {
+                anyhow::bail!(
+                    "no reviewer profile is available: {}",
+                    format_unavailable_reasons(&unavailable)
+                );
+            }
+            Ok(crate::server::api::SubagentCandidates {
+                offered: Vec::new(),
+                unavailable,
+            })
         })
     }
 
@@ -5609,6 +5645,8 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             use futures::StreamExt;
             let ids = self.profile_catalog.candidates()?;
+            let config = self.profile_catalog.live()?;
+            let (ids, mut unavailable) = self.filter_eligible_profiles(ids, &config).await?;
             let mut pending = futures::stream::FuturesUnordered::new();
             for (id, _) in &ids {
                 let id = id.clone();
@@ -5620,33 +5658,76 @@ impl SubagentBackend for ApiBackend {
             }
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
             let mut answered = Vec::new();
+            let mut failed = Vec::new();
             let mut models = Vec::new();
-            while let Ok(Some((id, result))) =
-                tokio::time::timeout_at(deadline, pending.next()).await
-            {
-                if let Ok(choices) = result {
-                    for choice in choices {
-                        models.extend(choice.models);
-                    }
-                    answered.push(id);
-                    if mj_core::review::autoconfigure::autoconfigure(
-                        &mj_core::review::autoconfigure::merged_model_offers(&models),
-                        |_| None,
-                    )
-                    .is_some()
-                    {
+            let mut timed_out = false;
+            loop {
+                let (id, result) = match tokio::time::timeout_at(deadline, pending.next()).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(_) => {
+                        timed_out = true;
                         break;
+                    }
+                };
+                match result {
+                    Ok(choices) if choices.is_empty() => {
+                        failed.push(id.clone());
+                        unavailable.push((id, "its discovery returned nothing".to_owned()));
+                    }
+                    Ok(choices) => {
+                        for choice in choices {
+                            models.extend(choice.models);
+                        }
+                        answered.push(id);
+                        if mj_core::review::autoconfigure::autoconfigure(
+                            &mj_core::review::autoconfigure::merged_model_offers(&models),
+                            |_| None,
+                        )
+                        .is_some()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            profile_id = %id,
+                            %error,
+                            "reviewer profile left out of autoconfigure"
+                        );
+                        failed.push(id.clone());
+                        unavailable.push((id, format!("{error:#}")));
                     }
                 }
             }
             drop(pending);
-            self.discover_profile_candidates(
-                ids.into_iter()
-                    .filter(|(id, _)| answered.contains(id))
-                    .collect(),
-                "reviewer",
-            )
-            .await
+            if timed_out {
+                for (id, _) in &ids {
+                    if !answered.contains(id) && !failed.contains(id) {
+                        unavailable.push((id.clone(), "capability discovery timed out".to_owned()));
+                    }
+                }
+            }
+            if answered.is_empty() && !unavailable.is_empty() {
+                anyhow::bail!(
+                    "no reviewer profile is available: {}",
+                    format_unavailable_reasons(&unavailable)
+                );
+            }
+            let mut candidates = self
+                .discover_profile_candidates(
+                    ids.into_iter()
+                        .filter(|(id, _)| answered.contains(id))
+                        .collect(),
+                    "reviewer",
+                )
+                .await?;
+            for (id, reason) in unavailable {
+                if !candidates.unavailable.iter().any(|(known, _)| *known == id) {
+                    candidates.unavailable.push((id, reason));
+                }
+            }
+            Ok(candidates)
         })
     }
 

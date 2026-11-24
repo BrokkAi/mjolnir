@@ -17,7 +17,23 @@
 #   MJ_WORKER_INPUTS_ID   40-digit worker input digest, overriding Git's
 #   MJ_BUILD_CHANNEL      "release" for a release build
 #   MJ_DAEMON_IMAGE       the daemon image the build names, overriding the channel
+#
+# Test-harness aid, with no Rust counterpart:
+#   MJ_BUILD_EXECUTABLE_TIME_FROM  a file whose modification time the built
+#     executables take. A build's identity includes its executable's file time
+#     (client.ThisBuild), so with the revision, commit time and worker inputs
+#     of a Rust reference build and that build's `mj` here, go/bin/mj is the
+#     same build as a daemon the Rust `mj` started: it uses that daemon and
+#     never tries to replace it. Never set it for a build anyone installs.
 set -euo pipefail
+if [[ -n "${MJ_BUILD_EXECUTABLE_TIME_FROM+set}" ]]; then
+	# Relative to the caller's directory, before the script changes it.
+	[[ -f "$MJ_BUILD_EXECUTABLE_TIME_FROM" ]] || {
+		echo "build.sh: MJ_BUILD_EXECUTABLE_TIME_FROM must name an existing file" >&2
+		exit 1
+	}
+	executable_time_from="$(realpath "$MJ_BUILD_EXECUTABLE_TIME_FROM")"
+fi
 cd "$(dirname "$0")/.."
 mkdir -p bin/.mj-development-build
 
@@ -123,3 +139,9 @@ printf '{"Replace":{%s:%s}}\n' \
 	"$(json_string "$PWD/$stamp/stamp.go")" >"$stamp/overlay.json"
 
 go build -buildvcs=true -overlay "$stamp/overlay.json" -ldflags "${ldflags[*]}" -o bin/ ./cmd/...
+
+if [[ -n "${executable_time_from-}" ]]; then
+	for command in cmd/*/; do
+		touch -r "$executable_time_from" "bin/$(basename "$command")"
+	done
+fi
