@@ -60,6 +60,16 @@ impl Drop for ProjectMemoryTransfer<'_> {
     }
 }
 
+// A disposable proxy cannot prove that the worker or its Control transport died.
+// Preserve typed protocol/application errors, but keep restart markers local.
+fn bulk_connection_error(error: anyhow::Error) -> anyhow::Error {
+    if RelayTransportDead::marks(&error) {
+        anyhow!("bulk relay connection failed: {error:#}")
+    } else {
+        error
+    }
+}
+
 impl RelayClient {
     /// Bulk failures belong to the disposable connection, never the Control owner.
     async fn with_bulk<T>(
@@ -82,9 +92,10 @@ impl RelayClient {
             self.request_timeout,
             RELAY_HANDSHAKE_TIMEOUT,
         )
-        .await?;
+        .await
+        .map_err(bulk_connection_error)?;
         bulk.set_adoption_wait_progress(self.adoption_wait_progress.clone());
-        let result = operation(&mut bulk).await;
+        let result = operation(&mut bulk).await.map_err(bulk_connection_error);
         if let Err(error) = bulk.detach().await {
             tracing::warn!(session_id = %self.session_id, %error, "detach bulk relay");
         }
@@ -1040,6 +1051,9 @@ impl RelayClient {
         images: &[mj_core::attachment::AttachmentRef],
         files: &[mj_core::attachment::FileAttachmentRef],
     ) -> Result<()> {
+        if images.is_empty() && files.is_empty() {
+            return Ok(());
+        }
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let images = images.to_vec();
         let files = files.to_vec();
@@ -1080,28 +1094,28 @@ impl RelayClient {
         if images.is_empty() && files.is_empty() {
             return Ok(());
         }
-        let pending_images = images.clone();
-        let pending_files = files.clone();
         let result = self.with_bulk(move |bulk| Box::pin(async move {
             for reference in images {
                 if let Err(error) = bulk.download_attachment(&reference).await {
+                    if bulk.abandoned.is_some() || RelayTransportDead::marks(&error) {
+                        return Err(error);
+                    }
                     tracing::warn!(session_id = %bulk.session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
                 }
             }
             for reference in files {
                 if let Err(error) = bulk.download_file_attachment(&reference).await {
+                    if bulk.abandoned.is_some() || RelayTransportDead::marks(&error) {
+                        return Err(error);
+                    }
                     tracing::warn!(session_id = %bulk.session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
                 }
             }
             Ok(())
         })).await;
         if let Err(error) = result {
-            for reference in pending_images {
-                tracing::warn!(session_id = %self.session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
-            }
-            for reference in pending_files {
-                tracing::warn!(session_id = %self.session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
-            }
+            tracing::warn!(session_id = %self.session_id, %error, "could not cache attachments during recovery");
+            return Err(error);
         }
         Ok(())
     }

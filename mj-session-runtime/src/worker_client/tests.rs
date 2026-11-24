@@ -5953,6 +5953,8 @@ fn bulk_transfers_preserve_control_connection_ownership() {
     mj_core::targets::set_ssh_connection_sharing_for_test(Some(
         mj_core::targets::SshSharingForTest::Disabled,
     ));
+    let captured = CapturedLog::default();
+    tracing::subscriber::set_global_default(captured.clone()).unwrap();
     let root = tempfile::tempdir().unwrap();
     let log = root.path().join("requests");
     let script = r#"
@@ -5977,7 +5979,14 @@ for line in sys.stdin:
     elif method == "submit":
         payload = {"type":"accepted","data":{"command_id":params["command_id"],"ordinal":1}}
     elif method in ("read_attachment", "read_file_attachment"):
+        filename = params["reference"].get("filename", "")
+        if filename == "disconnect":
+            sys.exit(1)
+        if filename == "reject":
+            print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"error","error":{"code":"internal","message":"blob rejected permanently","retryable":False}}), flush=True)
+            continue
         data = b"\x89PNG\r\n\x1a\nrecovered" if method == "read_attachment" else b"recovered-file"
+        if filename == "continued": data = b"continued"
         payload = {"type":"attachment_data","data":{"data":base64.b64encode(data).decode()}}
     elif method == "begin_live_baseline":
         print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"ok","payload":{"type":"live_baseline_waiting","data":{"blockers":["held-turn"]}}}), flush=True)
@@ -6094,11 +6103,64 @@ for line in sys.stdin:
                 format!("{error:#}").contains("decode live recovery baseline"),
                 "{error:#}"
             );
-            assert!(client.install_skills(b"fail").await.is_err());
+            let error = client.install_skills(b"fail").await.unwrap_err();
+            assert!(!RelayTransportDead::marks(&error));
+            assert!(!RelayTransportDead::marks_failed_handshake(&error));
+            assert!(format!("{error:#}").contains("bulk relay connection failed"));
+            let rejected = mj_core::attachment::FileAttachmentRef::new(
+                b"reject",
+                "reject",
+                "text/plain".into(),
+            )
+            .unwrap();
+            let continued = mj_core::attachment::FileAttachmentRef::new(
+                b"continued",
+                "continued",
+                "text/plain".into(),
+            )
+            .unwrap();
+            client
+                .cache_attachments(&[], &[rejected.clone(), continued.clone()])
+                .await
+                .unwrap();
+            assert!(!store.contains_file(&rejected).unwrap());
+            assert!(store.contains_file(&continued).unwrap());
+            assert!(
+                captured
+                    .at(tracing::Level::WARN)
+                    .iter()
+                    .any(|line| line.contains("could not cache file attachment during recovery"))
+            );
+            let disconnected = mj_core::attachment::FileAttachmentRef::new(
+                b"disconnect",
+                "disconnect",
+                "text/plain".into(),
+            )
+            .unwrap();
+            let error = client
+                .cache_attachments(&[], std::slice::from_ref(&disconnected))
+                .await
+                .unwrap_err();
+            assert!(!RelayTransportDead::marks(&error));
+            assert!(!RelayTransportDead::marks_failed_handshake(&error));
+            assert!(format!("{error:#}").contains("bulk relay connection failed"));
             assert!(client.abandoned.is_none());
             client.skills_state().await.unwrap();
-            client.bulk_spec = Some(CommandSpec::new("sh", ["-c", "exit 1"]));
-            assert!(client.install_skills(b"connect failure").await.is_err());
+            client.bulk_spec = Some(CommandSpec::new(
+                "sh",
+                ["-c", "echo bulk-handshake-diagnostic >&2; exit 1"],
+            ));
+            let error = client.install_skills(b"connect failure").await.unwrap_err();
+            assert!(!RelayTransportDead::marks(&error));
+            assert!(!RelayTransportDead::marks_failed_handshake(&error));
+            assert!(format!("{error:#}").contains("bulk-handshake-diagnostic"));
+            let error = client
+                .cache_attachments(&[], &[disconnected])
+                .await
+                .unwrap_err();
+            assert!(!RelayTransportDead::marks(&error));
+            assert!(!RelayTransportDead::marks_failed_handshake(&error));
+            assert!(format!("{error:#}").contains("bulk-handshake-diagnostic"));
             assert!(client.abandoned.is_none());
             client.skills_state().await.unwrap();
             client.detach().await.unwrap();
@@ -6158,7 +6220,7 @@ for line in sys.stdin:
         .iter()
         .filter(|(_, method)| matches!(*method, "read_attachment" | "read_file_attachment"))
         .collect();
-    assert_eq!(downloads.len(), 2);
+    assert_eq!(downloads.len(), 5);
     assert_eq!(
         downloads[0].0, downloads[1].0,
         "one Bulk connection for recovery"

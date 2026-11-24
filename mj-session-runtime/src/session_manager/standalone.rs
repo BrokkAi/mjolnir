@@ -236,31 +236,22 @@ impl StandaloneSession {
         client.cache_attachments(&images, &files).await
     }
 
-    async fn cache_prompt_attachments(
-        &mut self,
-        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
-    ) -> Result<()> {
-        self.client
-            .cache_attachments(
-                &mj_core::attachment::references(prompt)?,
-                &mj_core::attachment::file_references(prompt)?,
-            )
-            .await
-    }
-
     async fn cache_event_attachments(
         &mut self,
         events: &[mj_core::relay::RelayEvent],
     ) -> Result<()> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
         for event in events {
             if let mj_core::relay::RelayObservation::CommandQueued { command, .. } =
                 &event.observation
                 && let Some(prompt) = command.prompt_blocks()
             {
-                self.cache_prompt_attachments(&prompt).await?;
+                images.extend(mj_core::attachment::references(&prompt)?);
+                files.extend(mj_core::attachment::file_references(&prompt)?);
             }
         }
-        Ok(())
+        self.client.cache_attachments(&images, &files).await
     }
 
     pub async fn prepare_adoption(spec: &CommandSpec, session_id: &str) -> Result<RelayClient> {
