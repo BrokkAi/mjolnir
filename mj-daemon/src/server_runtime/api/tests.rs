@@ -1611,6 +1611,95 @@ async fn prompt_reports_a_session_the_manager_does_not_hold() {
     );
 }
 
+/// A worker whose own `hel` predates a subcommand answers clap's usage
+/// failure until the session is next resumed. The live export then runs the
+/// current build's control worker staged beside it, once, and leaves `hel`
+/// alone.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_command_an_older_hel_cannot_serve_runs_on_the_staged_control_worker() {
+    use std::os::unix::fs::PermissionsExt;
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    struct Stager {
+        script: &'static str,
+        staged: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl mj_controller::targets::ControlWorkerStager for Stager {
+        fn stage_control_worker(
+            &self,
+            _caller: &impl mj_controller::targets::CommandExecutor,
+            _locator: &mj_core::targets::TargetLocator,
+            _session_id: &str,
+            root: &str,
+        ) -> Result<()> {
+            self.staged
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let path = std::path::Path::new(root).join("hel-control");
+            std::fs::write(&path, self.script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            Ok(())
+        }
+    }
+    let run = |control_script: &'static str| {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_root = directory.path().join(SESSION);
+        std::fs::create_dir_all(&worker_root).unwrap();
+        let old_hel = "#!/bin/sh\necho 'error: unrecognized subcommand' >&2\nexit 2\n";
+        let hel = worker_root.join("hel");
+        std::fs::write(&hel, old_hel).unwrap();
+        std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let layout = SessionExportLayout {
+            backend: mj_core::targets::TargetLocator::LocalBare {
+                worker_root: worker_root.to_str().unwrap().to_owned(),
+            },
+            workspace_root: String::new(),
+            primary_repository: "project".into(),
+            repositories: Vec::new(),
+            report_root: String::new(),
+            managed_worktree: None,
+        };
+        let staged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stager = Stager {
+            script: control_script,
+            staged: staged.clone(),
+        };
+        async move {
+            let result = worker_command_staging(
+                layout,
+                SESSION.into(),
+                vec!["bundle".into()],
+                "session bundle",
+                None,
+                stager,
+            )
+            .await;
+            let untouched = std::fs::read_to_string(&hel).unwrap() == old_hel;
+            let staged = staged.load(std::sync::atomic::Ordering::Acquire);
+            drop(directory);
+            (result, staged, untouched)
+        }
+    };
+
+    let (result, staged, untouched) = run("#!/bin/sh\nprintf 'bundle via %s' \"$0\"\n").await;
+    let bytes = result.unwrap();
+    assert!(
+        String::from_utf8(bytes).unwrap().ends_with("/hel-control"),
+        "the staged control worker ran the command"
+    );
+    assert_eq!((staged, untouched), (1, true));
+
+    // A staged worker that does not know the subcommand either is not asked
+    // again: the caller is told to resume, and nothing loops.
+    let (result, staged, untouched) = run("#!/bin/sh\nexit 2\n").await;
+    match result {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("resume the session to upgrade"), "{reason}")
+        }
+        other => panic!("expected an upgrade refusal, got {other:?}"),
+    }
+    assert_eq!((staged, untouched), (1, true));
+}
+
 /// A stopped session whose cleanup is deferred keeps its locator. Its work is
 /// in the checkpoint, so a patch export reads that instead of addressing a
 /// target that no longer runs it, and a stopped session with nothing saved is

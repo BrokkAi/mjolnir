@@ -1008,7 +1008,9 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                 &repository,
                 base.as_deref(),
                 branch.as_deref(),
-                false,
+                // A checkout that recorded no launch base is bundled against
+                // what its origin already has, as a suspended session's is.
+                true,
                 None,
             )
             .map_err(export_error)?;

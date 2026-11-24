@@ -4621,18 +4621,55 @@ async fn worker_command_with_input(
     purpose: &'static str,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
+    worker_command_staging(
+        layout,
+        session_id,
+        arguments,
+        purpose,
+        input,
+        mj_controller::controller::ControlWorker,
+    )
+    .await
+}
+
+/// Run a worker command, staging `stager`'s control worker beside a root
+/// whose own `hel` is too old to know the subcommand.
+async fn worker_command_staging(
+    layout: SessionExportLayout,
+    session_id: String,
+    arguments: Vec<String>,
+    purpose: &'static str,
+    input: Option<Vec<u8>>,
+    stager: impl targets::ControlWorkerStager + Send + 'static,
+) -> Result<Vec<u8>, ExportError> {
     // Dropping this future (the client left, or the server is stopping)
     // cancels the target command instead of leaving it to run to its timeout.
     let token = tokio_util::sync::CancellationToken::new();
     let _cancel = token.clone().drop_guard();
     let output: CommandOutput = export_blocking(purpose, move || {
-        let mut command = worker_command_spec(layout, &session_id, arguments, purpose)?;
-        if let Some(input) = input {
-            command = command.with_sensitive_stdin(input);
+        let executor =
+            CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).with_cancellation(token);
+        let run = |binary: &str| -> Result<CommandOutput> {
+            let mut command =
+                worker_command_spec_for(&layout, &session_id, binary, arguments.clone(), purpose)?;
+            if let Some(input) = &input {
+                command = command.with_sensitive_stdin(input.clone());
+            }
+            executor.execute(&command)
+        };
+        let first = run("hel")?;
+        // A worker installed before this subcommand existed answers clap's
+        // usage failure, and it stays until the session is next resumed. The
+        // current build's worker serves the call from the control name beside
+        // it: staging it replaces nothing, so no swap admission is needed.
+        if first.status != CLAP_USAGE_EXIT_CODE || executor.cancellation_requested() {
+            return Ok(first);
         }
-        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT)
-            .with_cancellation(token)
-            .execute(&command)
+        let root = targets::worker_root(&layout.backend, &session_id)?;
+        stager
+            .stage_control_worker(&executor, &layout.backend, &session_id, &root)
+            .with_context(|| format!("stage the current worker in {root} for the {purpose}"))?;
+        run(targets::CONTROL_WORKER_NAME)
     })
     .await?;
     worker_output(output, purpose)
@@ -4644,7 +4681,21 @@ fn worker_command_spec(
     arguments: Vec<String>,
     purpose: &'static str,
 ) -> Result<mj_core::targets::CommandSpec> {
-    let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
+    worker_command_spec_for(&layout, session, "hel", arguments, purpose)
+}
+
+/// `worker <arguments>` run by `binary`, a file in the session's worker root.
+fn worker_command_spec_for(
+    layout: &SessionExportLayout,
+    session: &str,
+    binary: &str,
+    arguments: Vec<String>,
+    purpose: &'static str,
+) -> Result<mj_core::targets::CommandSpec> {
+    let binary = format!(
+        "{}/{binary}",
+        targets::worker_root(&layout.backend, session)?
+    );
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
     targets::command_on_locator(

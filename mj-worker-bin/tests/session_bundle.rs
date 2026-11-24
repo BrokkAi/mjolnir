@@ -144,3 +144,87 @@ fn session_bundle_worker_writes_a_native_bundle_of_the_commits_beyond_its_base()
     let reason = String::from_utf8(refused.stdout).unwrap();
     assert!(reason.contains("mj export --kind patch"), "{reason}");
 }
+
+#[test]
+fn session_bundle_worker_without_a_recorded_base_bundles_what_origin_lacks() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let origin = root.join("origin.git");
+    git(
+        root,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let work = root.join("work");
+    git(
+        root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    git(&work, &["config", "user.name", "Test"]);
+    git(&work, &["config", "user.email", "test@example.com"]);
+    fs::write(work.join("tracked.txt"), b"base\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-qm", "pushed"]);
+    git(&work, &["push", "-q", "-u", "origin", "main"]);
+    let pushed = git(&work, &["rev-parse", "HEAD"]);
+
+    // Nothing beyond origin yet: a refusal, not an empty bundle.
+    let refused = bundle(&work, &[]);
+    assert_eq!(refused.status, EXPORT_REFUSED_EXIT_CODE);
+    let reason = String::from_utf8(refused.stdout).unwrap();
+    assert!(reason.contains("no commits beyond origin"), "{reason}");
+
+    fs::write(work.join("local.txt"), b"local\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-qm", "local"]);
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    let output = bundle(&work, &[]);
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let file = root.join("session.bundle");
+    fs::write(&file, &output.stdout).unwrap();
+    // The bundle assumes origin's commit and carries only the local one.
+    let header =
+        String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(1024)]).into_owned();
+    assert!(header.contains(&format!("\n-{pushed}")), "{header}");
+    let fresh = root.join("fresh");
+    git(
+        root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            fresh.to_str().unwrap(),
+        ],
+    );
+    git(&fresh, &["bundle", "verify", file.to_str().unwrap()]);
+    git(
+        &fresh,
+        &[
+            "fetch",
+            "-q",
+            file.to_str().unwrap(),
+            "HEAD:refs/heads/imported",
+        ],
+    );
+    assert_eq!(git(&fresh, &["rev-parse", "imported"]), head);
+    assert_eq!(
+        git(&fresh, &["rev-list", "--count", "imported", "^origin/main"]),
+        "1"
+    );
+}
