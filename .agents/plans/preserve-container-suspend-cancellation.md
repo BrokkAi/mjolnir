@@ -19,7 +19,8 @@ The fix is one extra attempt through the existing target-recovery function after
 - [x] (2026-11-24 13:40Z) Accepted MJ Advisor's smaller structural cut, superseding the per-call watcher, early record write, return-Pending and proposed daemon replay designs before daemon edits began. Production owner acknowledged the revision.
 - [x] (2026-11-24 13:41Z) Tracked the pipeline-wide shutdown-only executor limitation separately in #1678. No implementation of that follow-up is part of this task.
 - [x] (2026-11-24 13:45Z) Reduced lifecycle.rs change and same-call rollback fixture are complete. All three exact filters passed one each; strict controller all-targets Clippy and both Rust formatting/diff checks passed. No build/test remains active.
-- [ ] Commit, request review, merge unrelated upstream if necessary, push to origin/master, close #1677, and record platform CI/delivery.
+- [x] (2026-11-24 13:47Z) Final source commit fe9cc00b5 reviewed; explicitly overrode the three overlapping shutdown/handoff findings as the #1678 follow-up recommended by MJ Advisor. Unrelated upstream merged cleanly; integration review found zero own changed files.
+- [x] (2026-11-24 13:48Z) Pushed 65e6ecbbd to origin/master. #1677 closed and active-work label removed. Dispatched platform CI run 45407265706 on that exact code commit; it is pending. No build installed.
 
 ## Surprises & Discoveries
 
@@ -50,7 +51,7 @@ Date/Author: 2026-11-24 13:41Z, parent agent after design review.
 ## Outcomes & Retrospective
 
 
-The reduced implementation and local validation are complete. The actual managed recovery entry now rolls back cancellation to Parked in the same call, retaining its target and checkout contents and clearing the accepted/restart markers. A separate accepted operation preserves a preexisting rollback reason. Direct helper tests prove no early record writing, normal successful-probe behavior, and retained failure on shutdown-only or unreachable recovery. Three exact filters and strict controller Clippy pass. The discarded watcher and deferred-settlement mechanisms are removed from the final diff; production remains lifecycle.rs only. Review and delivery remain. Unreachable, missing or foreign targets retain a visible failure and their data. Simultaneous cancellation/handoff retains the surrounding pipeline's existing limitation, explicitly tracked in #1678.
+The reduced implementation is reviewed and pushed in 65e6ecbbd, closing #1677. The actual managed recovery entry rolls back cancellation to Parked in the same call, retaining its target and checkout contents and clearing the accepted/restart markers. A separate accepted operation preserves a preexisting rollback reason. Direct helper tests prove no early record writing, normal successful-probe behavior, and retained failure on shutdown-only or unreachable recovery. Three exact filters and strict controller Clippy pass. The discarded watcher and deferred-settlement mechanisms are removed from the final diff; production remains lifecycle.rs only. [Platform CI](https://github.com/BrokkAi/mjolnir/actions/runs/45407265706) is pending; the installed build is unchanged. Unreachable, missing or foreign targets retain a visible failure and their data. The three overlapping handoff review findings were explicitly overridden: the uncancelled retry can delay shutdown or continue after admission is released if transport stalls. That accepted limitation and the surrounding pipeline's executor problem remain in #1678, rather than being hidden behind a partial local watcher.
 
 ## Context and Orientation
 
@@ -111,3 +112,5 @@ Keep the existing CommandExecutor/ProcessExecutor, target recovery function, Ori
 Revision note (2026-11-24 13:41Z): Rewrote the plan around MJ Advisor's smaller same-owner cut. This supersedes the initial early record writer, local handoff watcher, deferred Pending settlement and proposed daemon replay. All are removed from the final implementation rather than retained as parallel paths. The surrounding pipeline's shutdown-only executor work is separately tracked in #1678.
 
 Revision note (2026-11-24 13:45Z): The reduced design passes the full same-call cancellation regression, two affected controls, strict controller Clippy and formatting. Recorded exact nonzero counts and the unchanged broader handoff limitation; review and delivery remain.
+
+Revision note (2026-11-24 13:48Z): Recorded the final review override, clean unrelated upstream integration, successful push, issue closure and exact pending platform CI run. No installation was performed; #1678 remains explicitly open.
