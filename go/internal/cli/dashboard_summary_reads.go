@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"maps"
 	"slices"
 	"strings"
@@ -49,8 +48,17 @@ func compareReadKey(a, b readKey) int {
 // summaryRead is Rust's Read: one read's generation and its task.
 type summaryRead struct {
 	generation uint64
-	// task aborts the read (Rust's AbortOnDropHandle); nil once finished.
-	task context.CancelFunc
+	// task is the read (Rust's AbortOnDropHandle): releasing the read
+	// aborts it. Nil once finished.
+	task *dashboardTask
+}
+
+// release is dropping the Rust handle, which aborts the read.
+func (r *summaryRead) release() {
+	if r.task != nil {
+		r.task.abort()
+		r.task = nil
+	}
 }
 
 // summaryReads owns summary and located-message requests for the current
@@ -76,7 +84,39 @@ func newSummaryReads() *summaryReads {
 // ordinal viewed) plus item: it cancels the others, starts the missing ones,
 // and answers the sessions whose summary reads it cancelled, in order.
 func (s *summaryReads) reconcile(wanted map[string]uint64, item *tui.NotificationReadRequest, updates *core.Unbounded[dashboardIoUpdate]) []string {
-	panic("unported: mj-cli/src/dashboard/summary_reads.rs SummaryReads::reconcile")
+	requests := make(map[readKey]uint64, len(wanted)+1)
+	for id, viewed := range wanted {
+		requests[readKeySummary{id: id}] = viewed
+	}
+	if item != nil {
+		requests[readKeyMessage{request: *item}] = 0
+	}
+	var removed []string
+	for _, key := range slices.SortedFunc(maps.Keys(s.reads), compareReadKey) {
+		if _, kept := requests[key]; kept {
+			continue
+		}
+		s.reads[key].release()
+		delete(s.reads, key)
+		if summary, ok := key.(readKeySummary); ok {
+			removed = append(removed, summary.id)
+		}
+	}
+	for _, key := range slices.SortedFunc(maps.Keys(requests), compareReadKey) {
+		if _, owned := s.reads[key]; owned {
+			continue
+		}
+		s.generation++
+		var task *dashboardTask
+		switch key := key.(type) {
+		case readKeySummary:
+			task = spawnStoredSessionSummary(key.id, requests[key], s.generation, s.permits, updates)
+		case readKeyMessage:
+			task = spawnNotificationMessageRead(key.request, s.generation, s.permits, updates)
+		}
+		s.reads[key] = &summaryRead{generation: s.generation, task: task}
+	}
+	return removed
 }
 
 // loadingSessions is the sessions whose summary read is still running, in
@@ -113,7 +153,6 @@ func (s *summaryReads) finishKey(key readKey, generation uint64) bool {
 		return false
 	}
 	// Rust drops the handle, which aborts a task that has already answered.
-	read.task()
-	read.task = nil
+	read.release()
 	return true
 }

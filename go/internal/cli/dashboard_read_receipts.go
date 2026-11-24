@@ -8,6 +8,7 @@ package cli
 import (
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -16,7 +17,31 @@ import (
 // preserveReadPositions keeps, in each changed incoming record, a read
 // frontier this terminal had already advanced past the incoming one.
 func preserveReadPositions(incoming *core.SnapshotMap[string, core.SessionRecord], previous core.SnapshotMap[string, core.SessionRecord]) {
-	panic("unported: mj-cli/src/dashboard/read_receipts.rs preserve_read_positions")
+	type preserved struct {
+		id       string
+		frontier uint64
+	}
+	var keep []preserved
+	sessionRecordEqual := func(a, b *core.SessionRecord) bool { return reflect.DeepEqual(a, b) }
+	for id, record := range previous.Changes(*incoming, sessionRecordEqual) {
+		if record == nil {
+			continue
+		}
+		old := previous.GetShared(id)
+		if old == nil {
+			continue
+		}
+		if frontier := old.ViewedThroughEventOrdinal; frontier > record.ViewedThroughEventOrdinal {
+			keep = append(keep, preserved{id: id, frontier: frontier})
+		}
+	}
+	for _, entry := range keep {
+		record := incoming.GetMut(entry.id)
+		if record == nil {
+			panic("changed record exists")
+		}
+		record.ViewedThroughEventOrdinal = entry.frontier
+	}
 }
 
 // readReceipts is every session's receipt save. The zero value is Rust's

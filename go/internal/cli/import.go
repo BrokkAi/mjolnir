@@ -4,11 +4,14 @@
 package cli
 
 import (
+	"fmt"
 	"sync/atomic"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/controller"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/mjimport"
+	"github.com/BrokkAi/mjolnir/go/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -194,4 +197,22 @@ type dashboardImportRequest struct {
 // spawnDashboardImport runs request off the loop, reporting on updates.
 func spawnDashboardImport(controller *controller.Controller, request dashboardImportRequest, updates chan<- dashboardImportUpdate, tracker client.CriticalOperationTracker) {
 	panic("unported: mj-cli/src/import.rs spawn_dashboard_import")
+}
+
+// discoverClientImportProfile lists the native sessions of profile's harness
+// that this machine can import, for the resume dialog, calling publish with
+// the partial list as the scan runs.
+//
+// Importing native sessions is not ported yet (mj-cli/src/import.rs
+// discover_client_import_profile and the scan behind it), so the profile
+// reports that as its error: the dialog shows it in place of a scan that
+// would never finish.
+func discoverClientImportProfile(profileID string, profile core.HarnessProfile, cache *mjimport.NativeScanCache, publish func(tui.ImportProfileOption)) tui.ImportProfileOption {
+	message := fmt.Errorf("listing native sessions to import: %w", errNotPorted).Error()
+	combined := tui.ImportProfileOption{
+		ProfileID:   profileID,
+		HarnessKind: profile.Kind,
+		Error:       &message,
+	}
+	return combined
 }

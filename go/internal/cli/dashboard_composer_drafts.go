@@ -6,6 +6,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"math"
 	"slices"
@@ -55,8 +56,68 @@ func (c composerDraftCache) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire)
 }
 
+// UnmarshalJSON requires drafts and, in each persistence entry, desired and
+// saved, as serde does; a missing persistence is empty (serde(default)).
+// Unknown fields are ignored.
 func (c *composerDraftCache) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-cli/src/dashboard/composer_drafts.rs ComposerDraftCache (serde Deserialize)")
+	var wire struct {
+		Drafts      json.RawMessage `json:"drafts"`
+		Persistence json.RawMessage `json:"persistence"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if string(data) == "null" {
+		return errors.New("invalid type: null, expected struct ComposerDraftCache")
+	}
+	if wire.Drafts == nil {
+		return errors.New("missing field `drafts`")
+	}
+	var drafts map[string]core.DetachedSessionDraft
+	if err := decodeSerdeMap(wire.Drafts, &drafts); err != nil {
+		return err
+	}
+	persistence := map[string]*draftPersistence{}
+	if wire.Persistence != nil {
+		var entries map[string]json.RawMessage
+		if err := decodeSerdeMap(wire.Persistence, &entries); err != nil {
+			return err
+		}
+		for id, raw := range entries {
+			var entry struct {
+				Desired *uint64 `json:"desired"`
+				Saved   *uint64 `json:"saved"`
+			}
+			if string(raw) == "null" {
+				return errors.New("invalid type: null, expected struct DraftPersistence")
+			}
+			if err := json.Unmarshal(raw, &entry); err != nil {
+				return err
+			}
+			if entry.Desired == nil {
+				return errors.New("missing field `desired`")
+			}
+			if entry.Saved == nil {
+				return errors.New("missing field `saved`")
+			}
+			persistence[id] = &draftPersistence{desired: *entry.Desired, saved: *entry.Saved}
+		}
+	}
+	if drafts == nil {
+		drafts = map[string]core.DetachedSessionDraft{}
+	}
+	c.drafts = drafts
+	c.persistence = persistence
+	return nil
+}
+
+// decodeSerdeMap decodes a JSON object into target, refusing null as serde
+// refuses it for a BTreeMap.
+func decodeSerdeMap[M any](raw json.RawMessage, target *M) error {
+	if string(raw) == "null" {
+		return errors.New("invalid type: null, expected a map")
+	}
+	return json.Unmarshal(raw, target)
 }
 
 func (c *composerDraftCache) remember(sessionID string) {

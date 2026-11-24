@@ -3,25 +3,61 @@
 //
 // Terminal-specific adapters for controller background feeds.
 //
-// Not declared yet, because what they take is in crates or modules the Go
-// build does not have: DashboardLifecycleUpdate (mj-daemon's pollers
-// LifecycleSuccess), apply_worker_poll_update (mj-daemon's
-// WorkerPollUpdate and the dashboard's MaterializedProjection), and
-// spawn_worker_diagnosis (mj-controller's Controller and the dashboard's
-// DashboardIoUpdate and CriticalOperationTracker). Rust's re-export of
-// `mj_daemon::pollers::*` waits for the same port.
+// Not declared yet, because what it takes is in crates the Go build does
+// not have: spawn_worker_diagnosis (mj-controller's Controller and its
+// worker diagnosis). Rust's re-export of `mj_daemon::pollers::*` waits for
+// the same port; mj-daemon's WorkerPollUpdate is sessionruntime's
+// SessionManagerUpdate, which it aliases.
 
 package cli
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/daemon"
+	"github.com/BrokkAi/mjolnir/go/internal/sessionruntime"
+	"github.com/BrokkAi/mjolnir/go/internal/tui"
 )
+
+// applyWorkerPollUpdate applies one worker poll's reachability to the
+// dashboard. The daemon owns durable missing-target findings and publishes
+// their notice. Returns the poll's projection, when it carried one.
+func applyWorkerPollUpdate(dashboard *tui.DashboardState, update sessionruntime.SessionManagerUpdate) *materializedProjection {
+	if viewError := update.View.Error; viewError == nil {
+		dashboard.ReportSessionReachable(update.SessionID)
+	} else {
+		switch viewError.Kind {
+		case client.ViewErrorKindUnreachable:
+			dashboard.MarkTranscriptUnavailable(update.SessionID)
+			slog.Warn(fmt.Sprintf("relay unreachable: %s", viewError.Detail()), "session_id", update.SessionID)
+			dashboard.ReportSessionUnreachable(update.SessionID)
+		case client.ViewErrorKindTargetMissing:
+			dashboard.MarkTranscriptUnavailable(update.SessionID)
+			dashboard.ClearSessionUnreachable(update.SessionID)
+		case client.ViewErrorKindProjectionIntegrity:
+			// Deterministic failure: no worker diagnostics. Like an
+			// unreachable relay, it is a live poll fact and is never
+			// persisted as a session last_error.
+			dashboard.MarkTranscriptUnavailable(update.SessionID)
+			dashboard.ClearSessionUnreachable(update.SessionID)
+			dashboard.SetNotice(fmt.Sprintf(
+				"Session %s: transcript projection failed: %s",
+				update.SessionID[:min(len(update.SessionID), 8)],
+				viewError.Detail(),
+			))
+		}
+	}
+	if update.View.Snapshot == nil {
+		return nil
+	}
+	projection := materializedProjectionFromSnapshot(*update.View.Snapshot)
+	return &projection
+}
 
 // dashboardLifecycleUpdate is one lifecycle operation's result. Completion
 // identity belongs to the UI operation that started the work; the daemon's

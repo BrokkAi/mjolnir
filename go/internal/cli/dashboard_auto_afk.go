@@ -6,6 +6,9 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -41,7 +44,29 @@ type daemonActivityTransport struct {
 }
 
 func (t *daemonActivityTransport) report(ctx context.Context, generation uint64) error {
-	panic("unported: mj-cli/src/dashboard/auto_afk.rs DaemonActivityTransport::report")
+	// Keep the stream local until the acknowledgement arrives. If the
+	// enclosing deadline cancels the report, the potentially half-consumed
+	// connection is dropped with it.
+	daemonClient := t.client
+	t.client = nil
+	if daemonClient == nil {
+		connected, err := client.ConnectExisting(ctx)
+		if err != nil {
+			return err
+		}
+		daemonClient = connected
+	}
+	reply, err := daemonClient.Request(ctx, client.DaemonActionRecordOperatorActivity{})
+	if err != nil {
+		daemonClient.Close()
+		return fmt.Errorf("record operator activity: %w", err)
+	}
+	if _, done := reply.(client.DaemonReplyDone); done {
+		t.client = daemonClient
+		return nil
+	}
+	daemonClient.Close()
+	return fmt.Errorf("unexpected activity-report reply %s", client.DaemonReplyDebug(reply))
 }
 
 // autoAfkReporter is one supervised sender for the dashboard lifetime. The
@@ -62,7 +87,25 @@ type autoAfkReporter struct {
 }
 
 func newAutoAfkReporter(enabled bool, away bool) *autoAfkReporter {
-	panic("unported: mj-cli/src/dashboard/auto_afk.rs AutoAfkReporter::new")
+	state := activitySignal{enabled: enabled, away: away}
+	signal := core.NewWatch(state)
+	signalDropped := make(chan struct{})
+	receiver := newWatchReceiver(signal, signalDropped)
+	errs := make(chan string, 1)
+	ctx, abort := context.WithCancel(context.Background())
+	task := core.Spawn(func() struct{} {
+		defer abort()
+		runReporter(ctx, receiver, errs, &daemonActivityTransport{}, minReportInterval, reportTimeout)
+		return struct{}{}
+	})
+	return &autoAfkReporter{
+		signal:        signal,
+		signalDropped: signalDropped,
+		errors:        errs,
+		task:          task,
+		abort:         abort,
+		state:         state,
+	}
 }
 
 func (r *autoAfkReporter) configure(enabled bool, away bool) {
@@ -94,7 +137,25 @@ func (r *autoAfkReporter) input() {
 // shutdown drops the sender, lets the reporter finish for up to two
 // seconds, then aborts it.
 func (r *autoAfkReporter) shutdown() {
-	panic("unported: mj-cli/src/dashboard/auto_afk.rs AutoAfkReporter::shutdown")
+	if r.signal != nil {
+		r.signal = nil
+		close(r.signalDropped)
+	}
+	task := r.task
+	if task == nil {
+		return
+	}
+	r.task = nil
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-task.Done():
+		if _, err := task.Join(context.Background()); err != nil {
+			slog.Warn("auto-AFK reporter task failed during shutdown", "error", err.Error())
+		}
+	case <-timer.C:
+		r.abort()
+	}
 }
 
 // drop is Rust's Drop: abort a reporter shutdown did not take.
@@ -118,11 +179,61 @@ func isOperatorInput(event tea.Msg) bool {
 }
 
 // runReporter reports each eligible generation the signal watch publishes,
-// at most one per interval, each bounded by timeout. It returns once
-// signalDropped closes with nothing unseen, or when ctx ends (abort).
-// Reports that fail send one message per distinct error to failures.
-func runReporter(ctx context.Context, signal *core.Watch[activitySignal], signalDropped <-chan struct{}, failures chan<- string, transport activityTransport, interval time.Duration, timeout time.Duration) {
-	panic("unported: mj-cli/src/dashboard/auto_afk.rs run_reporter")
+// at most one per interval, each bounded by timeout. It returns once the
+// sender is dropped with nothing unseen, or when ctx ends (abort). Reports
+// that fail send one message per distinct error to failures, without
+// waiting for room.
+func runReporter(ctx context.Context, signal *watchReceiver[activitySignal], failures chan<- string, transport activityTransport, interval time.Duration, timeout time.Duration) {
+	var reportedGeneration uint64
+	var lastReport *time.Time
+	var lastError *string
+	for {
+		if !signal.changed(ctx) {
+			return
+		}
+		current := signal.borrowAndUpdate()
+		if !eligibleGeneration(current, reportedGeneration) {
+			continue
+		}
+		if lastReport != nil {
+			if !sleepUntil(ctx, lastReport.Add(interval)) {
+				return
+			}
+		}
+		current = signal.borrowAndUpdate()
+		if !eligibleGeneration(current, reportedGeneration) {
+			continue
+		}
+		// Mark the generation before sending. A newer signal arriving
+		// during the request remains visible in the watch for one trailing
+		// report once this request completes.
+		reportedGeneration = current.generation
+		now := time.Now()
+		lastReport = &now
+		reportCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := transport.report(reportCtx, current.generation)
+		expired := errors.Is(reportCtx.Err(), context.DeadlineExceeded)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil && expired {
+			// tokio::time::timeout's Elapsed under the Rust context.
+			err = errors.New("daemon did not acknowledge operator activity before its deadline: deadline has elapsed")
+		}
+		if err == nil {
+			lastError = nil
+			continue
+		}
+		message := fmt.Sprintf("Could not report dashboard input: %v", err)
+		if lastError == nil || *lastError != message {
+			select {
+			case failures <- message:
+			default:
+			}
+			lastError = &message
+		}
+	}
 }
 
 func eligibleGeneration(current activitySignal, reported uint64) bool {
@@ -130,4 +241,65 @@ func eligibleGeneration(current activitySignal, reported uint64) bool {
 		!current.away &&
 		current.generation > reported &&
 		current.generation > current.discardedThrough
+}
+
+// sleepUntil is tokio::time::sleep_until under ctx: false when ctx ended
+// first.
+func sleepUntil(ctx context.Context, deadline time.Time) bool {
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// watchReceiver is tokio's watch::Receiver over a core.Watch: it knows which
+// publications it has seen, and its sender's drop. Like the receiver
+// watch::channel returns, it counts the value current when it was made as
+// seen, so it must be made before anything else can publish.
+type watchReceiver[T any] struct {
+	watch *core.Watch[T]
+	// seen is closed by the first publication after the last one this
+	// receiver marked seen.
+	seen <-chan struct{}
+	// senderDropped is closed when the sender is dropped.
+	senderDropped <-chan struct{}
+}
+
+func newWatchReceiver[T any](watch *core.Watch[T], senderDropped <-chan struct{}) *watchReceiver[T] {
+	return &watchReceiver[T]{watch: watch, seen: watch.Changed(), senderDropped: senderDropped}
+}
+
+// changed is Receiver::changed: it waits for a publication this receiver
+// has not seen and marks it seen. It answers false once the sender is
+// dropped with nothing unseen, or when ctx ends. As in tokio, an unseen
+// publication wins over the sender's drop.
+func (r *watchReceiver[T]) changed(ctx context.Context) bool {
+	select {
+	case <-r.seen:
+	case <-r.senderDropped:
+		select {
+		case <-r.seen:
+		default:
+			return false
+		}
+	case <-ctx.Done():
+		return false
+	}
+	r.seen = r.watch.Changed()
+	return true
+}
+
+// borrowAndUpdate is the current value, marked seen.
+func (r *watchReceiver[T]) borrowAndUpdate() T {
+	r.seen = r.watch.Changed()
+	return r.watch.Borrow()
+}
+
+// borrow is the current value, without marking it seen.
+func (r *watchReceiver[T]) borrow() T {
+	return r.watch.Borrow()
 }
