@@ -19,7 +19,7 @@ import (
 
 // PackageVersion is the workspace package version (Rust's
 // `CARGO_PKG_VERSION` for mj-core); it tracks the Rust workspace.
-const PackageVersion = "2.73.0"
+const PackageVersion = "2.74.0"
 
 // testRevision is the digest part of the identity a test binary reports: no
 // commit has it. Keep it equal to `TEST_REVISION` in `build.rs`, which stamps
