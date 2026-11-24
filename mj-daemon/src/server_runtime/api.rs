@@ -4669,12 +4669,18 @@ async fn worker_command_with_input(
     purpose: &'static str,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
+    // Dropping this future (the client left, or the server is stopping)
+    // cancels the target command instead of leaving it to run to its timeout.
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancel = token.clone().drop_guard();
     let output: CommandOutput = export_blocking(purpose, move || {
         let mut command = worker_command_spec(layout, &session_id, arguments, purpose)?;
         if let Some(input) = input {
             command = command.with_sensitive_stdin(input);
         }
-        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).execute(&command)
+        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT)
+            .with_cancellation(token)
+            .execute(&command)
     })
     .await?;
     worker_output(output, purpose)

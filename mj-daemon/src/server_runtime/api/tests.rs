@@ -1640,6 +1640,77 @@ async fn a_stopped_sessions_patch_export_reads_its_checkpoint_even_with_a_locato
     }
 }
 
+/// A live export runs a worker command on the target. When its request is
+/// dropped (the client left, or the daemon is stopping) that command must stop
+/// at once rather than run on to its five-minute timeout.
+// Hard-won: review of b5c722d: dropped live export requests left their target Git/SSH subprocess running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_live_export_request_stops_its_worker_command() {
+    use std::os::unix::fs::PermissionsExt;
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    let directory = tempfile::tempdir().unwrap();
+    // The worker root is named for its session.
+    let worker_root = directory.path().join(SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let script = worker_root.join("hel");
+    let pid_file = worker_root.join("pid");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let layout = SessionExportLayout {
+        backend: mj_core::targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_str().unwrap().to_owned(),
+        },
+        workspace_root: String::new(),
+        primary_repository: "project".into(),
+        repositories: Vec::new(),
+        report_root: String::new(),
+        managed_worktree: None,
+    };
+    let request = mj_core::runtime::spawn(worker_command(
+        layout,
+        SESSION.into(),
+        vec!["diff".into()],
+        "session diff",
+    ));
+    let started = std::time::Instant::now();
+    let pid = loop {
+        assert!(
+            !request.is_finished(),
+            "the command ended before it was dropped: {:?}",
+            request.await
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no command started"
+        );
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    assert!(alive(pid));
+    request.abort();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker command outlived its request"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// A bundle of a session with no checkout comes from its stored checkpoint, as
 /// does one of a live session whose own lifecycle operation is busy: neither
 /// asks the worker for a fresh checkpoint, and both rebuild the work in a

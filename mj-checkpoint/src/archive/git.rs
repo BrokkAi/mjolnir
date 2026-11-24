@@ -3742,13 +3742,26 @@ fn resolve_commit(
 /// Mjolnir's own refs are not bundled, so the bundle is committed history and
 /// nothing else. A session with no commits beyond its base is refused, because
 /// Git cannot write an empty bundle and its edits are in the patch export.
+///
+/// `selected_refs` names exactly the refs to bundle besides `HEAD`, for a
+/// checkout whose branches and tags are not all the session's: one rebuilt
+/// from a seed repository also holds what the seed gained since. `None`
+/// bundles every local branch and tag.
 pub fn session_bundle_bytes(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
     fallback_origin: bool,
+    selected_refs: Option<&[String]>,
 ) -> Result<Vec<u8>, SessionExportError> {
+    if let Some(refs) = selected_refs
+        && let Some(bad) = refs.iter().find(|name| !name.starts_with("refs/"))
+    {
+        return Err(SessionExportError::Failed(anyhow!(
+            "{bad:?} is not a full ref name"
+        )));
+    }
     let (top_level, recorded) = locate_session_base(runner, repository, base, branch)?;
     let (exclusion, none_message) = match recorded {
         Some(recorded) => {
@@ -3773,11 +3786,22 @@ pub fn session_bundle_bytes(
     };
     let selection = |verb: &[&str]| -> Vec<String> {
         let mut arguments: Vec<String> = verb.iter().map(|word| (*word).to_owned()).collect();
-        arguments.extend(
-            ["HEAD", "--branches", "--tags"]
-                .into_iter()
-                .map(String::from),
-        );
+        match selected_refs {
+            Some(refs) => {
+                arguments.push("HEAD".to_owned());
+                arguments.extend(
+                    refs.iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .cloned(),
+                );
+            }
+            None => arguments.extend(
+                ["HEAD", "--branches", "--tags"]
+                    .into_iter()
+                    .map(String::from),
+            ),
+        }
         arguments.extend(exclusion.iter().cloned());
         arguments
     };

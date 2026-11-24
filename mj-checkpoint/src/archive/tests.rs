@@ -3369,11 +3369,11 @@ fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
     };
 
     // A launch base bundles everything beyond it, including what was pushed.
-    let bytes = session_bundle_bytes(&SystemGit, &work, Some(&base), None, false).unwrap();
+    let bytes = session_bundle_bytes(&SystemGit, &work, Some(&base), None, false, None).unwrap();
     assert_bundle_fetches(&bytes, &base, &[&pushed, &head]);
 
     // With no base, origin's own commits are left out.
-    let bytes = session_bundle_bytes(&SystemGit, &work, None, None, true).unwrap();
+    let bytes = session_bundle_bytes(&SystemGit, &work, None, None, true, None).unwrap();
     assert_bundle_fetches(&bytes, &pushed, &[&head]);
     let fresh = temp.path().join("fresh");
     assert_eq!(
@@ -3381,8 +3381,29 @@ fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
         "1"
     );
 
+    // Selected refs bundle exactly those, and not the tag the seed gained.
+    let selected = ["refs/heads/feature".to_owned()];
+    let bytes =
+        session_bundle_bytes(&SystemGit, &work, Some(&base), None, false, Some(&selected)).unwrap();
+    let listing = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).into_owned();
+    assert!(listing.contains("refs/heads/feature"), "{listing}");
+    assert!(!listing.contains("refs/tags/session-tag"), "{listing}");
+    assert!(!listing.contains("refs/heads/main"), "{listing}");
+    let not_a_ref = ["--all".to_owned()];
+    assert!(
+        session_bundle_bytes(
+            &SystemGit,
+            &work,
+            Some(&base),
+            None,
+            false,
+            Some(&not_a_ref)
+        )
+        .is_err()
+    );
+
     // No base and no fallback is not a guess.
-    let error = session_bundle_bytes(&SystemGit, &work, None, None, false).unwrap_err();
+    let error = session_bundle_bytes(&SystemGit, &work, None, None, false, None).unwrap_err();
     assert!(matches!(error, SessionExportError::Refused(_)), "{error}");
 
     // Nothing beyond the base: a refusal that names the patch export.
@@ -3392,7 +3413,7 @@ fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
     git(&work, &["tag", "-d", "session-tag"]);
     git(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
     let SessionExportError::Refused(reason) =
-        session_bundle_bytes(&SystemGit, &work, Some(&base), None, false).unwrap_err()
+        session_bundle_bytes(&SystemGit, &work, Some(&base), None, false, None).unwrap_err()
     else {
         panic!("expected a refusal");
     };
@@ -3403,7 +3424,7 @@ fn a_session_bundle_holds_committed_history_beyond_its_base_and_nothing_else() {
     assert!(reason.contains("mj export --kind patch"), "{reason}");
     git(&work, &["fetch", "-q", "origin"]);
     let SessionExportError::Refused(reason) =
-        session_bundle_bytes(&SystemGit, &work, None, None, true).unwrap_err()
+        session_bundle_bytes(&SystemGit, &work, None, None, true, None).unwrap_err()
     else {
         panic!("expected a refusal");
     };
