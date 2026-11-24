@@ -11,7 +11,6 @@ Commands:
   acp                Serve the Agent Client Protocol on standard input and output, running each session it creates through this daemon
   doctor             Diagnose platform and configuration prerequisites
   ec2                Create, list, or destroy persistent EC2 hosts with rootless Podman
-  setup              Rerun agent and repository discovery, preserving existing configuration
   import             Adopt a native coding-agent session as a stopped Mjolnir session
   recover            Find, adopt, or explicitly destroy managed workers missing from state
   move               Move a session to another configured profile and/or target
@@ -39,6 +38,7 @@ Commands:
   destroy            Permanently destroy a session, its environment, and recovery archive
   notices            Read recent cleanup notices, including after a session was destroyed
   resume             Resume a stopped session from its checkpoint
+  restart            Restart a running session's agent (replaces pre-release workers in place)
   interrupt-turn     Cancel the turn a session is running
   review             Review a session's committed work, or show the review it has open
   stop-task          Stop a session's background task, or all tasks the worker can stop

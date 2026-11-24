@@ -1,0 +1,18 @@
+=== untracked refusal ===
+6 untracked files will not be kept: a.txt, b.txt, c.txt, d.txt, e.txt… `git add` (or commit) anything you want to keep, or pass `--discard-untracked`. Ignored files are never kept.
+
+=== dry run ===
+dry run for session session-1
+git delta: 64.0 KiB
+session state: 4.0 KiB
+.mj/keep/: 2.0 KiB, not saved by suspend; copy out anything you need first, for example with `mj fetch`
+would be lost (ignored files are never kept):
+  - scratch.txt
+
+=== dry run during rebase ===
+dry run for session session-2
+git delta: Git size estimate unavailable during rebase
+session state: unavailable
+.mj/keep/: 0 B
+in-progress operations (would be aborted):
+  - rebase (workspace)

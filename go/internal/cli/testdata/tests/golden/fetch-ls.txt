@@ -1,0 +1,7 @@
+=== mj fetch --ls <directory> ===
+     9  2026-10-22T09:00:00Z  latest -> report.md
+     -  2026-10-22T08:00:00Z  nested/
+120000  2026-10-23T07:56:00Z  probe.log
+     9  2026-10-23T07:55:30Z  report.md
+=== mj fetch --ls <file> ===
+120000  2026-10-23T07:56:00Z  probe.log

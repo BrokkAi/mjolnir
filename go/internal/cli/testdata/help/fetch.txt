@@ -1,0 +1,13 @@
+Copy a file, or a directory as a zip archive, from a session's target into this machine's temporary directory and print where it landed
+
+Usage: mj fetch [OPTIONS] --session <SESSION> --path <PATH>
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id, as `mj sessions` lists it
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --path <PATH>        File or directory to fetch: relative to the directory the session's agent runs in, or absolute on the session's target. It must lie in the session's workspace, its sub-agent report directories, or the target's temporary directory
+      --stdout             Write the file, or the directory's zip archive, to standard output instead of the temporary directory
+      --ls                 List the directory, or the file, with each entry's size and modification time, on standard output. Symlinks are listed, not followed
+      --json               Print the result as JSON: the listing with `--ls`, otherwise where the copy landed
+  -h, --help               Print help
