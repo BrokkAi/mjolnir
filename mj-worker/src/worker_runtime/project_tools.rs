@@ -598,7 +598,7 @@ mod tests {
         let root = temp.path();
         let bin = root.join("bin");
         std::fs::create_dir(&bin).unwrap();
-        for tool in ["cargo", "mbx"] {
+        for tool in ["cargo", "mbx", "gh"] {
             let path = bin.join(tool);
             std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -670,9 +670,14 @@ mod tests {
             assert_eq!(env["PATH"], expected.to_str().unwrap());
         }
         for generation in ["harness-git-first", "harness-git-reload"] {
+            let git_bin = root.join(generation).join("bin");
+            std::fs::create_dir_all(&git_bin).unwrap();
+            let git_gh = git_bin.join("gh");
+            std::fs::write(&git_gh, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&git_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
             environment.insert(
                 "MJ_GITHUB_CLI_BIN".into(),
-                root.join(generation).join("bin").display().to_string(),
+                git_bin.display().to_string(),
             );
             super::super::restore_mbx_launcher(root, None, &mut environment).unwrap();
             let check = |env: &BTreeMap<String, String>, reset: bool| {
@@ -698,19 +703,23 @@ mod tests {
             let mut command = std::process::Command::new("/bin/bash");
             let output = command.env_clear().envs(&environment)
                 .env("PATH", format!("/opt/mise/shims:{}:/usr/bin:/bin:{}", bin.display(), bin.display()))
-                .args(["-c", ". \"$MJ_SESSION_BASH_ENV\"; . \"$MJ_SESSION_BASH_ENV\"; command -v cargo; printf '%s' \"$PATH\""])
+                .args(["-c", ". \"$MJ_SESSION_BASH_ENV\"; . \"$MJ_SESSION_BASH_ENV\"; command -v gh; command -v cargo; printf '%s' \"$PATH\""])
                 .output().unwrap();
             assert!(output.status.success());
             let output = String::from_utf8(output.stdout).unwrap();
-            let (cargo, path) = output.split_once('\n').unwrap();
-            assert_eq!(cargo, bin.join("cargo").to_str().unwrap());
+            let mut lines = output.splitn(3, '\n');
+            assert_eq!(lines.next().unwrap(), git_gh.to_str().unwrap());
+            assert_eq!(lines.next().unwrap(), bin.join("cargo").to_str().unwrap());
+            let path = lines.next().unwrap();
             assert_eq!(
                 std::env::split_paths(path)
                     .filter(|entry| entry == &bin)
                     .count(),
                 1
             );
-            assert_eq!(std::env::split_paths(path).next().unwrap(), bin);
+            let mut path_entries = std::env::split_paths(path);
+            assert_eq!(path_entries.next().unwrap(), git_bin);
+            assert_eq!(path_entries.next().unwrap(), bin);
         }
     }
 }

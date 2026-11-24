@@ -17,7 +17,7 @@ func TestMbxLaunchersSurviveShellResetAndGitReload(t *testing.T) {
 	if err := os.Mkdir(bin, 0755); err != nil {
 		t.Fatal(err)
 	}
-	for _, tool := range []string{"cargo", "mbx"} {
+	for _, tool := range []string{"cargo", "mbx", "gh"} {
 		if err := os.WriteFile(filepath.Join(bin, tool), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +104,15 @@ func TestMbxLaunchersSurviveShellResetAndGitReload(t *testing.T) {
 		}
 	}
 	for _, generation := range []string{"harness-git-first", "harness-git-reload"} {
-		env["MJ_GITHUB_CLI_BIN"] = filepath.Join(root, generation, "bin")
+		gitBin := filepath.Join(root, generation, "bin")
+		if err := os.MkdirAll(gitBin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		gitGh := filepath.Join(gitBin, "gh")
+		if err := os.WriteFile(gitGh, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		env["MJ_GITHUB_CLI_BIN"] = gitBin
 		if err := restoreMbxLauncher(root, nil, env); err != nil {
 			t.Fatal(err)
 		}
@@ -117,7 +125,7 @@ func TestMbxLaunchersSurviveShellResetAndGitReload(t *testing.T) {
 			t.Fatal(err)
 		}
 		check(true)
-		cmd := exec.Command("/bin/bash", "-c", `. "$MJ_SESSION_BASH_ENV"; . "$MJ_SESSION_BASH_ENV"; command -v cargo; printf '%s' "$PATH"`)
+		cmd := exec.Command("/bin/bash", "-c", `. "$MJ_SESSION_BASH_ENV"; . "$MJ_SESSION_BASH_ENV"; command -v gh; command -v cargo; printf '%s' "$PATH"`)
 		for k, v := range env {
 			if k == "PATH" {
 				v = "/opt/mise/shims:" + bin + ":/usr/bin:/bin:" + bin
@@ -128,21 +136,20 @@ func TestMbxLaunchersSurviveShellResetAndGitReload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
-		cargo, path, _ := strings.Cut(string(out), "\n")
-		if cargo != filepath.Join(bin, "cargo") {
-			t.Fatalf("cargo: %s", cargo)
+		parts := strings.SplitN(string(out), "\n", 3)
+		if len(parts) != 3 || parts[0] != gitGh || parts[1] != filepath.Join(bin, "cargo") {
+			t.Fatalf("resolved: %q", out)
 		}
-		entries := filepath.SplitList(path)
+		entries := filepath.SplitList(parts[2])
 		count := 0
 		for _, entry := range entries {
 			if entry == bin {
 				count++
 			}
 		}
-		if entries[0] != bin || count != 1 {
-			t.Fatalf("PATH: %s", path)
+		if len(entries) < 2 || entries[0] != gitBin || entries[1] != bin || count != 1 {
+			t.Fatalf("PATH: %s", parts[2])
 		}
-
 	}
 	cmd := exec.Command("/bin/sh", "-c", bazelPathScript()+"printf '%s' \"$PATH\"")
 	cmd.Env = []string{"PATH=" + bin + ":/usr/bin", "MJ_MBX_BIN=" + bin}

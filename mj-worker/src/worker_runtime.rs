@@ -116,10 +116,12 @@ use mj_core::worker_launch::WorkerLaunchConfig;
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
 // Highest precedence first. All launcher PATH consumers use this contract.
+// Git wrappers precede MJ_MBX_BIN so resumed workers shadow any legacy `gh`/
+// `slopcop` wrappers left in `<worker_root>/bin` before Git setup isolation.
 pub(super) const LAUNCHER_BIN_ENVS: [&str; 3] = [
     "MJ_BUILD_TOOL_BIN",
-    mj_core::worker_launch::SESSION_MBX_BIN_ENV,
     GITHUB_CLI_BIN_ENV,
+    mj_core::worker_launch::SESSION_MBX_BIN_ENV,
 ];
 
 pub(super) fn launcher_path_shell() -> String {

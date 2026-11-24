@@ -148,7 +148,9 @@ func RecordStartupFailure(root string, step string, errorText string) {
 const githubCLIBinEnv = "MJ_GITHUB_CLI_BIN"
 
 // Highest precedence first; all launcher PATH consumers share this contract.
-var launcherBinEnvs = [...]string{"MJ_BUILD_TOOL_BIN", core.SessionMbxBinEnv, githubCLIBinEnv}
+// Git wrappers precede MJ_MBX_BIN so resumed workers shadow any legacy `gh`/
+// `slopcop` wrappers left in `<worker_root>/bin` before Git setup isolation.
+var launcherBinEnvs = [...]string{"MJ_BUILD_TOOL_BIN", githubCLIBinEnv, core.SessionMbxBinEnv}
 
 func launcherPathShell() string {
 	var result strings.Builder
