@@ -19,7 +19,9 @@ mod sessions;
 mod terminal;
 mod terminal_operations;
 mod terminal_streams;
-pub use terminal::{ContainerSettingsRequest, ContainerSettingsResponse};
+pub use terminal::{
+    ContainerSettingsRequest, ContainerSettingsResponse, ProviderProfileSelectionRequest,
+};
 pub use terminal_operations::*;
 pub use terminal_streams::*;
 mod workspaces;
@@ -633,8 +635,12 @@ mod tests {
                 let (request, path, _, body_bytes) = read_request(&listener).await;
                 assert_eq!(path, "POST /api/v1/profiles/select HTTP/1.1");
                 assert_eq!(
-                    serde_json::from_slice::<mj_core::config::QuotaProvider>(&body_bytes).unwrap(),
-                    mj_core::config::QuotaProvider::OpenAI
+                    serde_json::from_slice::<ProviderProfileSelectionRequest>(&body_bytes).unwrap(),
+                    ProviderProfileSelectionRequest {
+                        provider: mj_core::config::QuotaProvider::OpenAI,
+                        profile_id: None,
+                        target_template_id: None
+                    }
                 );
                 respond(request, status, body).await;
             }
@@ -642,14 +648,22 @@ mod tests {
         let (_, ()) = tokio::join!(server, async {
             assert_eq!(
                 client
-                    .select_provider_profile(mj_core::config::QuotaProvider::OpenAI)
+                    .select_provider_profile(ProviderProfileSelectionRequest {
+                        provider: mj_core::config::QuotaProvider::OpenAI,
+                        profile_id: None,
+                        target_template_id: None
+                    })
                     .await
                     .unwrap(),
                 "codex-2"
             );
             assert!(
                 client
-                    .select_provider_profile(mj_core::config::QuotaProvider::OpenAI)
+                    .select_provider_profile(ProviderProfileSelectionRequest {
+                        provider: mj_core::config::QuotaProvider::OpenAI,
+                        profile_id: None,
+                        target_template_id: None
+                    })
                     .await
                     .unwrap_err()
                     .to_string()

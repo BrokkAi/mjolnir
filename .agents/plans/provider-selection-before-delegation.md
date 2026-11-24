@@ -29,7 +29,7 @@ The daemon and TUI already transport the remembered delegation policies correctl
 
 ## Outcomes & Retrospective
 
-Implemented early provider resolution through the daemon scheduler. The profile transition regressions (3), delegation regressions including the Create golden (3), and HTTP client contract test (1) pass. Clippy passed on all five affected crates. The existing provider scheduler regression also passes (1). The isolated daemon approval-policy regression also passes (1), and profile transitions (3) and Clippy passed again after retaining provider origin. Second review and push remain.
+Implemented early provider resolution through the daemon scheduler. The profile transition regressions (3), delegation regressions including the Create golden (3), and HTTP client contract test (1) pass. Clippy passed on all five affected crates. The existing provider scheduler regression also passes (1). The isolated daemon approval-policy regression also passes (1), and profile transitions (3) and Clippy passed again after retaining provider origin. The second review identified target-compatible refinement and stable profile identity; both are implemented, with extended profile/config-refresh/navigation tests and an isolated mixed-provider test. Final checks and third review remain.
 
 ## Context and Orientation
 
@@ -37,7 +37,7 @@ Implemented early provider resolution through the daemon scheduler. The profile 
 
 ## Plan of Work
 
-Add a terminal dashboard HTTP operation accepting a provider and returning its selected profile ID. Its daemon backend calls the existing provider resolver against current configuration and releases the temporary reservation on return. At the first wizard's Next, emit a background action and record its request generation. Disable duplicate Next while allowing cancel and profile changes. On a matching reply, select the returned named profile, restore delegation settings for it, and advance normally; report a failed selection while leaving the first page available to retry. Queue any follow-up UI action through the CLI's existing action queue. Keep a profile chosen at this boundary through later target/project/review pages and Create.
+Add a terminal dashboard HTTP operation accepting a provider and returning its selected profile ID. Its daemon backend calls the existing provider resolver against current configuration and releases the temporary reservation on return. At the first wizard's Next, emit a background action and record its request generation. Disable duplicate Next while allowing cancel and profile changes. On a matching reply, select the returned named profile, restore delegation settings for it, and advance normally; report a failed selection while leaving the first page available to retry. Queue any follow-up UI action through the CLI's existing action queue. Keep the chosen profile by ID through configuration refreshes. Before leaving the target page, ask the daemon whether that profile can satisfy its approval policy. Preserve a compatible profile; otherwise choose a compatible profile from the same provider and restore that profile's delegation preferences before moving on to project/review. Creation retains the final named profile and provider scope.
 
 ## Milestones
 
@@ -61,7 +61,7 @@ Issue: https://github.com/BrokkAi/mjolnir/issues/1681. Validation receipts will 
 
 ## Interfaces and Dependencies
 
-Extend `DashboardBackend` and `HttpDaemonClient` with `select_provider_profile(provider: QuotaProvider) -> Result<String>` using `/api/v1/profiles/select`. Add a `SelectProviderProfile` dashboard action carrying provider and generation, and a matching I/O completion. Add `NewWizard::profile_selection_request: Option<u64>` and `resolved_provider: Option<QuotaProvider>`. Apply completion through a public dashboard method returning the next `DashboardAction`.
+Extend `DashboardBackend` and `HttpDaemonClient` with `select_provider_profile(request: ProviderProfileSelectionRequest) -> Result<String>` using `/api/v1/profiles/select`. The request carries the provider and optional concrete profile and target names. A first-page request has neither; the target-page request has both. Add a `SelectProviderProfile` dashboard action carrying provider and generation, and a matching I/O completion. Add `NewWizard::profile_selection_request: Option<u64>` and `resolved_profile: Option<(String, QuotaProvider)>`; the string is the launch identity and the numeric profile index is only picker presentation. Apply completion through a public dashboard method returning the next `DashboardAction`.
 
 Initial plan written after the user clarified provider-group selection as the trigger.
 
@@ -69,3 +69,5 @@ Initial plan written after the user clarified provider-group selection as the tr
 
 Review identified two consequences of treating an automatically resolved profile as an ordinary explicit pin: guardian eligibility could be bypassed on the final target, and placement accounting was skipped. Retain the provider origin with the concrete profile, and run the existing provider admission against a configuration narrowed to that profile. This reuses the existing policy filter and quota reservation owner, commits the reservation after registration, and cannot silently select a different profile. Browsing holds no reservation; Create rechecks current quota and reports a refusal if the pinned profile is no longer eligible.
 2026-11-24 14:13Z: Revised the Create boundary after the first review; targeted validation passed (three profile tests and the isolated approval-policy test); Clippy passed again.
+
+2026-11-24 14:22Z: Updated the final design after review: target compatibility is resolved before review, IDs survive profile-list changes, and Back invalidates pending target checks.

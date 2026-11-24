@@ -157,7 +157,7 @@ pub(crate) struct NewWizard {
     /// Only this background selection may advance the profile page.
     pub(crate) profile_selection_request: Option<u64>,
     /// Provider placement still validates and accounts for this named choice at Create.
-    pub(crate) resolved_provider: Option<QuotaProvider>,
+    pub(crate) resolved_profile: Option<(String, QuotaProvider)>,
     bundle: usize,
     pub(crate) target: usize,
     /// Whether the draft passed the target step without showing it, because
@@ -293,6 +293,8 @@ impl NewWizard {
     pub(crate) fn selected_profile_id(&self, dashboard: &DashboardState) -> Option<String> {
         if self.selected_provider(dashboard).is_some() {
             Some(String::new())
+        } else if let Some((id, _)) = &self.resolved_profile {
+            Some(id.clone())
         } else {
             dashboard.new_wizard_profile_id(self.profile)
         }
@@ -301,6 +303,8 @@ impl NewWizard {
     pub(crate) fn selected_profile_label(&self, dashboard: &DashboardState) -> String {
         if let Some(provider) = self.selected_provider(dashboard) {
             format!("Auto ({})", provider.display_name())
+        } else if let Some((id, _)) = &self.resolved_profile {
+            id.clone()
         } else {
             dashboard.new_wizard_profile_label(self.profile)
         }
@@ -340,7 +344,7 @@ impl PartialEq for NewWizard {
             && self.expanded_providers == other.expanded_providers
             && self.focused_provider == other.focused_provider
             && self.profile_selection_request == other.profile_selection_request
-            && self.resolved_provider == other.resolved_provider
+            && self.resolved_profile == other.resolved_profile
             && self.bundle == other.bundle
             && self.target == other.target
             && self.profile_step_skipped == other.profile_step_skipped

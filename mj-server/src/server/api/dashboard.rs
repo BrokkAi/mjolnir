@@ -90,7 +90,7 @@ pub(super) fn dashboard_backend(
 pub trait DashboardBackend: TerminalOperations {
     fn select_provider_profile(
         &self,
-        provider: mj_core::config::QuotaProvider,
+        request: mj_client::http::ProviderProfileSelectionRequest,
     ) -> BoxFuture<'_, AnyResult<String>>;
     fn dashboard_startup(
         &self,
@@ -188,12 +188,12 @@ struct DashboardStartupRequest {
 async fn select_provider_profile(
     State(state): State<ServerState>,
     headers: HeaderMap,
-    Json(provider): Json<mj_core::config::QuotaProvider>,
+    Json(request): Json<mj_client::http::ProviderProfileSelectionRequest>,
 ) -> Result<Json<String>, ApiFailure> {
     require_terminal(&state, &headers)?;
     Ok(Json(
         dashboard_backend(&state)?
-            .select_provider_profile(provider)
+            .select_provider_profile(request)
             .await?,
     ))
 }

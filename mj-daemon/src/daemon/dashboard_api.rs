@@ -11,19 +11,37 @@ use mj_core::workspace::{ConversationLayout, PaneSize, PaneSizes};
 impl DashboardBackend for RuntimeState {
     fn select_provider_profile(
         &self,
-        provider: mj_core::config::QuotaProvider,
+        request: mj_client::http::ProviderProfileSelectionRequest,
     ) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let config = self.owner().controller().config.clone();
+            let policy = request
+                .target_template_id
+                .as_ref()
+                .map(|id| {
+                    config
+                        .targets
+                        .get(id)
+                        .with_context(|| format!("target {id} is no longer configured"))
+                })
+                .transpose()?
+                .map_or(mj_core::config::ExecutionPolicy::Unconstrained, |target| {
+                    target.execution_policy()
+                });
+            if let Some(id) = &request.profile_id
+                && let Some(profile) = config.enabled_profile(id)
+                && mj_controller::profile_scheduler::guardian_eligible(profile.kind, policy)
+            {
+                return Ok(id.clone());
+            }
             let backend: Arc<dyn crate::server::api::SubagentBackend> = self
                 .quota_report_backend()
                 .context("session selection backend is unavailable")?;
             let selected = crate::server::api::resolve_provider_session_selection(
                 &backend,
                 &config,
-                &provider,
-                // The person chooses a target after choosing a profile.
-                mj_core::config::ExecutionPolicy::Unconstrained,
+                &request.provider,
+                policy,
                 None,
             )
             .await

@@ -353,7 +353,7 @@ pub enum DashboardAction {
         config: String,
     },
     SelectProviderProfile {
-        provider: mj_core::config::QuotaProvider,
+        request: mj_client::http::ProviderProfileSelectionRequest,
         generation: u64,
     },
     /// Read the session checkout's branch and changed files on its target.

@@ -1288,6 +1288,7 @@ mod delegation_replay_tests {
 
     #[tokio::test]
     async fn a_resolved_provider_profile_keeps_target_approval_constraints_at_create() {
+        use crate::server::api::DashboardBackend;
         use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider, TargetTemplate};
         use std::sync::Arc;
         const CHILD: &str = "MJ_TEST_RESOLVED_PROVIDER_APPROVALS";
@@ -1309,6 +1310,18 @@ mod delegation_replay_tests {
             "kimi".into(),
             HarnessProfile::new(HarnessKind::Kimi, mj_core::config::data_dir().join("kimi")),
         );
+        let compatible_home = mj_core::config::data_dir().join("compatible");
+        std::fs::create_dir_all(&compatible_home).unwrap();
+        std::fs::write(compatible_home.join("config.toml"), "model_provider = 'moonshot'\n[model_providers.moonshot]\nname = 'Moonshot'\nbase_url = 'https://api.moonshot.ai/v1'\nwire_api = 'responses'\nenv_key = 'MOONSHOT_API_KEY'\n").unwrap();
+        let mut compatible = HarnessProfile::new(HarnessKind::Codex, compatible_home);
+        compatible.environment = mj_core::config::Environment::from_sources(
+            [(
+                "MOONSHOT_API_KEY".into(),
+                mj_core::config::EnvironmentValue::Literal("test-only".into()),
+            )]
+            .into(),
+        );
+        config.profiles.insert("compatible".into(), compatible);
         config
             .targets
             .insert("localhost".into(), TargetTemplate::LocalBare);
@@ -1350,6 +1363,22 @@ mod delegation_replay_tests {
                 .unwrap()
                 .sessions
                 .is_empty()
+        );
+        let check = |target| mj_client::http::ProviderProfileSelectionRequest {
+            provider: QuotaProvider::Moonshot,
+            profile_id: Some("kimi".into()),
+            target_template_id: target,
+        };
+        assert_eq!(
+            runtime.select_provider_profile(check(None)).await.unwrap(),
+            "kimi"
+        );
+        assert_eq!(
+            runtime
+                .select_provider_profile(check(Some("localhost".into())))
+                .await
+                .unwrap(),
+            "compatible"
         );
     }
 

@@ -708,7 +708,7 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::SelectProviderProfile {
-            provider,
+            request,
             generation,
         } => {
             super::io::spawn_async_io(
@@ -719,7 +719,7 @@ pub(crate) async fn apply_dashboard_action(
                         .await?
                         .http()
                         .await?
-                        .select_provider_profile(provider)
+                        .select_provider_profile(request)
                         .await
                 },
                 move |result| DashboardIoUpdate::ProviderProfileSelection { generation, result },
