@@ -328,6 +328,8 @@ pub enum RelayRequest {
         operation_id: String,
         expected_store_id: String,
         launch_config: Box<crate::worker_launch::WorkerLaunchConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
     },
     CommandRetentionStatus,
     /// Freeze a coherent current-state recovery cut on this connection.
@@ -1273,6 +1275,9 @@ pub enum RelayErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RelayErrorDetail {
+    ReloadFailedAfterCommit {
+        operation_id: String,
+    },
     Desynchronized {
         requested_after: u64,
         requested_digest: String,

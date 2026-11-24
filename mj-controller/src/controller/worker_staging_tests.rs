@@ -495,6 +495,7 @@ fn cache_test_launch(
     use mj_core::worker_launch::HarnessRuntimePolicy;
 
     WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,

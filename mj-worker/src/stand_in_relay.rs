@@ -445,6 +445,7 @@ pub fn serve_latch_relay() {
                 },
             }
         } else if let mj_core::relay::RelayRequest::RestartHarnessInPlace {
+            candidate_id: _,
             operation_id,
             expected_store_id,
             launch_config,

@@ -511,6 +511,7 @@ impl DurableRelay {
             .map(|queued| queued.command_id.clone())
             .collect();
         self.snapshot.in_place_move_hold = Some(mj_core::relay::InPlaceMoveHold {
+            reload_phase: None,
             operation_id: operation_id.to_owned(),
             captured_pending_command_ids: captured_pending_command_ids.clone(),
             harness_restarted: false,

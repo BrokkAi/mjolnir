@@ -3534,6 +3534,7 @@ impl Controller {
                                     &operation.operation_id,
                                     &expected_store_id,
                                     Box::new(launch_config),
+                                    None,
                                 )
                                 .await?;
                             Ok(())

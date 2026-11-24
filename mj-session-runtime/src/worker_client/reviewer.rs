@@ -415,8 +415,10 @@ impl RelayClient {
         operation_id: &str,
         expected_store_id: &str,
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        candidate_id: Option<String>,
     ) -> Result<()> {
         let request = RelayRequest::RestartHarnessInPlace {
+            candidate_id,
             operation_id: operation_id.to_owned(),
             expected_store_id: expected_store_id.to_owned(),
             launch_config,

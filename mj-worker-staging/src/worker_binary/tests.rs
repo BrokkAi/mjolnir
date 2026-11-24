@@ -5392,6 +5392,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -5566,6 +5567,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -7062,4 +7064,66 @@ fn a_container_mbx_that_reports_another_version_never_replaces_the_stable_path()
         "the failed staging file is removed: {lines:#?}"
     );
     assert!(!last.contains("/home/dev/.local/bin/mbx"), "{last}");
+}
+
+#[test]
+fn reload_candidate_install_and_cleanup_leave_live_files_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("test-session");
+    let home = dir.path().join("home");
+    let stage = dir.path().join("stage");
+    for path in [&root, &home, &stage] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for name in ["launch.json", "ownership.json"] {
+        std::fs::write(root.join(name), "live").unwrap();
+    }
+    std::fs::write(home.join("config.toml"), "live profile").unwrap();
+    std::fs::write(stage.join("config.toml"), "candidate profile").unwrap();
+    let launch = dir.path().join("launch.json");
+    let manifest = dir.path().join("manifest.json");
+    std::fs::write(&launch, "candidate").unwrap();
+    std::fs::write(&manifest, "manifest").unwrap();
+    let root_text = root.to_str().unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.into(),
+    };
+    install_reload_candidate(
+        &ProcessExecutor,
+        &locator,
+        "test-session",
+        root_text,
+        "candidate",
+        &manifest,
+        StagedWorkerProfile {
+            launch: &launch,
+            ownership: &launch,
+            profile: &stage,
+            shared_login: None,
+            shared_paths: &[],
+        },
+    )
+    .unwrap();
+    let candidate = root.join("reload-candidates/candidate");
+    for name in [
+        "launch.json",
+        "ownership.json",
+        "manifest.json",
+        "profile/config.toml",
+    ] {
+        assert!(candidate.join(name).is_file(), "{name}");
+    }
+    for name in ["launch.json", "ownership.json"] {
+        assert_eq!(std::fs::read(root.join(name)).unwrap(), b"live");
+    }
+    assert_eq!(
+        std::fs::read(home.join("config.toml")).unwrap(),
+        b"live profile"
+    );
+    for unsafe_id in ["..", "/", "", "../worker", "a/b", "a\\b"] {
+        assert!(remove_reload_candidate(&ProcessExecutor, &locator, root_text, unsafe_id).is_err());
+    }
+    remove_reload_candidate(&ProcessExecutor, &locator, root_text, "candidate").unwrap();
+    assert!(!candidate.exists());
+    assert_eq!(std::fs::read(root.join("launch.json")).unwrap(), b"live");
 }

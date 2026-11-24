@@ -941,6 +941,7 @@ async fn restart_harness_in_place_response(
     let protocol_version = envelope.protocol_version;
     let request_id = envelope.request_id;
     let RelayRequest::RestartHarnessInPlace {
+        candidate_id: _,
         operation_id,
         expected_store_id,
         launch_config,
@@ -5621,6 +5622,7 @@ mod preparation_tests {
                 request_id: "reload".into(),
                 protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
+                    candidate_id: None,
                     operation_id: "move".into(),
                     expected_store_id: store_id,
                     launch_config: Box::new(launch),
@@ -5759,6 +5761,7 @@ mod preparation_tests {
             request_id: request_id.into(),
             protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
             request: RelayRequest::RestartHarnessInPlace {
+                candidate_id: None,
                 operation_id: "move-bc".into(),
                 expected_store_id: store_id.clone(),
                 launch_config: Box::new(launch.clone()),
@@ -5984,6 +5987,7 @@ mod preparation_tests {
             request_id: "restart".into(),
             protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
             request: RelayRequest::RestartHarnessInPlace {
+                candidate_id: None,
                 operation_id: "move".into(),
                 expected_store_id: store_id.clone(),
                 launch_config: Box::new(config.clone()),
@@ -6148,6 +6152,7 @@ mod preparation_tests {
                 request_id: "r-restart-unheld".into(),
                 protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
+                    candidate_id: None,
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id.clone(),
                     launch_config: Box::new(launch_config.clone()),
@@ -6198,6 +6203,7 @@ mod preparation_tests {
                 request_id: "r-restart-rejected".into(),
                 protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
+                    candidate_id: None,
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id.clone(),
                     launch_config: Box::new(launch_config),
@@ -6328,6 +6334,7 @@ mod preparation_tests {
                 request_id: "r-restart-bad-profile".into(),
                 protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
+                    candidate_id: None,
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id.clone(),
                     launch_config: Box::new(updated_launch.clone()),
@@ -6365,6 +6372,7 @@ mod preparation_tests {
                 request_id: "r-restart-ok".into(),
                 protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
+                    candidate_id: None,
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id,
                     launch_config: Box::new(updated_launch),

@@ -9,9 +9,14 @@ pub fn oracle_launch_enabled(
     owns_environment && !session.effective_oracle(choices).is_empty()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum WorkerFilePreparation {
     Install,
+    StageCandidate {
+        operation_id: String,
+        expected_store_id: String,
+        candidate_id: String,
+    },
     /// Restage the profile into a retained home, and replace the worker
     /// binary when the retained worker's build differs.
     RefreshProfile,
@@ -514,6 +519,7 @@ pub fn worker_launch_config_with_checkout(
     let approval_choices = config.profile_approval_choices(profile);
     Ok((
         WorkerLaunchConfig {
+            accepted_reload_operation_id: None,
             cpu_accounting: backend.cpu_accounting(),
             no_github_credentials: session.no_github_credentials,
             oracle: false,

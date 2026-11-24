@@ -151,6 +151,7 @@ pub fn prepare_worker_files_for(
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
 ) -> Result<StagedWorkerProfile> {
+    let candidate = matches!(&preparation, WorkerFilePreparation::StageCandidate { .. });
     let (launch, staged_profile) = stage_worker_files_for(
         config,
         state,
@@ -161,7 +162,9 @@ pub fn prepare_worker_files_for(
         preparation,
         history,
     )?;
-    if let Some(launch) = launch {
+    if let Some(launch) = launch
+        && !candidate
+    {
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
     }
     Ok(staged_profile)
@@ -249,6 +252,15 @@ pub fn stage_worker_files_for(
 
     if session.native_session_id.is_some() && profile.kind == mj_core::config::HarnessKind::Codex {
         launch.goal_resume_request = Some(mj_core::state::new_session_id()?);
+    }
+    if let WorkerFilePreparation::StageCandidate {
+        operation_id,
+        candidate_id,
+        ..
+    } = &preparation
+    {
+        mj_core::worker_launch::validate_candidate_id(candidate_id)?;
+        launch.accepted_reload_operation_id = Some(operation_id.clone());
     }
     let staging = tempfile::tempdir().context("create worker staging directory")?;
     let launch_path = staging.path().join("launch.json");
@@ -392,6 +404,49 @@ pub fn stage_worker_files_for(
     // deliver too long, so the staged file is checked before it travels.
     profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
     let shared_login = shared_profile_login(profile, backend);
+    if let WorkerFilePreparation::StageCandidate {
+        operation_id,
+        expected_store_id,
+        candidate_id,
+    } = &preparation
+    {
+        use mj_core::worker_launch::{ReloadCandidateManifest, ReloadSharedLogin};
+        install_build_cache_shim(session, backend, &launch, executor)
+            .context("stage the session's mbx and configuration")?;
+        let (clear_paths, protected_paths) = profile_clear_spec(profile.kind);
+        let manifest = ReloadCandidateManifest {
+            operation_id: operation_id.clone(),
+            expected_store_id: expected_store_id.clone(),
+            candidate_id: candidate_id.clone(),
+            harness: profile.kind,
+            target_profile_home: target_profile_home.clone(),
+            clear_paths,
+            protected_paths,
+            shared_login: shared_login.as_ref().map(|login| ReloadSharedLogin {
+                relative_marker: login.name.to_owned(),
+                source_path: login.file.to_string_lossy().into_owned(),
+            }),
+            clear_github_token: session.no_github_credentials,
+        };
+        let manifest_path = staging.path().join("manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        install_reload_candidate(
+            executor,
+            backend,
+            session_id,
+            worker_root,
+            candidate_id,
+            &manifest_path,
+            mj_worker_staging::worker_binary::StagedWorkerProfile {
+                launch: &launch_path,
+                ownership: &ownership_path,
+                profile: &profile_stage,
+                shared_login: None,
+                shared_paths: &shared_paths,
+            },
+        )?;
+        return Ok((Some(launch), staged_profile));
+    }
     if preparation != WorkerFilePreparation::Install {
         // A shared symlink stays live across boot. Only a copied login
         // identifies the credentials staged for this specific launch.
@@ -1135,6 +1190,91 @@ mod tests {
     use mj_core::state::{SessionState, TargetLocator};
     use mj_core::subagent::{CHILD_REPORT_DIR_ENV, SubagentKind, SubagentRecord};
     use mj_targets::test_isolation::{IsolatedTest, test_name};
+
+    #[test]
+    fn stage_candidate_preserves_live_files() {
+        const MARKER: &str = "MJ_TEST_PRIVATE_RELOAD";
+        if std::env::var_os(MARKER).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "stage_candidate_preserves_live_files",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(dir.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("config.toml"), "model = \"candidate\"\n").unwrap();
+        std::fs::write(source.join("auth.json"), r#"{"OPENAI_API_KEY":"test-key"}"#).unwrap();
+        let mut config = Config::default().with_local_targets();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, &source),
+        );
+        let id = "55555555555555555555555555555555";
+        let root = dir.path().join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.last_profile = "codex".into();
+        session.harness_kind = HarnessKind::Codex;
+        session.native_session_id = None;
+        session.project_directory = Some(dir.path().to_owned());
+        session.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: root.clone(),
+        }));
+        session.target_template_id = "localhost".into();
+        crate::database::save_session(&session).unwrap();
+        let home = targets::target_profile_home(&backend, id, &config.profiles["codex"]);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(Path::new(&home).join("config.toml"), "live profile").unwrap();
+        for name in ["launch.json", "ownership.json"] {
+            std::fs::write(root.join(name), "live").unwrap();
+        }
+        let state = crate::database::load_state().unwrap();
+        crate::database::test_fixtures::worker_test_scope(id, || {
+            prepare_worker_files_for(
+                &config,
+                &state,
+                id,
+                &backend,
+                root.to_str().unwrap(),
+                &mj_core::targets::ProcessExecutor,
+                WorkerFilePreparation::StageCandidate {
+                    operation_id: "move".into(),
+                    expected_store_id: "store".into(),
+                    candidate_id: "candidate".into(),
+                },
+                LaunchHistory::Stored,
+            )
+            .unwrap();
+        });
+        let candidate = root.join("reload-candidates/candidate");
+        let launch = WorkerLaunchConfig::read(&candidate.join("launch.json")).unwrap();
+        assert_eq!(launch.accepted_reload_operation_id.as_deref(), Some("move"));
+        for name in [
+            "launch.json",
+            "ownership.json",
+            "manifest.json",
+            "profile/config.toml",
+        ] {
+            assert!(candidate.join(name).exists(), "{name}");
+        }
+        for name in ["launch.json", "ownership.json"] {
+            assert_eq!(std::fs::read(root.join(name)).unwrap(), b"live");
+        }
+        assert_eq!(
+            std::fs::read(Path::new(&home).join("config.toml")).unwrap(),
+            b"live profile"
+        );
+    }
 
     #[test]
     fn current_worker_launch_config_preserves_staged_aws_profile() {
