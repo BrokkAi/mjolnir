@@ -2991,6 +2991,23 @@ async fn golden_active_chat_render() {
         &[],
     );
 
+    let mut failed = chat.turn_reviews[0].view.clone();
+    failed.review_id = "failed-review".into();
+    failed.phase = mj_core::review::driver::TurnReviewPhase::Verdict(
+        mj_core::review::verdict::ReviewVerdict::Failed {
+            reason: "reviewer could not start".into(),
+        },
+    );
+    failed.status = "the review failed: reviewer could not start".into();
+    chat.set_turn_reviews(vec![failed]);
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "failed review reason remains visible",
+        &buffer,
+        &[],
+    );
+
     // Several reviews at once leave the composer free of passive status text.
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_turn_reviews(

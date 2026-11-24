@@ -75,7 +75,15 @@ impl super::ChatState {
             .turn_reviews
             .iter()
             .filter_map(|review| {
-                let failure = review.failure.as_ref()?;
+                let failure = review.failure.as_ref().or_else(|| {
+                    matches!(
+                        review.view.phase,
+                        TurnReviewPhase::Verdict(
+                            mj_core::review::verdict::ReviewVerdict::Failed { .. }
+                        )
+                    )
+                    .then_some(&review.view.status)
+                })?;
                 let roots = review.view.roots_label();
                 Some(if self.turn_reviews.len() > 1 && !roots.is_empty() {
                     format!("{roots}: {failure}")
