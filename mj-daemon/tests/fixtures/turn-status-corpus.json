@@ -1733,7 +1733,7 @@
     "committed_subagent_holds": [],
     "expected": {
       "parent": {
-        "attention": "needs_input",
+        "attention": "working",
         "working": false,
         "idle": true,
         "working_children": 0,
