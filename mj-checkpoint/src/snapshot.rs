@@ -1024,6 +1024,16 @@ pub(crate) fn private_index(
         tempfile::NamedTempFile::new_in(index.parent().context("index has no parent")?)?;
     if index.try_exists()? {
         fs::copy(&index, temporary.path())?;
+        // Git trusts an entry whose file stat matches only when the entry is
+        // older than the index file; an entry as new as the index is
+        // "racily clean" and gets its content compared. A fresh copy is newer
+        // than every entry, so without the original's time an edit made in
+        // the same timestamp tick as the entry, to a file of the same size,
+        // looks unchanged and its content is left out of the snapshot.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(temporary.path())?
+            .set_modified(fs::metadata(&index)?.modified()?)?;
     } else {
         fs::remove_file(temporary.path())?;
     }
@@ -4717,6 +4727,52 @@ mod tests {
             "HEAD, index and tracked worktree"
         );
     }
+    // The private index copy once had a fresh mtime, so an unstaged edit made
+    // in the same timestamp tick as the staged edit to the same file, at the
+    // same size, was missing from the snapshot.
+    #[test]
+    fn working_state_keeps_an_unstaged_edit_that_looks_racily_clean() {
+        let r = Repo::new();
+        let checkout = &r.checkout;
+        // Make the stat match decide, as it does within one coarse timestamp.
+        git(checkout, &["config", "core.checkStat", "minimal"]);
+        git(checkout, &["config", "core.trustctime", "false"]);
+        // Whole seconds, which every file system stores exactly.
+        let tick = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    - 5,
+            );
+        let set_mtime = |path: &Path| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(tick)
+                .unwrap();
+        };
+        let file = checkout.join("file");
+        fs::write(&file, "FIRST\nsecond\nthird\n").unwrap();
+        set_mtime(&file);
+        git(checkout, &["add", "file"]);
+        // The same size as the staged content, so only content tells them
+        // apart, and the same timestamp as the entry Git just recorded.
+        fs::write(&file, "FIRST\nsecond\nTHIRD\n").unwrap();
+        set_mtime(&file);
+        set_mtime(&checkout.join(".git/index"));
+        // Git itself still sees the edit, because the entry is racily clean.
+        assert_eq!(git(checkout, &["diff", "--name-only"]), "file");
+
+        let state = working_state(&FileGit, checkout, false).unwrap().unwrap();
+        assert_eq!(
+            git(checkout, &["show", &format!("{state}:file")]),
+            "FIRST\nsecond\nTHIRD"
+        );
+    }
+
     #[test]
     fn seeded_git_round_trip_after_source_deletion_and_raw_immutability() {
         let started = std::time::Instant::now();
