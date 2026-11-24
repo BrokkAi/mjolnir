@@ -40,10 +40,15 @@ Review of the cleanup checkpoint found that ordinary judge/task sessions create 
 - Decision: Use new arm O and a fresh verify7 round pooling A, B, E, and O, restricted to `gpt-6.1-terra:high`, `gpt-6.1-sol:medium`, and `gpt-6.2-sol:medium`.
   Rationale: These are precisely the requested configurations. Joint blinded judging gives all four comparisons one verdict set; consistency against verify6 will reveal changes in adjudication. Preserve verify6 unchanged.
   Date/Author: 2026-11-23, parent agent.
+- Decision: Remove the runner's hardcoded two-creation semaphore for future invocations, leaving the requested executor concurrency as the sole admission width. Let the already-running process finish with its existing gate.
+  Rationale: An independent history audit traced the gate to the initial study commit without a documented or measured external limit. It is the observed launch bottleneck. The running Python process has no reload or drain interface and holds accepted launch intents; restarting or overlapping drivers could duplicate work or exceed the user's 16 jobs. Source edits will not change its in-memory semaphore. Record this timing limitation in the result.
+  Date/Author: 2026-11-24, parent agent.
+
+The removal and the existing recovery tests' call signatures are implemented. Python syntax checks, `git diff --check`, and both existing driver recovery tests passed. The current driver was not restarted and retains the original in-memory gate.
 
 ## Outcomes & Retrospective
 
-The first review completed under installed Mjolnir 2.74.0 and passed independent audit. Its live configuration confirms `gpt-6.2-sol` at medium effort; historical context matches arms E and N byte for byte. The 57.862-second live-prompt clock matches usage, and inventory was unchanged. Four raw finding bullets await blinded verification. The full campaign is running at concurrency 16, PID 184435 at launch, with durable logs. Completion and the full comparison remain pending. Arm registration checkpoint `b2b743052` passed repository review.
+The first review completed under installed Mjolnir 2.74.0 and passed independent audit. Its live configuration confirms `gpt-6.2-sol` at medium effort; historical context matches arms E and N byte for byte. The 57.862-second live-prompt clock matches usage, and inventory was unchanged. Four raw finding bullets await blinded verification. The full campaign is running with executor concurrency 16, PID 184435 at launch, with durable logs; the old two-creation gate remains in that process. Completion and the full comparison remain pending. Runner checkpoints through `5c564d6af` passed repository review and were pushed to origin/master in merge `b5e6d3fce`.
 
 ## Context and Orientation
 

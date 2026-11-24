@@ -964,7 +964,7 @@ def compare_inventories(before, after):
     return problems, new_refs
 
 
-def run_job(job, gate):
+def run_job(job):
     bug = CORPUS[job["bug"]]
     arm = job["arm"]
     d = ROOT / "runs" / bug["id"] / arm
@@ -985,8 +985,7 @@ def run_job(job, gate):
         return "needs-recovery"
     identity = {"bug": bug["id"], "arm": arm, "reviewers": ARMS[arm], "intro": bug["intro_commit"],
                 "base": bug["base_commit"], "time_ns": time.time_ns()}
-    with gate:
-        hold = quota_hold()
+    hold = quota_hold()
     if hold:
         return "held: " + hold  # nothing recorded; the job starts on a later run
     workspace = workspace_id()
@@ -1007,15 +1006,14 @@ def run_job(job, gate):
         save(d / "launch-intent.json", identity)
         # Neutral title: reviewers must not see the bug id.
         title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]
-        with gate:
-            launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
-                        "--bundle", BUNDLE, "--at", bug["intro_commit"], "--base", bug["base_commit"],
-                        "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
-                        "--no-project-memory", "--no-github-events", "--no-github-credentials",
-                        "--subagents", "none", "--title", title, timeout=900)
-            save(d / "launch.json", launch)
-            sid = launch["session_id"]
-            s = wait_idle(sid)
+        launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
+                    "--bundle", BUNDLE, "--at", bug["intro_commit"], "--base", bug["base_commit"],
+                    "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
+                    "--no-project-memory", "--no-github-events", "--no-github-credentials",
+                    "--subagents", "none", "--title", title, timeout=900)
+        save(d / "launch.json", launch)
+        sid = launch["session_id"]
+        s = wait_idle(sid)
     assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
     place = container(sid)
     pinned = image_pin_mismatch(place)
@@ -1215,8 +1213,6 @@ def main():
     global IMAGE_PIN
     IMAGE_PIN = pathlib.Path(a.same_image) if a.same_image else None
     jobs = json.loads(pathlib.Path(a.jobs).read_text())
-    # Serialize session creation and startup; reviews themselves run concurrently.
-    gate = threading.Semaphore(2)
     admission_lock = threading.Lock()
     stopped = False
 
@@ -1226,7 +1222,7 @@ def main():
             if a.stop_on_failure and stopped:
                 return job, "not-started", None
         try:
-            state, error = run_job(job, gate), None
+            state, error = run_job(job), None
         except Exception as e:  # report every failure with its job
             d = ROOT / "runs" / job["bug"] / job["arm"]
             save(d / "error.json", {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
