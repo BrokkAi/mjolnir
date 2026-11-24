@@ -1,167 +1,182 @@
-# Port Mjolnir to Go, feature for feature
+# Port Mjolnir to Go, validated end to end at every step
 
-This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md`.
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md`. It was restructured on 2026-11-24 after the owner's verdict that the earlier way of working was a fundamental error; read "How to work" before doing anything.
 
 
 ## Purpose / Big Picture
 
-Mjolnir (`mj`) is a terminal dashboard and background service that runs coding agents (Claude Code, Codex, OpenCode and others) as persistent sessions. It is written in Rust: about 935,000 lines across 29 crates (Rust packages) in this repository. The owner asked for a Go build of the same product that replaces it feature for feature, with the same behaviour a user sees, built on Go's standard library or established Go packages, using `github.com/BrokkAi/acp-go` for the Agent Client Protocol (ACP, the JSON-RPC protocol over standard input and output that Mjolnir uses to drive each agent) and Charm's libraries (Bubble Tea, Lip Gloss, Bubbles) in place of ratatui for the terminal interface.
+Mjolnir (`mj`) is a terminal dashboard and background service that runs coding agents (Claude Code, Codex, OpenCode and others) as persistent sessions. It is written in Rust: about 925,000 lines across 32 crates (Rust packages) in this repository. The team wants a Go build of the same product that replaces it feature for feature, with the same behaviour a user sees, built on Go's standard library or established Go packages, using `github.com/BrokkAi/acp-go` for the Agent Client Protocol (ACP: the JSON-RPC protocol over standard input and output that Mjolnir uses to drive each agent) and Charm's libraries (Bubble Tea, Lip Gloss, Bubbles, ultraviolet) in place of ratatui for the terminal interface.
 
-When this plan is done, someone can build `go/bin/mj` with `go/scripts/build.sh`, run it against an isolated instance (`mj --instance <name> ...`), and use every command, the dashboard, the daemon and remote workers exactly as they would use the Rust `mj`.
+When this plan is done, someone can build `go/bin/mj` and `go/bin/mj-worker` with `go/scripts/build.sh`, run them against an isolated instance (`mj --instance <name> ...`), and use every command, the dashboard, the daemon and remote workers exactly as they would use the Rust `mj`, proven by the same end-to-end scenarios passing on both builds.
 
-The Go build lives in `go/` as a complete, separate program (Go module `github.com/BrokkAi/mjolnir/go`). It does not call into the Rust build and the Rust build does not call into it. Both use the same configuration format, database schema and wire formats, so a user can switch between them on the same data.
+The Go build lives in `go/` (Go module `github.com/BrokkAi/mjolnir/go`). Rust and Go share the configuration format, the SQLite store, the relay protocol between daemon and worker, the daemon's HTTP API and every persisted file format. That shared ground is what makes this plan work: any Go part can be swapped into a running Rust Mjolnir and judged by whether real sessions still work.
 
 
-## How to approach the port (read this first)
+## How to work (read this first)
 
-An earlier attempt on 2026-11-20 ported Rust's own libraries (tokio, serde, clap, ratatui and others) into Go before touching Mjolnir's code. It produced about 270,000 lines of infrastructure and no Mjolnir, and was reverted in commit 7b78e794a. Do not repeat it. Translate Mjolnir's own code, crate by crate, onto Go equivalents:
+Two earlier efforts failed on basic mistakes. The first (2026-11-20, reverted in 7b78e794a) ported Rust's own libraries into Go and produced no Mjolnir. The second (2026-11-20 to 2026-11-24) translated 64% of the Rust code bottom-up, crate by crate, and validated it only with Rust tests ported by the same agents; nothing could run until the last crate, and the first live run of the Go worker under a real daemon failed at session start. The owner called the bottom-up order "a fatal and fundamental error": a lot of work, nothing functional, and no way to know how close it is. These rules exist to make those mistakes impossible to repeat.
+
+1. Nothing counts until it runs against the real system. A Go part is done only when the end-to-end scenario suite (defined below under Validation and Acceptance) passes with that part swapped into a working Mjolnir. Passing Go unit tests is necessary, never sufficient.
+2. Work in vertical slices from the user's side, in the milestone order below. Never port a layer that nothing runnable needs yet.
+3. Use the swap-in method. Rust and Go speak the same protocols, so: the Go worker runs under a Rust daemon (`MJ_WORKER_BINARY`); the Go `mj` CLI and dashboard talk to a Rust daemon; the Rust CLI talks to a Go daemon. Every scenario also runs on the all-Rust control in a second isolated instance, which shows what correct means.
+4. Every merge passes three gates, in order: (a) `go build ./...` and `go vet ./...`; (b) the scenario suite for every part that is already Go, plus the Go tests of the changed packages; (c) an independent reviewer agent, who did not write the change, compares every added or changed Go test with its Rust original and rejects weakened ones (see "Test fidelity rules" below). A change that fails a gate is not merged.
+5. Small batches. Fan out agents only inside one slice, and only as much work as can be gated the same day. Before any fan-out, state what the owner will be able to run when it lands and roughly what it costs.
+6. One Rust baseline. All Go code follows the pinned Rust commit 3dde0c11b (read-only checkout below). Do not take later Rust changes piecemeal. One deliberate sync to a newer Rust commit happens after milestone 4, as its own gated step.
+7. Report progress as the list of scenarios that pass on Go, never as lines or percentages ported.
+8. Operating rules for agents and the coordinator:
+   - Never `cd` out of the repository in a shell that later launches worktree agents; use absolute paths, `git -C` and `go -C`. A worktree workflow launched from outside the repository fails every agent.
+   - After launching agents, confirm from the workflow journal that they started before saying they run.
+   - Never delete a worktree or branch that holds commits; pin them first (`git update-ref refs/go-port/wip/<name> <sha>`).
+   - The daemon deletes a session's worker directory, including `worker.log`, when its worker dies. Copy logs out continuously (`tail -F ... > file &`) before signalling a process for a goroutine dump.
+   - Test only in isolated instances, with `env -u MJ_CONFIG_DIR -u MJ_DATA_DIR -u MJ_SESSION_ID -u MJ_SESSION_BASH_ENV -u MJ_INSTANCE -u MJ_NO_SPLASH` in front of every `mj` command (inside a Mjolnir session those variables otherwise point at the live default instance). Stop test daemons and kill leftover test workers when done.
+   - Push merged, gated work promptly; the owner does not want intermediate work lost.
+
+Translation rules (which Go package replaces which Rust library, naming, serde, tests) are in `.agents/docs/go-port/core-brief.md`. In short: translate Mjolnir's own code onto Go equivalents; never port a Rust library.
 
     Rust crate                  Go replacement
     tokio, futures              goroutines, channels, context.Context, sync
     serde, serde_json           encoding/json (custom MarshalJSON where serde attributes need it)
-    toml, toml_edit             github.com/BurntSushi/toml (toml_edit's format-preserving edits: decide when config saving is ported)
-    clap                        github.com/spf13/cobra, with help rendered in clap's layout by go/internal/cli/clapstyle.go
-    ratatui, crossterm          charm.land/bubbletea/v2, charm.land/lipgloss/v2, Bubbles
+    toml, toml_edit             BurntSushi/toml; go-toml/v2 unstable parser with byte splicing for format-preserving edits
+    clap                        github.com/spf13/cobra, help rendered in clap's layout by go/internal/cli/clapstyle.go
+    ratatui, crossterm          charm.land/bubbletea/v2, lipgloss/v2, charmbracelet/ultraviolet cell buffers
     agent-client-protocol       github.com/BrokkAi/acp-go
-    rusqlite                    a SQLite driver for database/sql (modernc.org/sqlite, pure Go, when the store is ported)
+    rusqlite                    database/sql with modernc.org/sqlite
     reqwest, axum, hyper        net/http
-    sha2, base64, flate2, tar   crypto/sha256, encoding/base64, compress/*, archive/tar
-    anyhow                      wrapped errors with fmt.Errorf("...: %w")
-    tracing                     log/slog
-    dirs                        os.UserConfigDir plus a small data-directory helper in go/internal/core/config
+    anyhow / tracing            wrapped errors / log/slog
 
-Each Rust crate maps to a Go package under `go/internal/` with the same name minus the `mj-` prefix (`mj-core` is `go/internal/core/...`, one subpackage per Rust module where that keeps packages acyclic). Binaries live under `go/cmd/`. Port a crate's tests together with its code: the Rust tests are the behavioural specification. Keep test names readable in Go form (`instance_names_accept_single_segment_identifiers` becomes `TestInstanceNamesAcceptSingleSegmentIdentifiers`) and keep `Hard-won:` markers.
 
-User-visible output must match the Rust build. Prove it with golden files captured from the Rust `mj` (see `go/internal/cli/testdata/`).
+## Test fidelity rules
+
+The 2026-11-24 audit of the ported tests (below) found the same weakening habits in every agent group. A reviewer rejects a Go test that: discards an error that Rust `unwrap()`s (Rust's panic is an assertion); compares an "unchanged" value through a shallow copy that shares maps, slices or pointers; narrows a whole-value equality to an ID, length, prefix or JSON shape; replaces a paused clock with a short real sleep or overrides a production timeout; drops the positive half of a redaction or secret-stripping check; skips with `t.Skip` for any reason other than a missing ported dependency (named) or the same platform condition Rust uses; or uses `strings.Index` without checking for -1. Golden and fixture files must be byte-identical to the pinned Rust ones.
 
 
 ## Progress
 
-- [x] (2026-11-20) Milestone 1 slice: Go module, `go/internal/core/config` instance and directory resolution, ID validation and atomic writes (port of `mj-core/src/config/loading.rs`) with its Rust tests; `go/cmd/mj` root command tree with clap-identical top-level help, version and usage errors, proven by golden files.
-- [x] (2026-11-20) Owner confirmed the approach and chose the crate-by-crate fan-out.
-- [x] (2026-11-20) First slice moved into package `core`; `go/scripts/sync-assets.sh` copies mj-core/assets for `//go:embed`.
-- [x] (2026-11-20) mj-core declarations phase (ten groups) merged and compiling (823be3abb).
-- [x] (2026-11-20) mj-core bodies and tests phase merged: no unported bodies left, 678 of mj-core's 683 Rust tests ported, `go test ./...` passes, `go vet` passes for linux, windows and darwin. The five not ported: four test the Rust build's `worker_build_inputs.py` worker identity (the Go build needs its own; port with mj-worker-bin), plus one missed state test now added.
-- [ ] Milestone 1 rest: all of `mj-core` (config, state, relay protocol, transcript, subprocess, targets, credentials, harness install/runtime, acp on acp-go).
-- [x] (2026-11-20) Layer 1: mj-transcript, mj-checkpoint, mj-review, mj-build-id ported (323 tests; 2 benchmark tests skip as in Rust), merged d98013ebf.
-- [x] (2026-11-20) Layer 2 declarations: mj-client (`go/internal/client`) and mj-worker (`go/internal/worker`) declared in 14 groups and merged (6a0035221); builds and vets, 971 bodies still `panic("unported: ...")`, no tests ported yet.
-- [x] (2026-11-23) Layer 2 bodies and tests: mj-client and mj-worker fully ported, 1030 tests, all Go packages pass (merged 1ba15ffb6 after three rounds). Six groups had finished before the 2026-11-20 stop and were reused from the workflow cache; eight reran. Some groups read Rust at 4273087e6, others at f470ca8f7; `go/PORTED_FROM` records the older one so the sync pass re-checks the difference.
-- [x] (2026-11-23) Mirrored Rust's crate extractions up to 3dde0c11b: `go/internal/harnessinstall` (mj-harness-install: harness_install, login_environment, program_path, session_image and their assets and fixtures, out of core) and `go/internal/microvm` (mj-microvm, out of worker). The guardian policy files were already in core. mj-worker-mcp and mj-worker-review, extracted in the same Rust commit, followed later the same day (next entry).
-- [x] (2026-11-23) Split `go/internal/workermcp` (mj-worker-mcp: subagent_mcp, mcp_stdio, memory_mcp) and `go/internal/workerreview` (mj-worker-review: capture, hook) out of worker, and brought both to 3dde0c11b, including 35aecf3e1's worker/standalone orchestrator tool split (`spawn_worker`, `spawn_orchestrator`, `list_targets`) and its worker-side importers (Claude allow-list capabilities, no `--agent-mailboxes-enabled`).
-- [ ] Sync pass: port the Rust changes made since each crate's base in `go/PORTED_FROM`.
-- [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
-- [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).
-- [ ] Milestone 4: `mj-store` and the crates on it (`mj-accounts`, `mj-import`, `mj-sessionwiki`, `mj-build-cache`, `mj-worker-staging`, `mj-worker-launch`, `mj-profile-catalog`, `mj-session-runtime`, `mj-review-host`, `mj-github-relevance`).
-- [ ] Milestone 5: control plane `mj-controller`, `mj-server`, `mj-daemon`, `mj-setup`.
-- [ ] Milestone 6: `mj-chat` and `mj-tui` on Bubble Tea and Lip Gloss; `mj-cli` commands and dashboard.
-- [ ] Milestone 7: end-to-end parity: the shell/expect suite in `tests/e2e/` passes against `go/bin/mj`.
+- [x] (2026-11-20) First slice: Go module, instance and directory resolution, clap-identical `mj --help`/`--version`/usage errors (golden files from the Rust `mj`).
+- [x] (2026-11-20 to 2026-11-24) Translated, bottom-up, with ported Rust tests passing but not validated against a real system: mj-core, mj-transcript, mj-checkpoint, mj-review, mj-build-id, mj-client, mj-worker, mj-harness-install, mj-microvm, mj-worker-mcp, mj-worker-review, mj-chat, mj-targets, mj-github-relevance, voice-worker, mj-session-types, mj-store, mj-tui (Charm), mj-worker-bin (`go/cmd/mj-worker`), mj-accounts, mj-build-cache, mj-github-watch, mj-import, mj-worker-staging. About 590k of 925k Rust lines; 4,351 Go tests. Declarations only (bodies unported, stopped 2026-11-24): mj-profile-catalog, mj-sessionwiki, mj-worker-launch.
+- [x] (2026-11-24) Independent test-fidelity audit of all ported tests (workflow wf_c827a56b-45c): 4,329 Rust tests compared, 97.7% faithful; about 100 not, including 8 high-severity gaps (listed under Surprises).
+- [x] (2026-11-24) Swap-in harness proven: a Rust daemon at 3dde0c11b in instance `go-e2e` ran the Go worker (stamped with the Rust worker identity) via `MJ_WORKER_BINARY`; control instance `go-e2e-rust` with the Rust worker completed a tool-using prompt in 13 s.
+- [ ] Milestone 1: the Go worker passes the scenario suite under the Rust daemon. Live debugging and fixing in progress (first failure: session start hangs at `acp-session-open`; working theory: relay wire-format mismatch).
+- [ ] Milestone 1: `tests/e2e/go_port_scenarios.py` written and passing on the all-Rust control.
+- [ ] Milestone 1: fix the audit's high-severity test gaps in the worker and core (Antigravity module, reload secret stripping, protocol-82 guardian skip) and the medium weakenings, through the reviewer gate.
+- [ ] Milestone 2: Go `mj` CLI and Charm dashboard against the Rust daemon.
+- [ ] Milestone 3: Go daemon serving the Rust CLI and Go workers, slice by slice.
+- [ ] Milestone 4: all Go; the credential-free scripts in `tests/e2e/` pass against `go/bin/mj`.
+- [ ] One deliberate sync from 3dde0c11b to a current Rust commit, gated like any other change.
 
 
 ## Resume here
 
-State on 2026-11-23 (evening), all pushed to origin/master (5bd893ef9):
+State on 2026-11-24: everything merged is pushed to origin/master. No porting runs; the port is paused by the owner until milestone 1 shows whether the translated code holds up. A live-validation agent works on milestone 1 in its own worktree (results to be merged through the gates). Partial work from stopped agents is pinned under `refs/go-port/wip/*` in the clone at `/home/ryansvihla/code/mjolnir/.mj/clones/dc6166cb2ec39f9967531a714cab0e2e`.
 
-- Done, all tests passing: mj-core, mj-transcript, mj-checkpoint, mj-review, mj-build-id, mj-client, mj-worker, mj-harness-install, mj-microvm, mj-worker-mcp, mj-worker-review (synced to Rust 3dde0c11b), then layer 1 (mj-chat, mj-targets, mj-github-relevance, voice-worker) and layer 2 (mj-session-types, mj-store, mj-tui on Charm, mj-worker-bin as go/cmd/mj-worker).
-- Layer 3 (mj-accounts, mj-build-cache, mj-github-watch): declarations merged and pushed (05163526b); bodies stopped mid-way at the owner's request. One agent's partial work is saved as a local WIP commit (pinned under refs/go-port/wip/); the bodies phase should be rerun.
-- Remaining after layer 3, in order: L4 mj-import, mj-worker-staging; L5 mj-profile-catalog, mj-sessionwiki, mj-worker-launch; L6 mj-session-runtime; L7 mj-controller, mj-review-host, mj-server; L8 mj-setup; L9 mj-daemon; L10 mj-cli (extends go/internal/cli and go/cmd/mj).
+Next step: finish milestone 1, then decide with the owner whether to continue (decision criteria under Milestone 1).
 
-How the remaining crates are ported (owner's direction, 2026-11-23): every crate from the pinned Rust snapshot 3dde0c11b, read only from a read-only checkout of it (see the brief), with no tracking of later Rust changes until the owner has tested the Go build; then one sync pass. Each layer runs declarations, merge, bodies and tests, merge, and up to two fix rounds, one agent per group of about 10k Rust lines, each in its own git worktree. Launch worktree workflows only with the session's working directory at the repository root. Groups were generated with a small script that bin-packs each crate's modules into about 10k-line groups. Push after every merge, not only at the end of a layer.
 
-Cost so far: about 100 agent tokens per Rust line.
+## Milestones
+
+Milestone 1, the Go data plane under the Rust control plane. The worker is where sessions live (the ACP connection to the agent, the relay journal, checkpoints, sub-agent tools), and the Go worker already exists, so it is validated first. Setup is under Concrete Steps. Work through the scenario suite with the Go worker; for each failure find the root cause against the pinned Rust, fix the Go code, and add a regression test where AGENTS.md "Which tests to add" allows (an integration test of the relay protocol against a recorded Rust worker or daemon exchange, or of ACP against a recorded harness transcript). At the end the suite passes on both `go-e2e` (Go worker) and `go-e2e-rust` (control). Decision point for the owner: if the worker reaches that state after a handful of seam defects, the translated code is worth keeping and milestone 2 starts; if failures turn out to be spread through the translation, stop and rethink before spending more.
+
+Milestone 2, the Go `mj` users run. Port mj-cli's command surface and dashboard on top of the already-translated mj-client, mj-chat and mj-tui, against the Rust daemon at 3dde0c11b with the Go worker. Commands that need the daemon in-process (`daemon-run`, `setup`, `doctor`, `import`, `recover`) say plainly that they are not ported yet. At the end the scenario suite driven by `go/bin/mj` passes, the TUI scripts in `tests/e2e/` that need no credentials (for example `tui_components_*`, `tui_quit_persistence.py`, `tui_selection.py`) pass against `go/bin/mj`, and the owner can use the Go dashboard.
+
+Milestone 3, the Go daemon. Port the control plane (mj-session-runtime, mj-controller, mj-server, mj-review-host, mj-setup, mj-daemon, and finishing mj-profile-catalog, mj-sessionwiki, mj-worker-launch) slice by slice, each slice driven by a scenario: first `daemon-run` serving workspace and session listing, then create, then prompt and wait, then suspend and resume, and so on. Validate each slice with the Rust CLI against the Go daemon, and the Go CLI against the Go daemon. The store is shared: a Go daemon must open a store a Rust daemon wrote, and the reverse, with the same migration rules as AGENTS.md.
+
+Milestone 4, all Go and parity. Every credential-free script in `tests/e2e/` passes against `go/bin/mj`; scripts that need paid harness logins are run once with the owner's agreement. Then the one sync to current Rust.
 
 
 ## Surprises & Discoveries
 
-- Observation: mj-core needed declarations first: in the bodies phase, agents reported dozens of tests blocked on other groups' functions, and all of them passed once merged. Two real failures remained after the first merge (a serde `default` missed in a custom decoder, and a test fixture built from Go zero values instead of `DefaultConfig()`).
-  Evidence: bodies workflow wf_0dc3082d-c19, merge round 1 (675 of 677 passing) and round 2 (all passing).
+- Observation: passing ported tests did not mean working code. The Go worker under a real Rust daemon hung at session start; the same setup with the Rust worker completed a tool-using prompt in 13 s.
+  Evidence: instance `go-e2e` session a8e1fe5b..., worker-startup.json last step `acp-session-open`, daemon log "the worker process is gone; it reached the startup step acp-session-open" after 133 s; control session c7c53955... "turn finished (completed, end of turn) in 13.1s · 1 tool call".
 
-- Observation: clap lists a command's own options interleaved with the global ones by declaration index (`--instance`, `--session`, `--all`, `--no-splash`, ...), and shows the current environment value in `[env: NAME=value]`.
-  Evidence: `mj sessions --help` on the Rust build. `go/internal/cli/clapstyle.go` reproduces the ordering with an `mj_order` annotation per flag.
+- Observation: the Go build still said version 2.73.0 after the sync to Rust 2.74.0, so a Rust daemon would have rejected the Go worker. Fixed in ad4d80209; `cli.Version` now reads `core.PackageVersion`.
 
-- Observation: cobra sorts subcommands alphabetically and adds its own `help` and `completion` commands; both must be turned off for clap's output.
+- Observation: the test audit (wf_c827a56b-45c) found 97.7% of ported tests faithful, and these high-severity gaps: the whole Antigravity dispatch test module (8 tests on Stop ordering, stale-state fencing, refusing an idle reservation while busy) has no Go port; the harness in-place reload test lost its accepted half, so secret stripping (`FASTINO_KEY`, excluded secrets) is untested; `guardian_requests_remain_supported_on_protocol_82_workers` is skipped with a false reason. mj-import is the weakest crate (86.9%: 17 sessionwiki skips leave transcript import untested). Recurring habits are listed under Test fidelity rules. The Go code also took some Rust commits after the pin (through teammates' updates, for example #1670's daemon image) and not others.
+
+- Observation: mj-core needed declarations before bodies; clap orders options by declaration index and shows current env values; cobra sorts commands and adds `help`/`completion` unless told not to. (Kept from the first slice.)
 
 
 ## Decision Log
 
-- Decision (retrospective, 2026-11-24): the port's bottom-up order (mj-core first, mj-cli last) was a fundamental mistake. The owner: it lets a large amount of work produce nothing runnable and gives no way to know how close the port is. A port should start from the user-facing CLI and one end-to-end path, runnable against the existing Rust pieces, then fill in layers beneath it. The owner chose to continue in the current order for this port.
-  Date/Author: 2026-11-24, agent (owner's assessment).
+- Decision: restructure the plan around end-to-end milestones that swap Go parts into a working Rust Mjolnir, with merge gates (build, scenario suite, independent test-fidelity review), one Rust baseline, and progress reported as passing scenarios.
+  Rationale: the owner's verdict (2026-11-24) that bottom-up translation was a fundamental error and that confidence in the existing work is zero; the team very much wants a Go Mjolnir, and repeated false starts came from basic process mistakes, not from the goal.
+  Date/Author: 2026-11-24, agent with the owner.
 
-- Decision: the Go build is a separate program in `go/`, not a component the Rust daemon drives.
-  Rationale: the owner asked for a replacement; mixing the two was never asked for.
+- Decision (retrospective): the bottom-up order (mj-core first, mj-cli last) was a fundamental mistake: a lot of work produced nothing runnable and no measure of closeness.
+  Date/Author: 2026-11-24, owner's assessment.
+
+- Decision: all of mj-core is one Go package, `go/internal/core`, one file per Rust module; other crates are one package each under `go/internal/<crate without mj- and dashes>` (`mj-import` is `go/internal/mjimport`, since `import` is a Go keyword); binaries under `go/cmd/`.
+  Rationale: 42 of mj-core's modules form one dependency cycle, which Go packages cannot express.
   Date/Author: 2026-11-20, agent.
 
-- Decision: all of mj-core becomes one Go package, `go/internal/core`, with one file per Rust module (`config_loading.go` for `config/loading.rs`). Rules for agents are in `.agents/docs/go-port/core-brief.md`.
-  Rationale: 42 of mj-core's modules (71k of 84k lines) form one dependency cycle, which Go packages cannot express. Only 30 top-level names collide across modules; the brief settles them with a module prefix.
+- Decision: keep tree-sitter-bash through cgo for mj-transcript's shell command summaries.
+  Rationale: Rust uses the same C parser and its error recovery, which the summaries depend on. Cost: a C cross-compiler for Windows/macOS cross builds and static Linux workers.
   Date/Author: 2026-11-20, agent.
 
-- Decision: mj-core is ported in two fan-out phases over ten module groups: declarations (every type, constant and signature) so the package compiles, then bodies and tests against those declarations. Each agent works in its own git worktree and the results are merged.
-  Rationale: parallel agents in one package need each other's signatures; declaring first means the bodies phase compiles against the real shapes instead of guesses.
-  Date/Author: 2026-11-20, agent.
-
-- Decision: keep tree-sitter-bash through cgo (`github.com/tree-sitter/go-tree-sitter`) for mj-transcript's shell command summaries.
-  Rationale: Rust uses the same C parser, including its error recovery on broken shell text, which the summaries and their tests depend on; a pure-Go shell parser (mvdan.cc/sh) fails on such input instead. The cost is a C cross-compiler for Windows/macOS cross builds and for static Linux workers, which the Rust build also needs for this parser.
-  Date/Author: 2026-11-20, agent.
-
-- Decision: the Go tree records, per crate, the Rust commit it was translated from (`go/PORTED_FROM`); `go/scripts/rust-changes.sh <crate>` shows what Rust changed since. Sync passes port those diffs.
-  Rationale: Rust development continues during the port (about 30 commits touched ported crates within hours); without a recorded base the Go port silently falls behind.
-  Date/Author: 2026-11-20, agent.
-
-- Decision: when Rust extracts modules into a new crate, the Go code that ports them moves to the new crate's package (git mv, same file names relative to the new crate), keeps the Go names it had, and `go/PORTED_FROM` records the new crate with the base the code was ported from; `go/scripts/rust-changes.sh` follows the old paths for it.
-  Rationale: later syncs map one Rust crate to one Go package. Renaming the collision-prefixed names (`LoginEnvironmentEnvironment`, `MicrovmVMRun`) would churn every importer for no behaviour change; the final cleanup can drop the prefixes.
+- Decision: when Rust extracts modules into a new crate, the Go code moves to the new crate's package and keeps its Go names.
   Date/Author: 2026-11-23, agent.
 
-- Decision: parse with cobra but render help and usage errors with a small clap-layout renderer.
-  Rationale: cobra is the established Go command-line library; the help text is user-visible behaviour and must match.
+- Decision: parse with cobra, render help and usage errors in clap's layout; recognise development builds by a `.mj-development-build` directory beside the binary or Go's `go-build` temporary directories.
   Date/Author: 2026-11-20, agent.
 
-- Decision: a development build is recognised by a `.mj-development-build` directory beside the binary (created by `go/scripts/build.sh`), or by Go's temporary `go-build` directories, in place of Cargo's `.fingerprint`.
-  Rationale: keeps the rule that development builds never take over the default instance (Hard-won f7272bb0).
-  Date/Author: 2026-11-20, agent.
+- Decision: `go/PORTED_FROM` and `go/scripts/rust-changes.sh` record and show per-crate Rust bases. Superseded for now by rule 6 (one baseline, one deliberate sync); kept for that sync.
+  Date/Author: 2026-11-20, revised 2026-11-24.
 
 
 ## Outcomes & Retrospective
 
-Not yet: the port is at its first slice.
+As of 2026-11-24: about 590k of 925k Rust lines are translated and their ported tests pass, but no Go part has yet been shown to work in a real system, and the first attempt to do so failed. Spent so far: about 28M agent tokens in the workflows that completed and reported totals (mj-core 8.4M, layer 1 4.8M, layer 2 7.8M, audit 6.8M), plus the layers 1 to 5 run, the sync and several fix agents, which were stopped before reporting and are not measured; the true total is well above that. Lessons are encoded in "How to work": validate against the real system from the first slice, go top-down from what users run, gate every merge, keep one Rust baseline, report by working scenarios.
 
 
 ## Context and Orientation
 
-The Rust workspace's crates, from the bottom of the dependency graph up: `mj-core` (no internal dependencies; configuration, state model, relay protocol, subprocess helpers, targets), then `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-build-id`, then `mj-client`, `mj-worker`, `mj-targets`, `mj-store`, and so on up to `mj-cli` (the `mj` binary). `AGENTS.md` describes the control plane (the daemon, `mj daemon-run`) and the data plane (one `mj-worker` per session). The Go packages follow the same layering.
+The daemon (`mj daemon-run`, crates mj-daemon over mj-controller, mj-server and mj-session-runtime) is the control plane: it owns the SQLite store, session records, lifecycle operations and the HTTP API. Workers (mj-worker, binary `mj-worker`, one per session, copied into the session's worker directory as `hel`) are the data plane: they run the harness over ACP and own the relay journal. The `mj` CLI (mj-cli, with mj-client for the API, mj-tui and mj-chat for the dashboard) talks to the daemon over HTTP. AGENTS.md describes the contracts between them.
+
+The pinned Rust source is a read-only git worktree at `/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b` (create with `git worktree add --detach <path> 3dde0c11b` if missing); its debug build is in that checkout's `target/debug` (`mj`, `mj-worker`).
 
 
 ## Plan of Work
 
-Port bottom-up so every package compiles and its tests pass before anything depends on it, but surface each piece through the `mj` binary as soon as a command can use it, so progress is visible from the command line. Each Rust command currently returns "this command is not yet ported to the Go build of mj" in the Go build; replace that as each command is ported, and add a golden file of its Rust output.
+Milestone 1 is the next and only authorised work: write `tests/e2e/go_port_scenarios.py` (modelled on the existing scripts in `tests/e2e/`, which take `--mj <binary> --instance <name>`), make it pass on the all-Rust control, then make it pass with the Go worker by fixing the Go code, each fix through the gates. In parallel, fix the audit's high-severity test gaps in the worker and core through the reviewer gate. Report to the owner per scenario, then stop for the owner's decision.
 
 
 ## Concrete Steps
 
-From the repository root:
+Build the Rust reference (once) and the Go worker with the Rust worker identity, from the repository root, without changing directory:
 
-    cd go
-    ./scripts/build.sh                 # builds go/bin/mj
-    go vet ./... && go test ./...      # all ported tests
-    diff <(mj --help) <(bin/mj --help) # against an installed Rust mj
+    cargo build --manifest-path /home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b/Cargo.toml -p brokk-mjolnir -p brokk-mj-worker
+    grep -ao 'MJ-WORKER-BUILD:[0-9.]*+[0-9a-f]*' /home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b/target/debug/mj-worker
+        MJ-WORKER-BUILD:2.74.0+893f80b9daead06cf443cd0e6ca8275ab3e9f239
+    MJ_WORKER_INPUTS_ID=893f80b9daead06cf443cd0e6ca8275ab3e9f239 go/scripts/build.sh
 
-Test the Go build only in an isolated instance (`bin/mj --instance go-test ...`) and stop that instance's daemon when done.
+Isolated instances: `~/.config/mjolnir/instances/go-e2e/config.toml` and the identical `go-e2e-rust` (control) hold `version = 24`, `[jev] enabled = false`, an OpenCode profile `oc` (`kind = "open-code"`, `home` ending in `/opencode` with an `opencode.json` selecting `opencode/big-pickle`, placeholder `DEEPSEEK_API_KEY` under `[profiles.oc.environment]`), and `[targets.localhost] kind = "bare"`. OpenCode's free models need no login; keep prompts synthetic because content goes to OpenCode's hosted service.
+
+Run a session with the Go worker (prefix from rule 8; T is the Rust debug directory):
+
+    E="env -u MJ_CONFIG_DIR -u MJ_DATA_DIR -u MJ_SESSION_ID -u MJ_SESSION_BASH_ENV -u MJ_INSTANCE -u MJ_NO_SPLASH"
+    $E MJ_WORKER_BINARY=<repo>/go/bin/mj-worker $T/mj --instance go-e2e daemon status     # must name instances/go-e2e
+    $E MJ_WORKER_BINARY=<repo>/go/bin/mj-worker $T/mj --instance go-e2e workspaces create goe2e
+    $E MJ_WORKER_BINARY=<repo>/go/bin/mj-worker $T/mj --instance go-e2e --workspace goe2e new --profile oc --target localhost --project-directory <scratch git repo> --title t
+    $E $T/mj --instance go-e2e prompt --session <id> "Create a file named hello.txt containing exactly: go-port works. Then reply DONE."
+
+The same commands without `MJ_WORKER_BINARY` and with `--instance go-e2e-rust` give the control. Clean up with `mj --instance <name> destroy --session <id>` and `daemon stop`; kill leftover `instances/go-e2e*/workers/*/hel` process groups.
 
 
 ## Validation and Acceptance
 
-For the first slice: `go test ./...` passes, and `bin/mj --help`, `bin/mj -h`, `bin/mj help`, `bin/mj --version` and `bin/mj nosuch` print exactly what the Rust `mj` prints (the golden tests in `go/internal/cli/golden_test.go` check `--help` and the unknown-command error). The final acceptance is the end-to-end suite in `tests/e2e/` passing against `go/bin/mj`.
+The scenario suite (`tests/e2e/go_port_scenarios.py`, taking `--mj`, `--instance` and optionally `--worker-binary`) runs each scenario and compares the outcome with the control: create a session; a prompt that needs a tool call, with the file present in the session's checkout and the transcript showing the tool call; a follow-up prompt in the same session; interrupt a long turn, then prompt again; a question or permission request answered through `mj elicitations`/`mj respond` when the harness raises one; stop and restart the daemon during a turn, the turn finishes and the transcript is complete; suspend then resume, then a prompt; destroy, leaving no processes or files. A milestone is accepted when every scenario passes on the Go configuration of that milestone and on the control.
 
 
 ## Idempotence and Recovery
 
-Everything is additive under `go/` and `.agents/plans/go-port.md`. Rebuilding is safe. Set `MJ_UPDATE_GOLDEN=1` only when deliberately recapturing a golden file from the Rust build.
+Everything is additive under `go/`, `tests/e2e/go_port_scenarios.py` and this plan. Isolated instances can be deleted and recreated (`~/.config/mjolnir/instances/go-e2e*`, `~/.local/share/mjolnir/instances/go-e2e*`). Never point any of this at the default instance.
 
 
 ## Artifacts and Notes
 
-    $ diff <(mj --help) <(go/bin/mj --help) && echo HELP-SAME
-    HELP-SAME
+    control (Rust worker, go-e2e-rust):  turn finished (completed, end of turn) in 13.1s · 1 tool call
+    Go worker (go-e2e):                  session stays "launching"; last startup step acp-session-open; daemon gives up after 133 s
 
 
 ## Interfaces and Dependencies
 
-Go 1.27.1 or newer. Modules: `github.com/spf13/cobra`, `github.com/BurntSushi/toml`, `github.com/BrokkAi/acp-go`, `charm.land/bubbletea/v2`, `charm.land/lipgloss/v2`; more are added only as the crate that needs them is ported, each replacing the Rust dependency listed in the table above.
+Go 1.27.1 or newer, cgo with a C compiler (tree-sitter-bash). Modules include cobra, BurntSushi/toml, go-toml/v2, acp-go v0.14.0, bubbletea/v2, lipgloss/v2, ultraviolet, modernc.org/sqlite, klauspost/compress, yaml v3, hujson. Host prerequisites on Fedora for some tests: `perl-Digest-SHA perl-File-Copy perl-JSON-PP` (provides `shasum`); run tests with `LC_ALL=C.UTF-8 LANGUAGE=en`.
