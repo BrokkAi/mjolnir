@@ -32,7 +32,22 @@ pub struct ContainerSettingsResponse {
     pub preview: Option<ContainerUpgradePreview>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderProfileSelectionRequest {
+    pub provider: mj_core::config::QuotaProvider,
+    pub profile_id: Option<String>,
+    pub target_template_id: Option<String>,
+}
+
 impl HttpDaemonClient {
+    pub async fn select_provider_profile(
+        &self,
+        request: ProviderProfileSelectionRequest,
+    ) -> Result<String> {
+        self.post_json("/api/v1/profiles/select", &request).await
+    }
+
     pub async fn dashboard_startup(
         &self,
         client_id: String,

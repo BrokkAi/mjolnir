@@ -3,6 +3,10 @@
 package core
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	acpschema "github.com/BrokkAi/acp-go/schema"
@@ -107,5 +111,62 @@ func TestPreClassificationJournalsKeepTheirOriginalDigestInBothFormats(t *testin
 				}
 			}
 		}
+	}
+}
+
+// Hard-won: 4a5cfbd03: a prompt holding U+2028 left the Go worker's session
+// unreachable ("relay event 8 digest is invalid"): encoding/json escapes
+// U+2028 and U+2029, serde_json writes them raw, and the Rust daemon
+// recomputes every event's digest from serde's bytes. The frames were
+// recorded from the Rust worker at 3dde0c11b: a submitted prompt holding line
+// and paragraph separators, markup, quotes, control characters and non-ASCII
+// text, then an attach that returns its events. Go must compute the digest
+// the Rust worker wrote for each event.
+func TestRelayEventDigestsMatchARecordedRustWorker(t *testing.T) {
+	recorded, err := os.ReadFile(filepath.Join("testdata", "relay_snapshot_digest", "rust_worker_unicode_prompt_frames.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := strings.Split(strings.TrimSuffix(string(recorded), "\n"), "\n")
+	if len(frames) != 4 {
+		t.Fatalf("the recording holds %d frames, not a submit and an attach exchange", len(frames))
+	}
+	var request RelayRequestEnvelope
+	if err := json.Unmarshal([]byte(frames[2]), &request); err != nil {
+		t.Fatal(err)
+	}
+	attach, ok := request.Request.(RelayRequestAttach)
+	if !ok {
+		t.Fatalf("the third frame is %#v, not an attach request", request.Request)
+	}
+	var response RelayResponseEnvelope
+	if err := json.Unmarshal([]byte(frames[3]), &response); err != nil {
+		t.Fatal(err)
+	}
+	body, ok := response.Body.(RelayResponseBodyOk)
+	if !ok {
+		t.Fatalf("attach answered %#v", response.Body)
+	}
+	attached, ok := body.Payload.(RelayResponsePayloadAttached)
+	if !ok {
+		t.Fatalf("attach answered %#v", body.Payload)
+	}
+	if len(attached.Events) == 0 {
+		t.Fatal("the recorded attach returned no events")
+	}
+	if !strings.Contains(frames[3], "\u2028") || !strings.Contains(frames[3], "\u2029") {
+		t.Fatal("the recorded events do not hold the raw separators the recording was made for")
+	}
+	previousOrdinal, previousDigest := attach.AfterOrdinal, attach.AfterDigest
+	for i := range attached.Events {
+		event := &attached.Events[i]
+		if err := ValidateRelayEvent(previousOrdinal, previousDigest, event); err != nil {
+			t.Errorf("event %d: %v", event.Ordinal, err)
+		}
+		previousOrdinal, previousDigest = event.Ordinal, event.Digest
+	}
+	if previousOrdinal != attached.ThroughOrdinal || previousDigest != attached.ThroughDigest {
+		t.Fatalf("events end at %d %s, the attach at %d %s", previousOrdinal, previousDigest,
+			attached.ThroughOrdinal, attached.ThroughDigest)
 	}
 }

@@ -39,6 +39,10 @@ use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, Lifecy
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    ProviderProfileSelection {
+        generation: u64,
+        result: std::result::Result<String, String>,
+    },
     RuntimeConfirmationMissing(String),
     OperatorAway {
         away: bool,
@@ -388,6 +392,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     SuspendPreflight {
         session_id: String,
+        request_id: u64,
         result: std::result::Result<mj_core::suspend_consent::SuspendPreflight, String>,
     },
     ContainerUpgradeQueued {
@@ -1049,6 +1054,10 @@ impl DashboardContext {
                     }
                 }
             },
+            DashboardIoUpdate::ProviderProfileSelection { generation, result } => {
+                let action = self.dashboard.apply_provider_profile_selection(generation, result);
+                self.ui_request_actions.push(action);
+            }
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
             DashboardIoUpdate::RemotePreflight {
                 generation,
@@ -1581,16 +1590,20 @@ impl DashboardContext {
                     else { self.dashboard.show_normal_restart(session_id); }
                 }
             },
-            DashboardIoUpdate::SuspendPreflight { session_id, result } => match result {
+            DashboardIoUpdate::SuspendPreflight {
+                session_id,
+                request_id,
+                result,
+            } => match result {
                 Ok(preflight) => {
                     if let DashboardAction::Suspend { session_id, consent } =
-                        self.dashboard.apply_suspend_preflight(preflight)
+                        self.dashboard.apply_suspend_preflight(request_id, preflight)
                     {
                         super::actions::start_suspension(self, session_id, consent);
                     }
                 }
                 Err(error) => {
-                    if self.dashboard.dismiss_suspend_preflight(&session_id) {
+                    if self.dashboard.dismiss_suspend_preflight(&session_id, request_id) {
                         self.dashboard.set_failure_notice(format!(
                             "Could not check workspace for {}: {error}",
                             self.session_notice_name(&session_id)

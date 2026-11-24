@@ -95,9 +95,25 @@ latency frontier and stay outside the cost frontier.
 
 ![Latency and confirmed findings frontiers for all, medium and high, and high impact after Opus 5.5/high verification](review-pareto-latency-findings.png)
 
-Opus 5.5/high verification across 70 diffs. The figure shows the latency
-frontiers and rounds the chart key to whole seconds and findings.
-[Vector figure](review-pareto-latency-findings.svg)
+![Estimated cost and confirmed findings frontiers for the same impact tiers](review-pareto-cost-findings.png)
+
+Both charts use Opus 5.5/high verification across 70 diffs. Greptile Base and
+Plus are solo reference diamonds. Greptile's repository context could not be
+pinned to each diff's commit. The frontiers and cost cloud omit all Greptile
+combinations. Both keys show reviewer setup, time in seconds, estimated cost
+in USD per diff, and findings for all, medium-plus and high impact. Times are
+shown to one decimal place, costs to three decimals, and unknown prices use an
+em dash in the latency key. Severity cells appear for audited frontier marks
+and Greptile solo references; blanks mean the option is not on that tier's
+frontier. The cost chart includes only priced options.
+
+[Latency SVG](review-pareto-latency-findings.svg) · [Cost SVG](review-pareto-cost-findings.svg)
+
+From this results directory, render both charts from the checked-in CSVs with
+`python3 plot_frontiers.py .` using Matplotlib 3.11.2. The script uses the
+audited frontier flags and checks that removing Greptile options cannot
+promote an option. It does not recalculate frontier membership from rounded
+coordinates.
 
 The latency frontier compares findings with simulated median latency.
 For all impact tiers, Terra 6.1 high anchors the fast end at **89.67**

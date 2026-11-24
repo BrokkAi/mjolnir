@@ -729,9 +729,10 @@ func (r *DurableRelay) LiveSessionBaseline() (core.LiveSessionBaseline, error) {
 	}
 	var nativeAgentReplay *[]core.NativeAgent
 	if r.snapshot.NativeAgentReplay != nil {
-		agents := make([]core.NativeAgent, 0, len(r.snapshot.NativeAgentReplay))
-		for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgentReplay)) {
-			agents = append(agents, r.snapshot.NativeAgentReplay[id])
+		replay := *r.snapshot.NativeAgentReplay
+		agents := make([]core.NativeAgent, 0, len(replay))
+		for _, id := range slices.Sorted(maps.Keys(replay)) {
+			agents = append(agents, replay[id])
 		}
 		nativeAgentReplay = &agents
 	}
