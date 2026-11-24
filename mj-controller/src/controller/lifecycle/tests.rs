@@ -5783,10 +5783,39 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         assert!(!files.contains_key(wire::RESTART));
     }
 
-    // The worker can accept a stop while SSH loses both its reply and the
-    // readback. Lost observations during stop and capture also keep Closing.
-    controller.state.sessions.get_mut(session_id).unwrap().state = SessionState::Closing;
+    // Simulate a handoff after borrower teardown and before the dead
+    // original worker could write REQUEST. A stopped borrower can still
+    // have detached writers in the parent's checkout.
     persist_controller_fixture(&mut controller);
+    let borrower_id = "bound-stopped-borrower";
+    let mut borrower = checkpoint_test_session(borrower_id);
+    borrower.target_template_id = "ssh-bare".into();
+    borrower.project_directory = Some(checkout.clone());
+    borrower.target = Some(Box::new(TargetLocator::SshBare {
+        host: "remote.example".into(),
+        workspace: checkout.clone(),
+        worker_id: Some(borrower_id.into()),
+    }));
+    let mut relation = failed_subagent_relation(borrower_id);
+    relation.parent_session_id = session_id.into();
+    crate::database::save_subagent_session(&borrower, &relation).unwrap();
+    borrower.state = SessionState::Stopped;
+    borrower.target = None;
+    crate::database::save_lifecycle_session(&borrower).unwrap();
+
+    let parent = controller.state.sessions.get_mut(session_id).unwrap();
+    parent.state = SessionState::Closing;
+    crate::database::save_lifecycle_session(parent).unwrap();
+    let mut controller = Controller {
+        config: controller.config,
+        state: crate::database::load_state().unwrap(),
+    };
+    assert_eq!(
+        controller.state.sessions[borrower_id].state,
+        SessionState::Stopped
+    );
+    assert!(controller.state.active_borrowers(session_id).is_empty());
+
     let consent = SuspendConsent {
         discard_untracked: UntrackedConsent::Any,
         ..Default::default()
@@ -5823,6 +5852,36 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         ),
         ("launch.json".into(), serde_json::to_vec(&launch).unwrap()),
     ]);
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!reloaded.request_recorded());
+    assert_eq!(reloaded.live_worker_mode(&fake).unwrap(), None);
+    assert_eq!(reloaded.capture_scope().child_sessions, [borrower_id]);
+
+    // StopSubagent can delete the operational row and binding. Teardown
+    // retains the worker lease so recovery can still find detached writers.
+    let environment = crate::database::session_environment(session_id)
+        .unwrap()
+        .unwrap();
+    crate::database::delete_session(borrower_id).unwrap();
+    controller.state = crate::database::load_state().unwrap();
+    assert!(!controller.state.sessions.contains_key(borrower_id));
+    assert!(
+        crate::database::session_environment(borrower_id)
+            .unwrap()
+            .is_none()
+    );
+    let workers = crate::database::environment_workers(&environment.id).unwrap();
+    assert!(
+        workers
+            .iter()
+            .any(|worker| worker.session_id == borrower_id)
+    );
+    let reloaded = OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!reloaded.request_recorded());
+    assert_eq!(reloaded.capture_scope().child_sessions, [borrower_id]);
+
+    // The worker can accept a stop while SSH loses both its reply and the
+    // readback. Lost observations during stop and capture also keep Closing.
     *fake.worker_alive.lock().unwrap() = true;
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);

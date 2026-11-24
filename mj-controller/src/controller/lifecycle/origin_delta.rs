@@ -404,12 +404,7 @@ impl OriginDeltaSuspend {
             // scope of the original stop after its worker has exited.
             request.child_sessions
         } else {
-            let mut child_sessions = controller.state.active_borrowers(session_id);
-            if !child_sessions.is_empty() {
-                let peers = crate::database::bound_environment_member_ids(session_id)?;
-                child_sessions.retain(|id| peers.contains(id));
-            }
-            child_sessions
+            crate::database::environment_quiescence_session_ids(session_id)?
         };
         Ok(Self {
             session_id: session_id.to_owned(),

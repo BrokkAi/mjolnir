@@ -141,6 +141,40 @@ pub fn session_owns_environment(session_id: &str) -> Result<bool> {
     Ok(session_environment_owner(session_id)?.as_deref() == Some(session_id))
 }
 
+/// Other session IDs to drain when capturing the owner's environment.
+pub fn environment_quiescence_session_ids(owner_session_id: &str) -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    environment_quiescence_session_ids_with(&connection, owner_session_id)
+}
+
+fn environment_quiescence_session_ids_with(
+    connection: &Connection,
+    owner_session_id: &str,
+) -> Result<Vec<String>> {
+    // StopSubagent can delete a borrower's binding while its physical worker
+    // lease remains in the environment's cleanup inventory.
+    let mut query = connection.prepare(
+        "WITH owned_environment AS (
+             SELECT b.environment_id FROM environment_bindings b
+             JOIN environments e USING (environment_id)
+             WHERE b.session_id = ?1 AND e.owner_session_id = ?1
+         ),
+         members AS (
+             SELECT b.session_id FROM environment_bindings b
+             JOIN owned_environment e USING (environment_id)
+             UNION
+             SELECT w.worker_session_id FROM environment_workers w
+             JOIN owned_environment e USING (environment_id)
+             LEFT JOIN environment_bindings b ON b.session_id = w.worker_session_id
+             WHERE b.environment_id IS NULL OR b.environment_id = e.environment_id
+         )
+         SELECT session_id FROM members WHERE session_id <> ?1 ORDER BY session_id",
+    )?;
+    Ok(query
+        .query_map([owner_session_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn environment_workers(environment_id: &str) -> Result<Vec<EnvironmentWorker>> {
     let connection = open_reader(&database_path())?;
     read_environment_workers(&connection, environment_id)
@@ -1266,9 +1300,28 @@ mod tests {
                 .len(),
             2
         );
+        assert_eq!(
+            environment_quiescence_session_ids_with(&connection, &parent.id).unwrap(),
+            [child.id.as_str()]
+        );
+        connection
+            .execute(
+                "UPDATE environment_bindings SET environment_id=?2 WHERE session_id=?1",
+                params![child.id, source_environment],
+            )
+            .unwrap();
+        assert!(
+            environment_quiescence_session_ids_with(&connection, &parent.id)
+                .unwrap()
+                .is_empty()
+        );
         connection
             .execute("DELETE FROM sessions WHERE session_id=?1", [&child.id])
             .unwrap();
+        assert_eq!(
+            environment_quiescence_session_ids_with(&connection, &parent.id).unwrap(),
+            [child.id.as_str()]
+        );
         connection
             .execute("DELETE FROM sessions WHERE session_id=?1", [&parent.id])
             .unwrap();
