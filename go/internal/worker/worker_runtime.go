@@ -475,26 +475,13 @@ func resolveRelativeWorkerRoot(root string, base string) string {
 // workerRuntimeMarshalJSON encodes v as serde_json::to_vec does: without
 // Go's HTML escaping and without a trailing newline.
 func workerRuntimeMarshalJSON(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return core.SerdeJSON(v)
 }
 
 // workerRuntimeMarshalPretty encodes v as serde_json::to_vec_pretty does:
 // two-space indent, no HTML escaping, no trailing newline.
 func workerRuntimeMarshalPretty(v any) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+	return core.SerdeJSONPretty(v)
 }
 
 // workerRuntimeDecodeStrict decodes data into v as serde does with

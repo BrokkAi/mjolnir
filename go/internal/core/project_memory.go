@@ -853,13 +853,7 @@ func UnmarshalProjectMemoryIdentity(data []byte) (ProjectMemoryIdentity, error) 
 // projectMemoryMarshalJSON encodes like serde_json: no HTML escaping of <, >
 // and &, and no trailing newline.
 func projectMemoryMarshalJSON(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	return SerdeJSON(v)
 }
 
 // ProjectMemoryIdentityForLegacySession is the exact identity used before

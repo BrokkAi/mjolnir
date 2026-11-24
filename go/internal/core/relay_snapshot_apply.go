@@ -1680,7 +1680,7 @@ func completedReplyMessage(snapshot *RelaySnapshot) *string {
 func applyNativeAgentEvent(snapshot *RelaySnapshot, event NativeAgentEvent) {
 	target := func() map[string]NativeAgent {
 		if snapshot.NativeAgentReplay != nil {
-			return snapshot.NativeAgentReplay
+			return *snapshot.NativeAgentReplay
 		}
 		if snapshot.NativeAgents == nil {
 			snapshot.NativeAgents = map[string]NativeAgent{}
@@ -1712,7 +1712,7 @@ func applyNativeAgentEvent(snapshot *RelaySnapshot, event NativeAgentEvent) {
 	case NativeAgentEventReplayBegin, NativeAgentEventDisconnected:
 		snapshot.NativeAgentReplay = nil
 		if _, begin := event.(NativeAgentEventReplayBegin); begin {
-			snapshot.NativeAgentReplay = map[string]NativeAgent{}
+			snapshot.NativeAgentReplay = &map[string]NativeAgent{}
 		}
 		for id, agent := range snapshot.NativeAgents {
 			agent.InvalidateAvailability()
@@ -1727,7 +1727,7 @@ func applyNativeAgentEvent(snapshot *RelaySnapshot, event NativeAgentEvent) {
 			if snapshot.NativeAgents == nil {
 				snapshot.NativeAgents = map[string]NativeAgent{}
 			}
-			for id, agent := range replayed {
+			for id, agent := range *replayed {
 				agent.FinishReplay()
 				snapshot.NativeAgents[id] = agent
 			}

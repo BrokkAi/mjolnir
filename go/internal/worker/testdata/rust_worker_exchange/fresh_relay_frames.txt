@@ -1,0 +1,6 @@
+{"request_id":"recorded-1","protocol_version":85,"request":{"method":"command_retention_status"}}
+{"request_id":"recorded-1","protocol_version":85,"result":"ok","payload":{"type":"command_retention_state","data":{"legacy_pending":false,"operation_ids":[]}}}
+{"request_id":"recorded-2","protocol_version":85,"request":{"method":"history_requests"}}
+{"request_id":"recorded-2","protocol_version":85,"result":"ok","payload":{"type":"history_requests","data":{"requests":[]}}}
+{"request_id":"recorded-3","protocol_version":85,"request":{"method":"guardian_requests"}}
+{"request_id":"recorded-3","protocol_version":85,"result":"ok","payload":{"type":"guardian_requests","data":{"requests":[]}}}

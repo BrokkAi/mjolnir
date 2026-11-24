@@ -1527,25 +1527,25 @@ type RelaySnapshot struct {
 	Steering           *SteeringOperation     `json:"steering,omitempty"`
 	CancellingPromptID *string                `json:"cancelling_prompt_id,omitempty"`
 	NativeAgents       map[string]NativeAgent `json:"native_agents,omitempty"`
-	// Nil means None (serialized as null); an empty non-nil map is {}.
-	NativeAgentReplay       map[string]NativeAgent `json:"native_agent_replay"`
-	Goal                    GoalState              `json:"goal"`
-	CapacityRetry           *CapacityRetry         `json:"capacity_retry,omitempty"`
-	RetryAssessment         *RetryAssessment       `json:"retry_assessment,omitempty"`
-	ActivityTurnStartedAtMs *int64                 `json:"activity_turn_started_at_ms,omitempty"`
-	StoreID                 *string                `json:"store_id,omitempty"`
-	FormatVersion           uint32                 `json:"format_version"`
-	IdleSinceMs             *int64                 `json:"idle_since_ms,omitempty"`
-	ActivityWasIdle         *bool                  `json:"activity_was_idle,omitempty"`
-	SessionID               string                 `json:"session_id"`
-	Execution               RelayExecutionState    `json:"execution"`
-	LatestOrdinal           uint64                 `json:"latest_ordinal"`
-	LatestDigest            string                 `json:"latest_digest"`
-	AcknowledgedThrough     uint64                 `json:"acknowledged_through"`
-	AcknowledgedDigest      string                 `json:"acknowledged_digest"`
-	RecoveryFloorOrdinal    uint64                 `json:"recovery_floor_ordinal"`
-	RecoveryFloorDigest     string                 `json:"recovery_floor_digest"`
-	NativeSessionID         *string                `json:"native_session_id"`
+	// Nil means None (serialized as null).
+	NativeAgentReplay       *map[string]NativeAgent `json:"native_agent_replay"`
+	Goal                    GoalState               `json:"goal"`
+	CapacityRetry           *CapacityRetry          `json:"capacity_retry,omitempty"`
+	RetryAssessment         *RetryAssessment        `json:"retry_assessment,omitempty"`
+	ActivityTurnStartedAtMs *int64                  `json:"activity_turn_started_at_ms,omitempty"`
+	StoreID                 *string                 `json:"store_id,omitempty"`
+	FormatVersion           uint32                  `json:"format_version"`
+	IdleSinceMs             *int64                  `json:"idle_since_ms,omitempty"`
+	ActivityWasIdle         *bool                   `json:"activity_was_idle,omitempty"`
+	SessionID               string                  `json:"session_id"`
+	Execution               RelayExecutionState     `json:"execution"`
+	LatestOrdinal           uint64                  `json:"latest_ordinal"`
+	LatestDigest            string                  `json:"latest_digest"`
+	AcknowledgedThrough     uint64                  `json:"acknowledged_through"`
+	AcknowledgedDigest      string                  `json:"acknowledged_digest"`
+	RecoveryFloorOrdinal    uint64                  `json:"recovery_floor_ordinal"`
+	RecoveryFloorDigest     string                  `json:"recovery_floor_digest"`
+	NativeSessionID         *string                 `json:"native_session_id"`
 	// Persisted alongside the native id so a controller that reconnects
 	// after the fallback still sees that continuity was lost.
 	NativeContinuityLost bool `json:"native_continuity_lost"`
