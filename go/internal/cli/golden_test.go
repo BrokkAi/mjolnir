@@ -106,6 +106,11 @@ func TestGoldenRepeatedArgumentsAreRefusedPerCommandLevel(t *testing.T) {
 	}
 }
 
+// Hard-won: 9fd6c692b: an option given no value did not list the values it takes
+func TestGoldenMissingValueListsThePossibleValues(t *testing.T) {
+	assertParseErrorGolden(t, "missing-value-of-enumerated-option", "", []string{"--instance", "go-port-golden", "new", "--oracle"})
+}
+
 // assertParseErrorGolden parses args, which must fail, and compares what mj
 // prints for the failure with testdata/usage-errors/<name>.txt.
 func assertParseErrorGolden(t *testing.T, name, instance string, args []string) {
