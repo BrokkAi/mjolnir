@@ -70,6 +70,34 @@ func TestGoldenHelpOfEveryPortedCommandMatchesTheRustBuild(t *testing.T) {
 	}
 }
 
+// The files in testdata/usage-errors were captured from the Rust mj at the
+// pinned commit (`mj --instance go-e2e usage`, `mj usage --instance go-e2e
+// --json`, and `MJ_INSTANCE=go-e2e mj usage`).
+//
+// Hard-won: 9fca71682: a global option given before the command, or none from the environment, changed the usage line
+func TestGoldenUsageErrorsNameTheGlobalsInTheCommandsOwnMatcher(t *testing.T) {
+	for _, test := range []struct {
+		name, environment string
+		args              []string
+	}{
+		{"global-before-command", "", []string{"--instance", "go-e2e", "usage"}},
+		{"global-after-command", "", []string{"usage", "--instance", "go-e2e", "--json"}},
+		{"global-from-environment", "go-e2e", []string{"usage"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			unsetHelpEnvironment(t)
+			if test.environment != "" {
+				t.Setenv("MJ_INSTANCE", test.environment)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Main(test.args, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit %d: %s", code, stderr.String())
+			}
+			assertGolden(t, filepath.Join("usage-errors", test.name+".txt"), stderr.String())
+		})
+	}
+}
+
 func assertGolden(t *testing.T, name, actual string) {
 	t.Helper()
 	path := filepath.Join("testdata", name)
