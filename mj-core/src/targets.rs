@@ -278,6 +278,10 @@ pub struct CommandSpec {
     /// opens a master (see [`CommandSpec::ssh_probe_session`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_session_probe: bool,
+    #[serde(default)]
+    pub ssh_gzip_stdin: bool,
+    #[serde(default)]
+    pub ssh_gzip_stdout: bool,
     /// The remote command line starts by printing [`SSH_START_MARKER`], so the
     /// reader of this command's stdout strips it and the command's start is
     /// known from it. Set only by [`CommandSpec::open_ssh_session`], on the
@@ -323,6 +327,8 @@ impl CommandSpec {
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
+            ssh_gzip_stdin: false,
+            ssh_gzip_stdout: false,
             ssh_start_marker: false,
             sensitive_stdin: None,
             keep_stdin_open: false,
@@ -400,6 +406,18 @@ impl CommandSpec {
         self
     }
 
+    /// Compress stdin on the SSH wire using gzip, after remote admission.
+    pub fn gzip_ssh_stdin(mut self) -> Self {
+        self.ssh_gzip_stdin = true;
+        self
+    }
+
+    /// Compress remote stdout on the SSH wire using gzip.
+    pub fn gzip_ssh_stdout(mut self) -> Self {
+        self.ssh_gzip_stdout = true;
+        self
+    }
+
     /// Preserve the proxy command while moving Control traffic to the Bulk lane.
     pub fn ssh_bulk_variant(&self) -> Option<CommandSpec> {
         let request = self.ssh_session.as_ref()?;
@@ -462,7 +480,14 @@ impl CommandSpec {
     ) -> Result<SessionCommand<'_>> {
         let Some(request) = &self.ssh_session else {
             return Ok(SessionCommand {
-                command: std::borrow::Cow::Borrowed(self),
+                command: if self.ssh_gzip_stdin || self.ssh_gzip_stdout {
+                    let mut raw = self.clone();
+                    raw.ssh_gzip_stdin = false;
+                    raw.ssh_gzip_stdout = false;
+                    std::borrow::Cow::Owned(raw)
+                } else {
+                    std::borrow::Cow::Borrowed(self)
+                },
                 lease: None,
             });
         };
@@ -489,6 +514,12 @@ impl CommandSpec {
         command.args = session_command_args(&self.program, &self.args, ssh, &lease);
         if self.keep_stdin_open && self.program == "ssh" {
             ssh::configure_stdin_lifetime(&mut command.args);
+        }
+        if self.program != "ssh" {
+            command.ssh_gzip_stdin = false;
+            command.ssh_gzip_stdout = false;
+        } else if let Some(line) = command.args.last_mut() {
+            *line = gzip_ssh_line(line, command.ssh_gzip_stdin, command.ssh_gzip_stdout);
         }
         // The remote command line is the last argument of every `ssh` session
         // the builders in `targets/ssh.rs` make; `scp` has none.
@@ -1306,6 +1337,45 @@ pub struct ProcessExecutor;
 /// report into (`None` when the command prints no start marker).
 ///
 /// Commands that are not tagged with a destination run untouched.
+fn gzip_ssh_line(line: &str, stdin: bool, stdout: bool) -> String {
+    let mut line = line.to_owned();
+    if stdin {
+        line = format!(
+            r#"_mj_rc=0; exec 3>&1; _mj_gz=$({{ {{ gzip -d 3>&- 4>&-; printf '%s' "$?" >&4; }} | ( {line}
+) >&3 4>&-; }} 4>&1) || _mj_rc=$?; exec 3>&-; [ "$_mj_rc" -eq 0 ] || exit "$_mj_rc"; [ "${{_mj_gz:-1}}" -eq 0 ] || exit "${{_mj_gz:-1}}""#
+        );
+    }
+    if stdout {
+        line = format!(
+            r#"_mj_gz=0; exec 3>&1; _mj_rc=$({{ {{ ( {line}
+) 3>&- 4>&-; printf '%s' "$?" >&4; }} | gzip -c >&3 4>&-; }} 4>&1) || _mj_gz=$?; exec 3>&-; [ "${{_mj_rc:-1}}" -eq 0 ] || exit "${{_mj_rc:-1}}"; [ "$_mj_gz" -eq 0 ] || exit "$_mj_gz""#
+        );
+    }
+    if stdin || stdout {
+        format!("sh -c {}", posix_quote(&line))
+    } else {
+        line
+    }
+}
+
+fn decode_ssh_output(command: &CommandSpec, mut output: CommandOutput) -> Result<CommandOutput> {
+    if command.ssh_gzip_stdout && !output.stdout.is_empty() {
+        // Multi-member decoding also rejects trailing garbage rather than silently
+        // accepting a valid first member followed by corrupt bytes.
+        let mut decoded = Vec::new();
+        let result =
+            flate2::read::MultiGzDecoder::new(output.stdout.as_slice()).read_to_end(&mut decoded);
+        match result {
+            Ok(_) => output.stdout = decoded,
+            Err(error) if output.status == 0 => {
+                return Err(error).context("decode SSH gzip stdout");
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(output)
+}
+
 fn with_ssh_refusal_retry(
     command: &CommandSpec,
     executor: &dyn CommandExecutor,
@@ -1313,13 +1383,19 @@ fn with_ssh_refusal_retry(
     mut run: impl FnMut(&CommandSpec, Option<&Arc<StartGate>>) -> Result<CommandOutput>,
 ) -> Result<CommandOutput> {
     let Some(destination) = command.ssh_destination.as_deref() else {
-        return run(command, None);
+        let session = command.open_ssh_session(executor, &mut SshWalk::default())?;
+        return run(session.command(), None);
     };
     let mut retry = SshRefusalRetry::for_command(command);
     loop {
         let session = command.open_ssh_session(executor, retry.walk())?;
         let output = run(session.command(), session.gate())?;
         let refusal = note_session_refusal(&session, &output);
+        let output = if refusal.is_none() {
+            decode_ssh_output(session.command(), output)?
+        } else {
+            output
+        };
         drop(session);
         let Some((refusal, walks_on)) = refusal else {
             return Ok(output);
@@ -1657,7 +1733,7 @@ fn stream_command_with_stdin(
                 observer.report(CommandActivity::StdinStarted);
                 ObservedStdin(observer)
             });
-            let mut stdin = ProgressWriter {
+            let raw_stdin = ProgressWriter {
                 stdin,
                 observer: command.observer.as_ref(),
             };
@@ -1665,12 +1741,26 @@ fn stream_command_with_stdin(
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
             // copy of the write end is still open.
+            let mut encoder;
+            let mut raw;
+            let stdin: &mut dyn Write = if command.ssh_gzip_stdin {
+                encoder = Some(flate2::write::GzEncoder::new(
+                    raw_stdin,
+                    flate2::Compression::fast(),
+                ));
+                encoder.as_mut().unwrap()
+            } else {
+                encoder = None;
+                raw = raw_stdin;
+                &mut raw
+            };
             let mut buffer = [0_u8; 64 * 1024];
             loop {
                 // Checking before each chunk makes large checkpoint copies
                 // cooperatively cancellable without changing the executor
                 // interface.
                 if is_cancelled() {
+                    wait_for_child_done();
                     bail!("operation cancelled");
                 }
                 let count = match input.read(&mut buffer) {
@@ -1689,6 +1779,14 @@ fn stream_command_with_stdin(
                     .context("stream command input")?;
             }
             stdin.flush().context("flush command input")?;
+            let mut finished = encoder
+                .take()
+                .map(|encoder| encoder.finish())
+                .transpose()
+                .context("finish SSH gzip stdin")?;
+            if let Some(stdin) = finished.as_mut() {
+                stdin.flush()?;
+            }
             if command.keep_stdin_open {
                 drop(progress);
                 wait_for_child_done();
@@ -1728,6 +1826,7 @@ fn stream_command_with_stdin(
             }
             if is_cancelled() {
                 let close_stdin_first = command.keep_stdin_open
+                    && !command.ssh_gzip_stdin
                     && gate.is_none_or(|gate| gate.phase() == ssh::StartPhase::Started);
                 if !close_stdin_first {
                     terminate_cancellable_child(&mut child, false);
@@ -2424,7 +2523,33 @@ impl CancellableProcessExecutor {
                         file.set_len(0).context("reset command output file")?;
                         file.seek(SeekFrom::Start(0))
                             .context("rewind command output file")?;
-                        self.run_once_output(command, gate, Some(file))
+                        let mut compressed = command
+                            .ssh_gzip_stdout
+                            .then(tempfile::tempfile)
+                            .transpose()
+                            .context("create compressed SSH output")?;
+                        let sink = compressed.as_ref().unwrap_or(&file).try_clone()?;
+                        let result = self.run_once_output(command, gate, Some(sink))?;
+                        if let Some(raw) = compressed.as_mut() {
+                            if raw.metadata()?.len() == 0 {
+                                return Ok(result);
+                            }
+                            raw.rewind()?;
+                            let decoding = std::io::copy(
+                                &mut flate2::read::MultiGzDecoder::new(&mut *raw),
+                                &mut file,
+                            );
+                            if let Err(error) = decoding {
+                                if result.status == 0 {
+                                    return Err(error).context("decode SSH gzip file output");
+                                }
+                                file.set_len(0)?;
+                                file.rewind()?;
+                                raw.rewind()?;
+                                std::io::copy(raw, &mut file)?;
+                            }
+                        }
+                        Ok(result)
                     },
                 ),
             )
@@ -4882,6 +5007,87 @@ mod executor_tests {
     }
 
     #[test]
+    fn ssh_gzip_roundtrip_and_refusal_preserve_large_input() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
+        let command = fake.command(&["cat"]).gzip_ssh_stdin().gzip_ssh_stdout();
+        let session = command
+            .open_ssh_session(&ProcessExecutor, &mut SshWalk::default())
+            .unwrap();
+        let remote = session.command().args.last().unwrap();
+        assert!(remote.starts_with(&with_start_marker("sh -c ")), "{remote}");
+        drop(session);
+        let bytes = vec![b'x'; 300 * 1024];
+        let mut input = std::io::Cursor::new(bytes.clone());
+        let output = ProcessExecutor
+            .execute_with_stdin(&command, &mut input)
+            .unwrap();
+        assert_eq!(output.status, 0, "{:?}", output.stderr);
+        assert_eq!(output.stdout, bytes);
+        assert_eq!(fake.attempts(), 3);
+    }
+
+    #[test]
+    fn ssh_gzip_wrappers_fail_closed_on_truncation_and_inner_exit() {
+        let bytes = vec![b'x'; 300 * 1024];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&bytes).unwrap();
+        let wire = encoder.finish().unwrap();
+        assert!(wire.len() < bytes.len() / 100);
+        let mut trailing = wire.clone();
+        trailing.extend_from_slice(b"corrupt trailing data");
+        assert!(
+            decode_ssh_output(
+                &CommandSpec::new("ssh", Vec::<String>::new()).gzip_ssh_stdout(),
+                CommandOutput {
+                    status: 0,
+                    stdout: trailing,
+                    stderr: Vec::new()
+                }
+            )
+            .is_err()
+        );
+        let error_output = decode_ssh_output(
+            &CommandSpec::new("ssh", Vec::<String>::new()).gzip_ssh_stdout(),
+            CommandOutput {
+                status: 42,
+                stdout: b"remote error".to_vec(),
+                stderr: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(error_output.status, 42);
+        assert_eq!(error_output.stdout, b"remote error");
+        for line in [
+            "cat",
+            "cat; exit 42",
+            "cat; exec false",
+            "set -e; cat; false",
+        ] {
+            let wrapped = gzip_ssh_line(line, true, false);
+            let mut input = std::io::Cursor::new(&wire[..wire.len() - 8]);
+            let output = ProcessExecutor
+                .execute_with_stdin(&CommandSpec::new("sh", ["-c", &wrapped]), &mut input)
+                .unwrap();
+            assert_ne!(output.status, 0, "{line}");
+        }
+        for line in ["exit 42", "exec false", "set -e; false"] {
+            let wrapped = gzip_ssh_line(line, false, true);
+            assert_ne!(
+                ProcessExecutor
+                    .execute(&CommandSpec::new("sh", ["-c", &wrapped]))
+                    .unwrap()
+                    .status,
+                0
+            );
+        }
+    }
+
+    #[test]
     fn file_output_preserves_large_ssh_stdout_across_refusals_and_cancels() {
         let _guard = ssh::SHARING_TEST_LOCK
             .lock()
@@ -4889,11 +5095,13 @@ mod executor_tests {
         let _fast_retries = FastRetries::new();
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
         let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
-        let command = fake.command(&[
-            "sh",
-            "-c",
-            "head -c 307200 /dev/zero; printf diagnostic >&2",
-        ]);
+        let command = fake
+            .command(&[
+                "sh",
+                "-c",
+                "head -c 307200 /dev/zero; printf diagnostic >&2",
+            ])
+            .gzip_ssh_stdout();
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(b"old output that must be truncated")
             .unwrap();
@@ -5191,7 +5399,12 @@ exit 0
         let published = dir.path().join("published.bin");
         // Child reads stdin to EOF and only creates `published.bin` if it sees EOF.
         let script = format!("cat >/dev/null && printf done > '{}'", published.display());
-        let command = CommandSpec::new("sh", vec!["-c".into(), script]);
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&[]);
+        let command = fake.command(&["sh", "-c", &script]).gzip_ssh_stdin();
         let mut reader = FailAfter {
             remaining: 128 * 1024,
         };
