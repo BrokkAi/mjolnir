@@ -147,6 +147,25 @@ pub fn prune_stale_ec2_grant_users<S: Ec2GrantStore>(
     })
 }
 
+/// A security group with the region and AWS profile that own it.
+type SecurityGroupScope = (String, Option<String>, Option<String>);
+
+/// Every recorded security group with the region and AWS profile that own it.
+fn recorded_security_groups<S: Ec2GrantStore>(store: &S) -> Result<BTreeSet<SecurityGroupScope>> {
+    store.with_transaction(|records| {
+        Ok(records
+            .keys()
+            .map(|k| {
+                (
+                    k.security_group_id.clone(),
+                    k.region.clone(),
+                    k.aws_profile.clone(),
+                )
+            })
+            .collect())
+    })
+}
+
 /// Live-safe EC2 grant reconciliation across every recorded security group.
 ///
 /// Uses [`Ec2GrantManager::reconcile_group`], which never prunes active users
@@ -157,17 +176,12 @@ pub fn reconcile_ec2_grants_live<S: Ec2GrantStore, C: Ec2SecurityGroupClient>(
     client: C,
     daemon_instance_id: &str,
 ) -> Result<ReconcileReport> {
-    let security_groups: BTreeSet<String> = store.with_transaction(|records| {
-        Ok(records
-            .keys()
-            .map(|k| k.security_group_id.clone())
-            .collect())
-    })?;
+    let security_groups = recorded_security_groups(&store)?;
     let manager =
         Ec2GrantManager::new(store, client, daemon_instance_id, Ec2GrantConfig::default());
     let mut total = ReconcileReport::default();
-    for sg in security_groups {
-        let report = manager.reconcile_group(&sg)?;
+    for (sg, region, profile) in security_groups {
+        let report = manager.reconcile_group(&sg, region.as_deref(), profile.as_deref())?;
         total.revoked_rules += report.revoked_rules;
         total.dropped_records += report.dropped_records;
         total.resolved_installed += report.resolved_installed;
@@ -184,18 +198,17 @@ pub fn reconcile_ec2_grants_startup<S: Ec2GrantStore, C: Ec2SecurityGroupClient>
     daemon_instance_id: &str,
     active_operation_ids: &BTreeSet<String>,
 ) -> Result<ReconcileReport> {
-    let security_groups: BTreeSet<String> = store.with_transaction(|records| {
-        Ok(records
-            .keys()
-            .map(|k| k.security_group_id.clone())
-            .collect())
-    })?;
+    let security_groups = recorded_security_groups(&store)?;
     let manager =
         Ec2GrantManager::new(store, client, daemon_instance_id, Ec2GrantConfig::default());
     let mut total = ReconcileReport::default();
-    for sg in security_groups {
-        let report =
-            manager.reconcile_group_startup(&sg, |op_id| active_operation_ids.contains(op_id))?;
+    for (sg, region, profile) in security_groups {
+        let report = manager.reconcile_group_startup(
+            &sg,
+            region.as_deref(),
+            profile.as_deref(),
+            |op_id| active_operation_ids.contains(op_id),
+        )?;
         total.revoked_rules += report.revoked_rules;
         total.dropped_records += report.dropped_records;
         total.resolved_installed += report.resolved_installed;
@@ -519,7 +532,7 @@ mod tests {
     fn startup_prune_and_live_reconcile_preserve_concurrent_new_moves() {
         use super::super::transport::ec2_grant::{
             Ec2ApiError, Ec2GrantKey, Ec2GrantRecord, Ec2GrantState, Ec2IngressRule,
-            Ec2SecurityGroupClient, InMemoryGrantStore,
+            Ec2InstanceNetwork, Ec2SecurityGroupClient, InMemoryGrantStore,
         };
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
@@ -540,9 +553,19 @@ mod tests {
             rules: Arc<Mutex<Vec<(String, Ec2IngressRule)>>>,
         }
         impl Ec2SecurityGroupClient for StubEc2 {
+            fn describe_instance(
+                &self,
+                instance_id: &str,
+                _region: Option<&str>,
+                _aws_profile: Option<&str>,
+            ) -> std::result::Result<Ec2InstanceNetwork, Ec2ApiError> {
+                Err(Ec2ApiError::Other(format!("no instance {instance_id}")))
+            }
             fn describe_ingress_rules(
                 &self,
                 group_id: &str,
+                _region: Option<&str>,
+                _aws_profile: Option<&str>,
             ) -> std::result::Result<Vec<Ec2IngressRule>, Ec2ApiError> {
                 Ok(self
                     .rules
@@ -555,31 +578,25 @@ mod tests {
             }
             fn authorize_ingress(
                 &self,
-                group_id: &str,
-                port: u16,
-                cidr_ip: &str,
+                key: &Ec2GrantKey,
                 description: &str,
             ) -> std::result::Result<(), Ec2ApiError> {
                 self.rules.lock().unwrap().push((
-                    group_id.to_owned(),
+                    key.security_group_id.clone(),
                     Ec2IngressRule {
-                        cidr_ip: cidr_ip.to_owned(),
-                        port,
+                        cidr_ip: key.cidr_ip.clone(),
+                        port: key.port,
                         description: Some(description.to_owned()),
                     },
                 ));
                 Ok(())
             }
-            fn revoke_ingress(
-                &self,
-                group_id: &str,
-                port: u16,
-                cidr_ip: &str,
-            ) -> std::result::Result<(), Ec2ApiError> {
-                self.rules
-                    .lock()
-                    .unwrap()
-                    .retain(|(sg, r)| !(sg == group_id && r.cidr_ip == cidr_ip && r.port == port));
+            fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
+                self.rules.lock().unwrap().retain(|(sg, r)| {
+                    !(sg == &key.security_group_id
+                        && r.cidr_ip == key.cidr_ip
+                        && r.port == key.port)
+                });
                 Ok(())
             }
         }
@@ -606,7 +623,7 @@ mod tests {
             })
             .unwrap();
         client
-            .authorize_ingress("sg-1", 22, "10.0.0.1/32", "mj-move-grant:daemon-1")
+            .authorize_ingress(&dead_key, "mj-move-grant:daemon-1")
             .unwrap();
 
         // 1. Startup prunes dead pre-crash users synchronously (before live admission).
@@ -630,7 +647,7 @@ mod tests {
             })
             .unwrap();
         client
-            .authorize_ingress("sg-1", 22, "10.0.0.2/32", "mj-move-grant:daemon-1")
+            .authorize_ingress(&live_key, "mj-move-grant:daemon-1")
             .unwrap();
 
         // 3. Background live reconciliation revokes the dead pre-crash rule
@@ -638,7 +655,7 @@ mod tests {
         let report = reconcile_ec2_grants_live(store.clone(), client.clone(), "daemon-1").unwrap();
         assert_eq!(report.revoked_rules, 1);
         assert_eq!(report.remaining_pending, 0);
-        let remaining_rules = client.describe_ingress_rules("sg-1").unwrap();
+        let remaining_rules = client.describe_ingress_rules("sg-1", None, None).unwrap();
         assert_eq!(remaining_rules.len(), 1);
         assert_eq!(remaining_rules[0].cidr_ip, "10.0.0.2/32");
         let snapshot = store.0.snapshot();

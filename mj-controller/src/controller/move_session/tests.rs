@@ -1678,3 +1678,476 @@ mod staged_in_place_tests {
             });
     }
 }
+
+mod direct_peer_route {
+    use std::collections::BTreeMap;
+    use std::io::Read;
+    use std::sync::Mutex;
+
+    use mj_core::ec2_records::Ec2InstanceRef;
+    use mj_core::state::GrantedMoveKey;
+    use mj_core::targets::{
+        CommandExecutor, CommandOutput, CommandSpec, DeadlinePause, SshTarget, TargetLocator,
+    };
+
+    use super::super::transport::DirectPeerConfig;
+    use super::super::transport::ec2_grant::{
+        Ec2ApiError, Ec2GrantKey, Ec2IngressRule, Ec2InstanceNetwork, Ec2SecurityGroupClient,
+    };
+    use super::super::{drop_credentials_removed_by_transfer, try_build_direct_peer_config};
+    use super::KeepTransferOptions;
+
+    const HOST_KEY: &str = "ssh-ed25519 AAAAhost";
+
+    /// Answers each host's one probe call with `home`, a host key and, for
+    /// container hosts, the discovered host worker; records every call.
+    struct ProbeExecutor {
+        /// Substring of the SSH destination -> stdout of the probe.
+        replies: BTreeMap<&'static str, String>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ProbeExecutor {
+        fn new(replies: &[(&'static str, Option<&str>)]) -> Self {
+            Self {
+                replies: replies
+                    .iter()
+                    .map(|(host, worker)| {
+                        let mut out = format!("/home/ubuntu\n{HOST_KEY}\n");
+                        out.push_str(worker.unwrap_or(""));
+                        out.push('\n');
+                        (*host, out)
+                    })
+                    .collect(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for ProbeExecutor {
+        fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            let line = command.args.join(" ");
+            self.calls.lock().unwrap().push(line.clone());
+            let stdout = self
+                .replies
+                .iter()
+                .find(|(host, _)| line.contains(**host))
+                .map(|(_, out)| out.clone().into_bytes())
+                .unwrap_or_default();
+            Ok(CommandOutput {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_without_deadline(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> anyhow::Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+    }
+
+    /// In-memory EC2 API; any rule call is a test failure.
+    #[derive(Default)]
+    struct FakeEc2 {
+        instances: BTreeMap<String, Ec2InstanceNetwork>,
+    }
+
+    impl Ec2SecurityGroupClient for FakeEc2 {
+        fn authorize_ingress(&self, _: &Ec2GrantKey, _: &str) -> Result<(), Ec2ApiError> {
+            unreachable!("building a peer config never changes security groups")
+        }
+        fn revoke_ingress(&self, _: &Ec2GrantKey) -> Result<(), Ec2ApiError> {
+            unreachable!("building a peer config never changes security groups")
+        }
+        fn describe_ingress_rules(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Vec<Ec2IngressRule>, Ec2ApiError> {
+            unreachable!("building a peer config never reads security groups")
+        }
+        fn describe_instance(
+            &self,
+            instance_id: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Ec2InstanceNetwork, Ec2ApiError> {
+            self.instances
+                .get(instance_id)
+                .cloned()
+                .ok_or_else(|| Ec2ApiError::Other(format!("no instance {instance_id}")))
+        }
+    }
+
+    fn network(vpc: &str, private: &str, public: &str, sg: &str) -> Ec2InstanceNetwork {
+        Ec2InstanceNetwork {
+            vpc_id: Some(vpc.into()),
+            private_ip: Some(private.into()),
+            public_ip: Some(public.into()),
+            security_group_ids: vec![sg.into()],
+        }
+    }
+
+    fn ssh(destination: &str) -> SshTarget {
+        SshTarget {
+            destination: destination.into(),
+            ssh_args: vec![],
+        }
+    }
+
+    fn podman(destination: &str) -> TargetLocator {
+        TargetLocator::SshPodman {
+            ssh: ssh(destination),
+            container_id: "c1".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        }
+    }
+
+    fn nitro(destination: &str) -> TargetLocator {
+        TargetLocator::SshNitro {
+            ssh: ssh(destination),
+            container_id: "vm1".into(),
+            borrowed_from: None,
+        }
+    }
+
+    /// Records name `i-src` / `i-dst` by SSH destination host.
+    fn ec2_records(
+        locator: &TargetLocator,
+        known: &[(&str, &str, &str, Option<&str>)],
+    ) -> Option<Ec2InstanceRef> {
+        let ssh = match locator {
+            TargetLocator::SshPodman { ssh, .. }
+            | TargetLocator::SshNitro { ssh, .. }
+            | TargetLocator::SshBare { ssh, .. } => ssh,
+            _ => return None,
+        };
+        known
+            .iter()
+            .find(|(host, ..)| ssh.destination.ends_with(host))
+            .map(|(_, id, region, profile)| Ec2InstanceRef {
+                instance_id: (*id).into(),
+                region: (*region).into(),
+                aws_profile: profile.map(ToOwned::to_owned),
+            })
+    }
+
+    fn build(
+        source: &TargetLocator,
+        destination: &TargetLocator,
+        executor: &ProbeExecutor,
+        ec2: &FakeEc2,
+        known: &[(&str, &str, &str, Option<&str>)],
+    ) -> Option<DirectPeerConfig> {
+        try_build_direct_peer_config(
+            "op-1",
+            source,
+            "/work/src",
+            destination,
+            "/work/dst",
+            KeepTransferOptions::default(),
+            executor,
+            ec2,
+            &|locator| ec2_records(locator, known),
+        )
+    }
+
+    const SRC_BIN: &str = "/home/ubuntu/.local/share/hel/workers/worker-binaries/abc/hel";
+    const DST_BIN: &str = "/home/ubuntu/.local/share/hel/microvm/hel";
+
+    #[test]
+    fn podman_and_nitro_hosts_in_one_vpc_talk_over_private_ips_with_per_grant_scope() {
+        let executor =
+            ProbeExecutor::new(&[("54.0.0.1", Some(SRC_BIN)), ("54.0.0.2", Some(DST_BIN))]);
+        let ec2 = FakeEc2 {
+            instances: BTreeMap::from([
+                (
+                    "i-src".into(),
+                    network("vpc-1", "10.0.0.5", "54.0.0.1", "sg-src"),
+                ),
+                (
+                    "i-dst".into(),
+                    network("vpc-1", "10.0.0.6", "54.0.0.2", "sg-dst"),
+                ),
+            ]),
+        };
+        let peer = build(
+            &podman("ubuntu@54.0.0.1"),
+            &nitro("ubuntu@54.0.0.2"),
+            &executor,
+            &ec2,
+            &[
+                ("54.0.0.1", "i-src", "us-east-2", Some("team")),
+                ("54.0.0.2", "i-dst", "us-east-2", Some("team")),
+            ],
+        )
+        .expect("podman and nitro hosts support direct Move");
+
+        assert_eq!(
+            executor.calls().len(),
+            2,
+            "one SSH probe per host, no extras"
+        );
+        assert_eq!(peer.source_address, "10.0.0.5");
+        assert_eq!(peer.destination_address, "10.0.0.6");
+        assert_eq!(peer.destination_ssh_destination, "ubuntu@10.0.0.6");
+        assert_eq!(peer.source_ssh_destination, "ubuntu@10.0.0.5");
+        let scoped = |sg: &str, cidr: &str| {
+            Ec2GrantKey::ssh(sg, cidr)
+                .with_region(Some("us-east-2".into()))
+                .with_aws_profile(Some("team".into()))
+        };
+        assert_eq!(
+            peer.destination_ec2_grant,
+            Some(scoped("sg-dst", "10.0.0.5/32"))
+        );
+        assert_eq!(peer.source_ec2_grant, Some(scoped("sg-src", "10.0.0.6/32")));
+        // Stream commands run in the container; authorized_keys on the host.
+        assert_eq!(peer.source_worker_bin, "/work/src/hel");
+        assert_eq!(peer.destination_worker_bin, "/work/dst/hel");
+        assert_eq!(peer.source_host_worker_bin, SRC_BIN);
+        assert_eq!(peer.destination_host_worker_bin, DST_BIN);
+    }
+
+    #[test]
+    fn other_vpc_or_region_uses_public_ips_with_each_sides_region_and_profile() {
+        let executor =
+            ProbeExecutor::new(&[("54.0.0.1", Some(SRC_BIN)), ("54.0.0.2", Some(SRC_BIN))]);
+        let ec2 = FakeEc2 {
+            instances: BTreeMap::from([
+                (
+                    "i-src".into(),
+                    network("vpc-1", "10.0.0.5", "54.0.0.1", "sg-src"),
+                ),
+                (
+                    "i-dst".into(),
+                    network("vpc-2", "10.1.0.5", "54.0.0.2", "sg-dst"),
+                ),
+            ]),
+        };
+        let peer = build(
+            &podman("ubuntu@54.0.0.1"),
+            &podman("ubuntu@54.0.0.2"),
+            &executor,
+            &ec2,
+            &[
+                ("54.0.0.1", "i-src", "us-east-2", Some("a")),
+                ("54.0.0.2", "i-dst", "eu-west-1", None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(peer.source_address, "54.0.0.1");
+        assert_eq!(peer.destination_address, "54.0.0.2");
+        assert_eq!(peer.destination_ssh_destination, "ubuntu@54.0.0.2");
+        assert_eq!(
+            peer.destination_ec2_grant,
+            Some(Ec2GrantKey::ssh("sg-dst", "54.0.0.1/32").with_region(Some("eu-west-1".into())))
+        );
+        assert_eq!(
+            peer.source_ec2_grant,
+            Some(
+                Ec2GrantKey::ssh("sg-src", "54.0.0.2/32")
+                    .with_region(Some("us-east-2".into()))
+                    .with_aws_profile(Some("a".into()))
+            )
+        );
+    }
+
+    #[test]
+    fn one_sided_ec2_grants_only_for_a_literal_ipv4_peer_never_a_hostname() {
+        let ec2 = FakeEc2 {
+            instances: BTreeMap::from([(
+                "i-dst".into(),
+                network("vpc-1", "10.0.0.6", "54.0.0.2", "sg-dst"),
+            )]),
+        };
+        let known = [("54.0.0.2", "i-dst", "us-east-2", None)];
+        let with_ip = build(
+            &podman("ubuntu@203.0.113.7"),
+            &podman("ubuntu@54.0.0.2"),
+            &ProbeExecutor::new(&[("203.0.113.7", Some(SRC_BIN)), ("54.0.0.2", Some(SRC_BIN))]),
+            &ec2,
+            &known,
+        )
+        .unwrap();
+        assert_eq!(
+            with_ip.destination_ec2_grant,
+            Some(
+                Ec2GrantKey::ssh("sg-dst", "203.0.113.7/32").with_region(Some("us-east-2".into()))
+            )
+        );
+        assert_eq!(with_ip.source_ec2_grant, None);
+
+        let with_name = build(
+            &podman("ubuntu@build.example.com"),
+            &podman("ubuntu@54.0.0.2"),
+            &ProbeExecutor::new(&[
+                ("build.example.com", Some(SRC_BIN)),
+                ("54.0.0.2", Some(SRC_BIN)),
+            ]),
+            &ec2,
+            &known,
+        )
+        .unwrap();
+        assert_eq!(
+            with_name.destination_ec2_grant, None,
+            "a hostname is not a CIDR"
+        );
+    }
+
+    #[test]
+    fn describe_failure_leaves_that_endpoint_without_a_grant_instead_of_failing_the_move() {
+        let peer = build(
+            &podman("ubuntu@203.0.113.7"),
+            &podman("ubuntu@54.0.0.2"),
+            &ProbeExecutor::new(&[("203.0.113.7", Some(SRC_BIN)), ("54.0.0.2", Some(SRC_BIN))]),
+            &FakeEc2::default(),
+            &[("54.0.0.2", "i-gone", "us-east-2", None)],
+        )
+        .expect("the Move still goes direct");
+        assert_eq!(peer.destination_ec2_grant, None);
+    }
+
+    #[test]
+    fn docker_apple_and_workerless_container_hosts_keep_the_daemon_stream() {
+        let docker = TargetLocator::SshDocker {
+            ssh: ssh("ubuntu@h1"),
+            container_id: "c".into(),
+            borrowed_from: None,
+        };
+        let apple = TargetLocator::SshAppleContainer {
+            ssh: ssh("ubuntu@h2"),
+            container_id: "c".into(),
+            borrowed_from: None,
+        };
+        let executor = ProbeExecutor::new(&[
+            ("h1", Some(SRC_BIN)),
+            ("h2", Some(SRC_BIN)),
+            ("h3", Some(SRC_BIN)),
+            ("h4", None),
+        ]);
+        let ec2 = FakeEc2::default();
+        assert!(build(&docker, &podman("ubuntu@h3"), &executor, &ec2, &[]).is_none());
+        assert!(build(&podman("ubuntu@h3"), &apple, &executor, &ec2, &[]).is_none());
+        assert!(
+            executor.calls().is_empty(),
+            "unsupported targets are not probed"
+        );
+        // No runnable host worker on the container host (e.g. another CPU
+        // architecture than the container's): fall back, do not guess a path.
+        assert!(
+            build(
+                &podman("ubuntu@h3"),
+                &nitro("ubuntu@h4"),
+                &executor,
+                &ec2,
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn container_probe_discovers_the_host_worker_in_the_same_ssh_call() {
+        let executor = ProbeExecutor::new(&[("h1", Some(SRC_BIN)), ("h2", Some(DST_BIN))]);
+        build(
+            &podman("ubuntu@h1"),
+            &nitro("ubuntu@h2"),
+            &executor,
+            &FakeEc2::default(),
+            &[],
+        )
+        .unwrap();
+        let calls = executor.calls();
+        assert_eq!(calls.len(), 2);
+        let podman_probe = calls.iter().find(|call| call.contains("h1")).unwrap();
+        let nitro_probe = calls.iter().find(|call| call.contains("h2")).unwrap();
+        assert!(podman_probe.contains("worker-binaries"));
+        assert!(!podman_probe.contains("microvm/hel"));
+        assert!(nitro_probe.contains(".local/share/hel/microvm/hel"));
+        assert!(nitro_probe.contains("worker-binaries"));
+        for probe in [podman_probe, nitro_probe] {
+            assert!(probe.contains("worker authorized-keys --help"), "{probe}");
+        }
+    }
+
+    fn key(comment: &str) -> GrantedMoveKey {
+        GrantedMoveKey {
+            host: "h".into(),
+            comment: comment.into(),
+            private_key_path: None,
+            known_hosts_path: None,
+            authorized_keys_path: None,
+            worker_bin: None,
+            ssh_target: None,
+        }
+    }
+
+    #[test]
+    fn clean_transfer_drops_only_this_attempts_keys_and_dirty_keeps_all() {
+        let peer = |dirty: bool| {
+            let executor = ProbeExecutor::new(&[("h1", Some(SRC_BIN)), ("h2", Some(DST_BIN))]);
+            let peer = build(
+                &podman("ubuntu@h1"),
+                &nitro("ubuntu@h2"),
+                &executor,
+                &FakeEc2::default(),
+                &[],
+            )
+            .unwrap();
+            if dirty {
+                super::super::transport::mark_cleanup_dirty_for_test(&peer);
+            }
+            peer
+        };
+        let keys = || vec![key("carried"), key("this-1"), key("this-2")];
+
+        let mut clean = keys();
+        assert!(drop_credentials_removed_by_transfer(
+            &mut clean,
+            1,
+            Some(&peer(false))
+        ));
+        assert_eq!(
+            clean.iter().map(|k| k.comment.as_str()).collect::<Vec<_>>(),
+            ["carried"]
+        );
+
+        let mut dirty = keys();
+        assert!(!drop_credentials_removed_by_transfer(
+            &mut dirty,
+            1,
+            Some(&peer(true))
+        ));
+        assert_eq!(dirty.len(), 3);
+
+        let mut no_peer = vec![key("carried")];
+        assert!(!drop_credentials_removed_by_transfer(&mut no_peer, 1, None));
+        assert_eq!(no_peer.len(), 1);
+    }
+}

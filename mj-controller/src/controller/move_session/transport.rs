@@ -136,16 +136,57 @@ pub struct DirectPeerConfig {
     pub destination_authorized_keys: PathBuf,
     /// Path to `authorized_keys` on source host (for DirectPull).
     pub source_authorized_keys: PathBuf,
-    /// Worker binary path on source host (or inside source container).
+    /// Worker binary that runs `export-move-stream` for the source: inside the
+    /// source container when container-backed, otherwise on the host.
     pub source_worker_bin: String,
-    /// Worker binary path on destination host (or inside destination container).
+    /// Worker binary that runs `receive-move-stream` for the destination:
+    /// inside the destination container when container-backed, otherwise on
+    /// the host.
     pub destination_worker_bin: String,
+    /// Host-side worker binary running `worker authorized-keys install|remove`
+    /// on the source host. Differs from `source_worker_bin` for containers.
+    pub source_host_worker_bin: String,
+    /// Host-side worker binary running `worker authorized-keys install|remove`
+    /// on the destination host. Differs from `destination_worker_bin` for
+    /// containers.
+    pub destination_host_worker_bin: String,
     /// Optional EC2 SG grant key to open on destination for DirectPush.
     pub destination_ec2_grant: Option<Ec2GrantKey>,
     /// Optional EC2 SG grant key to open on source for DirectPull.
     pub source_ec2_grant: Option<Ec2GrantKey>,
     /// Optional `.mj/keep/` source, destination, and `--skip` exclusions.
     pub keep: KeepTransferOptions,
+    /// Reports whether every credential this transfer created was removed.
+    pub cleanup: DirectCleanupTracker,
+}
+
+/// Shared record of whether the credentials a direct transfer created were all
+/// removed. Clones observe the same state, so the caller can read it even when
+/// the transfer returns an error.
+///
+/// Clean means every removal the transfer's cleanup guards ran (the
+/// `authorized_keys` entry and the staged key and `known_hosts` files) exited
+/// zero; a transfer that created nothing is trivially clean.
+#[derive(Debug, Clone, Default)]
+pub struct DirectCleanupTracker {
+    dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Simulate a failed credential removal for tests in sibling modules.
+#[cfg(test)]
+pub(super) fn mark_cleanup_dirty_for_test(peer: &DirectPeerConfig) {
+    peer.cleanup.mark_dirty();
+}
+
+impl DirectCleanupTracker {
+    fn mark_dirty(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// True when no cleanup failed so far. Read after the transfer returned.
+    pub fn is_clean(&self) -> bool {
+        !self.dirty.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// Transfer `source_path` on `source` to `destination_path` on `destination`
@@ -868,6 +909,7 @@ where
     authorized_key_installed: bool,
     ec2_grants: Option<&'a Ec2GrantManager<S, C>>,
     ec2_key: Option<Ec2GrantKey>,
+    tracker: DirectCleanupTracker,
 }
 
 impl<E, S, C> Drop for DirectTransferCleanup<'_, E, S, C>
@@ -904,6 +946,7 @@ where
             .purpose("remove temporary Move authorized_keys entry");
             match self.executor.execute_cleanup(&remove_spec) {
                 Ok(out) if out.status != 0 => {
+                    self.tracker.mark_dirty();
                     tracing::warn!(
                         operation_id = %self.operation_id,
                         status = out.status,
@@ -912,6 +955,7 @@ where
                     );
                 }
                 Err(err) => {
+                    self.tracker.mark_dirty();
                     tracing::warn!(
                         operation_id = %self.operation_id,
                         error = %err,
@@ -931,6 +975,7 @@ where
                     .purpose("remove temporary Move SSH key and known_hosts");
             match self.executor.execute_cleanup(&rm_spec) {
                 Ok(out) if out.status != 0 => {
+                    self.tracker.mark_dirty();
                     tracing::warn!(
                         operation_id = %self.operation_id,
                         status = out.status,
@@ -939,6 +984,7 @@ where
                     );
                 }
                 Err(err) => {
+                    self.tracker.mark_dirty();
                     tracing::warn!(
                         operation_id = %self.operation_id,
                         error = %err,
@@ -981,13 +1027,14 @@ where
         executor,
         initiator_host: source_host.clone(),
         receiver_host: dest_host.clone(),
-        receiver_worker_bin: peer.destination_worker_bin.clone(),
+        receiver_worker_bin: peer.destination_host_worker_bin.clone(),
         receiver_authorized_keys: peer.destination_authorized_keys.clone(),
         operation_id: peer.operation_id.clone(),
         stage_files: vec![priv_path.clone(), kh_path.clone()],
         authorized_key_installed: false,
         ec2_grants,
         ec2_key: None,
+        tracker: peer.cleanup.clone(),
     };
 
     // 1. Stage 0600 private key and verified peer known_hosts on source host.
@@ -1007,7 +1054,7 @@ where
         SshTrafficClass::Control,
         &dest_host,
         vec![
-            peer.destination_worker_bin.clone(),
+            peer.destination_host_worker_bin.clone(),
             "worker".into(),
             "authorized-keys".into(),
             "install".into(),
@@ -1110,13 +1157,14 @@ where
         executor,
         initiator_host: dest_host.clone(),
         receiver_host: source_host.clone(),
-        receiver_worker_bin: peer.source_worker_bin.clone(),
+        receiver_worker_bin: peer.source_host_worker_bin.clone(),
         receiver_authorized_keys: peer.source_authorized_keys.clone(),
         operation_id: peer.operation_id.clone(),
         stage_files: vec![priv_path.clone(), kh_path.clone()],
         authorized_key_installed: false,
         ec2_grants,
         ec2_key: None,
+        tracker: peer.cleanup.clone(),
     };
 
     stage_mode_0600_file(executor, &dest_host, &priv_path, &keypair.private_key)?;
@@ -1134,7 +1182,7 @@ where
         SshTrafficClass::Control,
         &source_host,
         vec![
-            peer.source_worker_bin.clone(),
+            peer.source_host_worker_bin.clone(),
             "worker".into(),
             "authorized-keys".into(),
             "install".into(),
@@ -2082,6 +2130,8 @@ fi
             source_authorized_keys: dir.path().join("src-auth"),
             source_worker_bin: fake_worker.to_string_lossy().into_owned(),
             destination_worker_bin: fake_worker.to_string_lossy().into_owned(),
+            source_host_worker_bin: fake_worker.to_string_lossy().into_owned(),
+            destination_host_worker_bin: fake_worker.to_string_lossy().into_owned(),
             destination_ec2_grant: None,
             source_ec2_grant: None,
             keep: KeepTransferOptions {
@@ -2089,6 +2139,7 @@ fi
                 keep_dest: Some(keep_dest),
                 skip: vec![PathBuf::from("skip.txt")],
             },
+            cleanup: DirectCleanupTracker::default(),
         };
 
         // 1. SameHost route carries archive + keep_dir (excluding skip.txt).
@@ -2282,34 +2333,27 @@ fi
     impl Ec2SecurityGroupClient for FailingTransferFakeEc2 {
         fn authorize_ingress(
             &self,
-            group_id: &str,
-            port: u16,
-            cidr_ip: &str,
+            key: &Ec2GrantKey,
             description: &str,
         ) -> std::result::Result<(), Ec2ApiError> {
             self.rules
                 .lock()
                 .unwrap()
-                .entry(group_id.to_owned())
+                .entry(key.security_group_id.clone())
                 .or_default()
                 .push(Ec2IngressRule {
-                    port,
-                    cidr_ip: cidr_ip.to_owned(),
+                    port: key.port,
+                    cidr_ip: key.cidr_ip.clone(),
                     description: Some(description.to_owned()),
                 });
             Ok(())
         }
 
-        fn revoke_ingress(
-            &self,
-            group_id: &str,
-            port: u16,
-            cidr_ip: &str,
-        ) -> std::result::Result<(), Ec2ApiError> {
+        fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
             let mut map = self.rules.lock().unwrap();
-            let list = map.entry(group_id.to_owned()).or_default();
+            let list = map.entry(key.security_group_id.clone()).or_default();
             let before = list.len();
-            list.retain(|r| !(r.port == port && r.cidr_ip == cidr_ip));
+            list.retain(|r| !(r.port == key.port && r.cidr_ip == key.cidr_ip));
             if list.len() == before {
                 return Err(Ec2ApiError::NotFound);
             }
@@ -2319,6 +2363,8 @@ fi
         fn describe_ingress_rules(
             &self,
             group_id: &str,
+            _region: Option<&str>,
+            _aws_profile: Option<&str>,
         ) -> std::result::Result<Vec<Ec2IngressRule>, Ec2ApiError> {
             Ok(self
                 .rules
@@ -2328,16 +2374,37 @@ fi
                 .cloned()
                 .unwrap_or_default())
         }
+
+        fn describe_instance(
+            &self,
+            instance_id: &str,
+            _region: Option<&str>,
+            _aws_profile: Option<&str>,
+        ) -> std::result::Result<ec2_grant::Ec2InstanceNetwork, Ec2ApiError> {
+            Err(Ec2ApiError::Other(format!("no instance {instance_id}")))
+        }
     }
 
     struct MidTransferFailExecutor {
         recorded_purposes: Mutex<Vec<String>>,
+        recorded_args: Mutex<Vec<(String, Vec<String>)>>,
+        /// A command purpose whose execution exits non-zero, besides the stream.
+        failing_purpose: Option<&'static str>,
     }
 
     impl MidTransferFailExecutor {
         fn new() -> Self {
             Self {
                 recorded_purposes: Mutex::new(Vec::new()),
+                recorded_args: Mutex::new(Vec::new()),
+                failing_purpose: None,
+            }
+        }
+
+        fn failing(purpose: &'static str) -> Self {
+            Self {
+                failing_purpose: Some(purpose),
+                ..Self::new()
             }
         }
     }
@@ -2346,6 +2413,17 @@ fi
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let purpose = command.purpose.clone();
             self.recorded_purposes.lock().unwrap().push(purpose.clone());
+            self.recorded_args
+                .lock()
+                .unwrap()
+                .push((purpose.clone(), command.args.clone()));
+            if self.failing_purpose == Some(purpose.as_str()) {
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"simulated cleanup failure".to_vec(),
+                });
+            }
             if purpose == "direct push Move stream" {
                 return Ok(CommandOutput {
                     status: 255,
@@ -2389,33 +2467,10 @@ fi
         }
     }
 
-    #[test]
-    fn mid_transfer_failure_cleans_up_key_known_hosts_authorized_keys_and_ec2_grant() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = InMemoryGrantStore::new();
-        let fake_ec2 = FailingTransferFakeEc2::default();
-        let mgr = Ec2GrantManager::new(
-            store,
-            fake_ec2.clone(),
-            "daemon-test",
-            Ec2GrantConfig {
-                backoff: Duration::from_millis(1),
-                max_wait_attempts: 2,
-            },
-        );
-        let executor = MidTransferFailExecutor::new();
-
-        let src = TargetLocator::SshBare {
+    fn midfail_fixture(dir: &Path) -> (TargetLocator, TargetLocator, DirectPeerConfig) {
+        let bare = |destination: &str| TargetLocator::SshBare {
             ssh: SshTarget {
-                destination: "user@src".into(),
-                ssh_args: vec![],
-            },
-            workspace: "/w".into(),
-            worker_id: None,
-        };
-        let dst = TargetLocator::SshBare {
-            ssh: SshTarget {
-                destination: "user@dst".into(),
+                destination: destination.into(),
                 ssh_args: vec![],
             },
             workspace: "/w".into(),
@@ -2429,41 +2484,74 @@ fi
             source_ssh_destination: "user@src".into(),
             destination_host_key: "ssh-ed25519 AAAA".into(),
             source_host_key: "ssh-ed25519 BBBB".into(),
-            source_stage_dir: dir.path().join("src-stage"),
-            destination_stage_dir: dir.path().join("dst-stage"),
-            destination_authorized_keys: dir.path().join("dst-auth-keys"),
-            source_authorized_keys: dir.path().join("src-auth-keys"),
+            source_stage_dir: dir.join("src-stage"),
+            destination_stage_dir: dir.join("dst-stage"),
+            destination_authorized_keys: dir.join("dst-auth-keys"),
+            source_authorized_keys: dir.join("src-auth-keys"),
             source_worker_bin: "mj-worker".into(),
             destination_worker_bin: "mj-worker".into(),
+            source_host_worker_bin: "/host/src-hel".into(),
+            destination_host_worker_bin: "/host/dst-hel".into(),
             destination_ec2_grant: Some(Ec2GrantKey::ssh("sg-dst", "10.0.0.1/32")),
             source_ec2_grant: None,
             keep: KeepTransferOptions::default(),
+            cleanup: DirectCleanupTracker::default(),
         };
+        (bare("user@src"), bare("user@dst"), peer)
+    }
 
-        let err = try_direct_push(
+    fn midfail_push(
+        executor: &MidTransferFailExecutor,
+        dir: &Path,
+    ) -> (
+        DirectPeerConfig,
+        FailingTransferFakeEc2,
+        Result<Option<u64>>,
+    ) {
+        let fake_ec2 = FailingTransferFakeEc2::default();
+        let mgr = Ec2GrantManager::new(
+            InMemoryGrantStore::new(),
+            fake_ec2.clone(),
+            "daemon-test",
+            Ec2GrantConfig {
+                backoff: Duration::from_millis(1),
+                max_wait_attempts: 2,
+            },
+        );
+        let (src, dst, peer) = midfail_fixture(dir);
+        let result = try_direct_push(
             &src,
             Path::new("/tmp/src.hel.zip"),
             &dst,
             Path::new("/tmp/dst.hel.zip"),
             &"a".repeat(64),
-            &executor,
+            executor,
             &peer,
             Some(&mgr),
-        )
-        .expect_err("mid-transfer failure must return Err");
+        );
+        assert!(mgr.store().snapshot().is_empty());
+        (peer, fake_ec2, result)
+    }
+
+    #[test]
+    fn mid_transfer_failure_cleans_up_key_known_hosts_authorized_keys_and_ec2_grant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executor = MidTransferFailExecutor::new();
+        let (peer, fake_ec2, result) = midfail_push(&executor, dir.path());
+        let err = result.expect_err("mid-transfer failure must return Err");
         assert!(err.to_string().contains("direct push failed"));
 
         // EC2 grant must have been revoked and removed from store.
         assert!(
             fake_ec2
-                .describe_ingress_rules("sg-dst")
+                .describe_ingress_rules("sg-dst", None, None)
                 .unwrap()
                 .is_empty(),
             "EC2 ingress rule must be revoked on mid-transfer failure"
         );
-        assert!(mgr.store().snapshot().is_empty());
 
-        // Cleanup commands for authorized_keys and stage files must have run.
+        // Cleanup commands for authorized_keys and stage files must have run,
+        // and `authorized-keys` must run the host binary, not the container's.
         let purposes = executor.recorded_purposes.lock().unwrap().clone();
         assert!(
             purposes
@@ -2475,6 +2563,82 @@ fi
                 .iter()
                 .any(|p| p == "remove temporary Move SSH key and known_hosts")
         );
+        for (purpose, args) in executor.recorded_args.lock().unwrap().iter() {
+            if purpose.contains("authorized_keys") {
+                // The remote command line is one string: the host binary runs
+                // `worker authorized-keys`, never the container's `mj-worker`.
+                let line = args.join(" ");
+                assert!(
+                    line.contains("'/host/dst-hel' 'worker' 'authorized-keys'"),
+                    "{purpose}: {line}"
+                );
+                assert!(
+                    !line.contains("'mj-worker' 'worker' 'authorized-keys'"),
+                    "{line}"
+                );
+            }
+        }
+        assert!(
+            peer.cleanup.is_clean(),
+            "every removal exited zero, so the caller may skip the recovery cleanup"
+        );
+    }
+
+    #[test]
+    fn failed_credential_removal_marks_the_transfer_cleanup_dirty() {
+        for failing in [
+            "remove temporary Move authorized_keys entry",
+            "remove temporary Move SSH key and known_hosts",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let executor = MidTransferFailExecutor::failing(failing);
+            let (peer, _, result) = midfail_push(&executor, dir.path());
+            assert!(result.is_err());
+            assert!(
+                !peer.cleanup.is_clean(),
+                "{failing} failing must keep the recovery cleanup"
+            );
+        }
+    }
+
+    #[test]
+    fn nitro_forced_commands_are_valid_authorized_keys_commands() {
+        let nitro = TargetLocator::SshNitro {
+            ssh: SshTarget {
+                destination: "ubuntu@203.0.113.9".into(),
+                ssh_args: vec![],
+            },
+            container_id: "vm-1".into(),
+            borrowed_from: None,
+        };
+        let receive = format_forced_receive_command(
+            &nitro,
+            "/work/hel",
+            Path::new("/work/archive.hel.zip"),
+            &"a".repeat(64),
+            Some(Path::new("/work/keep")),
+        )
+        .unwrap();
+        let export = format_forced_export_command(
+            &nitro,
+            "/work/hel",
+            Path::new("/work/archive.hel.zip"),
+            Some(Path::new("/work/keep")),
+            &[PathBuf::from("skip.txt")],
+        )
+        .unwrap();
+        for command in [&receive, &export] {
+            assert!(
+                command.starts_with("sudo -n $HOME/.local/share/hel/microvm/hel microvm exec -i "),
+                "{command}"
+            );
+            assert!(
+                !command
+                    .chars()
+                    .any(|c| c.is_control() || c == '"' || c == '\\'),
+                "{command}"
+            );
+        }
     }
 
     #[test]

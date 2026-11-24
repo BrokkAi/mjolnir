@@ -31,6 +31,12 @@ pub struct Ec2GrantKey {
     pub security_group_id: String,
     pub cidr_ip: String,
     pub port: u16,
+    /// AWS region of the security group; `None` uses the client's default.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// AWS CLI profile owning the security group; `None` uses the client's default.
+    #[serde(default)]
+    pub aws_profile: Option<String>,
 }
 
 impl Ec2GrantKey {
@@ -39,7 +45,19 @@ impl Ec2GrantKey {
             security_group_id: security_group_id.into(),
             cidr_ip: cidr_ip.into(),
             port: 22,
+            region: None,
+            aws_profile: None,
         }
+    }
+
+    pub fn with_region(mut self, region: Option<String>) -> Self {
+        self.region = region;
+        self
+    }
+
+    pub fn with_aws_profile(mut self, aws_profile: Option<String>) -> Self {
+        self.aws_profile = aws_profile;
+        self
     }
 }
 
@@ -203,6 +221,8 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                             security_group_id: k.security_group_id.clone(),
                             cidr_ip: k.cidr_ip.clone(),
                             port: k.port,
+                            region: v.region.clone(),
+                            aws_profile: v.aws_profile.clone(),
                         };
                         map.insert(
                             key.clone(),
@@ -224,8 +244,8 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                     rows.clear();
                     for (k, v) in updated {
                         let key_row = crate::database::Ec2MoveGrantKeyRow {
-                            security_group_id: k.security_group_id,
-                            cidr_ip: k.cidr_ip,
+                            security_group_id: k.security_group_id.clone(),
+                            cidr_ip: k.cidr_ip.clone(),
                             port: k.port,
                         };
                         rows.insert(
@@ -236,6 +256,8 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
                                 users: v.users,
                                 absent_checks: v.absent_checks,
                                 attempt_id: v.attempt_id,
+                                region: k.region,
+                                aws_profile: k.aws_profile,
                             },
                         );
                     }
@@ -274,27 +296,40 @@ impl Ec2GrantStore for SqliteEc2GrantStore {
     }
 }
 
-/// Abstraction over AWS EC2 security-group ingress API calls.
+/// Network placement of one EC2 instance from `describe-instances`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ec2InstanceNetwork {
+    pub vpc_id: Option<String>,
+    pub private_ip: Option<String>,
+    pub public_ip: Option<String>,
+    pub security_group_ids: Vec<String>,
+}
+
+/// Abstraction over AWS EC2 API calls. Every call carries the region and AWS
+/// CLI profile of the resource; `None` falls back to the client's default.
 pub trait Ec2SecurityGroupClient: Send + Sync {
+    /// Authorize `key.port` from `key.cidr_ip` on `key.security_group_id`.
     fn authorize_ingress(
         &self,
-        group_id: &str,
-        port: u16,
-        cidr_ip: &str,
+        key: &Ec2GrantKey,
         description: &str,
     ) -> std::result::Result<(), Ec2ApiError>;
 
-    fn revoke_ingress(
-        &self,
-        group_id: &str,
-        port: u16,
-        cidr_ip: &str,
-    ) -> std::result::Result<(), Ec2ApiError>;
+    fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError>;
 
     fn describe_ingress_rules(
         &self,
         group_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
     ) -> std::result::Result<Vec<Ec2IngressRule>, Ec2ApiError>;
+
+    fn describe_instance(
+        &self,
+        instance_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
+    ) -> std::result::Result<Ec2InstanceNetwork, Ec2ApiError>;
 }
 
 /// Real AWS CLI implementation patterned after `mj-cli/src/ec2.rs:295-345, 1145`.
@@ -316,7 +351,13 @@ impl Default for AwsCliEc2Client {
 }
 
 impl AwsCliEc2Client {
-    fn ec2(&self, operation: &str, request: Value) -> std::result::Result<Value, Ec2ApiError> {
+    fn ec2(
+        &self,
+        operation: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
+        request: Value,
+    ) -> std::result::Result<Value, Ec2ApiError> {
         let mut command = Command::new(&self.program);
         command.args([
             "--no-cli-pager",
@@ -325,10 +366,10 @@ impl AwsCliEc2Client {
             "--cli-binary-format",
             "base64",
         ]);
-        if let Some(region) = &self.region {
+        if let Some(region) = region.or(self.region.as_deref()) {
             command.args(["--region", region]);
         }
-        if let Some(profile) = &self.aws_profile {
+        if let Some(profile) = aws_profile.or(self.aws_profile.as_deref()) {
             command.args(["--profile", profile]);
         }
         command
@@ -369,21 +410,21 @@ impl AwsCliEc2Client {
 impl Ec2SecurityGroupClient for AwsCliEc2Client {
     fn authorize_ingress(
         &self,
-        group_id: &str,
-        port: u16,
-        cidr_ip: &str,
+        key: &Ec2GrantKey,
         description: &str,
     ) -> std::result::Result<(), Ec2ApiError> {
         self.ec2(
             "authorize-security-group-ingress",
+            key.region.as_deref(),
+            key.aws_profile.as_deref(),
             json!({
-                "GroupId": group_id,
+                "GroupId": key.security_group_id,
                 "IpPermissions": [{
                     "IpProtocol": "tcp",
-                    "FromPort": port,
-                    "ToPort": port,
+                    "FromPort": key.port,
+                    "ToPort": key.port,
                     "IpRanges": [{
-                        "CidrIp": cidr_ip,
+                        "CidrIp": key.cidr_ip,
                         "Description": description,
                     }]
                 }]
@@ -392,22 +433,19 @@ impl Ec2SecurityGroupClient for AwsCliEc2Client {
         Ok(())
     }
 
-    fn revoke_ingress(
-        &self,
-        group_id: &str,
-        port: u16,
-        cidr_ip: &str,
-    ) -> std::result::Result<(), Ec2ApiError> {
+    fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
         self.ec2(
             "revoke-security-group-ingress",
+            key.region.as_deref(),
+            key.aws_profile.as_deref(),
             json!({
-                "GroupId": group_id,
+                "GroupId": key.security_group_id,
                 "IpPermissions": [{
                     "IpProtocol": "tcp",
-                    "FromPort": port,
-                    "ToPort": port,
+                    "FromPort": key.port,
+                    "ToPort": key.port,
                     "IpRanges": [{
-                        "CidrIp": cidr_ip,
+                        "CidrIp": key.cidr_ip,
                     }]
                 }]
             }),
@@ -415,12 +453,48 @@ impl Ec2SecurityGroupClient for AwsCliEc2Client {
         Ok(())
     }
 
+    fn describe_instance(
+        &self,
+        instance_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
+    ) -> std::result::Result<Ec2InstanceNetwork, Ec2ApiError> {
+        let response = self.ec2(
+            "describe-instances",
+            region,
+            aws_profile,
+            json!({ "InstanceIds": [instance_id] }),
+        )?;
+        let instance = &response["Reservations"][0]["Instances"][0];
+        if !instance.is_object() {
+            return Err(Ec2ApiError::Other(format!(
+                "describe-instances returned no instance {instance_id}"
+            )));
+        }
+        let text = |value: &Value| value.as_str().map(ToOwned::to_owned);
+        Ok(Ec2InstanceNetwork {
+            vpc_id: text(&instance["VpcId"]),
+            private_ip: text(&instance["PrivateIpAddress"]),
+            public_ip: text(&instance["PublicIpAddress"]),
+            security_group_ids: instance["SecurityGroups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|group| text(&group["GroupId"]))
+                .collect(),
+        })
+    }
+
     fn describe_ingress_rules(
         &self,
         group_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
     ) -> std::result::Result<Vec<Ec2IngressRule>, Ec2ApiError> {
         let response = self.ec2(
             "describe-security-groups",
+            region,
+            aws_profile,
             json!({ "GroupIds": [group_id] }),
         )?;
         let mut rules = Vec::new();
@@ -645,17 +719,16 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         operation_id: &str,
     ) -> Result<AcquireOutcome> {
         let our_desc = self.description();
-        match self.client.authorize_ingress(
-            &key.security_group_id,
-            key.port,
-            &key.cidr_ip,
-            &our_desc,
-        ) {
+        match self.client.authorize_ingress(key, &our_desc) {
             Ok(()) => self.finish_installed_or_revoke(key, attempt_id, Ec2GrantState::Installed),
             Err(Ec2ApiError::Duplicate) => {
                 // Rule already existed; inspect description to distinguish
                 // Mjolnir's rule from an external user-managed rule.
-                let rules = match self.client.describe_ingress_rules(&key.security_group_id) {
+                let rules = match self.client.describe_ingress_rules(
+                    &key.security_group_id,
+                    key.region.as_deref(),
+                    key.aws_profile.as_deref(),
+                ) {
                     Ok(rules) => rules,
                     Err(_) => {
                         self.unregister_user_only(key, operation_id)?;
@@ -683,7 +756,11 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
             }
             Err(Ec2ApiError::Other(_) | Ec2ApiError::NotFound) => {
                 // Ambiguous failure: query AWS before changing state.
-                let rules = match self.client.describe_ingress_rules(&key.security_group_id) {
+                let rules = match self.client.describe_ingress_rules(
+                    &key.security_group_id,
+                    key.region.as_deref(),
+                    key.aws_profile.as_deref(),
+                ) {
                     Ok(rules) => rules,
                     Err(_) => {
                         // Query itself failed: leave record in `Installing` for
@@ -861,7 +938,11 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         let our_desc = self.description();
         let rules = self
             .client
-            .describe_ingress_rules(&key.security_group_id)
+            .describe_ingress_rules(
+                &key.security_group_id,
+                key.region.as_deref(),
+                key.aws_profile.as_deref(),
+            )
             .map_err(|err| {
                 anyhow::anyhow!(
                     "describe EC2 security group {} before revoke: {err}",
@@ -887,10 +968,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
             return Ok(false);
         }
 
-        match self
-            .client
-            .revoke_ingress(&key.security_group_id, key.port, &key.cidr_ip)
-        {
+        match self.client.revoke_ingress(key) {
             Ok(()) => {
                 self.store.with_transaction(|records| {
                     if records
@@ -933,8 +1011,13 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
     /// zero-user records, advances orphaned `Installing`/`Removing` records,
     /// and claims/revokes AWS rules carrying this daemon instance's description
     /// (`mj-move-grant:<daemon_instance_id>`) that have no live users.
-    pub fn reconcile_group(&self, group_id: &str) -> Result<ReconcileReport> {
-        self.reconcile_group_inner(group_id, None)
+    pub fn reconcile_group(
+        &self,
+        group_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
+    ) -> Result<ReconcileReport> {
+        self.reconcile_group_inner(group_id, region, aws_profile, None)
     }
 
     /// Startup reconciliation for `group_id`.
@@ -946,14 +1029,18 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
     pub fn reconcile_group_startup(
         &self,
         group_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
         is_active: impl Fn(&str) -> bool,
     ) -> Result<ReconcileReport> {
-        self.reconcile_group_inner(group_id, Some(&is_active))
+        self.reconcile_group_inner(group_id, region, aws_profile, Some(&is_active))
     }
 
     fn reconcile_group_inner(
         &self,
         group_id: &str,
+        region: Option<&str>,
+        aws_profile: Option<&str>,
         startup_is_active: Option<&dyn Fn(&str) -> bool>,
     ) -> Result<ReconcileReport> {
         let mut report = ReconcileReport::default();
@@ -1006,7 +1093,7 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         // 2. Query AWS for current rules in `group_id`.
         let aws_rules = self
             .client
-            .describe_ingress_rules(group_id)
+            .describe_ingress_rules(group_id, region, aws_profile)
             .map_err(|err| anyhow::anyhow!("describe EC2 security group {group_id}: {err}"))?;
 
         let our_aws_keys: BTreeSet<Ec2GrantKey> = aws_rules
@@ -1016,6 +1103,8 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                 security_group_id: group_id.to_owned(),
                 cidr_ip: rule.cidr_ip.clone(),
                 port: rule.port,
+                region: region.map(ToOwned::to_owned),
+                aws_profile: aws_profile.map(ToOwned::to_owned),
             })
             .collect();
 
@@ -1162,6 +1251,9 @@ mod tests {
         fail_next_authorize_without_creating: bool,
         force_next_authorize_duplicate: bool,
         on_describe: Option<Box<dyn Fn() + Send>>,
+        /// `(operation, group, region, aws_profile)` for every scoped call.
+        scopes: Vec<(&'static str, String, Option<String>, Option<String>)>,
+        instances: BTreeMap<String, Ec2InstanceNetwork>,
     }
 
     #[derive(Clone, Default)]
@@ -1188,17 +1280,26 @@ mod tests {
         fn revoke_calls(&self) -> usize {
             self.state.lock().expect("fake lock").revoke_calls
         }
+
+        fn scopes(&self) -> Vec<(&'static str, String, Option<String>, Option<String>)> {
+            self.state.lock().expect("fake lock").scopes.clone()
+        }
     }
 
     impl Ec2SecurityGroupClient for FakeEc2Client {
         fn authorize_ingress(
             &self,
-            group_id: &str,
-            port: u16,
-            cidr_ip: &str,
+            key: &Ec2GrantKey,
             description: &str,
         ) -> std::result::Result<(), Ec2ApiError> {
+            let (group_id, port, cidr_ip) = (&key.security_group_id, key.port, &key.cidr_ip);
             let mut st = self.state.lock().expect("fake lock");
+            st.scopes.push((
+                "authorize",
+                group_id.clone(),
+                key.region.clone(),
+                key.aws_profile.clone(),
+            ));
             st.authorize_calls += 1;
             if st.force_next_authorize_duplicate {
                 st.force_next_authorize_duplicate = false;
@@ -1208,13 +1309,13 @@ mod tests {
                 st.fail_next_authorize_without_creating = false;
                 return Err(Ec2ApiError::Other("simulated timeout".into()));
             }
-            let list = st.rules.entry(group_id.to_owned()).or_default();
-            if list.iter().any(|r| r.port == port && r.cidr_ip == cidr_ip) {
+            let list = st.rules.entry(group_id.clone()).or_default();
+            if list.iter().any(|r| r.port == port && &r.cidr_ip == cidr_ip) {
                 return Err(Ec2ApiError::Duplicate);
             }
             list.push(Ec2IngressRule {
                 port,
-                cidr_ip: cidr_ip.to_owned(),
+                cidr_ip: cidr_ip.clone(),
                 description: Some(description.to_owned()),
             });
             if st.fail_next_authorize_after_creating {
@@ -1224,17 +1325,19 @@ mod tests {
             Ok(())
         }
 
-        fn revoke_ingress(
-            &self,
-            group_id: &str,
-            port: u16,
-            cidr_ip: &str,
-        ) -> std::result::Result<(), Ec2ApiError> {
+        fn revoke_ingress(&self, key: &Ec2GrantKey) -> std::result::Result<(), Ec2ApiError> {
+            let (group_id, port, cidr_ip) = (&key.security_group_id, key.port, &key.cidr_ip);
             let mut st = self.state.lock().expect("fake lock");
+            st.scopes.push((
+                "revoke",
+                group_id.clone(),
+                key.region.clone(),
+                key.aws_profile.clone(),
+            ));
             st.revoke_calls += 1;
-            let list = st.rules.entry(group_id.to_owned()).or_default();
+            let list = st.rules.entry(group_id.clone()).or_default();
             let before = list.len();
-            list.retain(|r| !(r.port == port && r.cidr_ip == cidr_ip));
+            list.retain(|r| !(r.port == port && &r.cidr_ip == cidr_ip));
             if list.len() == before {
                 return Err(Ec2ApiError::NotFound);
             }
@@ -1244,12 +1347,38 @@ mod tests {
         fn describe_ingress_rules(
             &self,
             group_id: &str,
+            region: Option<&str>,
+            aws_profile: Option<&str>,
         ) -> std::result::Result<Vec<Ec2IngressRule>, Ec2ApiError> {
-            let hook = self.state.lock().expect("fake lock").on_describe.take();
+            let hook = {
+                let mut st = self.state.lock().expect("fake lock");
+                st.scopes.push((
+                    "describe",
+                    group_id.to_owned(),
+                    region.map(ToOwned::to_owned),
+                    aws_profile.map(ToOwned::to_owned),
+                ));
+                st.on_describe.take()
+            };
             if let Some(f) = hook {
                 f();
             }
             Ok(self.rules_for(group_id))
+        }
+
+        fn describe_instance(
+            &self,
+            instance_id: &str,
+            _region: Option<&str>,
+            _aws_profile: Option<&str>,
+        ) -> std::result::Result<Ec2InstanceNetwork, Ec2ApiError> {
+            self.state
+                .lock()
+                .expect("fake lock")
+                .instances
+                .get(instance_id)
+                .cloned()
+                .ok_or_else(|| Ec2ApiError::Other(format!("no fake instance {instance_id}")))
         }
     }
 
@@ -1361,7 +1490,9 @@ mod tests {
             .expect("seed installing");
 
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
-        let report = mgr.reconcile_group("sg-ambig").expect("reconcile");
+        let report = mgr
+            .reconcile_group("sg-ambig", None, None)
+            .expect("reconcile");
         assert_eq!(report.revoked_rules, 1);
         assert!(client.rules_for("sg-ambig").is_empty());
         assert!(mgr.store().snapshot().is_empty());
@@ -1389,7 +1520,9 @@ mod tests {
         );
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
 
-        let report = mgr.reconcile_group("sg-shared").expect("reconcile");
+        let report = mgr
+            .reconcile_group("sg-shared", None, None)
+            .expect("reconcile");
         assert_eq!(report.revoked_rules, 1);
 
         let remaining = client.rules_for("sg-shared");
@@ -1424,7 +1557,9 @@ mod tests {
         assert_eq!(snap.get(&key).map(|r| r.absent_checks), Some(1));
 
         // Second separated reconcile check confirms absence and drops the record.
-        let report = mgr.reconcile_group("sg-abs").expect("reconcile 2");
+        let report = mgr
+            .reconcile_group("sg-abs", None, None)
+            .expect("reconcile 2");
         assert_eq!(report.dropped_records, 1);
         assert!(mgr.store().snapshot().is_empty());
     }
@@ -1497,7 +1632,8 @@ mod tests {
             "daemon-a",
             fast_config(),
         );
-        mgr.reconcile_group("sg-race").expect("reconcile");
+        mgr.reconcile_group("sg-race", None, None)
+            .expect("reconcile");
 
         assert_eq!(
             store.snapshot().get(&new_key).map(|r| r.state),
@@ -1540,7 +1676,9 @@ mod tests {
         // Simulate another task currently revoking `key`.
         mgr.in_flight_revokes.lock().unwrap().insert(key.clone());
 
-        let report = mgr.reconcile_group("sg-rev").expect("concurrent reconcile");
+        let report = mgr
+            .reconcile_group("sg-rev", None, None)
+            .expect("concurrent reconcile");
         assert_eq!(
             report.revoked_rules, 0,
             "second reconciler must skip key already in in_flight_revokes"
@@ -1553,7 +1691,7 @@ mod tests {
         let saved_rules = std::mem::take(&mut client.state.lock().unwrap().rules);
         for _ in 0..3 {
             let absent_report = mgr
-                .reconcile_group("sg-rev")
+                .reconcile_group("sg-rev", None, None)
                 .expect("reconcile while absent and revoking");
             assert_eq!(absent_report.dropped_records, 0);
             assert_eq!(absent_report.remaining_pending, 1);
@@ -1706,7 +1844,9 @@ mod tests {
         );
 
         // Live reconciliation must never prune `op-live` or revoke its rule.
-        let live_report = mgr.reconcile_group("sg-live").expect("live reconcile");
+        let live_report = mgr
+            .reconcile_group("sg-live", None, None)
+            .expect("live reconcile");
         assert_eq!(live_report.revoked_rules, 0);
         assert_eq!(client.rules_for("sg-live").len(), 1);
         assert!(
@@ -1718,7 +1858,7 @@ mod tests {
 
         // Startup reconciliation with `is_active = false` prunes the dead op and revokes.
         let startup_report = mgr
-            .reconcile_group_startup("sg-live", |_| false)
+            .reconcile_group_startup("sg-live", None, None, |_| false)
             .expect("startup reconcile");
         assert_eq!(startup_report.revoked_rules, 1);
         assert!(client.rules_for("sg-live").is_empty());
@@ -1775,5 +1915,68 @@ mod tests {
             .with_transaction(|map| Ok(map.get(&key).map(|rec| rec.users.clone())))
             .expect("read grant");
         assert_eq!(users, Some(BTreeSet::from(["op-commit".to_owned()])));
+
+        // The grant's region and AWS profile survive the SQLite round trip.
+        let regional = Ec2GrantKey::ssh("sg-regional", "10.0.2.5/32")
+            .with_region(Some("eu-west-1".into()))
+            .with_aws_profile(Some("team".into()));
+        store
+            .with_transaction(|map| {
+                map.insert(
+                    regional.clone(),
+                    Ec2GrantRecord {
+                        key: regional.clone(),
+                        state: Ec2GrantState::Installed,
+                        users: BTreeSet::from(["op-regional".to_owned()]),
+                        absent_checks: 0,
+                        attempt_id: 2,
+                    },
+                );
+                Ok(())
+            })
+            .expect("commit regional grant");
+        let reloaded = store
+            .with_transaction(|map| Ok(map.keys().cloned().collect::<Vec<_>>()))
+            .expect("reload grants");
+        assert!(reloaded.contains(&regional));
+        assert!(reloaded.contains(&key));
+    }
+
+    #[test]
+    fn grant_calls_carry_the_keys_region_and_profile_through_acquire_release_and_reconcile() {
+        let client = FakeEc2Client::default();
+        let mgr = Ec2GrantManager::new(
+            InMemoryGrantStore::new(),
+            client.clone(),
+            "daemon-a",
+            fast_config(),
+        );
+        let key = Ec2GrantKey::ssh("sg-east", "10.0.0.5/32")
+            .with_region(Some("us-east-2".into()))
+            .with_aws_profile(Some("team".into()));
+        assert_eq!(mgr.acquire(&key, "op-1").unwrap(), AcquireOutcome::Granted);
+        mgr.release(&key, "op-1").unwrap();
+        mgr.reconcile_group("sg-east", Some("us-east-2"), Some("team"))
+            .unwrap();
+        let scope = |operation: &'static str| {
+            (
+                operation,
+                "sg-east".to_owned(),
+                Some("us-east-2".to_owned()),
+                Some("team".to_owned()),
+            )
+        };
+        let scopes = client.scopes();
+        assert!(!scopes.is_empty());
+        for expected in ["authorize", "describe", "revoke"] {
+            assert!(scopes.contains(&scope(expected)), "{expected}: {scopes:?}");
+        }
+        assert!(
+            scopes.iter().all(
+                |(_, _, region, profile)| region.as_deref() == Some("us-east-2")
+                    && profile.as_deref() == Some("team")
+            ),
+            "{scopes:?}"
+        );
     }
 }
