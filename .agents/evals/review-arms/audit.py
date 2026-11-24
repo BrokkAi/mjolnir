@@ -188,7 +188,14 @@ def is_rql_mcp_call(call, rollout_mcp=None, rollout=None):
         if rollout is not None and identifier in rollout:
             return False
         if rollout_mcp is not None:
-            return rollout_mcp.get(identifier) == ("rql", "rql_query")
+            if rollout_mcp.get(identifier) == ("rql", "rql_query"):
+                return True
+            # A background Codex JS-exec MCP call still in_progress when the turn finishes
+            # never emits an item_completed McpToolCall in rollout-*.jsonl.
+            meta = call.get("_meta")
+            return (call.get("status") == "in_progress"
+                    and isinstance(meta, dict) and meta.get("is_mcp_tool_call") is True
+                    and call.get("rawOutput") is None and not (call.get("content") or []))
         return True
     return False
 

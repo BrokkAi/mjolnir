@@ -1282,6 +1282,28 @@ if not (attempt / "recover").exists():
         disagree = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
         self.assertFalse(disagree["passed"])
         self.assertTrue(any("disagree" in hit["snippet"] for hit in disagree["hits"]))
+        # An in_progress Codex MCP card left open when the turn ended has no item_completed entry.
+        in_progress_pages = [{
+            "cwd": f"/workspace/{own}/mjolnir",
+            "items": [{
+                "seq": 1,
+                "role": "tool",
+                "body": {"call": {
+                    "toolCallId": "exec-rql-bg",
+                    "title": "mcp.rql.rql_query",
+                    "kind": "execute",
+                    "status": "in_progress",
+                    "rawInput": {"server": "rql", "tool": "rql_query", "arguments": {"query": "(function)"}},
+                    "_meta": {"is_mcp_tool_call": True},
+                }},
+            }],
+        }]
+        pilot.driver.save(transcript, in_progress_pages)
+        rollout_file.write_text("")
+        bg_ok = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=True)
+        self.assertTrue(bg_ok["passed"], bg_ok["hits"])
+        bg_denied = audit.audit_pilot(transcript, own, commits=("b" * 40,), allow_rql=False)
+        self.assertFalse(bg_denied["passed"])
 
 
 if __name__ == "__main__":
