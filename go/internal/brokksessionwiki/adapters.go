@@ -119,6 +119,17 @@ var (
 	_ Adapter = (*Antigravity)(nil)
 )
 
+// ParseSessionKey parses one key from a shared-store adapter and applies the
+// same normalization as the ordinary file-backed path.
+func ParseSessionKey(adapter Adapter, key string) (*Session, error) {
+	session, err := adapter.ParseKey(key)
+	if err != nil {
+		return nil, err
+	}
+	FoldToolParts(session)
+	return session, nil
+}
+
 // All is every registered adapter with its stock location.
 func All() []Adapter {
 	panic("unported: brokk-sessionwiki src/adapters/mod.rs all")

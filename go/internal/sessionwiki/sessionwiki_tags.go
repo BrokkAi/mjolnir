@@ -32,6 +32,9 @@
 package sessionwiki
 
 import (
+	"database/sql"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -102,13 +105,79 @@ func (t *MjTags) absorb(tag string) {
 // over the old one. Runs inside the caller's transaction, so a sync pays for
 // one commit rather than one per session.
 func TagsWrite(conn store.Queryer, sessionID string, tags *MjTags) error {
-	panic("unported: mj-sessionwiki/src/sessionwiki/tags.rs write")
+	if _, err := conn.Exec(
+		`DELETE FROM tags
+             WHERE session_id = ?1
+               AND (tag LIKE 'mj-target:%' OR tag LIKE 'mj-profile:%' OR tag LIKE 'mj-harness:%')`,
+		sessionID,
+	); err != nil {
+		return fmt.Errorf("clear the indexed metadata of session %s: %w", sessionID, err)
+	}
+	insert, err := conn.Prepare("INSERT OR IGNORE INTO tags(session_id, tag) VALUES (?1, ?2)")
+	if err != nil {
+		return fmt.Errorf("prepare the indexed metadata insert: %w", err)
+	}
+	defer insert.Close()
+	for _, tag := range tags.tags() {
+		if _, err := insert.Exec(sessionID, tag); err != nil {
+			return fmt.Errorf("store %s on session %s: %w", core.RustDebugString(tag), sessionID, err)
+		}
+	}
+	return nil
 }
 
 // TagsRead is Rust's `tags::read`: the Mjolnir metadata of each of
 // sessionIDs that has any, in one query.
 func TagsRead(conn store.Queryer, sessionIDs []string) (map[string]MjTags, error) {
-	panic("unported: mj-sessionwiki/src/sessionwiki/tags.rs read")
+	found := map[string]MjTags{}
+	if len(sessionIDs) == 0 {
+		return found, nil
+	}
+	// SQLite's parameter limit is in the hundreds by default and a search
+	// page is capped well below it, but chunking costs nothing and removes
+	// the question.
+	for chunk := range slices.Chunk(sessionIDs, 200) {
+		placeholders := strings.Repeat("?, ", len(chunk))
+		placeholders = placeholders[:len(placeholders)-len(", ")]
+		statement, err := conn.Prepare(fmt.Sprintf(
+			`SELECT session_id, tag FROM tags
+                 WHERE tag LIKE 'mj-%%' AND session_id IN (%s)`, placeholders))
+		if err != nil {
+			return nil, fmt.Errorf("prepare the indexed metadata query: %w", err)
+		}
+		if err := tagsReadChunk(statement, chunk, found); err != nil {
+			return nil, err
+		}
+	}
+	return found, nil
+}
+
+// tagsReadChunk runs the metadata query for one chunk of session ids and
+// records every tag it returns.
+func tagsReadChunk(statement *sql.Stmt, chunk []string, found map[string]MjTags) error {
+	defer statement.Close()
+	arguments := make([]any, len(chunk))
+	for index, sessionID := range chunk {
+		arguments[index] = sessionID
+	}
+	rows, err := statement.Query(arguments...)
+	if err != nil {
+		return fmt.Errorf("read the indexed session metadata: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID, tag string
+		if err := rows.Scan(&sessionID, &tag); err != nil {
+			return fmt.Errorf("read one indexed metadata tag: %w", err)
+		}
+		entry := found[sessionID]
+		entry.absorb(tag)
+		found[sessionID] = entry
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read one indexed metadata tag: %w", err)
+	}
+	return nil
 }
 
 // Rust's `tags::testing`: opening a SessionWiki index of this test process's

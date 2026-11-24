@@ -176,6 +176,12 @@ type Hit struct {
 	Snippet string
 }
 
+// Search searches messages of every role and returns each session's best
+// matching hit.
+func Search(conn store.Queryer, query string, limit int, tool, project *string) ([]Hit, error) {
+	return SearchWithRoles(conn, query, limit, tool, project, nil)
+}
+
 // SearchWithRoles searches messages and returns each session's best matching
 // hit. roles nil matches every role; a non-nil empty list matches nothing.
 func SearchWithRoles(conn store.Queryer, query string, limit int, tool, project *string, roles *[]Role) ([]Hit, error) {

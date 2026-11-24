@@ -81,6 +81,13 @@ func OpenConnection(path string) (*Connection, error) {
 	return openConnectionWith(path, "mode=rwc")
 }
 
+// OpenConnectionReadOnly is rusqlite's Connection::open_with_flags with
+// SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_URI: an existing database, read only,
+// never created.
+func OpenConnectionReadOnly(path string) (*Connection, error) {
+	return openConnectionWith(path, "mode=ro")
+}
+
 // openConnectionWith opens path on one pinned connection. query holds
 // SQLite URI parameters (mode=ro, mode=rwc). Every connection is opened with
 // modernc.org/sqlite's `_txlock=immediate`, under which a transaction begun
