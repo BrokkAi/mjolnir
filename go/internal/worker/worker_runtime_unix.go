@@ -1095,6 +1095,10 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	if err != nil {
 		return err
 	}
+	// Deferred first, so it runs after every deferred stop below: the Jev
+	// records queued until then are written before the daemon returns, and
+	// a task that outlives it can write none.
+	defer durableRelay.Shutdown()
 	// Only Claude Code's adapter marks the end of a turn it started on its
 	// own, so only it can model those turns without leaving a session stuck
 	// Running. See `.agents/docs/claude-autonomous-turns.md`.

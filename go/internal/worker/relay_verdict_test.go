@@ -241,7 +241,7 @@ func TestGlideCompletedTurnTransportAndReplayPreserveActionWithoutContinue(t *te
 		temp := t.TempDir()
 		relay := verdictOpen(t, temp, "glide-replay")
 		relay.setAcpReady(true)
-		relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, relay, core.HarnessKindClaude)
 		submitRelay(relay, "user-turn", prompt("Complete the task"))
 		journalTestClaim(t, relay)
 		finishPrompt(relay, "user-turn")
@@ -367,7 +367,7 @@ func TestGlideLateBackgroundInventoryRefreshesOnceAfterRestart(t *testing.T) {
 		temp := t.TempDir()
 		relay := verdictOpen(t, temp, "late-background")
 		relay.setAcpReady(true)
-		relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, relay, core.HarnessKindClaude)
 		submitRelay(relay, "user-turn", prompt("Complete the task"))
 		journalTestClaim(t, relay)
 		finishPrompt(relay, "user-turn")
@@ -377,7 +377,7 @@ func TestGlideLateBackgroundInventoryRefreshesOnceAfterRestart(t *testing.T) {
 		if restart {
 			relay = verdictOpen(t, temp, "late-background")
 			relay.setAcpReady(true)
-			relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+			setVerdictHarness(t, relay, core.HarnessKindClaude)
 		}
 		verdictTerminal(t, relay, core.ActiveAgentTerminal{TerminalID: "late", Command: "server", StartedAtMs: 100})
 		if verdictStateOf(relay).IsQuiet() {
@@ -414,7 +414,7 @@ func TestGlideWaitInventoryChangesReclassifyOnce(t *testing.T) {
 		temp := t.TempDir()
 		relay := verdictOpen(t, temp, "wait-background")
 		relay.setAcpReady(true)
-		relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, relay, core.HarnessKindClaude)
 		submitRelay(relay, "user-turn", prompt("Finish the task"))
 		journalTestClaim(t, relay)
 		verdictTerminal(t, relay, core.ActiveAgentTerminal{TerminalID: "first", Command: "checks", StartedAtMs: 100})
@@ -472,7 +472,7 @@ func TestGlideWorkerProjectionCaptureAndLargeHistoryBound(t *testing.T) {
 	temp := t.TempDir()
 	relay := verdictOpen(t, temp, "glide-projection-test")
 	relay.setAcpReady(true)
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "user-turn", prompt("Run the workspace checks and report failures."))
 	journalTestClaim(t, relay)
 	journalTestSessionUpdate(t, relay, verdictUpdateFromJSON(t,
@@ -566,7 +566,7 @@ func TestManagedChildCompletionAndSilentTurnNeverRequestClassification(t *testin
 		if err := relay.setManagedSubagent(managed); err != nil {
 			t.Fatal(err)
 		}
-		relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, relay, core.HarnessKindClaude)
 		submitRelay(relay, "user-turn", prompt("Do the assigned work."))
 		journalTestClaim(t, relay)
 		verdictPrepare(t, relay)
@@ -644,7 +644,7 @@ func TestManagedChildCompletionAndSilentTurnNeverRequestClassification(t *testin
 func TestAnAssessmentRestingOnANowGeneratedPromptIsClassifiedAgain(t *testing.T) {
 	temp := t.TempDir()
 	relay := verdictOpen(t, temp, "reclassify-test")
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "user-turn", prompt("Fix the build."))
 	journalTestClaim(t, relay)
 	finishPrompt(relay, "user-turn")
@@ -686,7 +686,7 @@ func TestAnAssessmentRestingOnANowGeneratedPromptIsClassifiedAgain(t *testing.T)
 func TestQuestionTargetIsStoredOnlyForCurrentInputGateAssessment(t *testing.T) {
 	temp := t.TempDir()
 	relay := verdictOpen(t, temp, "locator-test")
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "question-turn", prompt("Choose."))
 	journalTestClaim(t, relay)
 	finishPrompt(relay, "question-turn")
@@ -766,7 +766,7 @@ func TestQuestionTargetIsStoredOnlyForCurrentInputGateAssessment(t *testing.T) {
 func verdictCompleted(t *testing.T, root string) *DurableRelay {
 	t.Helper()
 	relay := verdictOpen(t, root, "jev-test")
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	relay.backgroundWork = BackgroundWorkPolicyAirTasks
 	relay.turnContext.Reset(nil, "How many tickets fell out of s21?")
 	journalTestSessionUpdate(t, relay, verdictUpdateFromJSON(t,
@@ -903,7 +903,7 @@ func TestHarnessRestartInvalidatesTheCompletedTurnInferenceAndRequest(t *testing
 func settledClaudeRelay(t *testing.T, root string) *DurableRelay {
 	t.Helper()
 	relay := verdictOpen(t, root, "settle-test")
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	relay.SetHarnessTurnPolicy(HarnessTurnPolicyClaudeAdapter)
 	relay.backgroundWork = BackgroundWorkPolicyAirTasks
 	return relay

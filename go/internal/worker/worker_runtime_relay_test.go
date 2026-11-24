@@ -1971,7 +1971,7 @@ func TestAuthenticationRecoveryHandlesBothOrdersOfInstallAndFailure(t *testing.T
 		fresh := []byte(`{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}`)
 		runtimeRelayWriteFile(t, path, old)
 		durable := runtimeRelayOpen(t, root, "test")
-		durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, durable, core.HarnessKindClaude)
 		loginPath := path
 		durable.authenticationLoginPath = &loginPath
 		initialRevision, _ := durable.loginIdentity.snapshot()
@@ -2082,7 +2082,7 @@ func TestAStalledLoginReadDoesNotBlockRelayEventsOrShutdown(t *testing.T) {
 	path := filepath.Join(root, "login.json")
 	gate := stalledReadFile(path)
 	durable := runtimeRelayOpen(t, root, "test")
-	durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, durable, core.HarnessKindClaude)
 	durable.authenticationLoginPath = &path
 	_, err := durable.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}})
 	runtimeRelayMust(t, err)
@@ -7184,7 +7184,7 @@ func TestCapacityRetryDispatchesWithoutAControllerAfterTheDeadline(t *testing.T)
 		temp := t.TempDir()
 		state := runtimeRelayOpen(t, temp, "1.0.0")
 		state.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
-		state.SetTurnVerdictHarness(core.HarnessKindCodex)
+		setVerdictHarness(t, state, core.HarnessKindCodex)
 		_, err := state.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}})
 		runtimeRelayMust(t, err)
 		runtimeRelayTestsSubmit(t, state, "capacity-original", runtimeRelayTestsPrompt("work"))
@@ -8844,7 +8844,7 @@ func TestAntigravityConnectedWithHookPublishesSteeringAndEnablesAutomaticSteerin
 	runtimeRelayMust(t, err)
 	relay := NewRelayCell(durable)
 	guard := relay.Lock()
-	guard.SetTurnVerdictHarness(core.HarnessKindAntigravity)
+	setVerdictHarness(t, guard.DurableRelay, core.HarnessKindAntigravity)
 	guard.SetSteeringDeliveryMode(core.HarnessKindAntigravity, true)
 	guard.Unlock()
 	agentName, agentVersion := "antigravity", "1.5.11"

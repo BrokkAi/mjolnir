@@ -202,6 +202,10 @@ func (c *Classifier) ClassifyWith(ctx context.Context, evidence *core.GithubItem
 	if log, err := core.DecisionLogOpen(core.ControllerLogDir()); err != nil {
 		slog.Warn("GitHub relevance diagnostic log unavailable", "error", err.Error())
 	} else {
+		// This call owns the log. Closing it after the attempt's release
+		// (defers run last in, first out) writes every record of this
+		// classification, its cancellation included, before it returns.
+		defer log.Close()
 		scope := "Hosted GLiDE"
 		if c.student != nil {
 			scope = "Student with GLiDE middle band"

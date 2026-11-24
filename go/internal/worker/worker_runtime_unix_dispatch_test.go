@@ -186,7 +186,7 @@ func TestHarnessStartupReadyAndExpiryHaveOneOutcome(t *testing.T) {
 			}
 			relay := NewRelayCell(durable)
 			guard := relay.Lock()
-			guard.SetTurnVerdictHarness(core.HarnessKindCodex)
+			setVerdictHarness(t, guard.DurableRelay, core.HarnessKindCodex)
 			guard.Unlock()
 			var checkpoint *core.RelayCursor
 			if arrival == checkpointExpiry || arrival == checkpointReady || arrival == closeAtReleasedCut {
@@ -590,7 +590,7 @@ func completedTurnResponse(t *testing.T, action whileClassifying, choice string,
 	if err := durable.setManagedSubagent(action == whileClassifyingChild); err != nil {
 		t.Fatal(err)
 	}
-	durable.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, durable, core.HarnessKindClaude)
 	durable.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
 	fixtures := make([]AirTaskFixture, 0, tasks)
 	for id := range tasks {
@@ -1059,7 +1059,7 @@ func completedQuotaTurn(t *testing.T, quota quotaCase) {
 			t.Fatalf("retry at %v", failed.RetryAtMs)
 		}
 	}
-	durable.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, durable, core.HarnessKindCodex)
 	if quota == quotaCaseUntimedRecovery {
 		durable.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
 		if err := durable.setAirTasks([]AirTaskFixture{{TaskID: "background-task", Description: "Waiting for a build"}}); err != nil {

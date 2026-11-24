@@ -45,15 +45,9 @@ func journalTestOpen(t *testing.T, root, sessionID, version string) *DurableRela
 	if err != nil {
 		t.Fatalf("open relay at %s: %v", root, err)
 	}
-	// Rust's tempdir ignores a failed removal; t.TempDir fails the test, so
-	// the Jev records this relay queued are written before its root goes.
-	// Registered after the t.TempDir that made root, this runs before the
-	// removal.
-	t.Cleanup(func() {
-		if log, ok := relay.turnContext.DecisionLog(); ok {
-			log.Flush()
-		}
-	})
+	// The test owns the relay, so it shuts it down: registered after the
+	// t.TempDir that made root, this runs before the removal.
+	t.Cleanup(relay.Shutdown)
 	return relay
 }
 
