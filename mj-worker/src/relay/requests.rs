@@ -1,6 +1,31 @@
 use super::*;
 
 impl DurableRelay {
+    /// Validate the authoritative scan and reserve its idle state under one lock.
+    pub(crate) fn reserve_idle_after_antigravity_refresh(
+        &mut self,
+        envelope: RelayRequestEnvelope,
+        synced_epoch: Option<u64>,
+    ) -> RelayResponseEnvelope {
+        let RelayRequest::ReserveIdle { command_id } = &envelope.request else {
+            unreachable!("idle reservation only")
+        };
+        if !self.has_handled_command(command_id)
+            && (synced_epoch.is_none()
+                || (self.background_work == BackgroundWorkPolicy::AntigravityTasks
+                    && synced_epoch != Some(self.antigravity_hook_epoch())))
+        {
+            return RelayResponseEnvelope {
+                request_id: envelope.request_id,
+                protocol_version: envelope.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::IdleReservation { ordinal: None },
+                },
+            };
+        }
+        self.handle(envelope)
+    }
+
     pub fn handle(&mut self, envelope: RelayRequestEnvelope) -> RelayResponseEnvelope {
         self.handle_with_antigravity_stop_baseline(envelope, None)
     }

@@ -1231,7 +1231,7 @@ fn antigravity_in_place_reload_drains_old_stop_before_retiring_its_work() {
 }
 
 #[tokio::test]
-async fn antigravity_busy_grace_preserves_known_state_and_recovers() {
+async fn antigravity_busy_grace_fails_closed_without_warning_until_sustained() {
     let temp = tempfile::tempdir().unwrap();
     let databases = Databases::create(temp.path());
     let relay = antigravity_relay(&temp.path().join("relay"));
@@ -1242,7 +1242,7 @@ async fn antigravity_busy_grace_preserves_known_state_and_recovers() {
     assert!(!monitor.refresh_for_idle_reservation(&relay).await.unwrap());
     {
         let state = relay.lock().unwrap();
-        assert_eq!(state.operational_state().background_work_known, Some(true));
+        assert_eq!(state.operational_state().background_work_known, Some(false));
         assert!(
             !state
                 .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
@@ -1371,6 +1371,7 @@ async fn antigravity_reserve_idle_socket_refreshes_hookless_tasks_and_fails_clos
                     .any(|event| matches!(&event.observation, RelayObservation::Warning { .. }))
             );
             databases.steps.execute_batch("ROLLBACK").unwrap();
+            wait_state(&relay, |state| state.background_work_known == Some(true)).await;
         }
     }
     assert!(
@@ -1455,4 +1456,147 @@ async fn antigravity_hooks_wake_settled_idle_polling() {
             .unwrap()
             .antigravity_needs_fast_poll(Some(epoch))
     );
+}
+
+#[tokio::test]
+async fn antigravity_reserve_idle_rejects_ineligible_and_stale_epoch_decisions() {
+    use crate::relay::ReserveIdleAntigravityCheck;
+    let temp = tempfile::tempdir().unwrap();
+    let _databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    stop(
+        &mut relay.lock().unwrap(),
+        Some(NATIVE),
+        Some(true),
+        "END_TURN",
+    );
+    monitor.refresh(&relay, true).await.unwrap();
+    let envelope = RelayRequestEnvelope {
+        request_id: "test-reserve".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::ReserveIdle {
+            command_id: "test-reserve".into(),
+        },
+    };
+    let mut state = relay.lock().unwrap();
+    assert!(matches!(
+        state.reserve_idle_antigravity_check("test-reserve"),
+        ReserveIdleAntigravityCheck::RefreshFirst
+    ));
+    let scanned_epoch = state.antigravity_hook_epoch();
+    stop(&mut state, Some(NATIVE), Some(true), "END_TURN");
+    let rejected =
+        state.reserve_idle_after_antigravity_refresh(envelope.clone(), Some(scanned_epoch));
+    assert!(matches!(
+        rejected.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::IdleReservation { ordinal: None }
+        }
+    ));
+    state.antigravity_tasks_unavailable().unwrap();
+    assert!(matches!(
+        state.reserve_idle_antigravity_check("test-reserve"),
+        ReserveIdleAntigravityCheck::RejectNow
+    ));
+    let rejected = state.reserve_idle_after_antigravity_refresh(envelope.clone(), None);
+    assert!(matches!(
+        rejected.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::IdleReservation { ordinal: None }
+        }
+    ));
+    drop(state);
+    monitor.refresh(&relay, true).await.unwrap();
+    let mut state = relay.lock().unwrap();
+    let epoch = state.antigravity_hook_epoch();
+    let accepted = state.reserve_idle_after_antigravity_refresh(envelope.clone(), Some(epoch));
+    assert!(matches!(
+        accepted.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::IdleReservation { ordinal: Some(_) }
+        }
+    ));
+    let duplicate = state.reserve_idle_after_antigravity_refresh(envelope, None);
+    assert_eq!(
+        serde_json::to_value(accepted).unwrap(),
+        serde_json::to_value(duplicate).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn antigravity_blocked_scan_keeps_coordinator_events_responsive_and_coalesces_waiters() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    databases.steps.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (reply1, mut result1) = oneshot::channel();
+    let (reply2, mut result2) = oneshot::channel();
+    monitor
+        .request_idle_reservation_refresh(&relay, reply1)
+        .unwrap();
+    monitor
+        .request_idle_reservation_refresh(&relay, reply2)
+        .unwrap();
+    let (wake, wakes) = mpsc::channel(8);
+    let (event_tx, events) = mpsc::channel(8);
+    let (commands, _command_rx) = mpsc::channel(8);
+    let (shell_events, _shell_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().into(),
+        BTreeMap::new(),
+        shell_events,
+    );
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator(
+        relay.clone(),
+        events,
+        wakes,
+        commands,
+        shells,
+        TaskMonitors {
+            antigravity: Some(monitor),
+            ..Default::default()
+        },
+        None,
+        None,
+        None,
+        None,
+    ));
+    event_tx.send(RuntimeEvent::SessionUpdate { update: serde_json::json!({
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Scan is blocked"}
+    }) }).await.unwrap();
+    wake.send(()).await.unwrap();
+    wait_state(&relay, |state| {
+        state.assessment_context.as_ref().is_some_and(|context| {
+            context
+                .messages
+                .iter()
+                .any(|message| message.text == "Scan is blocked")
+        })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    // The event was consumed while SQLite still held both scan replies.
+    assert!(matches!(
+        result1.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        result2.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    databases.steps.execute_batch("ROLLBACK").unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), result1)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), result2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.is_some());
+    assert_eq!(first, second);
+    coordinator.abort();
+    assert!(coordinator.await.unwrap_err().is_cancelled());
 }

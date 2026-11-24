@@ -207,6 +207,12 @@ fn kimi_agent_description(
         .to_owned()
 }
 
+pub(crate) enum ReserveIdleAntigravityCheck {
+    ProceedDirectly,
+    RejectNow,
+    RefreshFirst,
+}
+
 impl DurableRelay {
     pub(crate) fn antigravity_needs_fast_poll(&self, last_synced_hook_epoch: Option<u64>) -> bool {
         let work = &self.antigravity_work;
@@ -230,14 +236,23 @@ impl DurableRelay {
         self.snapshot.handled_commands.contains_key(command_id)
     }
 
-    pub(crate) fn needs_antigravity_refresh_before_reserve_idle(&self, command_id: &str) -> bool {
-        self.background_work == BackgroundWorkPolicy::AntigravityTasks
-            && !self.has_handled_command(command_id)
-            && self.reviewer_admissions.is_empty()
-            && self.snapshot.native_session_id.is_some()
-            && self
+    pub(crate) fn reserve_idle_antigravity_check(
+        &self,
+        command_id: &str,
+    ) -> ReserveIdleAntigravityCheck {
+        if self.background_work != BackgroundWorkPolicy::AntigravityTasks
+            || self.has_handled_command(command_id)
+        {
+            ReserveIdleAntigravityCheck::ProceedDirectly
+        } else if !self.reviewer_admissions.is_empty()
+            || !self
                 .verdict_harness
-                .is_some_and(|harness| self.operational_state().safe_to_replace(harness))
+                .is_some_and(|h| self.operational_state().safe_to_replace(h))
+        {
+            ReserveIdleAntigravityCheck::RejectNow
+        } else {
+            ReserveIdleAntigravityCheck::RefreshFirst
+        }
     }
 
     /// Choose where commands the agent left running are read from.

@@ -111,7 +111,7 @@ enum PreparationStop {
 }
 
 struct HarnessPreparationSetup {
-    antigravity_refresh: mpsc::Receiver<oneshot::Sender<bool>>,
+    antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     root: PathBuf,
     config: WorkerLaunchConfig,
     relay: Arc<RelayCell>,
@@ -485,7 +485,7 @@ fn publish_started(
 #[allow(clippy::too_many_arguments)]
 fn start_bridge(
     setup: PreparedAcpSetup,
-    antigravity_refresh: mpsc::Receiver<oneshot::Sender<bool>>,
+    antigravity_refresh: mpsc::Receiver<oneshot::Sender<Option<u64>>>,
     relay: Arc<RelayCell>,
     dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
     task_monitors: TaskMonitors,
@@ -3383,7 +3383,7 @@ pub(super) async fn serve_terminal_relay(
 /// everything answered on the connection instead of being journaled.
 #[derive(Clone, Default)]
 pub(super) struct ConnectionRuntime {
-    pub(super) antigravity_refresh: Option<mpsc::Sender<oneshot::Sender<bool>>>,
+    pub(super) antigravity_refresh: Option<mpsc::Sender<oneshot::Sender<Option<u64>>>>,
     pub(super) project_memory: ProjectMemoryEndpoint,
     /// The ACP coordinator's command channel, or `None` once the session is
     /// sealed and no ACP runtime is left to serve scratch prompts.
@@ -4070,19 +4070,27 @@ pub(super) async fn serve_client_with_shared_credentials(
             let attach_preparation = preparation
                 .as_ref()
                 .and_then(|receiver| receiver.borrow().state.clone());
-            let needs_refresh = if let RelayRequest::ReserveIdle { command_id } = &envelope.request {
-                relay.lock().expect("relay state lock poisoned").needs_antigravity_refresh_before_reserve_idle(command_id)
-            } else { false };
-            let refresh_ok = if needs_refresh && let Some(tx) = &antigravity_refresh {
-                let (reply, result) = oneshot::channel();
-                tx.send(reply).await.is_ok() && matches!(result.await, Ok(true))
-            } else { true };
-            let already_accepted = !refresh_ok && if let RelayRequest::ReserveIdle { command_id } = &envelope.request {
-                relay.lock().expect("relay state lock poisoned").has_handled_command(command_id)
-            } else { false };
-            let result = if !refresh_ok && !already_accepted {
-                Ok(RelayResponseEnvelope { request_id: envelope.request_id, protocol_version: envelope.protocol_version, body: RelayResponseBody::Ok { payload: RelayResponsePayload::IdleReservation { ordinal: None } } })
-            } else if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
+            let reservation_response = if let RelayRequest::ReserveIdle { command_id } = &envelope.request {
+                use crate::relay::ReserveIdleAntigravityCheck;
+                let immediate = {
+                    let mut state = relay.lock().expect("relay state lock poisoned");
+                    match state.reserve_idle_antigravity_check(command_id) {
+                        ReserveIdleAntigravityCheck::ProceedDirectly => Some(state.handle(envelope.clone())),
+                        ReserveIdleAntigravityCheck::RejectNow => Some(state.reserve_idle_after_antigravity_refresh(envelope.clone(), None)),
+                        ReserveIdleAntigravityCheck::RefreshFirst => None,
+                    }
+                };
+                if let Some(response) = immediate { Some(response) } else {
+                    let synced_epoch = if let Some(tx) = &antigravity_refresh {
+                        let (reply, result) = oneshot::channel();
+                        if tx.send(reply).await.is_ok() { result.await.ok().flatten() } else { None }
+                    } else { None };
+                    Some(relay.lock().expect("relay state lock poisoned")
+                        .reserve_idle_after_antigravity_refresh(envelope.clone(), synced_epoch))
+                }
+            } else { None };
+            let result = if let Some(response) = reservation_response { Ok(response) }
+            else if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
                 Ok(handle_antigravity_stop(&relay, envelope, &credentials).await)
             } else {
                 handle_request(&relay, envelope, attach_preparation).await
