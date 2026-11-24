@@ -4,7 +4,7 @@
 //! checkpoint has no tool identity to align on, so it is anchored to the latest
 //! agent reply before it whose text identifies exactly one canonical agent item.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -201,62 +201,51 @@ fn prior_compaction_from_transcript(
             }
         }
     }
-    let mut prior = None;
+    // A reply anchors a checkpoint only when it occurs once in the native
+    // transcript (unique before the checkpoint and absent after it) and matches
+    // exactly one canonical agent item.
+    let mut reply_counts = HashMap::<&str, usize>::new();
+    for reply in &transcript.replies {
+        *reply_counts.entry(reply.as_str()).or_default() += 1;
+    }
+    let mut latest_anchor = Vec::with_capacity(transcript.replies.len() + 1);
+    let mut current_anchor = None;
+    latest_anchor.push(current_anchor);
+    for reply in &transcript.replies {
+        if reply_counts[reply.as_str()] == 1
+            && let Some(position) = canonical_agents.get(reply.as_str()).copied().flatten()
+        {
+            current_anchor = Some(position);
+        }
+        latest_anchor.push(current_anchor);
+    }
     for checkpoint in transcript.checkpoints.into_iter().rev() {
         check_cancel(cancel)?;
-        let (preceding, following) = transcript.replies.split_at(checkpoint.before_reply);
-        prior = map_checkpoint(
-            checkpoint.summary,
-            preceding,
-            following,
-            &canonical_agents,
-            snapshot,
-            lineage_start,
-        );
-        if prior.is_some() {
-            break;
+        let Some(anchor_position) = latest_anchor[checkpoint.before_reply] else {
+            continue;
+        };
+        let Some(cutoff) = anchor_position.checked_sub(1) else {
+            continue;
+        };
+        if cutoff <= lineage_start {
+            continue;
         }
+        let retained_positions =
+            collect_retained_positions(snapshot, lineage_start, anchor_position, |call| {
+                matches!(
+                    call.get("status").and_then(Value::as_str),
+                    Some("completed" | "failed")
+                )
+            });
+        check_cancel(cancel)?;
+        return Ok(Some(PriorCompaction {
+            through_position: cutoff,
+            summary: checkpoint.summary,
+            retained_positions,
+        }));
     }
     check_cancel(cancel)?;
-    Ok(prior)
-}
-
-fn map_checkpoint(
-    summary: String,
-    preceding: &[String],
-    following: &[String],
-    canonical_agents: &HashMap<String, Option<u64>>,
-    snapshot: &CanonicalSessionSnapshot,
-    lineage_start: u64,
-) -> Option<PriorCompaction> {
-    let following = following.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut preceding_counts = HashMap::<&str, usize>::new();
-    for reply in preceding {
-        *preceding_counts.entry(reply).or_default() += 1;
-    }
-    let anchor_position = preceding.iter().rev().find_map(|reply| {
-        let reply = reply.as_str();
-        if preceding_counts[reply] != 1 || following.contains(reply) {
-            return None;
-        }
-        canonical_agents.get(reply).copied().flatten()
-    })?;
-    let cutoff = anchor_position.checked_sub(1)?;
-    if cutoff <= lineage_start {
-        return None;
-    }
-    let retained_positions =
-        collect_retained_positions(snapshot, lineage_start, anchor_position, |call| {
-            matches!(
-                call.get("status").and_then(Value::as_str),
-                Some("completed" | "failed")
-            )
-        });
-    Some(PriorCompaction {
-        through_position: cutoff,
-        summary,
-        retained_positions,
-    })
+    Ok(None)
 }
 
 #[cfg(test)]
