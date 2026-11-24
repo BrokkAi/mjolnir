@@ -1,0 +1,156 @@
+# Finish interrupted suspend in the existing capture worker
+
+This ExecPlan follows `.agents/PLANS.md`. Maintain Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective as work proceeds. The user requires simpler lifecycle code and asked for this plan, review by MJ Advisor, then implementation. This revision replaces the rejected target-command design with the advisor's smaller capture-worker design.
+
+## Purpose / Big Picture
+
+
+An accepted Suspend must finish when its original worker disappears during a daemon restart. The replacement daemon should resume the accepted operation using the retained checkout and command journal, without starting an agent harness on the successful path. A harness is the external coding agent. The daemon coordinates lifecycle work; a worker holds the worker-root lock, runs the harness, and owns the durable journal. The existing checkpoint-only worker reads that journal and exports a verified archive without starting a harness.
+
+Fresh managed Suspend, a user's retry, and startup recovery will enter one capture pipeline. A live harness worker retains the current orderly interruption and stop. If that worker is gone, skip the live-only work and start the existing checkpoint-only worker. In both cases that capture worker drains remaining attributable writers and checks unknown checkout holders before opening the journal. Proof and capture share one worker-root lock tenure. Remove the superseded recovery routing and harness-revival branches. There is no new control command, capability negotiation, daemon service, or lifecycle state.
+
+## Progress
+
+
+- [x] (2026-11-24 01:05Z) Manually repaired the affected retained environment and completed normal Suspend with a fresh checksum-verified archive and no error.
+- [x] (2026-11-24 01:29Z) Wrote the original plan and created/self-assigned #1676 with agent-in-progress after finding no matching open issue.
+- [x] (2026-11-24 01:37Z) Received MJ Advisor review: routing consolidation approved in principle; new target command rejected as unnecessary. Accepted the capture-worker design and the listed deletions and behavioral limits.
+- [x] (2026-11-24 01:41Z) Verified sealed relay behavior, refusal-state mapping, and early stopped-target recovery ordering in current code.
+- [x] (2026-11-24 01:43Z) MJ Advisor approved implementation with six final corrections recorded below; no further plan review is needed.
+- [ ] Add additive capture launch context and shared writer draining in the checkpoint-only worker.
+- [ ] Consolidate managed controller routing and remove the specified special cases.
+- [ ] Extend the existing isolated fixture with same-daemon worker death, daemon crash, retry-from-Error, and sealed-capture restart variants.
+- [ ] Run targeted regression/controls and affected-crate Clippy under one build owner.
+- [ ] Review integrated simplicity and behavior, commit on the current branch, obtain before-push review, push origin/master, and dispatch platform CI.
+
+## Surprises & Discoveries
+
+
+The incident had durable Closing, no checkpoint frontier, no stop REQUEST or RECEIPT, and no worker. Recovery still required a relay lease from that worker. After failure became Error, retry treated the missing worker as an old live worker needing an upgrade and failed its initial lease. The actual worker/daemon death mechanism is unproven; the previous daemon stopped uncleanly. Another same-day session reached the same dead end after a clean handoff.
+
+Successful Suspend already stops the original worker and starts a distinct checkpoint-only worker. `OriginDeltaSuspend::start_worker` installs the current build and launch config before starting that worker, and can reattach an alive/starting checkpoint-only worker after another daemon restart. That worker acquires worker.lock before reading or writing runtime state. A separate target-side quiescence command would duplicate ownership already available there.
+
+The live worker publishes its stop receipt before releasing its root lock. Existing live waiting must continue to verify exit; the capture worker's later acquisition proves root release. A stopped container makes launch/acceptance/Git reads fail before the current late target-recovery call. Reuse target_recovery_plan and ensure_recovery_target_running inside admitted accepted Suspend before those reads; do not add side effects to dry-run or preflight. Closed relay latch requires its exact barrier/cursor, so a sealed capture must use the existing verified artifact and cleanup path rather than latch again.
+
+## Decision Log
+
+
+Decision: replace the initial proposed ensure-quiescent command and Live/Waiting/Finished protocol with capture-worker writer draining.
+Rationale: the existing current-build capture worker and its exclusive root lock already provide the required authority, survival across daemon handoff, and reattachment. No new command, probe, staging machinery, or controller polling protocol is needed.
+Date/Author: 2026-11-24, parent agent accepting MJ Advisor review.
+
+Decision: use one shared helper for launch mode Harness and held root lock; gate all live-only work through it. If live work fails, recheck once and enter capture only if the live harness is gone; otherwise return the original failure.
+Rationale: only this lifecycle owner starts workers under session admission. Worker disappearance is a one-way transition while that owner holds admission, so a retry loop or separate daemon PID predicate is unnecessary. An existing checkpoint-only holder must be reattached rather than mistaken for an old harness worker.
+Date/Author: 2026-11-24, parent agent accepting MJ Advisor review.
+
+Decision: add one optional serde(default) launch field suspend_capture containing operation, checkout, and child_sessions; publish drain refusal through the existing worker exit error path unless its handling requires more code than the existing receipt path.
+Rationale: the installed current-build capture worker needs the accepted operation's scope. An absent field preserves ordinary and historical launches, and new readers accept old JSON. WorkerLaunchConfig denies unknown fields, so an older reader cannot parse a present field: write it only after the existing replacement path installs the current worker, and never include it in an old live Harness launch. The worker owns failure reporting; avoid parallel durable refusal state. Confirm the selected path in implementation review and record a change here if receipt is smaller.
+Date/Author: 2026-11-24, parent agent.
+
+Decision: preserve cooperative live CancelTurn/quiescence and older live worker compatibility; accept existing crash continuation semantics for a dead worker with an in-flight prompt and no durable CancelTurn.
+Rationale: live cancellation prevents a restart continuation; a worker crash without that marker already creates one at journal recovery. Successful recovery must preserve that behavior rather than silently drop the input. Explicit Resume may continue that interrupted turn. A refusal may restart a harness through existing recovery, intentionally.
+Date/Author: 2026-11-24, parent agent accepting MJ Advisor review.
+
+Decision: incorporate the advisor's final approval corrections without another review loop. Omit absent suspend_capture entirely with skip_serializing_if and extend the existing compatibility test. Keep current same-mode alive/starting reattachment and use Closing/Closed plus installed checkpoint for sealed cleanup, without new operation predicates. Add a new post-live-gate hook for the deterministic recheck race. Drain refusal must remain a typed precondition with holder text, not a generic boot failure. Bound stopped-container work to one existing recovery-plan/start call at accepted-pipeline entry, yield handoff admission around container start as existing callers do, and use existing controller fixture coverage rather than a new Podman E2E; split any larger requirement into a follow-up.
+Rationale: strict older launch readers reject even a null unknown field; the extra operation guards would add unreachable branches; the existing preflight hook is too early to exercise the race; typed refusal and bounded resumable work preserve current user behavior and handoff ownership.
+Date/Author: 2026-11-24, parent agent accepting MJ Advisor final approval.
+
+## Outcomes & Retrospective
+
+
+Manual recovery is complete. The original command-based plan was rejected and replaced before production edits. Implementation and validation remain. Non-origin-delta checkouts retain their historical relay-first recovery path and its missing-worker limitation; this fix is scoped to managed origin-delta Suspend. The final outcome must identify deleted branches and shared ownership rather than treating raw line count as sufficient proof of simplicity. Record production diff size, test counts, review result, and pushed commit at completion.
+
+## Context and Orientation
+
+
+The initial baseline is commit 401753925 on the current master branch. Stay on that branch. Bug https://github.com/BrokkAi/mjolnir/issues/1676 is self-assigned and agent-in-progress. Do not install a build or touch live user data for tests.
+
+`mj-daemon/src/daemon/close.rs` persists accepted Closing and consent before the actual worker stop request. `mj-daemon/src/daemon/process.rs` finds interrupted operations at startup. `mj-controller/src/controller/lifecycle.rs` contains the managed stop/capture pipeline in suspend_session_controlled_with_manager and the relay-first recovery in recover_interrupted_close_managed. Origin-delta means the existing checkpoint policy preserving Git state relative to the origin repository. Verified Destroying means checkpoint verification finished and only cleanup remains.
+
+`mj-controller/src/controller/lifecycle/origin_delta.rs` owns OriginDeltaSuspend and start_worker. The latter already reads launch.json run_mode and authoritative root-lock liveness, stops old root holders through restart_worker_with_installed_binary, installs the current hel and launch config with prepared:false, and starts/reconnects the requested worker mode. Hoist the existing mode/liveness interpretation into one helper used by both start_worker and the pipeline gate. Keep path and process interpretation in their existing owners.
+
+`mj-core/src/worker_launch.rs` defines WorkerLaunchConfig. Add optional suspend_capture with serde(default, skip_serializing_if = "Option::is_none"), referring to a small capture-scope type in worker_suspend.rs or adjacent launch code. It contains only operation:String, checkout:PathBuf, and child_sessions:Vec<String>. Clear it for Harness mode. The controller populates it for managed origin-delta CheckpointOnly launch. Audit struct literals, writers, readers, and worker-restart launch refreshes so the field reaches the actual installed launch and old JSON still deserializes.
+
+`mj-worker/src/worker_runtime/unix.rs` handles checkpoint_only before open_for_checkpoint_with_initial_commands. The root lock is acquired by mj-worker-bin before runtime entry. Move shared marked-process drain and unknown-holder refusal out of the live-only terminate_session_processes implementation in mj-worker/src/worker_stop/suspension.rs and call it here before journal open for every launch carrying suspend_capture, including after a successful cooperative stop. Run blocking process inspection through the existing blocking-task helper. Live subreaper cleanup remains with the live worker. Ensure the capture worker's launcher is not mistaken for a session writer and never kill the process providing this proof.
+
+`mj-core/src/worker_suspend.rs` retains existing ACCEPTED, REQUEST, RECEIPT, CAPABILITY and PROGRESS formats for live cooperative stop. `tests/e2e/origin_delta_suspend.py` provides isolated real daemons and workers, a recorded harness, and the origin_delta_after_preflight pause hook. Extend it rather than inventing a new framework.
+
+## Plan of Work
+
+
+### Milestone 1: settle review details before implementation
+
+
+Send the revised plan to MJ Advisor for focused approval, then assign disjoint implementation slices. Verified findings: the latch requires an exact live barrier/cursor and must not run again on a sealed capture; restart_after_refused_origin_delta starts Harness and maps previous Closing to Running, previous Error to Error, and Parked back to Parked; target recovery currently runs too late for stopped containers. Preserve those refusal states and the existing Harness restart, and test the visible result. For admitted accepted owning Suspend, verify cached placement and reuse targets::target_recovery_plan plus ensure_recovery_target_running before the first target-backed policy, ACCEPTED, launch or Git read. This includes startup and retry but excludes dry-run/preflight. Missing or ambiguous/unreachable targets fail visibly and keep data. Bound this to one existing target-recovery call pair; release handoff admission during container start using the existing begin/end resumable-work pattern. Use an existing controller fixture for ordering if one fits, with no new Podman E2E. Split larger stopped-target work into a follow-up and record its exact user-visible limit. If the capture-worker design has a blocker, consult the advisor before reinstating any command.
+
+### Milestone 2: make the capture worker own final writer proof
+
+
+The worker implementer owns the optional launch context/type, necessary launch struct literals outside the controller, shared drain in worker_stop/suspension.rs, and the checkpoint_only runtime call. It owns no controller lifecycle or Python files. Reuse the existing verified process signaling, marked-session scan, and unknown checkout-holder refusal. Preserve live worker subreaper checks, scope by parent plus borrowed child sessions, and hold the existing worker root lock throughout proof and capture. Drain both after live cooperative stop and after abrupt original-worker loss. No new launch process, target command, capability, or durable receipt format is added.
+
+Use the existing exit record to report a refusal with useful context. Existing controller error handling must restart the harness on refusal and preserve the environment. If the receipt path is demonstrably smaller, select that before editing both sides and record why. Extend existing journal/launch compatibility or process-boundary coverage only where it tests a real boundary or tricky condition; the new command tests from the rejected plan are removed.
+
+### Milestone 3: unify controller routing and delete replaced code
+
+
+The controller implementer owns lifecycle.rs, lifecycle/origin_delta.rs, necessary launch population in worker_restart.rs, tightly scoped daemon integration/hooks, and their existing Rust fixtures. Populate suspend_capture from the accepted operation and chosen checkout/child scope. Hoist Harness mode plus root-lock liveness into one helper; reuse it in start_worker and the pipeline. No live harness means skip upgrade, lease, CancelTurn, quiesce and live wait and enter CheckpointOnly directly. A live harness retains the current live block. On failure recheck once; if gone enter capture, if still live return the original failure. Do not introduce loops or interpret socket refusal as quiescence.
+
+Route managed origin-delta fresh Suspend, retry, and startup to this common pipeline before legacy relay-seal querying. Preserve verified Destroying cleanup and historical sealed non-origin formats. Delete recover_interrupted_close_managed's parked_close block, resumable_origin_delta failed-lease arm, and origin-delta policy choice in its Idle/Running reroute. Delete the pipeline's Harness revival after WorkerRestartLeftNoWorker and the dead-worker half of the pending-restart branch. Delete request_stop's dead-REQUEST early return and wait_for_stop's synthetic exited-without-confirming receipt: worker disappearance now enters capture. If any specified deletion must stay, justify it in Decision Log rather than quietly retaining duplicate behavior.
+
+Generalize the currently parked-only sealed-capture block to every accepted explicit owning origin-delta Suspend; exclude Move/Restart handoffs whose checkpoint owners differ. If a daemon died after persisting the verified checkpoint but before Destroying, an already Closing/Closed capture relay must finish the same verified checkpoint and cleanup, not latch or export again. For Closing/Closed on the capture relay with an installed checkpoint, wait Closed, release it, run before_close, and use destroy_after_verified_checkpoint; no extra operation-ownership predicate is needed because sealing only moves forward. An Idle relay plus an old artifact must recapture. Add a deterministic hook after the relay Close is acknowledged/sealed and the verified checkpoint is persisted, before Destroying; the test must observe Closed before killing the daemon. Keep the existing same-mode alive/starting CheckpointOnly reattachment unchanged, including pre-upgrade and parked captures with no field. ACCEPTED persists until rollback replaces capture with Harness; an extra operation-match predicate would add an unreachable branch. Keep current operation identity, latch/export/checksum verification, and cleanup order.
+
+### Milestone 4: prove crashes, retries, and explicit behavior limits
+
+
+The E2E implementer owns tests/e2e/origin_delta_suspend.py and its existing fixtures, not production code or build settings. Extend one shared fixture with three preflight-hook variants: original worker killed while the same daemon continues; original worker killed plus test daemon crashed and replaced; retry from Error. Add an explicit new hook after the live-Harness gate and before live-only work for the same-daemon variant; the existing origin_delta_after_preflight hook precedes the gate and covers the plain absent-worker variants. Add the sealed-capture crash variant after verified checkpoint persistence with exactly one verified checkpoint. Coordinate the two required production hook names and timing with the controller owner.
+
+Each successful recovery must preserve staged/unstaged tracked edits and durable journal content, clean up a marked detached writer, reach suspended without a new harness launch, and survive explicit Resume. Include a dead in-flight prompt without CancelTurn and assert the existing restart continuation is preserved for Resume. Exercise an unknown checkout holder and assert visible refusal, retained data, the existing harness restart, and the actual recovered state for previous Closing/Error. Existing live CancelTurn and queued-prompt semantics remain controls. Repeated daemon restart during capture must reconnect to the existing capture worker; a receipt published before original worker exit must not allow premature capture.
+
+The dead-worker drain can only see MJ_SESSION_ID-marked processes and current checkout holders. A former descendant that dropped its marker and currently holds no checkout file is invisible; only the live subreaper can catch it. Do not claim equivalent ancestry coverage. The no-harness-start promise applies to successful capture; refusal intentionally uses restart_after_refused_origin_delta. Non-origin-delta checkouts retain their historical relay-first behavior. Include existing owned-container restart through target_recovery_plan/ensure_recovery_target_running before early target-backed reads; Missing or ambiguous targets retain the environment and report the existing diagnostic.
+
+## Concrete Steps
+
+
+Run from the repository root through the existing mbx dev profile, without changing targets or cache layout. Every Rust test and E2E invocation runs outside the restricted sandbox. Use named instances for all new-build daemon, TUI, CLI, and live test invocations; never use the default instance. Fixture-owned isolated MJ_CONFIG_DIR/MJ_DATA_DIR must remain isolated. One assigned child owns all builds/tests at a time, after concurrent production writers finish.
+
+    mbx build -p brokk-mjolnir --bin mj --features test-hooks
+    mbx build -p brokk-mj-worker --bin mj-worker
+    mbx test -p brokk-mj-daemon suspend_recovery_preserves_a_clones_
+    mbx test -p brokk-mj-daemon accepted_suspend_failure_is_published_without_an_observer
+    mbx test -p brokk-mj-controller legacy_closing_with_
+    python3 tests/e2e/origin_delta_suspend.py --mj target/debug/mj --worker target/debug/mj-worker --instance suspend-restart-before-request --case restart-before-request
+    python3 tests/e2e/origin_delta_suspend.py --mj target/debug/mj --worker target/debug/mj-worker --instance suspend-restart-round-trip --case round-trip
+
+Add the proposed regression selector before invoking it. Existing control selectors are detached, late-file, untracked, git-error, and raw; use distinct suspend-restart-<case> names. Run worker control/drain and affected launch/journal compatibility tests. If cancellation implementation changes, run the existing cancel_turn_bypasses_a_pending_checkpoint_without_steering_the_queue filter in brokk-mj-worker-runtime. Require a nonzero matched count per Rust filter. For behavior changes run affected-crate Clippy:
+
+    mbx clippy -p brokk-mj-controller -p brokk-mj-worker-runtime -p brokk-mj-worker -p brokk-mj-core --all-targets -- -D warnings
+
+Add daemon/targets only if their code changes. Rerun only failing tests after repairs. Broaden checks only for changed shared boundaries or a specific unresolved concern. Record exact commands/counts below. Commit changed files on the current branch, call request_review, resolve findings, then push HEAD to origin/master. If upstream moved fetch and merge origin/master, resolve conflicts, and validate what the merge invalidated. Dispatch nightly.yml for this platform-sensitive process change. Do not install without user authorization.
+
+## Validation and Acceptance
+
+
+The new real-process regression must reproduce the baseline worker-contact dead end and pass on the implementation. Replacement startup or same-daemon continuation must automatically report state suspended and has_error false, without an intervening Resume, and export exactly one verified checkpoint. Resume must restore staged-versus-unstaged Git state and journal content; a dead active input retains its existing crash continuation. Unknown-holder refusal must retain data, reach the user as a typed precondition refusal with the checkout-holder text, and recover through the existing harness path; generic worker-boot error is insufficient. A second restart during draining/capture must not start a competing worker or repeat an already verified export.
+
+Review the production diff for the named branch deletions, one shared liveness/mode interpretation, and one shared writer drain. Reject a parallel dead-worker rescue path. No new command, target protocol, capability staging, database migration, lifecycle state, daemon task, or speculative timeout is allowed. The one optional launch field is absent by default, omitted entirely when None (not serialized as null), and new readers accept old JSON. Extend existing launch compatibility coverage to assert a serialized Harness launch contains no suspend_capture key. Older strict launch readers reject a present field, so the current worker must be installed before its scoped launch is written; ordinary old live Harness launch files omit it. Existing request/receipt and checkpoint formats remain unchanged. Record the limited scope and visibility guarantees in Outcomes.
+
+## Idempotence and Recovery
+
+
+Reuse the accepted operation ID and existing WorkerRunMode::CheckpointOnly reattachment. The capture worker acquires worker.lock before proof; no worker can concurrently write the journal during capture. Never delete files as a substitute for stopping writers. Keep source cleanup after archive verification. Use existing lifecycle admission and restart machinery rather than new daemon memory. On a test failure retain isolated evidence, terminate test processes, and stop the named daemon in fixture cleanup. No manual edits to the live store are needed.
+
+## Artifacts and Notes
+
+
+The original session Flashing Notification And Bug Report reached Closing/no frontier/no REQUEST and no worker. Current daemon log mj-daemon-20261124T010035.305Z-2208363.log records startup failure at 01:01:08Z and repeated user retries. Manual retained-environment Resume followed by normal Suspend launched a distinct capture worker, exported and checksum-verified at 01:05:31Z, and reached suspended/closed/has_error=false at 01:05:32Z. The exit causes remain unknown. Investigation reports under .mj/agents/07f89d6cc8c9c36b6f7f1a8409c118df and .mj/agents/58baf6a47409a5175b1ab7b81c0198bf contain source/log references but are temporary; the facts needed to implement are embedded here.
+
+MJ Advisor reviewed baseline 401753925 without running tests. Required changes were to move proof into capture, keep live quiescence, delete named branches, cover sealed capture and stopped targets, and acknowledge the limits above. Full requested deletions and coverage are recorded in Milestones 3–4.
+
+## Interfaces and Dependencies
+
+
+Use optional WorkerLaunchConfig::suspend_capture with serde(default, skip_serializing_if = "Option::is_none") and a scope carrying operation, checkout and child_sessions. Populate it only for origin-delta CheckpointOnly; Harness launch clears it. Use the existing worker exit error record for proof failures and existing controller refusal recovery. Share existing worker stop process helpers and root owner; do not introduce a target control result. Hoist existing launch-mode/root-lock reads into one internal controller helper. Preserve frozen worker control commands and existing stored request/receipt shapes. Use Path/PathBuf, shared subprocess helpers, supervised background work and existing test isolation.
+
+Revision note (2026-11-24 01:41Z): Replaced the unapproved target command design with the smaller capture-worker design; specified deletions, shared root tenure, sealed restart coverage, strict launch-reader compatibility, existing refusal-state mapping, early owned-container restart, and explicit process/turn/refusal/non-origin limits. These details were checked against the baseline before implementation.
+
+Revision note (2026-11-24 01:43Z): Final advisor approval incorporated: omit None launch field, unchanged capture reattachment, monotonic sealed cleanup, bounded resumable target start, typed holder refusal, and explicit post-gate hook. Implementation is authorized and no further plan review is pending.
