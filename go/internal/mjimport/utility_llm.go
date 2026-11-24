@@ -363,8 +363,12 @@ func inferCandidates[T any](
 	panic("unported: mj-import/src/utility_llm.rs infer_candidates")
 }
 
+var _ CompactionBackend = (*UtilityCompactionBackend)(nil)
+
 // Compact asks the candidates, in order, for a state snapshot of prompt.
-func (b *UtilityCompactionBackend) Compact(prompt string) (string, error) {
+// ctx is the caller's request (Rust: dropping the compact future); b.ctx is
+// the compaction's own cancellation.
+func (b *UtilityCompactionBackend) Compact(ctx context.Context, prompt string) (string, error) {
 	panic("unported: mj-import/src/utility_llm.rs UtilityCompactionBackend::compact")
 }
 

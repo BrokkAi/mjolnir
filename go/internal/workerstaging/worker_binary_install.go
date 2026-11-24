@@ -26,7 +26,7 @@ func AppendHelTargetEnvironment(harness core.HarnessKind, destination string, ta
 		core.TargetsTargetLocatorAppleContainer, core.TargetsTargetLocatorSshPodman,
 		core.TargetsTargetLocatorSshDocker, core.TargetsTargetLocatorSshAppleContainer,
 		core.TargetsTargetLocatorSshNitro:
-		environment = MjContainerEnvironment
+		environment = MJContainerEnvironment
 	case core.TargetsTargetLocatorAwsEc2:
 		workspace := target.Workspace
 		environment = "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/" + workspace + "`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/" + workspace + "`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n"
