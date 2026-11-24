@@ -596,7 +596,7 @@ async fn infer_candidates<T>(
             Err(error) => {
                 let kind = error.kind();
                 failures.push(format!(
-                    "{} model {} ({kind:?})",
+                    "{} model {} ({kind:?}): {error:#}",
                     candidate.profile_id, candidate.model
                 ));
                 let retire = matches!(
