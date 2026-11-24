@@ -500,6 +500,12 @@ impl RuntimeState {
         } else {
             history.full.metadata.launch_recency.clone()
         };
+        super::verdicts::project_activity(
+            &mut full,
+            &history.attention_source,
+            committed.as_deref(),
+            history.committed.as_deref(),
+        );
         let mut source = full.clone();
         super::attention::update(&history.attention_source, &mut full, committed.as_deref());
         // Preserve decorated rows as well as the attention tree across polls.
@@ -532,18 +538,14 @@ impl RuntimeState {
             }
         }
         full.sessions = sessions;
-        super::verdicts::project(
-            &mut full,
-            &history.full,
-            committed.as_deref(),
-            history.committed.as_deref(),
-        );
+        super::verdicts::stamp_needs_person(&mut full, &history.full);
         history.retain(full.clone(), browser)?;
         source.metadata.unread_frontiers = full.metadata.unread_frontiers.clone();
         source.metadata.notification_dismissals = full.metadata.notification_dismissals.clone();
         source.metadata.notification_cards = full.metadata.notification_cards.clone();
         source.metadata.form_holders = full.metadata.form_holders.clone();
         source.metadata.session_attention = full.metadata.session_attention.clone();
+        source.verdicts = full.verdicts.clone();
         history.attention_source = source;
         history.native_owners = native_owners;
         history.committed = committed;

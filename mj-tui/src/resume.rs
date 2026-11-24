@@ -1258,10 +1258,6 @@ impl DashboardState {
                                 | SessionState::Destroying
                         ))
                     || self.session_is_working(&session.id)
-                    || self
-                        .session_reviews
-                        .get(&session.id)
-                        .is_some_and(|reviews| mj_client::review::any_working(reviews.iter()))
             })
     }
 

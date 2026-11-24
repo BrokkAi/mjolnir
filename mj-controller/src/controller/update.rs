@@ -24,6 +24,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use mj_core::config::{DaemonConfig, DaemonRuntime, config_path};
 use mj_core::github_rate_limit::github_rate_limit_retry_at;
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
@@ -672,9 +673,11 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
         Err(error) => return StartupUpdateOutcome::failed("Update check", &error),
     };
 
+    let ssh_host = configured_ssh_daemon_host();
+    let ssh_host = ssh_host.as_deref();
     match update {
         AvailableUpdate::Direct(update) => {
-            match prompt_for_update(&update.version, &InstallMethod::Direct) {
+            match prompt_for_update(&update.version, &InstallMethod::Direct, ssh_host) {
                 Ok(true) => {}
                 Ok(false) => return StartupUpdateOutcome::Declined,
                 Err(error) => return StartupUpdateOutcome::failed("Upgrade prompt", &error),
@@ -688,7 +691,7 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
         }
         AvailableUpdate::Managed { version, method } => match method {
             InstallMethod::Npm | InstallMethod::Homebrew => {
-                match prompt_for_update(&version, &method) {
+                match prompt_for_update(&version, &method, ssh_host) {
                     Ok(true) => {}
                     Ok(false) => return StartupUpdateOutcome::Declined,
                     Err(error) => return StartupUpdateOutcome::failed("Upgrade prompt", &error),
@@ -701,7 +704,7 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
                 }
             }
             InstallMethod::Npx | InstallMethod::Cargo { .. } => StartupUpdateOutcome::Notified(
-                managed_update_notice(&version, &method, env!("CARGO_PKG_VERSION"))
+                managed_update_notice(&version, &method, env!("CARGO_PKG_VERSION"), ssh_host)
                     .expect("notice-only channels have an update command"),
             ),
             InstallMethod::Direct => {
@@ -711,37 +714,79 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
     }
 }
 
-fn prompt_for_update(version: &Version, method: &InstallMethod) -> Result<bool> {
+fn configured_ssh_daemon_host() -> Option<String> {
+    let config = DaemonConfig::load_placement(&config_path()).ok()?;
+    if config.runtime == DaemonRuntime::Ssh {
+        Some(
+            config
+                .host
+                .as_deref()
+                .map(str::trim)
+                .filter(|host| !host.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "the remote SSH host".to_owned()),
+        )
+    } else {
+        None
+    }
+}
+
+fn prompt_for_update(
+    version: &Version,
+    method: &InstallMethod,
+    ssh_host: Option<&str>,
+) -> Result<bool> {
     print!(
-        "mj {version} is available through {}; current version is {}. Upgrade now? [Y/n] ",
-        method.channel_name(),
-        env!("CARGO_PKG_VERSION")
+        "{}",
+        update_prompt(version, method, env!("CARGO_PKG_VERSION"), ssh_host)
     );
     io::stdout().flush().context("flush update prompt")?;
 
-    read_update_answer(&mut io::stdin().lock())
+    read_update_answer(&mut io::stdin().lock(), ssh_host.is_none())
 }
 
-fn read_update_answer(input: &mut impl BufRead) -> Result<bool> {
+fn update_prompt(
+    version: &Version,
+    method: &InstallMethod,
+    current_version: &str,
+    ssh_host: Option<&str>,
+) -> String {
+    let channel = method.channel_name();
+    let announcement = format!(
+        "mj {version} is available through {channel}; current version is {current_version}."
+    );
+    match ssh_host {
+        Some(host) => format!(
+            "{announcement}\nYour daemon runs over SSH on {host}, which must also be updated to {version} to connect.\nUpgrade this client now? [y/N] "
+        ),
+        None => format!("{announcement} Upgrade now? [Y/n] "),
+    }
+}
+
+fn read_update_answer(input: &mut impl BufRead, default_yes: bool) -> Result<bool> {
     let mut answer = String::new();
     let bytes_read = input
         .read_line(&mut answer)
         .context("read update prompt answer")?;
-    Ok(bytes_read != 0 && prompt_answer_is_yes(&answer))
+    Ok(bytes_read != 0 && prompt_answer_is_yes(&answer, default_yes))
 }
 
-/// An empty answer accepts, matching the 1.x prompt's default.
-fn prompt_answer_is_yes(answer: &str) -> bool {
-    matches!(answer.trim(), "" | "y" | "Y" | "yes" | "YES")
+fn prompt_answer_is_yes(answer: &str, default_yes: bool) -> bool {
+    let answer = answer.trim();
+    (default_yes && answer.is_empty()) || matches!(answer, "y" | "Y" | "yes" | "YES")
 }
 
 fn managed_update_notice(
     version: &Version,
     method: &InstallMethod,
     current_version: &str,
+    ssh_host: Option<&str>,
 ) -> Option<String> {
+    let ssh_note = ssh_host.map_or_else(String::new, |host| {
+        format!(" (your SSH daemon on {host} must also run {version})")
+    });
     Some(format!(
-        "mj {version} is available through {}; current version is {current_version}. Run: {}",
+        "mj {version} is available through {}; current version is {current_version}. Run: {}{ssh_note}",
         method.channel_name(),
         method.update_command()?
     ))

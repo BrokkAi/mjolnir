@@ -360,7 +360,11 @@ pub(crate) fn config() -> Config {
         notify: Default::default(),
         spinner: Default::default(),
         theme: Default::default(),
-        phone: Default::default(),
+        phone: mj_core::config::PhoneConfig {
+            // Display fixtures use a fixed address regardless of the test instance.
+            bind: mj_core::config::default_phone_bind_for(None),
+            ..Default::default()
+        },
         daemon: Default::default(),
         github: Default::default(),
         guardian: Default::default(),

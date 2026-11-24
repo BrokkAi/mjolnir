@@ -1913,6 +1913,37 @@ if (await pending || newDraft.projectDirectory !== '~/newer') throw Error('cance
 }
 
 #[test]
+fn embedded_viewer_shows_working_subagents_when_the_parent_worker_is_idle() {
+    let source = [
+        viewer_source("function epochMs(", "\nfunction "),
+        viewer_source(
+            "function sessionActivityLabel(",
+            "function updateSessionActivity(",
+        ),
+    ]
+    .join("\n");
+    let setup = r#"
+const pendingLifecycleActions = new Map();
+const SILENCE_WORTH_REPORTING_SECONDS = 60;
+"#;
+    let checks = r#"
+const session = {
+  lifecycle: 'live', attention: 'working', activity_details: { kind: 'idle', idle_since_ms: 1000 },
+  verdict: { working_descendants: 1 },
+};
+if (sessionActivityLabel(session, 5000) !== '1 subagent working') throw Error('idle worker hides working subagent');
+delete session.activity_details;
+session.verdict.working_descendants = 2;
+if (sessionActivityLabel(session, 5000) !== '2 subagents working') throw Error('fallback hides working subagents');
+session.activity_details = { kind: 'turn' };
+if (sessionActivityLabel(session, 5000) !== 'Turn · Step') throw Error('an active parent lost its turn label');
+session.attention = 'needs_input';
+if (sessionActivityLabel(session, 5000) !== 'Input needed') throw Error('subagents hide a question');
+"#;
+    run_viewer_script("working-subagents", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[test]
 fn embedded_viewer_displays_capacity_retry_deadlines() {
     let source = viewer_source(
         "function sessionActivityLabel(",
