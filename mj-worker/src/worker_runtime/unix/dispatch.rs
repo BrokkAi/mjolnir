@@ -1043,8 +1043,25 @@ pub(super) fn reload_failure_resolution(
     message: String,
 ) -> Result<crate::acp::ReloadResolution> {
     let mut state = relay.lock().expect("relay state lock poisoned");
-    if let Some((operation, store)) = state.committed_reload_operation() {
-        state.mark_in_place_harness_failed_after_commit(&operation, &store, message.clone())?;
+    let pending_exists = state
+        .root()
+        .join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+        .exists();
+    let committed = state.committed_reload_operation();
+    if pending_exists || committed.is_some() {
+        let identity = committed.or_else(|| {
+            let operational = state.operational_state();
+            Some((
+                operational.in_place_move_hold?.operation_id,
+                operational.store_id?,
+            ))
+        });
+        if let Some((operation, store)) = identity
+            && let Err(error) =
+                state.mark_in_place_harness_failed_after_commit(&operation, &store, message.clone())
+        {
+            tracing::warn!(%error, "could not persist post-commit reload failure");
+        }
         Ok(crate::acp::ReloadResolution::FailedAfterCommit(message))
     } else {
         Ok(crate::acp::ReloadResolution::RefusedBeforeCommit(message))
@@ -1076,7 +1093,12 @@ pub(super) async fn apply_harness_reload_transition(
                     .to_string_lossy()
                     .into_owned(),
             );
-            super::super::reload_commit::commit_pending_reload(&root, &pending)?;
+            let commit_root = root.clone();
+            let commit_pending = pending.clone();
+            mj_core::runtime::spawn_blocking(move || {
+                super::super::reload_commit::commit_pending_reload(&commit_root, &commit_pending)
+            })
+            .await??;
             relay
                 .lock()
                 .expect("relay lock")
@@ -1086,6 +1108,7 @@ pub(super) async fn apply_harness_reload_transition(
                 )?;
             let apply_root = root.clone();
             mj_core::runtime::spawn_blocking(move || {
+                super::super::reload_commit::sync_pending_reload_dir(&apply_root)?;
                 super::super::reload_commit::apply_committed_reload(&apply_root, &pending)
             })
             .await??;
@@ -2730,6 +2753,42 @@ mod staged_reload_tests {
         ]
         .map(|name| std::fs::read(root.join(name)).unwrap())
         .into()
+    }
+
+    #[test]
+    fn reload_commit_wal_rename_is_postcommit_even_when_relay_persistence_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (relay, launch, store) = setup(root);
+        stage(root, &launch, &store);
+        hold(&relay, &store);
+        let pending = mj_core::worker_launch::PendingInPlaceReload {
+            operation_id: "move".into(),
+            expected_store_id: store,
+            candidate_id: "candidate".into(),
+            git_setup_name: None,
+        };
+        super::super::super::reload_commit::commit_pending_reload(root, &pending).unwrap();
+        assert!(relay.lock().unwrap().committed_reload_operation().is_none());
+        // Simulate failure persisting Committed, before the WAL directory sync.
+        let state_path = root.join(RELAY_STATE_FILE);
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let resolution =
+            reload_failure_resolution(&relay, "post-rename sync failure".into()).unwrap();
+        assert!(matches!(
+            resolution,
+            crate::acp::ReloadResolution::FailedAfterCommit(_)
+        ));
+        assert!(
+            root.join(mj_core::worker_launch::PENDING_RELOAD_FILE)
+                .exists()
+        );
+        assert!(root.join("reload-candidates/candidate").is_dir());
+        assert!(
+            startup_failure("post-commit failure".into())
+                .is::<mj_core::relay::WorkerHarnessStartupFailure>()
+        );
     }
 
     #[tokio::test]

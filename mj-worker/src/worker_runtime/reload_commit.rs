@@ -78,6 +78,11 @@ pub fn validate_candidate(
 }
 
 pub(super) fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_private_write_nosync_dir(path, bytes)?;
+    mj_core::config::sync_directory(path.parent().context("atomic write parent")?)
+}
+
+fn atomic_private_write_nosync_dir(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().context("atomic write parent")?;
     let temporary = parent.join(mj_core::relay::new_command_id("reload-write")?);
@@ -93,7 +98,6 @@ pub(super) fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)?;
-        mj_core::config::sync_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
@@ -102,12 +106,39 @@ pub(super) fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+fn sync_tree(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            sync_tree(&entry?.path())?;
+        }
+        mj_core::config::sync_directory(path)?;
+    } else if metadata.is_file() {
+        #[cfg(unix)]
+        std::fs::File::open(path)?.sync_all()?;
+    }
+    Ok(())
+}
+
 pub fn commit_pending_reload(root: &Path, pending: &PendingInPlaceReload) -> Result<()> {
     validate_candidate_id(&pending.candidate_id)?;
-    atomic_private_write(
+    if let Some(name) = &pending.git_setup_name {
+        validate_candidate_id(name)?;
+    }
+    sync_tree(&root.join(RELOAD_CANDIDATES_DIR).join(&pending.candidate_id))?;
+    mj_core::config::sync_directory(&root.join(RELOAD_CANDIDATES_DIR))?;
+    if let Some(name) = &pending.git_setup_name {
+        sync_tree(&root.join(name))?;
+    }
+    mj_core::config::sync_directory(root)?;
+    atomic_private_write_nosync_dir(
         &root.join(PENDING_RELOAD_FILE),
         &serde_json::to_vec(pending)?,
     )
+}
+
+pub fn sync_pending_reload_dir(root: &Path) -> Result<()> {
+    mj_core::config::sync_directory(root)
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -157,9 +188,11 @@ fn copy_overlay(source: &Path, destination: &Path) -> Result<()> {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = entry.metadata()?.permissions().mode() & 0o700;
                 std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))?;
+                std::fs::File::open(&target)?.sync_all()?;
             }
         }
     }
+    mj_core::config::sync_directory(destination)?;
     Ok(())
 }
 
@@ -211,6 +244,12 @@ pub fn apply_committed_reload(
             || std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
         {
             remove(&path)?;
+            if let Some(parent) = path.parent()
+                && parent != home
+                && parent.is_dir()
+            {
+                mj_core::config::sync_directory(parent)?;
+            }
         } else if path.is_dir() {
             for entry in std::fs::read_dir(&path)? {
                 let entry = entry?;
@@ -218,6 +257,7 @@ pub fn apply_committed_reload(
                     remove(&entry.path())?;
                 }
             }
+            mj_core::config::sync_directory(&path)?;
         }
     }
     copy_overlay(&candidate.join("profile"), home)?;
@@ -231,7 +271,8 @@ pub fn apply_committed_reload(
         remove(&marker)?;
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&login.source_path, marker)?;
+            std::os::unix::fs::symlink(&login.source_path, &marker)?;
+            mj_core::config::sync_directory(marker.parent().context("shared login parent")?)?;
         }
         #[cfg(not(unix))]
         {
@@ -253,6 +294,11 @@ pub fn apply_committed_reload(
     if manifest.clear_github_token {
         mj_core::credentials::remove_github_token(&root.join("github-token"))?;
     }
+    mj_core::config::sync_directory(home)?;
+    if let Some(parent) = home.parent() {
+        mj_core::config::sync_directory(parent)?;
+    }
+    mj_core::config::sync_directory(root)?;
     std::fs::remove_file(root.join(PENDING_RELOAD_FILE))?;
     mj_core::config::sync_directory(root)?;
     std::fs::remove_dir_all(candidate)?;
