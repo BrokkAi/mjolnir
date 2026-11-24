@@ -259,9 +259,18 @@ impl ActivityState {
     /// merely not finished.
     #[must_use]
     pub fn is_working(&self) -> bool {
+        self.is_computing(false, false)
+    }
+
+    /// Whether work can make progress while the foreground waits for input.
+    #[must_use]
+    pub fn is_computing(&self, waiting_for_input: bool, has_background: bool) -> bool {
         match self {
-            Self::Turn { .. } | Self::Tool { .. } | Self::Background { .. } | Self::Closing => true,
-            Self::Unknown { last_known, .. } => last_known.is_working(),
+            Self::Turn { .. } | Self::Tool { .. } => !waiting_for_input || has_background,
+            Self::Background { .. } | Self::Closing => true,
+            Self::Unknown { last_known, .. } => {
+                last_known.is_computing(waiting_for_input, has_background)
+            }
             Self::Expecting { .. }
             | Self::Idle { .. }
             | Self::Goal

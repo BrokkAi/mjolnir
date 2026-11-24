@@ -70,6 +70,8 @@ pub struct SessionVerdict {
     pub container_settings: SessionOffer,
     pub resume: SessionOffer,
     pub working_children: usize,
+    #[serde(default)]
+    pub working_descendants: usize,
     pub unfinished_children: usize,
 }
 

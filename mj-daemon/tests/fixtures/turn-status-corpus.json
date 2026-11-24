@@ -1,0 +1,2742 @@
+[
+  {
+    "name": "unread-after-failed-assessment",
+    "description": "An unread Antigravity parent has completed its own turn and assessment has failed. Its Grok child is still in a turn.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "antigravity",
+        "operational": {
+          "assessment": {
+            "turn_id": "prompt",
+            "completed_ordinal": 10,
+            "revision": 10,
+            "completed_at_ms": 8,
+            "completion": {
+              "stop_reason": "end_turn",
+              "diagnostic": null
+            },
+            "evidence": null,
+            "verdict": null,
+            "action": null,
+            "status": "failed",
+            "reason": "request_failed",
+            "failures": 1,
+            "retry_at_ms": null
+          },
+          "relay_protocol_version": 71
+        },
+        "transcript": {
+          "unread": 11,
+          "last_turn_outcome": {
+            "command_id": "prompt",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        },
+        "viewed_through_event_ordinal": 9
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "grok",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      },
+      {
+        "id": "child-parked-first",
+        "state": "parked",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null
+      },
+      {
+        "id": "child-parked-second",
+        "state": "parked",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null
+      },
+      {
+        "id": "child-stopped-first",
+        "state": "stopped",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closed"
+          }
+        }
+      },
+      {
+        "id": "child-stopped-second",
+        "state": "stopped",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closed"
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "child-parked-first",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "child-parked-second",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "child-stopped-first",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "child-stopped-second",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      },
+      "child-parked-first": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-parked-second": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-stopped-first": {
+        "attention": "inactive",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "closed"
+      },
+      "child-stopped-second": {
+        "attention": "inactive",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "closed"
+      }
+    }
+  },
+  {
+    "name": "parked-and-finished-control",
+    "description": "The parent has unread output and its managed children have finished or parked.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "antigravity",
+        "operational": {
+          "assessment": {
+            "turn_id": "prompt",
+            "completed_ordinal": 10,
+            "revision": 10,
+            "completed_at_ms": 8,
+            "completion": {
+              "stop_reason": "end_turn",
+              "diagnostic": null
+            },
+            "evidence": null,
+            "verdict": null,
+            "action": null,
+            "status": "failed",
+            "reason": "request_failed",
+            "failures": 1,
+            "retry_at_ms": null
+          },
+          "relay_protocol_version": 71
+        },
+        "transcript": {
+          "unread": 11,
+          "last_turn_outcome": {
+            "command_id": "prompt",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        },
+        "viewed_through_event_ordinal": 9
+      },
+      {
+        "id": "child-worker",
+        "state": "parked",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null
+      },
+      {
+        "id": "child-stopped",
+        "state": "stopped",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closed"
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "child-stopped",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "unread",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-stopped": {
+        "attention": "inactive",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "closed"
+      }
+    }
+  },
+  {
+    "name": "working-worker-grandchild",
+    "description": "A running worker is two levels below its idle grandparent and has an idle immediate parent.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "grandchild-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "grandchild-worker",
+        "parent": "child-worker",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "grandchild-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "working-oracle-grandchild",
+    "description": "A running oracle is two levels below its idle grandparent and has an idle immediate parent.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "grandchild-oracle",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "grandchild-oracle",
+        "parent": "child-worker",
+        "kind": "oracle"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "grandchild-oracle": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "working-oracle-child",
+    "description": "An idle parent has a oracle still running its assignment.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-oracle",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-oracle",
+        "parent": "parent",
+        "kind": "oracle"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-oracle": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "working-reviewer-grandchild",
+    "description": "A running reviewer is two levels below its idle grandparent and has an idle immediate parent.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "grandchild-reviewer",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "grandchild-reviewer",
+        "parent": "child-worker",
+        "kind": "reviewer"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "grandchild-reviewer": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "working-reviewer-child",
+    "description": "An idle parent has a reviewer still running its assignment.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-reviewer",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-reviewer",
+        "parent": "parent",
+        "kind": "reviewer"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-reviewer": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "parked-child-working-grandchild",
+    "description": "A parked intermediate child still owns a working grandchild.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "parked",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null
+      },
+      {
+        "id": "grandchild-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "grandchild-worker",
+        "parent": "child-worker",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "grandchild-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "native-running-under-child",
+    "description": "A managed child owns a native task in progress alongside a completed and a disconnected native task.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [
+      {
+        "owner": "child-worker",
+        "parent_session_id": null,
+        "session_id": "native-running",
+        "stable_id": "native-task",
+        "state": "running",
+        "pending_input": false
+      },
+      {
+        "owner": "child-worker",
+        "parent_session_id": null,
+        "session_id": "native-completed",
+        "stable_id": null,
+        "state": "completed",
+        "pending_input": false
+      },
+      {
+        "owner": "child-worker",
+        "parent_session_id": null,
+        "session_id": "native-disconnected",
+        "stable_id": null,
+        "state": "disconnected",
+        "pending_input": false
+      }
+    ],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "native-settled-control",
+    "description": "Retained completed and disconnected native tasks do not keep their owner busy.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [
+      {
+        "owner": "parent",
+        "parent_session_id": null,
+        "session_id": "native-completed",
+        "stable_id": null,
+        "state": "completed",
+        "pending_input": false
+      },
+      {
+        "owner": "parent",
+        "parent_session_id": null,
+        "session_id": "native-disconnected",
+        "stable_id": null,
+        "state": "disconnected",
+        "pending_input": false
+      }
+    ],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "native-running-direct",
+    "description": "A running native task is visible while the owner has no foreground turn.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [
+      {
+        "owner": "parent",
+        "parent_session_id": null,
+        "session_id": "native-running",
+        "stable_id": "native-task",
+        "state": "running",
+        "pending_input": false
+      }
+    ],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "monitor-expecting",
+    "description": "A Claude turn finished and is waiting for a Monitor wake without a tracked background command.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {
+          "expected_continuation": 9,
+          "assessment": {
+            "turn_id": "prompt",
+            "completed_ordinal": 10,
+            "revision": 10,
+            "completed_at_ms": 8,
+            "completion": {
+              "stop_reason": "end_turn",
+              "diagnostic": null
+            },
+            "evidence": null,
+            "verdict": null,
+            "action": "wait",
+            "status": "assessed",
+            "reason": "background work pending",
+            "failures": 0,
+            "retry_at_ms": null
+          }
+        },
+        "transcript": {
+          "last_turn_outcome": {
+            "command_id": "prompt",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "expecting"
+      }
+    }
+  },
+  {
+    "name": "monitor-wake",
+    "description": "A Claude background wake opened a harness turn without a user prompt.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {
+          "harness_turn": {
+            "started_at_ms": 8
+          },
+          "execution": "running"
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 8
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "background-command-needed",
+    "description": "An agent left a background process running after its foreground turn. The worker assessed it as needed.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "background_needed": true,
+          "background_commands": [
+            {
+              "id": "background-command",
+              "started_at_ms": 7,
+              "command": "sleep 300",
+              "can_stop": true
+            }
+          ]
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "background"
+      }
+    }
+  },
+  {
+    "name": "background-command-unneeded",
+    "description": "An agent left a background process running after its foreground turn. The worker assessed it as unneeded.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "background_needed": false,
+          "background_commands": [
+            {
+              "id": "background-command",
+              "started_at_ms": 7,
+              "command": "sleep 300",
+              "can_stop": true
+            }
+          ]
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "antigravity-native-background",
+    "description": "Antigravity still reports a native task although the worker published an idle inference from an earlier observation.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "antigravity",
+        "operational": {
+          "activity": {
+            "state": "idle"
+          },
+          "background_needed": false,
+          "background_commands": [
+            {
+              "id": "antigravity:native-task",
+              "started_at_ms": 7,
+              "command": "sleep 300",
+              "can_stop": false
+            }
+          ]
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "background"
+      }
+    }
+  },
+  {
+    "name": "active-user-shell",
+    "description": "A user shell command is running after the agent turn ended.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "active_user_shells": [
+            {
+              "command_id": "user-shell",
+              "command": "cargo test",
+              "created_at_ms": 6,
+              "started_at_ms": 7
+            }
+          ]
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "background"
+      }
+    }
+  },
+  {
+    "name": "held-child-background-process",
+    "description": "A child completed its handback reminder turn with work processes still alive. Its report is held pending those processes.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {
+          "work_liveness": {
+            "completed_ordinal": 10,
+            "alive": 1,
+            "checked_at_ms": 9
+          }
+        },
+        "transcript": {
+          "last_turn_outcome": {
+            "command_id": "handback-reminder-5",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [
+      {
+        "child": "child-worker",
+        "handback_recorded": false
+      }
+    ],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "recorded-handback-control",
+    "description": "A child completed its handback reminder turn with work processes still alive. A matching report has already been recorded.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {
+          "work_liveness": {
+            "completed_ordinal": 10,
+            "alive": 1,
+            "checked_at_ms": 9
+          }
+        },
+        "transcript": {
+          "last_turn_outcome": {
+            "command_id": "handback-reminder-5",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [
+      {
+        "child": "child-worker",
+        "handback_recorded": true
+      }
+    ],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-capturing",
+    "description": "The session has no foreground turn while the review is capturing.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "capturing_delta"
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-launching",
+    "description": "The session has no foreground turn while the review is launching.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "launching_reviewer"
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-running",
+    "description": "The session has no foreground turn while the review is running.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "running",
+          "roles": []
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-running-stopped-parent",
+    "description": "The session has no foreground turn while the review is running stopped parent.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "stopped",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closed"
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "running",
+          "roles": []
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "closed"
+      }
+    }
+  },
+  {
+    "name": "review-findings",
+    "description": "The session has no foreground turn while the review is findings.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "verdict",
+          "verdict": "findings",
+          "synthesis": "Inspect the failure path."
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "needs_input",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-clean",
+    "description": "The session has no foreground turn while the review is clean.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "verdict",
+          "verdict": "clean"
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "review-failed",
+    "description": "The session has no foreground turn while the review is failed.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [
+      {
+        "session_id": "parent",
+        "phase": {
+          "phase": "verdict",
+          "verdict": "failed",
+          "reason": "Reviewer unavailable."
+        },
+        "has_questions": false
+      }
+    ],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "failed",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  },
+  {
+    "name": "child-provisioning",
+    "description": "A managed child is provisioning while its parent worker is idle.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "provisioning",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "idle"
+          }
+        },
+        "lifecycle": "create"
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "unknown/idle"
+      }
+    }
+  },
+  {
+    "name": "child-suspending",
+    "description": "A managed child is suspending while its parent worker is idle.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "closing",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closing"
+          }
+        },
+        "lifecycle": "suspend"
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "unknown/closing"
+      }
+    }
+  },
+  {
+    "name": "child-destroying",
+    "description": "A managed child is destroying while its parent worker is idle.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "destroying",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "closing"
+          }
+        },
+        "lifecycle": "force_destroy"
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "unknown/closing"
+      }
+    }
+  },
+  {
+    "name": "reviewer-child-provisioning",
+    "description": "A Codex reviewer is provisioning while its DSH parent worker is idle.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "dsh",
+        "operational": {}
+      },
+      {
+        "id": "child-reviewer",
+        "state": "provisioning",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "lifecycle": "create"
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-reviewer",
+        "parent": "parent",
+        "kind": "reviewer"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": true,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-reviewer": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "unknown/idle"
+      }
+    }
+  },
+  {
+    "name": "parent-form-and-working-child",
+    "description": "An idle parent has a pending approval form while its child works.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {},
+        "transcript": {
+          "pending_elicitations": [
+            {
+              "id": "approval",
+              "message": "Proceed with deploy?",
+              "fields": []
+            }
+          ]
+        }
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "needs_input",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "parent-notification-needs-input",
+    "description": "An unread parent has a needs input notification while its child works.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "relay_protocol_version": 71,
+          "notification_stack": {
+            "revision": 10,
+            "entries": [
+              {
+                "completed_ordinal": 10,
+                "completed_at_ms": 8,
+                "kind": "needs_input",
+                "message": "none"
+              }
+            ]
+          },
+          "open_request": {
+            "question": {
+              "turn_id": "prompt",
+              "completed_ordinal": 10
+            },
+            "question_message": null
+          }
+        },
+        "transcript": {
+          "unread": 11,
+          "last_turn_outcome": {
+            "command_id": "prompt",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        }
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "needs_input",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "parent-notification-important",
+    "description": "An unread parent has a important notification while its child works.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "relay_protocol_version": 71,
+          "notification_stack": {
+            "revision": 10,
+            "entries": [
+              {
+                "completed_ordinal": 10,
+                "completed_at_ms": 8,
+                "kind": "important",
+                "message": "none"
+              }
+            ]
+          }
+        },
+        "transcript": {
+          "unread": 11,
+          "last_turn_outcome": {
+            "command_id": "prompt",
+            "completed_ordinal": 10,
+            "completed_at_ms": 8,
+            "outcome": {
+              "kind": "completed",
+              "stop_reason": "end_turn"
+            }
+          }
+        }
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "important",
+        "working": true,
+        "idle": true,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "parent-failed-and-working-child",
+    "description": "A parent is failed while its child is still working.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "error",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "last_error": "Worker failed."
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "failed",
+        "working": true,
+        "idle": false,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "unknown/idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "parent-unreachable-and-working-child",
+    "description": "A parent is unreachable while its child is still working.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "disconnected",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "unreachable",
+        "working": true,
+        "idle": false,
+        "working_children": 1,
+        "working_descendants": 1,
+        "unfinished_children": 1,
+        "subtree_idle": false,
+        "working_subagents": 1,
+        "activity_kind": "unknown/idle"
+      },
+      "child-worker": {
+        "attention": "working",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "foreground-form-alone",
+    "description": "An in-flight foreground turn is waiting for an approval form. No process is working in the background.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          }
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          },
+          "pending_elicitations": [
+            {
+              "id": "approval",
+              "message": "Proceed with deploy?",
+              "fields": []
+            }
+          ]
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "needs_input",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "foreground-form-with-background",
+    "description": "An in-flight foreground turn is waiting for an approval form. An independent command is still running.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "execution": "running",
+          "active_prompt": {
+            "command_id": "prompt",
+            "created_at_ms": 6,
+            "started_at_ms": 7
+          },
+          "background_commands": [
+            {
+              "id": "background-command",
+              "started_at_ms": 7,
+              "command": "sleep 300",
+              "can_stop": true
+            }
+          ]
+        },
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          },
+          "pending_elicitations": [
+            {
+              "id": "approval",
+              "message": "Proceed with deploy?",
+              "fields": []
+            }
+          ]
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "needs_input",
+        "working": true,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "turn"
+      }
+    }
+  },
+  {
+    "name": "disconnected-last-known-idle",
+    "description": "A disconnected worker retains its last materialized execution state.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "disconnected",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "unreachable",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "unknown/idle"
+      }
+    }
+  },
+  {
+    "name": "disconnected-last-known-turn",
+    "description": "A disconnected worker retains its last materialized execution state.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "disconnected",
+        "connected": false,
+        "harness_kind": "codex",
+        "operational": null,
+        "transcript": {
+          "execution": {
+            "state": "running",
+            "started_at_ms": 7
+          },
+          "active_turn": {
+            "command_id": "prompt",
+            "turn_start_position": 6,
+            "started_at_ms": 7
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "unreachable",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "unknown/turn"
+      }
+    }
+  },
+  {
+    "name": "server-retry",
+    "description": "The worker has armed a retry after the provider refused a turn.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "capacity_retry": {
+            "attempt": 1,
+            "retry_at_ms": 50,
+            "command_id": "server-retry-10",
+            "submitted": false
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "retry"
+      }
+    }
+  },
+  {
+    "name": "checking-quota",
+    "description": "The connected worker has an unsubmitted quota recovery and the daemon publishes its quota check.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "claude",
+        "operational": {
+          "activity": {
+            "state": "checking-continuation"
+          },
+          "continuation": {
+            "attempts": 0,
+            "suppressed": false,
+            "user_command_id": "prompt",
+            "completed_command_id": "prompt",
+            "quota_recovery": {
+              "user_command_id": "prompt",
+              "completed_command_id": "prompt",
+              "profile_id": "profile",
+              "reset_at_ms": 50,
+              "retry_at_ms": 50,
+              "notice": "Waiting for quota.",
+              "submitted": false
+            }
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "checking-continuation"
+      }
+    }
+  },
+  {
+    "name": "goal-durable-intent",
+    "description": "A native goal is active while the harness is between goal turns.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {
+          "goal": {
+            "known": true,
+            "snapshot": {
+              "objective": "Complete the checks.",
+              "status": "active"
+            },
+            "execution": {
+              "version": 1,
+              "status": "idle"
+            }
+          }
+        }
+      }
+    ],
+    "subagents": [],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "working",
+        "working": false,
+        "idle": false,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": false,
+        "working_subagents": 0,
+        "activity_kind": "goal"
+      }
+    }
+  },
+  {
+    "name": "cycle-guard",
+    "description": "Two child relationships form an invalid cycle. Both workers are idle and neither can make itself busy by traversal.",
+    "sessions": [
+      {
+        "id": "parent",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      },
+      {
+        "id": "child-worker",
+        "state": "running",
+        "connected": true,
+        "harness_kind": "codex",
+        "operational": {}
+      }
+    ],
+    "subagents": [
+      {
+        "child": "child-worker",
+        "parent": "parent",
+        "kind": "worker"
+      },
+      {
+        "child": "parent",
+        "parent": "child-worker",
+        "kind": "worker"
+      }
+    ],
+    "native_agents": [],
+    "reviews": [],
+    "committed_subagent_holds": [],
+    "expected": {
+      "parent": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      },
+      "child-worker": {
+        "attention": "idle",
+        "working": false,
+        "idle": true,
+        "working_children": 0,
+        "working_descendants": 0,
+        "unfinished_children": 0,
+        "subtree_idle": true,
+        "working_subagents": 0,
+        "activity_kind": "idle"
+      }
+    }
+  }
+]

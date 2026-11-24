@@ -868,7 +868,7 @@ async fn a_finished_wait_does_not_report_the_session_still_running() {
     // the published view had not caught up with the live actor yet.
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let mut session = ApiSession::from(&snapshot.sessions[0]);
+    let mut session = snapshot.sessions[0].clone();
     session.chat_phase = crate::server::ViewerChatPhase::Running;
     let observation = WaitObservation {
         execution: MaterializedExecutionState::Idle,
@@ -879,7 +879,7 @@ async fn a_finished_wait_does_not_report_the_session_still_running() {
     let response = finish_wait(
         &backend,
         "session-1",
-        session,
+        &session,
         observation,
         WaitDecision::simple(WaitOutcome::Finished, None),
         None,
@@ -891,6 +891,30 @@ async fn a_finished_wait_does_not_report_the_session_still_running() {
         response.session.chat_phase,
         crate::server::ViewerChatPhase::Idle
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_wait_settles_while_a_subagent_is_working() {
+    let (app, _actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.lifecycle = ViewerLifecycleCategory::Live;
+            session.capabilities.prompt = true;
+            session.is_idle = false;
+            session.verdict.working = true;
+            session.verdict.working_descendants = 1;
+        });
+
+    let response = spawn_wait(app, r#"{"timeout_secs":1}"#)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["outcome"], "finished");
+    assert_eq!(body["session"]["is_idle"], true);
+    assert_eq!(body["session"]["subtree_idle"], false);
+    assert_eq!(body["session"]["working_subagents"], 1);
 }
 
 #[tokio::test]
@@ -928,16 +952,9 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
             .background_work_known = known;
         let observation = build_observation(&snapshot, session, Some(&live), None, None);
         let decision = resolve_wait(&observation, &WaitRequest::default()).unwrap();
-        let response = finish_wait(
-            &backend,
-            &session.id,
-            ApiSession::from(session),
-            observation,
-            decision,
-            None,
-        )
-        .await
-        .unwrap();
+        let response = finish_wait(&backend, &session.id, session, observation, decision, None)
+            .await
+            .unwrap();
         assert_eq!(response.session.background_work.unwrap().known, known);
     }
     live.snapshot
@@ -5376,7 +5393,7 @@ async fn a_turn_the_harness_starts_itself_holds_only_the_session_wait() {
     let response = finish_wait(
         &backend,
         "session-1",
-        ApiSession::from(&snapshot.sessions[0]),
+        &snapshot.sessions[0],
         observation,
         decision,
         None,
@@ -7260,7 +7277,7 @@ async fn only_the_session_wait_follows_the_quota_check() {
     let response = finish_wait(
         &backend,
         "session-1",
-        ApiSession::from(&snapshot.sessions[0]),
+        &snapshot.sessions[0],
         observation,
         decision,
         None,
@@ -8090,7 +8107,7 @@ fn a_session_wait_follows_a_child_through_its_handback_reminder() {
 async fn a_session_wait_on_a_child_answers_with_its_handback() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let session = ApiSession::from(&snapshot.sessions[0]);
+    let session = &snapshot.sessions[0];
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
         summary: Some(TurnSummary {
             turn_number: 2,
@@ -8112,7 +8129,6 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
     };
     let answer = |observation: WaitObservation| {
         let backend = backend.clone();
-        let session = session.clone();
         async move {
             let decision = resolve_wait(&observation, &WaitRequest::default()).unwrap();
             finish_wait(&backend, "session-1", session, observation, decision, None)

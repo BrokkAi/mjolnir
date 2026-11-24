@@ -36,6 +36,7 @@ fn session_metadata_text(
         false,
         crate::AttentionLevel::Idle,
         None,
+        0,
         operation,
         now_epoch_seconds,
         &session_target_label(&State::default(), session, operation, config),
@@ -1234,6 +1235,65 @@ fn a_starting_session_keeps_one_preview_across_incomplete_state_publications() {
     let rendered = drawn(&mut dashboard, 140, 40).join("\n");
     assert!(rendered.contains("Ready session"), "{rendered}");
     assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+}
+
+#[test]
+fn idle_parent_shows_working_subagent_with_a_spinner_and_no_idle_clock() {
+    let session = running_session();
+    let id = session.id.clone();
+    let mut dashboard = dashboard_with_session(session.clone());
+    serve_attention(
+        &mut dashboard,
+        &[&id],
+        mj_core::attention::SessionAttention::Working,
+    );
+    let mut verdict = dashboard.verdict(&id);
+    verdict.working = true;
+    verdict.idle = true;
+    verdict.working_descendants = 1;
+    dashboard.set_session_verdict(&id, verdict);
+
+    let detail = SessionDetail {
+        activity: mj_client::usage_format::SessionActivity {
+            state: Some(mj_core::activity::ActivityState::Idle {
+                since_ms: Some(1000),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    dashboard.session_details.insert(id.clone(), detail);
+
+    let rows = drawn_session_rows(&dashboard, 80);
+    let lines = &rows[0].lines;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.to_string().contains(theme::glyphs().working))
+    );
+    let activity = lines
+        .iter()
+        .find(|line| line.to_string().contains("1 subagent"))
+        .unwrap();
+    assert_eq!(
+        activity.spans[2].content, "1 subagent",
+        "the spinner precedes the label"
+    );
+    assert!(!lines.iter().any(|line| line.to_string().contains("Idle")));
+    assert!(dashboard.needs_fast_tick());
+    assert!(dashboard.animation_changed());
+    assert_eq!(
+        session_display_clock(
+            &dashboard,
+            &session,
+            dashboard.session_details.get(&id),
+            &[],
+            false,
+            None,
+            60,
+        ),
+        None
+    );
 }
 
 #[test]

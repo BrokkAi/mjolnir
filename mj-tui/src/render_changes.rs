@@ -370,12 +370,11 @@ impl DashboardState {
                 if !self.session_row_is_visible_at(index) {
                     return false;
                 }
-                let reviews = self.session_reviews(&session.id);
                 let primary = self.session_is_working(&session.id);
                 let transition = self
                     .transition_kind(&session.id)
                     .is_some_and(|_| session.last_error.is_none());
-                primary || transition || mj_client::review::any_working(reviews)
+                primary || transition
             });
         let opening = self
             .opening_session()

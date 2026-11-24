@@ -171,12 +171,15 @@ async fn wait_for_turn(
                 } else {
                     mj_core::subagent::Liveness::default()
                 };
-                let session_facts = {
+                let viewer_session = {
                     let snapshot = snapshot_rx.borrow();
-                    let session = require_session_record(&snapshot, &session_id)?;
+                    let session = snapshot
+                        .sessions
+                        .get_shared(&session_id)
+                        .ok_or_else(|| ApiFailure::not_found("unknown session"))?;
                     observation = build_observation(
                         &snapshot,
-                        session,
+                        &session,
                         live.as_ref(),
                         durable.as_ref(),
                         start_status,
@@ -199,13 +202,13 @@ async fn wait_for_turn(
                         .flatten()
                         .min();
                     }
-                    ApiSession::from(session)
+                    session
                 };
                 if let Some(decision) = resolve_wait(&observation, &request) {
                     let mut response = finish_wait(
                         &backend,
                         &session_id,
-                        session_facts,
+                        &viewer_session,
                         observation,
                         decision,
                         relay,
@@ -462,17 +465,19 @@ pub(super) fn api_turn_outcome(mut turn: MaterializedTurnOutcome) -> Materialize
 pub(super) async fn finish_wait(
     backend: &Arc<dyn SubagentBackend>,
     session_id: &str,
-    mut session: ApiSession,
+    viewer_session: &ViewerSession,
     observation: WaitObservation,
     decision: WaitDecision,
     relay: Option<RelayHealth>,
 ) -> Result<WaitResponse, ApiFailure> {
+    let mut session = ApiSession::from(viewer_session);
     session.assessment.clone_from(&observation.assessment);
     session.activity_state = Some(observation.activity.clone());
     session.is_idle = observation.activity.is_idle()
         && session.lifecycle == ViewerLifecycleCategory::Live
         && !observation.resuming
         && !observation.closing;
+    session.subtree_idle = session.is_idle && !viewer_session.verdict.working;
     session
         .background_work
         .clone_from(&observation.background_work);

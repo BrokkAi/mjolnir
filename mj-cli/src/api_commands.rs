@@ -1999,6 +1999,13 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
         listed_state(session),
         session.title
     )];
+    if session.working_subagents > 0 {
+        let worker_state = if session.is_idle { "idle" } else { "busy" };
+        lines.push(format!(
+            "subagents: {} working (session worker is {worker_state})",
+            session.working_subagents
+        ));
+    }
     if let Some(operation) = &session.operation {
         use mj_daemon::server::ViewerOperationKind;
         let kind = match operation.kind {
@@ -2407,6 +2414,10 @@ fn listed_state(session: &ApiSession) -> String {
     let mut state = session.state.clone();
     if let Some(attention) = attention {
         state.push_str(&format!(" ({attention})"));
+    } else if session.working_subagents > 0 {
+        let worker_state = if session.is_idle { "idle" } else { "working" };
+        let subagents = mj_core::text::counted(session.working_subagents, "subagent", "subagents");
+        state.push_str(&format!(" ({worker_state}, {subagents} working)"));
     }
     if session.storage_problem.is_some() {
         state.push_str(" (disk full)");
@@ -4932,6 +4943,35 @@ mod tests {
                 .any(|line| line.contains("an older failure")),
             "a finished turn prints no failure reason"
         );
+    }
+
+    #[test]
+    fn sessions_report_the_workers_state_alongside_working_subagents() {
+        use mj_core::attention::SessionAttention;
+
+        let mut session = wait_response("finished", serde_json::json!({})).session;
+        session.attention = SessionAttention::Working;
+        session.is_idle = true;
+        session.working_subagents = 1;
+        assert_eq!(listed_state(&session), "running (idle, 1 subagent working)");
+        assert_eq!(
+            session_report_lines(&session, 0)[1],
+            "subagents: 1 working (session worker is idle)"
+        );
+
+        session.is_idle = false;
+        session.working_subagents = 2;
+        assert_eq!(
+            listed_state(&session),
+            "running (working, 2 subagents working)"
+        );
+        assert_eq!(
+            session_report_lines(&session, 0)[1],
+            "subagents: 2 working (session worker is busy)"
+        );
+
+        session.attention = SessionAttention::NeedsInput;
+        assert_eq!(listed_state(&session), "running (needs input)");
     }
 
     /// precision-3260: sessions on a full disk read as "unreachable" with

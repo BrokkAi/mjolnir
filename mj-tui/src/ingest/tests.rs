@@ -176,6 +176,9 @@ fn runtime_review_projection_restores_and_removes_session_activity() {
         verdict: None,
     };
 
+    let mut verdict = dashboard.verdict("session-1");
+    verdict.working = true;
+    dashboard.set_session_verdict("session-1", verdict);
     dashboard.set_session_reviews([review.clone()]);
     assert!(!dashboard.session_reviews("session-1").is_empty());
 
@@ -201,6 +204,8 @@ fn runtime_review_projection_restores_and_removes_session_activity() {
 
     // Runtime snapshots are complete projections: an empty replacement
     // closes the badge rather than leaving the previous review stuck.
+    verdict.working = false;
+    dashboard.set_session_verdict("session-1", verdict);
     dashboard.set_session_reviews(Vec::new());
     assert!(dashboard.session_reviews("session-1").is_empty());
 }
