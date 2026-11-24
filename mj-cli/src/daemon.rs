@@ -72,22 +72,16 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
     argv.extend_from_slice(args);
     #[cfg(windows)]
     let status = {
-        use std::io::{self, IsTerminal, Write};
+        use std::io::{self, IsTerminal};
 
-        if !interactive && (!io::stdout().is_terminal() || !io::stderr().is_terminal()) {
-            let output = mj_client::daemon::ssh::run_remote_captured(&placement, host, &argv)
-                .await
-                .context("run SSH command")?;
-            mj_core::runtime::spawn_blocking(move || -> std::io::Result<_> {
-                io::stdout().write_all(&output.stdout)?;
-                io::stdout().flush()?;
-                io::stderr().write_all(&output.stderr)?;
-                io::stderr().flush()?;
-                Ok(output.status)
-            })
+        let stdout_tty = io::stdout().is_terminal();
+        let stderr_tty = io::stderr().is_terminal();
+        if !interactive && (!stdout_tty || !stderr_tty) {
+            mj_client::daemon::ssh::run_remote_forwarded(
+                &placement, host, &argv, stdout_tty, stderr_tty,
+            )
             .await
-            .context("SSH output task panicked")?
-            .context("write SSH output")?
+            .context("run SSH command")?
         } else {
             run_remote_inherited(&placement, host, &argv, interactive).await?
         }

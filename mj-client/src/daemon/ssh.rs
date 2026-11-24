@@ -90,13 +90,55 @@ async fn diagnostics(stderr: &[u8], client_log: Option<&tempfile::TempPath>) -> 
     )
 }
 
-/// Run a remote daemon command with captured output.
-pub async fn run_remote_captured(
+/// Run a remote daemon command, forwarding stderr and console stdout live.
+pub async fn run_remote_forwarded(
     placement: &DaemonConfig,
     host: &str,
     argv: &[String],
-) -> Result<std::process::Output> {
-    capture_remote(placement, host, argv, false).await
+    inherit_stdout: bool,
+    inherit_stderr: bool,
+) -> Result<std::process::ExitStatus> {
+    ensure!(
+        !host.starts_with('-'),
+        "[daemon] host cannot be an SSH option"
+    );
+    let mut command = tokio::process::Command::new("ssh");
+    #[cfg(windows)]
+    let client_log = if inherit_stderr {
+        None
+    } else {
+        redirect_client_log(&mut command, &placement.ssh_args)?
+    };
+    command
+        .args(&placement.ssh_args)
+        .arg(host)
+        .arg(daemon_login_command(argv));
+    let status = mj_core::subprocess::run_forwarded_with_optional_stdout_file(
+        &mut command,
+        inherit_stdout,
+        inherit_stderr,
+    )
+    .await;
+    #[cfg(windows)]
+    if let Some(path) = client_log {
+        use std::io::{self, Write};
+
+        let log = tokio::fs::read(&path).await.unwrap_or_default();
+        if !log.is_empty() {
+            mj_core::runtime::spawn_blocking(move || -> io::Result<()> {
+                let mut stderr = io::stderr().lock();
+                stderr.write_all(&log)?;
+                if !log.ends_with(b"\n") {
+                    stderr.write_all(b"\n")?;
+                }
+                stderr.flush()
+            })
+            .await
+            .context("OpenSSH client log forwarding task failed")?
+            .context("write OpenSSH client log to stderr")?;
+        }
+    }
+    status
 }
 
 async fn capture_remote(
