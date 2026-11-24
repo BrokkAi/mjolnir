@@ -167,7 +167,7 @@ impl Controller {
     }
 
     pub fn deployment_capacity_targets(&self) -> Vec<targets::DeploymentCapacityTarget> {
-        use targets::{DeploymentCapacityKind, DeploymentCapacityTarget};
+        use targets::{DeploymentCapacityKind, DeploymentCapacityTarget, HostCapacityIdentity};
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
@@ -250,6 +250,7 @@ impl Controller {
                         }
                     }
                     targets.push(DeploymentCapacityTarget {
+                        stable_identity: None,
                         id: format!("aws:{target_id}"),
                         host: target_id.clone(),
                         target_ids: vec![target_id.clone()],
@@ -292,17 +293,24 @@ impl Controller {
                 }
                 session_paths.extend(self.session_storage_paths(target_id));
             }
+            paths.sort();
+            paths.dedup();
+            let local_template_paths = paths.clone();
+            push_unique(&mut paths, session_paths);
+            paths.sort();
+            paths.dedup();
             targets.push(DeploymentCapacityTarget {
+                stable_identity: Some(HostCapacityIdentity {
+                    connections: Vec::new(),
+                    local_template_paths,
+                }),
                 id: "local".into(),
                 host: "local".into(),
                 target_ids: local_ids,
                 kind: DeploymentCapacityKind::Host,
                 local: true,
                 probes: Vec::new(),
-                local_storage_paths: mj_core::targets::storage::capacity_storage_paths(
-                    paths,
-                    session_paths,
-                ),
+                local_storage_paths: paths,
                 storage_warning,
                 probe_error: None,
             });
@@ -310,8 +318,19 @@ impl Controller {
         targets.extend(
             ssh_hosts
                 .into_iter()
-                .map(
-                    |(host, (target_ids, connections))| DeploymentCapacityTarget {
+                .map(|(host, (target_ids, mut connections))| {
+                    for (_, paths, _, _) in &mut connections {
+                        paths.sort();
+                        paths.dedup();
+                    }
+                    DeploymentCapacityTarget {
+                        stable_identity: Some(HostCapacityIdentity {
+                            connections: connections
+                                .iter()
+                                .map(|(ssh, paths, nitro, _)| (ssh.clone(), *nitro, paths.clone()))
+                                .collect(),
+                            local_template_paths: Vec::new(),
+                        }),
                         id: format!("ssh:{host}"),
                         host,
                         target_ids,
@@ -320,10 +339,10 @@ impl Controller {
                         probes: connections
                             .iter()
                             .map(|(ssh, paths, nitro, sessions)| {
-                                let paths = mj_core::targets::storage::capacity_storage_paths(
-                                    paths.clone(),
-                                    sessions.clone(),
-                                );
+                                let mut paths = paths.clone();
+                                push_unique(&mut paths, sessions.clone());
+                                paths.sort();
+                                paths.dedup();
                                 if *nitro {
                                     targets::ssh_nitro_host_capacity_command(ssh, &paths)
                                 } else {
@@ -334,8 +353,8 @@ impl Controller {
                         local_storage_paths: Vec::new(),
                         storage_warning: None,
                         probe_error: None,
-                    },
-                ),
+                    }
+                }),
         );
         targets.sort_by(|left, right| left.id.cmp(&right.id));
         targets

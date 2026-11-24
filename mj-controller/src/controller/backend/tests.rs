@@ -1209,70 +1209,94 @@ fn deployment_capacity_targets_ignore_bare_session_churn() {
                     .insert(id.into(), id.into());
             }
             let baseline = controller.deployment_capacity_targets();
-            for id in ["s1", "s2"] {
-                let workspace = if local {
-                    data_dir().join("workspaces").join(id)
-                } else {
-                    PathBuf::from(prefix).join(id)
-                };
+            let paths = [
+                format!("{prefix}/nested/mount"),
+                "/mnt/data/repo/.mj/clones/s1/".into(),
+                "/mnt/data/repo/.mj/worktrees/s2".into(),
+                " /mnt/other/project with whitespace ".into(),
+            ];
+            for (index, path) in paths.iter().enumerate() {
+                let id = format!("session-{index}");
+                controller
+                    .state
+                    .environment_owners
+                    .insert(id.clone(), id.clone());
                 controller
                     .state
                     .sessions
-                    .insert(id.into(), session(id, &workspace.to_string_lossy()));
+                    .insert(id.clone(), session(&id, path));
             }
-            // A root-like prefix intentionally does not cover arbitrary paths.
-            if local || prefix != "/" {
-                assert_eq!(baseline, controller.deployment_capacity_targets());
+            let active = controller.deployment_capacity_targets();
+            assert_ne!(baseline, active);
+            assert!(baseline[0].same_schedule_identity(&active[0]));
+            for record in controller.state.sessions.values() {
+                let storage = mj_core::targets::storage::session_storage_paths(
+                    record.target.as_ref().unwrap(),
+                    &record.id,
+                    record.project_directory.as_deref(),
+                );
+                for path in storage.all() {
+                    if local {
+                        assert!(
+                            active[0]
+                                .local_storage_paths
+                                .iter()
+                                .any(|known| known == path),
+                            "{path:?}"
+                        );
+                    } else {
+                        assert!(
+                            active[0].probes[0]
+                                .args
+                                .iter()
+                                .any(|arg| arg.contains(path)),
+                            "{path:?}"
+                        );
+                    }
+                }
             }
+            let records: Vec<_> = controller.state.sessions.values().cloned().collect();
             controller.state.sessions.clear();
-            assert_eq!(baseline, controller.deployment_capacity_targets());
-
-            controller
-                .state
-                .sessions
-                .insert("s1".into(), session("s1", "/mnt/data/repo/.mj/clones/s1/"));
-            let one = controller.deployment_capacity_targets();
-            controller.state.sessions.insert(
-                "s2".into(),
-                session("s2", "/mnt/data/repo/.mj/worktrees/s2"),
-            );
-            assert_eq!(one, controller.deployment_capacity_targets());
-            let first = controller.state.sessions.remove("s1").unwrap();
-            assert_eq!(one, controller.deployment_capacity_targets());
-            controller.state.sessions.insert("s1".into(), first);
-            assert_eq!(one, controller.deployment_capacity_targets());
-            controller
-                .state
-                .sessions
-                .insert("external".into(), session("external", "/mnt/other/project"));
-            let external = controller.deployment_capacity_targets();
-            assert_ne!(one, external);
-            if local {
-                assert_eq!(
-                    external[0]
-                        .local_storage_paths
-                        .iter()
-                        .filter(|p| *p == "/mnt/data/repo")
-                        .count(),
-                    1
-                );
-                assert!(
-                    external[0]
-                        .local_storage_paths
-                        .contains(&"/mnt/other/project".into())
-                );
-            } else {
-                let command = external[0].probes[0].args.join(" ");
-                assert!(command.contains("/mnt/data/repo"));
-                assert!(command.contains("/mnt/other/project"));
-                assert!(!command.contains("/.mj/clones/"));
-                assert!(!command.contains("/.mj/worktrees/"));
+            for record in records.into_iter().rev() {
+                controller.state.sessions.insert(record.id.clone(), record);
             }
-            let ids: Vec<_> = controller.state.sessions.keys().cloned().collect();
-            for id in ids {
+            assert_eq!(active, controller.deployment_capacity_targets());
+            for id in controller
+                .state
+                .sessions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
                 controller.state.sessions.get_mut(&id).unwrap().state = SessionState::Stopped;
             }
             assert_eq!(baseline, controller.deployment_capacity_targets());
+            let mut changed = active[0].clone();
+            let identity = changed.stable_identity.as_mut().unwrap();
+            if local {
+                identity.local_template_paths.push("/new/template".into());
+            } else {
+                identity.connections[0].2.push("/new/template".into());
+            }
+            assert!(!active[0].same_schedule_identity(&changed));
+            if !local {
+                let mut changed = active[0].clone();
+                changed.stable_identity.as_mut().unwrap().connections[0].1 ^= true;
+                assert!(!active[0].same_schedule_identity(&changed));
+                let mut changed = active[0].clone();
+                changed.stable_identity.as_mut().unwrap().connections[0]
+                    .0
+                    .destination = "other".into();
+                assert!(!active[0].same_schedule_identity(&changed));
+            }
+            let mut fleet = active[0].clone();
+            fleet.stable_identity = None;
+            fleet.kind = targets::DeploymentCapacityKind::AwsFleet;
+            let mut changed = fleet.clone();
+            changed
+                .probes
+                .push(CommandSpec::new("new-instance", Vec::<String>::new()));
+            assert!(!fleet.same_schedule_identity(&changed));
         }
     }
 }
