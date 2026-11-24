@@ -1204,12 +1204,66 @@ func hostConfigFile(host CacheHost, executor core.CommandExecutor) (*string, err
 
 // LocalStoragePaths is the local directories mbx uses for its cache and
 // managed targets.
-func LocalStoragePaths() []string {
+func readLocalStorageConfig(path string) (*string, error) {
+	meta, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if meta.Mode()&os.ModeSymlink != 0 && os.IsNotExist(err) {
+			return nil, fmt.Errorf("read %s: dangling symlink: %w", path, err)
+		}
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("read %s: invalid UTF-8", path)
+	}
+	text := string(data)
+	return &text, nil
+}
+
+type mbxStorageConfig struct{ cache, targetRoot *string }
+
+func parseStorageConfig(text string) (mbxStorageConfig, error) {
+	var document map[string]any
+	var config mbxStorageConfig
+	if _, err := toml.Decode(text, &document); err != nil {
+		return config, fmt.Errorf("parse mbx storage configuration: %w", err)
+	}
+	if v, exists := document["cache_dir"]; exists {
+		value, ok := v.(string)
+		if !ok {
+			return config, fmt.Errorf("cache_dir must be a string")
+		}
+		config.cache = &value
+	}
+	if v, exists := document["target"]; exists {
+		target, ok := v.(map[string]any)
+		if !ok {
+			return config, fmt.Errorf("target must be a table")
+		}
+		if v, exists := target["root"]; exists {
+			value, ok := v.(string)
+			if !ok {
+				return config, fmt.Errorf("target.root must be a string")
+			}
+			config.targetRoot = &value
+		}
+	}
+	return config, nil
+}
+func LocalStoragePaths() ([]string, error) {
 	var configFile *string
+	configPath := "<unavailable>"
 	if directory, err := os.UserConfigDir(); err == nil {
-		if data, err := os.ReadFile(pathJoin(directory, "mbx/config.toml")); err == nil && utf8.Valid(data) {
-			text := string(data)
-			configFile = &text
+		configPath = pathJoin(directory, "mbx/config.toml")
+		configFile, err = readLocalStorageConfig(configPath)
+		if err != nil {
+			return nil, err
 		}
 	}
 	nonEmpty := func(name string) *string {
@@ -1223,30 +1277,27 @@ func LocalStoragePaths() []string {
 		cache := pathJoin(directory, "mbx")
 		defaultCache = &cache
 	}
-	return resolveLocalStoragePaths(nonEmpty("MBX_CACHE_DIR"), nonEmpty("MBX_TARGET_ROOT"), configFile, defaultCache)
+	paths, err := resolveLocalStoragePaths(nonEmpty("MBX_CACHE_DIR"), nonEmpty("MBX_TARGET_ROOT"), configFile, defaultCache)
+	if err != nil {
+		return nil, fmt.Errorf("resolve mbx config %s: %w", configPath, err)
+	}
+	return paths, nil
 }
 
-func resolveLocalStoragePaths(cacheOverride, targetRootOverride, configFile, defaultCache *string) []string {
-	var document map[string]any
+func resolveLocalStoragePaths(cacheOverride, targetRootOverride, configFile, defaultCache *string) ([]string, error) {
+	var config mbxStorageConfig
 	if configFile != nil {
-		if _, err := toml.Decode(*configFile, &document); err != nil {
-			document = nil
+		var err error
+		config, err = parseStorageConfig(*configFile)
+		if err != nil {
+			return nil, err
 		}
 	}
-	var configuredCache *string
-	if value, ok := document["cache_dir"].(string); ok {
-		configuredCache = &value
-	}
-	cache := firstPresent(cacheOverride, configuredCache, defaultCache)
+	cache := firstPresent(cacheOverride, config.cache, defaultCache)
 	if cache == nil {
-		return []string{}
+		return []string{}, nil
 	}
-	var configuredTargetRoot *string
-	if target, ok := document["target"].(map[string]any); ok {
-		if value, ok := target["root"].(string); ok {
-			configuredTargetRoot = &value
-		}
-	}
+	configuredTargetRoot := config.targetRoot
 	targetRoot := pathJoin(*cache, "targets")
 	if root := firstPresent(targetRootOverride, configuredTargetRoot); root != nil {
 		if filepath.IsAbs(*root) {
@@ -1255,7 +1306,7 @@ func resolveLocalStoragePaths(cacheOverride, targetRootOverride, configFile, def
 			targetRoot = pathJoin(*cache, *root)
 		}
 	}
-	return []string{*cache, targetRoot}
+	return []string{*cache, targetRoot}, nil
 }
 
 // firstPresent is Rust's `Option::or` chain: the first value that is set.
@@ -1271,19 +1322,15 @@ func firstPresent(values ...*string) *string {
 // relocatedTargetRoot is the `[target] root` a host configuration sets, when
 // it lies outside the cache directory and therefore needs its own mount.
 func relocatedTargetRoot(configFile string, directory string) *string {
-	var document map[string]any
-	if _, err := toml.Decode(configFile, &document); err != nil {
+	config, err := parseStorageConfig(configFile)
+	if err != nil {
 		slog.Warn(fmt.Sprintf("the host mbx configuration is unreadable: %s", err))
 		return nil
 	}
-	target, ok := document["target"].(map[string]any)
-	if !ok {
+	if config.targetRoot == nil {
 		return nil
 	}
-	root, ok := target["root"].(string)
-	if !ok {
-		return nil
-	}
+	root := *config.targetRoot
 	joined := pathJoin(directory, root)
 	if pathStartsWith(joined, directory) {
 		return nil

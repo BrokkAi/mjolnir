@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -546,17 +548,25 @@ func TestLocalStoragePathsFollowMbxCacheAndTargetRootResolution(t *testing.T) {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	}
-	check(resolveLocalStoragePaths(nil, nil,
+	resolve := func(a, b, c, d *string) []string {
+		paths, err := resolveLocalStoragePaths(a, b, c, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return paths
+	}
+
+	check(resolve(nil, nil,
 		stringPointer("cache_dir = \"/mnt/optane/mbx-cache\"\n[target]\nroot = \"/mnt/optane/mbx-targets\"\n"),
 		&defaultCache),
 		"/mnt/optane/mbx-cache", "/mnt/optane/mbx-targets")
-	check(resolveLocalStoragePaths(nil, nil,
+	check(resolve(nil, nil,
 		stringPointer("cache_dir = \"/mnt/optane/mbx-cache\"\n[target]\nroot = \"views\"\n"),
 		&defaultCache),
 		"/mnt/optane/mbx-cache", "/mnt/optane/mbx-cache/views")
-	check(resolveLocalStoragePaths(nil, nil, nil, &defaultCache),
+	check(resolve(nil, nil, nil, &defaultCache),
 		defaultCache, pathJoin(defaultCache, "targets"))
-	check(resolveLocalStoragePaths(stringPointer("/env/cache"), stringPointer("views"),
+	check(resolve(stringPointer("/env/cache"), stringPointer("views"),
 		stringPointer("cache_dir = \"/file/cache\"\n[target]\nroot = \"file-views\"\n"),
 		&defaultCache),
 		"/env/cache", "/env/cache/views")
@@ -1014,5 +1024,26 @@ func TestThePreviewReportsNativeCacheValuesWithoutCreatingDirectories(t *testing
 	// mkdir branch, but do not execute a host mkdir command.
 	if slices.ContainsFunc(probes.ran(), func(line string) bool { return strings.HasPrefix(line, "mkdir ") }) {
 		t.Fatalf("%q", probes.ran())
+	}
+}
+
+// Hard-won: #1597: invalid config silently measured default filesystems.
+func TestStorageConfigRejectsBrokenFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if text, err := readLocalStorageConfig(path); err != nil || text != nil {
+		t.Fatalf("missing: %v %v", text, err)
+	}
+	for _, text := range []string{"[", "cache_dir = 3", "[target]\nroot = 3", "target = 3"} {
+		if _, err := resolveLocalStoragePaths(stringPointer("/override"), nil, &text, nil); err == nil {
+			t.Fatalf("accepted %q", text)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(path+"-missing", path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readLocalStorageConfig(path); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("dangling: %v", err)
+		}
 	}
 }

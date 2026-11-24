@@ -1065,11 +1065,62 @@ fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result
     configuration::read_file(host, &directory.join("config.toml"), executor)
 }
 
+#[derive(Default)]
+struct MbxStorageConfig {
+    cache: Option<PathBuf>,
+    target_root: Option<PathBuf>,
+}
+
+fn parse_storage_config(text: &str) -> Result<MbxStorageConfig> {
+    let document: toml::Value = toml::from_str(text).context("parse mbx storage configuration")?;
+    let string_path = |value: &toml::Value, name: &str| -> Result<PathBuf> {
+        value
+            .as_str()
+            .map(PathBuf::from)
+            .with_context(|| format!("{name} must be a string"))
+    };
+    let cache = document
+        .get("cache_dir")
+        .map(|v| string_path(v, "cache_dir"))
+        .transpose()?;
+    let target_root = if let Some(target) = document.get("target") {
+        let target = target.as_table().context("target must be a table")?;
+        target
+            .get("root")
+            .map(|v| string_path(v, "target.root"))
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(MbxStorageConfig { cache, target_root })
+}
+
+fn read_local_storage_config(path: &Path) -> Result<Option<String>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    std::fs::read_to_string(path).map(Some).map_err(|error| {
+        let dangling =
+            meta.file_type().is_symlink() && error.kind() == std::io::ErrorKind::NotFound;
+        let context = if dangling {
+            format!("read {}: dangling symlink", path.display())
+        } else {
+            format!("read {}", path.display())
+        };
+        anyhow::Error::new(error).context(context)
+    })
+}
+
 /// The local directories mbx uses for its cache and managed targets.
-pub fn local_storage_paths() -> Vec<PathBuf> {
-    let config_file = dirs::config_dir()
-        .map(|directory| directory.join("mbx/config.toml"))
-        .and_then(|path| std::fs::read_to_string(path).ok());
+pub fn local_storage_paths() -> Result<Vec<PathBuf>> {
+    let config_path = dirs::config_dir().map(|directory| directory.join("mbx/config.toml"));
+    let config_file = config_path
+        .as_deref()
+        .map(read_local_storage_config)
+        .transpose()?
+        .flatten();
     let cache_override = std::env::var_os("MBX_CACHE_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -1084,6 +1135,15 @@ pub fn local_storage_paths() -> Vec<PathBuf> {
         config_file.as_deref(),
         default_cache,
     )
+    .with_context(|| {
+        format!(
+            "resolve mbx config {}",
+            config_path
+                .as_deref()
+                .unwrap_or(Path::new("<unavailable>"))
+                .display()
+        )
+    })
 }
 
 fn resolve_local_storage_paths(
@@ -1091,22 +1151,15 @@ fn resolve_local_storage_paths(
     target_root_override: Option<PathBuf>,
     config_file: Option<&str>,
     default_cache: Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let document = config_file.and_then(|text| toml::from_str::<toml::Value>(text).ok());
-    let configured_cache = document
-        .as_ref()
-        .and_then(|document| document.get("cache_dir"))
-        .and_then(toml::Value::as_str)
-        .map(PathBuf::from);
-    let Some(cache) = cache_override.or(configured_cache).or(default_cache) else {
-        return Vec::new();
+) -> Result<Vec<PathBuf>> {
+    let config = config_file
+        .map(parse_storage_config)
+        .transpose()?
+        .unwrap_or_default();
+    let Some(cache) = cache_override.or(config.cache).or(default_cache) else {
+        return Ok(Vec::new());
     };
-    let configured_target_root = document
-        .as_ref()
-        .and_then(|document| document.get("target"))
-        .and_then(|target| target.get("root"))
-        .and_then(toml::Value::as_str)
-        .map(PathBuf::from);
+    let configured_target_root = config.target_root;
     let target_root = target_root_override
         .or(configured_target_root)
         .map(|root| {
@@ -1117,16 +1170,16 @@ fn resolve_local_storage_paths(
             }
         })
         .unwrap_or_else(|| cache.join("targets"));
-    vec![cache, target_root]
+    Ok(vec![cache, target_root])
 }
 
 /// The `[target] root` a host configuration sets, when it lies outside the
 /// cache directory and therefore needs its own mount.
 fn relocated_target_root(config_file: &str, directory: &Path) -> Option<PathBuf> {
-    let document: toml::Value = toml::from_str(config_file)
-        .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error}"))
+    let config = parse_storage_config(config_file)
+        .map_err(|error| tracing::warn!("the host mbx configuration is unreadable: {error:#}"))
         .ok()?;
-    let root = document.get("target")?.get("root")?.as_str()?;
+    let root = config.target_root?;
     let root = directory.join(root);
     (!root.starts_with(directory)).then_some(root)
 }
@@ -2033,6 +2086,30 @@ mod tests {
         );
     }
 
+    // Hard-won: #1597: broken configuration silently measured default filesystems.
+    #[test]
+    fn local_storage_config_reports_broken_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert!(read_local_storage_config(&path).unwrap().is_none());
+        for text in ["[", "cache_dir = 3", "[target]\nroot = 3", "target = 3"] {
+            std::fs::write(&path, text).unwrap();
+            let text = read_local_storage_config(&path).unwrap().unwrap();
+            assert!(
+                resolve_local_storage_paths(Some("/override".into()), None, Some(&text), None)
+                    .is_err()
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(directory.path().join("missing"), &path).unwrap();
+            let error = format!("{:#}", read_local_storage_config(&path).unwrap_err());
+            assert!(error.contains(&path.display().to_string()));
+            assert!(error.contains("dangling symlink"));
+        }
+    }
+
     #[test]
     fn local_storage_paths_follow_mbx_cache_and_target_root_resolution() {
         let default_cache = PathBuf::from("/home/dev/.cache/mbx");
@@ -2045,7 +2122,8 @@ mod tests {
                      [target]\nroot = \"/mnt/optane/mbx-targets\"\n",
                 ),
                 Some(default_cache.clone()),
-            ),
+            )
+            .unwrap(),
             vec![
                 PathBuf::from("/mnt/optane/mbx-cache"),
                 PathBuf::from("/mnt/optane/mbx-targets"),
@@ -2057,14 +2135,15 @@ mod tests {
                 None,
                 Some("cache_dir = \"/mnt/optane/mbx-cache\"\n[target]\nroot = \"views\"\n"),
                 Some(default_cache.clone()),
-            ),
+            )
+            .unwrap(),
             vec![
                 PathBuf::from("/mnt/optane/mbx-cache"),
                 PathBuf::from("/mnt/optane/mbx-cache/views"),
             ]
         );
         assert_eq!(
-            resolve_local_storage_paths(None, None, None, Some(default_cache.clone())),
+            resolve_local_storage_paths(None, None, None, Some(default_cache.clone())).unwrap(),
             vec![default_cache.clone(), default_cache.join("targets")]
         );
         assert_eq!(
@@ -2073,7 +2152,8 @@ mod tests {
                 Some(PathBuf::from("views")),
                 Some("cache_dir = \"/file/cache\"\n[target]\nroot = \"file-views\"\n"),
                 Some(default_cache),
-            ),
+            )
+            .unwrap(),
             vec![
                 PathBuf::from("/env/cache"),
                 PathBuf::from("/env/cache/views")

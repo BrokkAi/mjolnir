@@ -259,6 +259,7 @@ fn documentation_dashboard() -> DashboardState {
         local: true,
         probes: Vec::new(),
         local_storage_paths: Vec::new(),
+        storage_warning: None,
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(
