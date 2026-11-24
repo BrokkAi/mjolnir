@@ -14,15 +14,25 @@
 package profilecatalog
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
 	"math"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/workerstaging"
 )
 
 // SubagentOptions is the pre-session choice of sub-agent models and
@@ -30,7 +40,13 @@ import (
 // delegation. Discovery remains supervised and cached; independent profiles
 // run concurrently.
 func SubagentOptions(ctx context.Context, parent string, model *string) (core.SubagentOptions, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs subagent_options")
+	config, err := core.ConfigLoad()
+	if err != nil {
+		return core.SubagentOptions{}, err
+	}
+	return SubagentOptionsWith(ctx, &config, parent, model, func(ctx context.Context, id string, model *string) (core.ProfileConfig, error) {
+		return Discover(ctx, id, model, false)
+	})
 }
 
 // DiscoverFor is the catalog's probe. `refresh` probes bypass the
@@ -54,7 +70,58 @@ func DiscoverFor(ctx context.Context, config core.Config, id string, model *stri
 // Subtle is optional; straightforward is not. A YOLO target reads its own
 // set of choices.
 func ValidateSessionSubagentPolicy(ctx context.Context, catalog *ProfileCatalog, config *core.Config, profileID string, policy *core.SubagentPolicy, targetID string) error {
-	panic("unported: mj-profile-catalog/src/profile_config.rs validate_session_subagent_policy")
+	refuse := func(message string) error {
+		return core.RefusalUnusable(message).WithCode(core.ChoiceUnavailableCode)
+	}
+	_ = targetID
+	profile, err := config.NamedProfile(profileID)
+	if err != nil {
+		return err
+	}
+	kind := profile.Kind
+	// None asks for no Mjolnir sub-agents at all, so any harness accepts it;
+	// only a Mjolnir policy needs the delegation tools.
+	if !kind.SupportsDelegationTools() && policy.UsesMjolnir() {
+		return refuse(fmt.Sprintf(
+			"%s sessions use their harness's own delegation; Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile",
+			kind.DisplayName()))
+	}
+	if policy.IsNative() && !kind.HasNativeSubagents() {
+		return core.RefusalUnusable(fmt.Sprintf(
+			"%s has no sub-agents of its own, so Native delegation does nothing for it; choose Mjolnir or None",
+			kind.DisplayName()))
+	}
+	if !policy.UsesMjolnir() {
+		return nil
+	}
+	if len(config.Subagents.EffectiveChoices(*policy, core.SubagentTaskTypeStraightforward)) == 0 {
+		return refuse("Mjolnir requires [subagents.straightforward] or --subagent-straightforward <MODEL>")
+	}
+	taskTypes := []core.SubagentTaskType{core.SubagentTaskTypeStraightforward, core.SubagentTaskTypeSubtle}
+	models := map[string]bool{}
+	for _, taskType := range taskTypes {
+		for _, choice := range config.Subagents.EffectiveChoices(*policy, taskType) {
+			models[choice.Model] = true
+		}
+	}
+	options, err := catalog.AdmissionOptions(ctx, config, profileID, models)
+	if err != nil {
+		return err
+	}
+	for _, taskType := range taskTypes {
+		choices := config.Subagents.EffectiveChoices(*policy, taskType)
+		if len(choices) == 0 {
+			continue
+		}
+		section := "subagents." + taskType.ID()
+		for _, choice := range choices {
+			offered := options[choice.Model]
+			if err := offered.Validate(&choice); err != nil {
+				return refuse(fmt.Sprintf("[%s]: %s", section, err.Error()))
+			}
+		}
+	}
+	return nil
 }
 
 // SubagentOptionsWith gathers the sub-agent options of every enabled
@@ -62,7 +129,109 @@ func ValidateSessionSubagentPolicy(ctx context.Context, catalog *ProfileCatalog,
 // selected (nil for the profile's default). Rust's generic `F: Fn(String,
 // Option<String>) -> Future<Output = Result<ProfileConfig>>`.
 func SubagentOptionsWith(ctx context.Context, config *core.Config, parent string, model *string, probe func(ctx context.Context, id string, model *string) (core.ProfileConfig, error)) (core.SubagentOptions, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs subagent_options_with")
+	if _, err := config.NamedProfile(parent); err != nil {
+		return core.SubagentOptions{}, err
+	}
+	candidates := []string{}
+	for _, id := range slices.Sorted(maps.Keys(config.Profiles)) {
+		if config.Profiles[id].Enabled {
+			candidates = append(candidates, id)
+		}
+	}
+	options := core.SubagentOptions{
+		Models:      []core.SessionConfigChoice{},
+		Efforts:     []core.SessionConfigChoice{},
+		Unavailable: []string{},
+	}
+	// Rust's join_all: every profile's default probe runs concurrently, and
+	// the results keep the profiles' order.
+	type defaultResult struct {
+		choices core.ProfileConfig
+		err     error
+	}
+	defaults := make([]defaultResult, len(candidates))
+	var waiting sync.WaitGroup
+	for index, id := range candidates {
+		waiting.Go(func() {
+			choices, err := probe(ctx, id, nil)
+			if err == nil {
+				offer := config.Profiles[id].ModelOffer()
+				choices = choices.RestrictedTo(&offer)
+			}
+			defaults[index] = defaultResult{choices: choices, err: err}
+		})
+	}
+	waiting.Wait()
+	models := []core.SessionConfigChoice{}
+	for _, result := range defaults {
+		if result.err == nil {
+			models = append(models, result.choices.Models...)
+		}
+	}
+	var identity *string
+	if model != nil {
+		resolved := core.ModelID(models, *model)
+		identity = &resolved
+	}
+	type optionResult struct {
+		models     []core.SessionConfigChoice
+		efforts    []core.SessionConfigChoice
+		effortsErr error
+		err        error
+	}
+	results := make([]optionResult, len(candidates))
+	for index, id := range candidates {
+		waiting.Go(func() {
+			result := defaults[index]
+			if result.err != nil {
+				results[index] = optionResult{err: result.err}
+				return
+			}
+			choices := result.choices
+			efforts := []core.SessionConfigChoice{}
+			var effortsErr error
+			if identity != nil {
+				preferred := *identity
+				if model != nil {
+					preferred = *model
+				}
+				if offer, ok := core.Offer(choices.Models, *identity, preferred); ok {
+					if choices.Model != nil && *choices.Model == offer.Value && len(choices.Efforts) > 0 {
+						efforts = choices.Efforts
+					} else {
+						value := offer.Value
+						specific, err := probe(ctx, id, &value)
+						efforts, effortsErr = specific.Efforts, err
+					}
+				}
+			}
+			// Spawn gets model availability from the default catalogue.
+			// A probe after selecting a model describes its efforts only.
+			results[index] = optionResult{models: choices.Models, efforts: efforts, effortsErr: effortsErr}
+		})
+	}
+	waiting.Wait()
+	for index, result := range results {
+		id := candidates[index]
+		if result.err != nil {
+			options.Unavailable = append(options.Unavailable, fmt.Sprintf("%s: %s", id, result.err.Error()))
+			continue
+		}
+		options.Models = append(options.Models, result.models...)
+		if result.effortsErr != nil {
+			options.Unavailable = append(options.Unavailable, fmt.Sprintf("%s: %s", id, result.effortsErr.Error()))
+			continue
+		}
+		for _, choice := range result.efforts {
+			if !slices.ContainsFunc(options.Efforts, func(existing core.SessionConfigChoice) bool {
+				return existing.Value == choice.Value
+			}) {
+				options.Efforts = append(options.Efforts, choice)
+			}
+		}
+	}
+	options.Models = core.MergedChoices(options.Models)
+	return options, nil
 }
 
 // probeLock serializes the probes of one profile and lets CancelAll stop
@@ -120,7 +289,102 @@ func serialized(ctx context.Context, profileID string, job func(cancelled *atomi
 // profile's lock. ctx only abandons the caller's wait; the supervisor and
 // its job carry on.
 func serializedUntil[T any](ctx context.Context, profileID string, cancellation context.Context, job func(cancelled *atomic.Bool) (T, error)) (T, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs serialized_until")
+	probes.mu.Lock()
+	if probes.locks == nil {
+		probes.locks = map[string]*probeLock{}
+	}
+	for id, lock := range probes.locks {
+		if lock.holders == 0 {
+			lock.cancel()
+			delete(probes.locks, id)
+		}
+	}
+	lock := probes.locks[profileID]
+	if lock == nil {
+		lock = newProbeLock()
+		probes.locks[profileID] = lock
+	}
+	lock.holders++
+	probes.mu.Unlock()
+	type result struct {
+		value T
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := superviseProbe(lock, cancellation, job)
+		probes.mu.Lock()
+		lock.holders--
+		probes.mu.Unlock()
+		done <- result{value: value, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.value, result.err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
+}
+
+// superviseProbe is serializedUntil's supervisor: it takes the profile's
+// gate, runs job on its own goroutine, and sets job's cancelled flag when
+// cancellation or CancelAll ends it, waiting for job before it releases the
+// gate.
+func superviseProbe[T any](lock *probeLock, cancellation context.Context, job func(cancelled *atomic.Bool) (T, error)) (T, error) {
+	var zero T
+	// Rust's biased select: the definition's retirement, then CancelAll,
+	// then the gate.
+	if cancellation.Err() != nil {
+		return zero, errors.New("profile definition retired")
+	}
+	if lock.cancellation.Err() != nil {
+		return zero, errors.New("profile discovery cancelled")
+	}
+	select {
+	case <-cancellation.Done():
+		return zero, errors.New("profile definition retired")
+	case <-lock.cancellation.Done():
+		return zero, errors.New("profile discovery cancelled")
+	case lock.gate <- struct{}{}:
+	}
+	defer func() { <-lock.gate }()
+	cancelled := new(atomic.Bool)
+	// Rust's CancelOnDrop: the blocking job is told to stop on every exit,
+	// before the profile lock is released.
+	defer cancelled.Store(true)
+	type result struct {
+		value T
+		err   error
+	}
+	task := make(chan result, 1)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				task <- result{err: fmt.Errorf("profile discovery task panicked: %v", recovered)}
+			}
+		}()
+		value, err := job(cancelled)
+		task <- result{value: value, err: err}
+	}()
+	var outcome result
+	select {
+	case <-cancellation.Done():
+		cancelled.Store(true)
+		outcome = <-task
+	case <-lock.cancellation.Done():
+		cancelled.Store(true)
+		outcome = <-task
+	case outcome = <-task:
+	}
+	if outcome.err != nil {
+		if DiscoveryIsUnsupported(outcome.err) {
+			slog.Debug("profile discovery unsupported", "error", outcome.err.Error())
+		} else {
+			slog.Warn("profile discovery failed", "error", outcome.err.Error())
+		}
+	}
+	return outcome.value, outcome.err
 }
 
 // ObservationCheck is what a session's worker must show before its observed
@@ -155,7 +419,61 @@ func ObservationCheckFor(target core.TargetLocator) (ObservationCheck, bool) {
 // Observe caches the choices a session's worker reports, when check allows
 // it. Returns whether anything was cached.
 func Observe(ctx context.Context, profileID string, workerBuild string, state core.SharedSnapshot[core.RelayOperationalState], check ObservationCheck) (bool, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs observe")
+	stored := new(atomic.Bool)
+	_, err := serialized(ctx, profileID, func(cancelled *atomic.Bool) (core.ProfileConfig, error) {
+		config, err := core.ConfigLoad()
+		if err != nil {
+			return core.ProfileConfig{}, err
+		}
+		profile, err := config.NamedProfile(profileID)
+		if err != nil {
+			return core.ProfileConfig{}, err
+		}
+		operational := state.Get()
+		facts := core.AcpSessionFactsFromOperational(profile.Kind, operational.Config, operational.ConfigOptions, operational.Modes)
+		var model *string
+		if current, ok := facts.CurrentModel(); ok {
+			model = &current
+		}
+		choices := core.ProfileConfig{
+			Model:      model,
+			Models:     core.SessionConfigChoices(operational.ConfigOptions, "model"),
+			Efforts:    core.SessionConfigChoices(operational.ConfigOptions, "effort"),
+			ObservedAt: time.Now().Unix(),
+		}
+		// Worker observations do not carry authentication provenance.
+		// Claude's setup-token and login catalogues differ, so only probes
+		// may cache it. Muse catalogues are never cached at all: its models
+		// and efforts change server-side without a managed-pin bump, so a
+		// cached copy hides options people expect.
+		if profile.Kind == core.HarnessKindClaude || profile.Kind == core.HarnessKindMuse {
+			return choices, nil
+		}
+		fingerprint := fingerprint(&profile)
+		switch check {
+		case ObservationCheckProbeBuild:
+			executor := core.NewCancellableProcessExecutor(cancelled).WithDeadline(30 * time.Second)
+			if _, err := workerstaging.WorkerBinaryFor(&core.TargetsTargetLocator{Kind: core.TargetsTargetLocatorLocalBare}, executor); err != nil {
+				return core.ProfileConfig{}, err
+			}
+			if core.WorkerBuildID() != workerBuild {
+				return choices, nil
+			}
+		case ObservationCheckNoProbe:
+			// Nothing else will ever fill the profile's default entry, so
+			// the first session observed stands in for it.
+			if _, ok := loadChoices(profileID, nil, fingerprint); !ok {
+				storeChoices(profileID, fingerprint, nil, &choices)
+			}
+		}
+		storeChoices(profileID, fingerprint, choices.Model, &choices)
+		stored.Store(true)
+		return choices, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return stored.Load(), nil
 }
 
 // fingerprint is a profile's cache identity, which follows configured
@@ -191,7 +509,51 @@ type Discovery struct {
 }
 
 func discoverWithProvenance(config *core.Config, profileID string, model *string, refresh bool, cancelled *atomic.Bool) (Discovery, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs discover_with_provenance")
+	if cancelled.Load() {
+		return Discovery{}, errors.New("profile discovery cancelled")
+	}
+	profile, err := config.NamedProfile(profileID)
+	if err != nil {
+		return Discovery{}, err
+	}
+	environment := maps.Clone(profile.Environment.Resolved())
+	if environment == nil {
+		environment = map[string]string{}
+	}
+	_ = workerstaging.ApplyClaudeSetupToken(environment, profile.Kind, core.ClaudeOauthTokenPath(profileID))
+	// Muse models and efforts change server-side without a managed-pin bump,
+	// so a cached catalogue hides options people expect. There is no point
+	// caching it: always probe the installation that actually runs, and
+	// never write the result back.
+	if profile.Kind == core.HarnessKindMuse {
+		choices, err := probeProfile(profileID, &profile, environment, model, cancelled)
+		if err != nil {
+			return Discovery{}, err
+		}
+		return Discovery{Choices: choices, Probed: true}, nil
+	}
+	fingerprint := fingerprint(&profile)
+	return resolveCachedDiscovery(
+		refresh,
+		IsCurrent,
+		func() (*core.ProfileConfig, error) {
+			choices, ok := loadChoices(profileID, model, fingerprint)
+			if !ok {
+				return nil, nil
+			}
+			return &choices, nil
+		},
+		func() (core.ProfileConfig, error) {
+			return probeProfile(profileID, &profile, maps.Clone(environment), model, cancelled)
+		},
+		func(choices *core.ProfileConfig) error {
+			if model == nil || (choices.Model != nil && *choices.Model == *model) {
+				storeChoices(profileID, fingerprint, model, choices)
+			}
+			storeChoices(profileID, fingerprint, choices.Model, choices)
+			return nil
+		},
+	)
 }
 
 // ChoicesLifetime is how long discovered choices are served before
@@ -223,7 +585,31 @@ func isCurrentAt(choices *core.ProfileConfig, now int64) bool {
 // from a cache row that was read earlier. load answers nil when nothing is
 // cached.
 func resolveCachedDiscovery(refresh bool, current func(choices *core.ProfileConfig) bool, load func() (*core.ProfileConfig, error), probe func() (core.ProfileConfig, error), save func(choices *core.ProfileConfig) error) (Discovery, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs resolve_cached_discovery")
+	var cached *core.ProfileConfig
+	if !refresh {
+		loaded, err := load()
+		if err != nil {
+			return Discovery{}, err
+		}
+		cached = loaded
+	}
+	if cached != nil && current(cached) {
+		return Discovery{Choices: cloneChoices(*cached), Probed: false}, nil
+	}
+	choices, err := probe()
+	if err == nil {
+		if err := save(&choices); err != nil {
+			return Discovery{}, err
+		}
+		return Discovery{Choices: choices, Probed: true}, nil
+	}
+	if cached == nil {
+		return Discovery{}, err
+	}
+	if !DiscoveryIsUnsupported(err) {
+		slog.Warn("profile discovery failed; serving out-of-date cached choices", "error", err.Error())
+	}
+	return Discovery{Choices: *cached, Probed: false}, nil
 }
 
 // DiscoveryUnsupported is discovery that no retry can make succeed: this
@@ -243,7 +629,92 @@ func DiscoveryIsUnsupported(err error) bool {
 }
 
 func probeProfile(profileID string, profile *core.HarnessProfile, environment map[string]string, model *string, cancelled *atomic.Bool) (core.ProfileConfig, error) {
-	panic("unported: mj-profile-catalog/src/profile_config.rs probe_profile")
+	// Checked first, so a profile that is also not signed in is still
+	// reported as the failure no retry can fix.
+	if !core.HostRunsWorkers {
+		return core.ProfileConfig{}, DiscoveryUnsupported{}
+	}
+	if err := profile.EnsureReady(profileID); err != nil {
+		return core.ProfileConfig{}, err
+	}
+	root, err := os.MkdirTemp("", ".tmp")
+	if err != nil {
+		return core.ProfileConfig{}, fmt.Errorf("create private profile discovery directory: %w", err)
+	}
+	// Rust's TempDir drop. The executor below has waited for the worker, and
+	// killed its process group when cancelled, before this removes it.
+	defer os.RemoveAll(root)
+	// The staged home and the probe spec carry the profile's logins and
+	// environment.
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil {
+			return core.ProfileConfig{}, err
+		}
+	}
+	// Muse and OpenCode read `$XDG_CONFIG_HOME/<id>`, so their staged home
+	// must carry that leaf name or the harness never sees the staged login.
+	home := profile.Kind.HomeFromEnvironment(filepath.Join(root, "profile"))
+	if err := workerstaging.StageProfileWithCatalog(profileID, profile, home, workerstaging.FetchCatalogOverHTTPS, workerstaging.SharedCatalogCache{}); err != nil {
+		return core.ProfileConfig{}, err
+	}
+	cwd := filepath.Join(root, "workspace")
+	if err := os.Mkdir(cwd, 0o777); err != nil {
+		return core.ProfileConfig{}, err
+	}
+	executor := core.NewCancellableProcessExecutor(cancelled).WithDeadline(300 * time.Second)
+	worker, err := workerstaging.WorkerBinaryFor(&core.TargetsTargetLocator{Kind: core.TargetsTargetLocatorLocalBare, WorkerRoot: root}, executor)
+	if err != nil {
+		return core.ProfileConfig{}, err
+	}
+	// Harnesses leave files in their temporary directory: OpenCode's Bun
+	// runtime extracts native libraries there on every start and never
+	// removes them. One inside the probe's root goes away with the probe.
+	temporary := filepath.Join(root, "tmp")
+	if err := os.Mkdir(temporary, 0o777); err != nil {
+		return core.ProfileConfig{}, err
+	}
+	if environment == nil {
+		environment = map[string]string{}
+	}
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		environment[name] = temporary
+	}
+	excludedEnvironment := profile.ExcludeHarnessEnvironment(environment)
+	spec := core.ProfileProbeSpec{
+		Harness:             profile.Kind,
+		ProfileHome:         home,
+		Environment:         environment,
+		ExcludedEnvironment: excludedEnvironment,
+		Cwd:                 cwd,
+		Model:               model,
+		HarnessRuntime:      core.LocalHarnessRuntime(),
+	}
+	path := filepath.Join(root, "probe.json")
+	body, err := json.Marshal(spec)
+	if err != nil {
+		return core.ProfileConfig{}, err
+	}
+	if err := core.AtomicWrite(path, body); err != nil {
+		return core.ProfileConfig{}, err
+	}
+	command := core.NewCommandSpec(worker, []string{"worker", "discover-config", "--spec", path}).
+		WithPurpose("discover profile configuration")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return core.ProfileConfig{}, err
+	}
+	diagnostics := strings.TrimSpace(strings.ToValidUTF8(string(output.Stderr), "�"))
+	if len(output.Stderr) > 0 {
+		slog.Info("profile discovery worker diagnostics", "harness", profile.Kind, "diagnostics", diagnostics)
+	}
+	if output.Status != 0 {
+		return core.ProfileConfig{}, fmt.Errorf("profile discovery failed: %s", diagnostics)
+	}
+	var choices core.ProfileConfig
+	if err := json.Unmarshal(output.Stdout, &choices); err != nil {
+		return core.ProfileConfig{}, fmt.Errorf("decode discovered configuration: %w", err)
+	}
+	return choices, nil
 }
 
 // choiceKey is Rust's `ChoiceKey`: discovered choices by profile, model
@@ -272,7 +743,24 @@ func newChoiceKey(profile string, model *string, fingerprint string) choiceKey {
 
 // AdvertisedModels is each profile's most recently observed model list.
 func AdvertisedModels() map[string][]core.SessionConfigChoice {
-	panic("unported: mj-profile-catalog/src/profile_config.rs advertised_models")
+	choiceCache.mu.Lock()
+	defer choiceCache.mu.Unlock()
+	keys := slices.SortedFunc(maps.Keys(choiceCache.choices), func(a, b choiceKey) int {
+		return cmp.Or(cmp.Compare(a.profile, b.profile), cmp.Compare(a.model, b.model), cmp.Compare(a.fingerprint, b.fingerprint))
+	})
+	newest := map[string]core.ProfileConfig{}
+	for _, key := range keys {
+		observed := choiceCache.choices[key]
+		entry, ok := newest[key.profile]
+		if !ok || observed.ObservedAt > entry.ObservedAt {
+			newest[key.profile] = observed
+		}
+	}
+	models := make(map[string][]core.SessionConfigChoice, len(newest))
+	for profile, observed := range newest {
+		models[profile] = slices.Clone(observed.Models)
+	}
+	return models
 }
 
 // loadChoices is Rust's `load`; false is None.
