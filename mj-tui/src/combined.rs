@@ -2498,6 +2498,7 @@ mod tests {
                 .map(|index| {
                     let host = format!("host-{index:02}");
                     mj_core::targets::DeploymentCapacityTarget {
+                        stable_identity: None,
                         id: host.clone(),
                         host,
                         local: false,

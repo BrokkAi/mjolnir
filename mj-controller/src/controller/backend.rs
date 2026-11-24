@@ -167,7 +167,7 @@ impl Controller {
     }
 
     pub fn deployment_capacity_targets(&self) -> Vec<targets::DeploymentCapacityTarget> {
-        use targets::{DeploymentCapacityKind, DeploymentCapacityTarget};
+        use targets::{DeploymentCapacityKind, DeploymentCapacityTarget, HostCapacityIdentity};
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
@@ -175,7 +175,10 @@ impl Controller {
         // sandbox, whose memory total is the engine's pool. A host shared
         // with other runtimes keeps its physical memory as the total, because
         // their sessions draw on all of it.
-        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
+        type HostProbes = (
+            Vec<String>,
+            Vec<(SshTarget, Vec<String>, bool, Vec<String>)>,
+        );
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
@@ -198,11 +201,11 @@ impl Controller {
                     let position = match entry
                         .1
                         .iter()
-                        .position(|(known, _, _)| *known == connection)
+                        .position(|(known, _, _, _)| *known == connection)
                     {
                         Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new(), true));
+                            entry.1.push((connection, Vec::new(), true, Vec::new()));
                             entry.1.len() - 1
                         }
                     };
@@ -221,7 +224,9 @@ impl Controller {
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
                     // clone can sit on a filesystem of its own.
-                    push_unique(paths, self.session_storage_paths(target_id));
+                    entry.1[position]
+                        .3
+                        .extend(self.session_storage_paths(target_id));
                 }
                 TargetTemplate::AwsEc2 { .. } => {
                     let mut probes = Vec::new();
@@ -245,6 +250,7 @@ impl Controller {
                         }
                     }
                     targets.push(DeploymentCapacityTarget {
+                        stable_identity: None,
                         id: format!("aws:{target_id}"),
                         host: target_id.clone(),
                         target_ids: vec![target_id.clone()],
@@ -280,13 +286,24 @@ impl Controller {
                     )
                 }
             };
+            let mut session_paths = Vec::new();
             for target_id in &local_ids {
                 if let Some(template) = self.config.targets.get(target_id) {
                     push_unique(&mut paths, local_storage_paths(template, &mbx_paths));
                 }
-                push_unique(&mut paths, self.session_storage_paths(target_id));
+                session_paths.extend(self.session_storage_paths(target_id));
             }
+            paths.sort();
+            paths.dedup();
+            let local_template_paths = paths.clone();
+            push_unique(&mut paths, session_paths);
+            paths.sort();
+            paths.dedup();
             targets.push(DeploymentCapacityTarget {
+                stable_identity: Some(HostCapacityIdentity {
+                    connections: Vec::new(),
+                    local_template_paths,
+                }),
                 id: "local".into(),
                 host: "local".into(),
                 target_ids: local_ids,
@@ -301,8 +318,19 @@ impl Controller {
         targets.extend(
             ssh_hosts
                 .into_iter()
-                .map(
-                    |(host, (target_ids, connections))| DeploymentCapacityTarget {
+                .map(|(host, (target_ids, mut connections))| {
+                    for (_, paths, _, _) in &mut connections {
+                        paths.sort();
+                        paths.dedup();
+                    }
+                    DeploymentCapacityTarget {
+                        stable_identity: Some(HostCapacityIdentity {
+                            connections: connections
+                                .iter()
+                                .map(|(ssh, paths, nitro, _)| (ssh.clone(), *nitro, paths.clone()))
+                                .collect(),
+                            local_template_paths: Vec::new(),
+                        }),
                         id: format!("ssh:{host}"),
                         host,
                         target_ids,
@@ -310,19 +338,23 @@ impl Controller {
                         local: false,
                         probes: connections
                             .iter()
-                            .map(|(ssh, paths, nitro)| {
+                            .map(|(ssh, paths, nitro, sessions)| {
+                                let mut paths = paths.clone();
+                                push_unique(&mut paths, sessions.clone());
+                                paths.sort();
+                                paths.dedup();
                                 if *nitro {
-                                    targets::ssh_nitro_host_capacity_command(ssh, paths)
+                                    targets::ssh_nitro_host_capacity_command(ssh, &paths)
                                 } else {
-                                    targets::ssh_host_capacity_command(ssh, paths)
+                                    targets::ssh_host_capacity_command(ssh, &paths)
                                 }
                             })
                             .collect(),
                         local_storage_paths: Vec::new(),
                         storage_warning: None,
                         probe_error: None,
-                    },
-                ),
+                    }
+                }),
         );
         targets.sort_by(|left, right| left.id.cmp(&right.id));
         targets
