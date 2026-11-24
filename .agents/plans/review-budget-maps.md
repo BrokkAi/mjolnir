@@ -21,7 +21,7 @@ The user wants to see which reviewer combinations deliver the most confirmed fin
 - [x] (2026-11-24 17:15:41Z) Completed marker/crosshair snapping and encoded local-file navigation with explicit error handling. Browser audit:48 ok,0 FAIL, including odd-path navigation and missing-file cleanup; HTML delivered and verified.
 - [x] (2026-11-24 17:18:22Z) Committed the third-pass corrections as 8a684544a and re-reviewed.
 - [x] (2026-11-24 17:32:59Z) Replaced marker takeover with budget-first primary results and a separate nearby reference. Dense 92,226-point scan and pinned narrow-cell cases pass. Browser audit:52 ok,0 FAIL. Latest HTML synced and verified.
-- [ ] Final review/disposition and source push.
+- [x] (2026-11-24 17:37:32Z) Recorded explicit overrides for three audit-only follow-ups, merged upstream with a zero-change clean review, and published source checkpoint de9404183 to origin/master. Downloads are complete and verified.
 
 ## Surprises & Discoveries
 
@@ -39,7 +39,7 @@ Prior analysis found 116 priced non-Greptile setups and 196 otherwise eligible s
 
 ## Outcomes & Retrospective
 
-Both static maps and the interactive page are delivered and remote-hash-verified. The independent oracle checked every observed cell and tie set with zero numeric mismatches; the established numeric/image audit remains 45 ok, 0 FAIL. The current browser audit is 52 ok, 0 FAIL, including a dense 92,226-pointer scan and pinned narrow-cell cases with no near-marker exclusions. Every primary result and crosshair now derives only from the actual pointer budget; markers append separately labelled reference information. Static maps, input CSVs and score JSON have not changed during the interaction fixes. No model or judge calls were run. Only final source review/disposition and publication remain.
+Both static maps and the interactive page are delivered and remote-hash-verified. The independent oracle checked every observed cell and tie set with zero numeric mismatches; the established numeric/image audit remains 45 ok, 0 FAIL. The current browser audit is 52 ok, 0 FAIL, including a dense 92,226-pointer scan and pinned narrow-cell cases with no near-marker exclusions. Every primary result and crosshair now derives only from the actual pointer budget; markers append separately labelled reference information. Static maps, input CSVs and score JSON have not changed during the interaction fixes. No model or judge calls were run. All requested deliverables and reproducible sources are published. Three optional audit-utility hardening items are explicitly documented as follow-ups; no delivery work remains.
 
 ## Context and Orientation
 
@@ -79,13 +79,13 @@ After acceptance, copy the two friendly PNGs, HTML and caption with existing SSH
 
     scp -F /home/jonathan/.ssh/config -o BatchMode=yes /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget-all.png /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget-medium-high.png /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget.html /mnt/optane/review-arms-20261113/sol-62-repeats/figure/review-opus-high-budget-caption.txt jbell@minastirith:Downloads/
 
-The established remote home is `C:\Users\jbell`; use remote PowerShell `Get-FileHash -Algorithm SHA256 -LiteralPath` on each of the four Downloads files and compare with local `sha256sum`. Do not change SSH configuration or open a remote GUI. Commit only this work's files on the current branch, call `request_review`, and push only after a clean final verdict. If upstream moved, fetch and merge `origin/master`, preserve the reviewed baseline, obtain the required merge review and retry the push.
+The established remote home is `C:\Users\jbell`; use remote PowerShell `Get-FileHash -Algorithm SHA256 -LiteralPath` on each of the four Downloads files and compare with local `sha256sum`. Do not change SSH configuration or open a remote GUI. Commit only this work's files on the current branch, call `request_review`, and push only after a clean final verdict or explicit reasoned overrides for every unfixed finding. If upstream moved, fetch and merge `origin/master`, preserve the reviewed baseline, obtain the required merge review and retry the push.
 
 ## Validation and Acceptance
 
 A user opening either PNG sees that panel's expected findings across 70 diffs under both resource limits, with clear units and a readable shared scale. Each image uses data-derived step boundaries. The HTML opens without a server, switches or shows both metrics, and displays every winning real setup with its actual time/cost when a region is inspected. Unknown prices never appear as free choices. Greptile combinations appear nowhere; its two solo reference diamonds expose their own findings and do not pretend to be the optimized background winner.
 
-Actual-data checks must cover every cell, all ties, exact thresholds and infeasible values. The two source CSVs must remain byte-unchanged. Images, SVGs and HTML must agree numerically; rendering must be repeatable. The independent audit must either pass or name a precise unresolved limitation. Remote SHA-256 values must match the accepted local artifacts. Before publication, review must be clean and the final working tree must be clean after the push.
+Actual-data checks must cover every cell, all ties, exact thresholds and infeasible values. The two source CSVs must remain byte-unchanged. Images, SVGs and HTML must agree numerically; rendering must be repeatable. The independent audit must either pass or name a precise unresolved limitation. Remote SHA-256 values must match the accepted local artifacts. Before publication, review must be clean or each unfixed finding must have a recorded reasoned override. The final working tree must be clean after the push.
 
 ## Idempotence and Recovery
 
@@ -120,3 +120,5 @@ Revision note (2026-11-24 17:15:41Z): Accepted the final focused interaction/nav
 Revision note (2026-11-24 17:18:22Z): A fourth review found that snapping still hides whole narrow regions behind marker hit radii. This supersedes the earlier marker-selection design: pointer budgets now exclusively own the primary result and crosshair; nearby markers may append separately labelled reference details but never replace the selected budget. Clicking pins the same actual pointer budget. This corrects the interaction ownership instead of narrowing a hit radius. Static maps and all numerical results remain unchanged.
 
 Revision note (2026-11-24 17:32:59Z): Accepted the root interaction correction. Primary tooltip and crosshair share the pointer budget as their sole authority; nearby marker cards never substitute their own budgets. The exact 54.7s/$0.198 case returns156.83, including after click-pin. The latest HTML is delivered and hash-verified; static assets and numerical data remain byte-identical.
+
+Revision note (2026-11-24 17:37:32Z): Completed publication at de9404183. Remaining findings concern only interruption of the optional audit runner, concurrent syntax-check scratch input, and SVG-audit URL encoding. They were explicitly overridden and documented as follow-ups after multiple review rounds, preserving the user's requested prompt artifact delivery. The accepted validation ran serially and uninterrupted at the canonical path, with no leftover browser processes. The execution plan is complete.

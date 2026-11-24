@@ -193,6 +193,21 @@ embedded data, the HTML rectangles and sampled PNG pixels. Add
 `node audit_budget_html.mjs . <scratch dir> <chrome-headless-shell>` to drive the
 HTML in headless Chrome and compare real hover tooltips with brute force.
 
+#### Audit utility follow-ups
+
+The published artifacts passed serial, uninterrupted audits at the canonical
+artifact path. Three audit-tool hardening items remain as explicit review
+follow-ups:
+
+- SIGINT or SIGTERM can bypass Node cleanup and leave the detached audit
+  browser/profile behind. Signal-aware cancellation cleanup remains to be added.
+- Concurrent Python audits in the same checkout share `.audit-app.js` for the
+  syntax check. Invocation-local input remains to be added; run that audit
+  serially until then.
+- The Python `--chrome` SVG pixel check does not encode `#` or `?` in local
+  paths. Use the canonical artifact path until it uses `Path.as_uri()`. The
+  separate HTML browser audit already supports encoded local paths.
+
 ## Coverage and judging
 
 The 280 new reviews preserved the original 140 Sol 6.2 samples, for 210
