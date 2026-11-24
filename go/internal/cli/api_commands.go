@@ -3606,7 +3606,7 @@ func readPrompt(text *string, file *string) (*string, error) {
 			return nil, fmt.Errorf("read prompt file %s: %w", *file, err)
 		}
 		if !utf8.Valid(read) {
-			return nil, fmt.Errorf("read prompt file %s: stream did not contain valid UTF-8", *file)
+			return nil, fmt.Errorf("read prompt file %s: %w", *file, errors.New("stream did not contain valid UTF-8"))
 		}
 		text := string(read)
 		return &text, nil
@@ -3624,7 +3624,7 @@ func readStdin() (string, error) {
 		return "", fmt.Errorf("read the prompt from standard input: %w", err)
 	}
 	if !utf8.Valid(read) {
-		return "", errors.New("read the prompt from standard input: stream did not contain valid UTF-8")
+		return "", fmt.Errorf("read the prompt from standard input: %w", errors.New("stream did not contain valid UTF-8"))
 	}
 	return string(read), nil
 }

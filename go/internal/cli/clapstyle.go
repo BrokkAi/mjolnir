@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -1369,7 +1370,7 @@ func reportError(stderr io.Writer, err error) int {
 	if errors.As(err, &exit) {
 		return exit.code
 	}
-	fmt.Fprintf(stderr, "Error: %s\n", err)
+	_, _ = io.WriteString(stderr, core.MainErrorReport(err))
 	return 1
 }
 
