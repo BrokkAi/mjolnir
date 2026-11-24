@@ -61,6 +61,43 @@ impl Drop for ProjectMemoryTransfer<'_> {
 }
 
 impl RelayClient {
+    /// Bulk failures belong to the disposable connection, never the Control owner.
+    async fn with_bulk<T>(
+        &mut self,
+        operation: impl for<'a> FnOnce(
+            &'a mut Self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>,
+        > + Send,
+    ) -> Result<T> {
+        if let Some(reason) = &self.abandoned {
+            bail!("{reason}");
+        }
+        let Some(spec) = &self.bulk_spec else {
+            return operation(self).await;
+        };
+        let mut bulk = Self::connect_with_timeouts(
+            spec,
+            &self.session_id,
+            self.request_timeout,
+            RELAY_HANDSHAKE_TIMEOUT,
+        )
+        .await?;
+        let result = operation(&mut bulk).await;
+        if let Err(error) = bulk.detach().await {
+            tracing::warn!(session_id = %self.session_id, %error, "detach bulk relay");
+        }
+        result
+    }
+
+    async fn call_bulk(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
+        if !request.supported_at(self.protocol_version) {
+            return self.call(request).await;
+        }
+        self.with_bulk(move |bulk| Box::pin(async move { bulk.call(request).await }))
+            .await
+    }
+
     pub async fn cpu_usage(&mut self) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
         if !RelayRequest::CpuUsage.supported_at(self.protocol_version) {
             return Ok(None);
@@ -792,7 +829,7 @@ impl RelayClient {
         archive_bytes: &[u8],
     ) -> Result<mj_core::skills::SkillsSyncState> {
         skills_sync_state(
-            self.call(RelayRequest::InstallSkills {
+            self.call_bulk(RelayRequest::InstallSkills {
                 data: BASE64.encode(archive_bytes),
             })
             .await?,
@@ -822,6 +859,17 @@ impl RelayClient {
         if self.attachment_present(reference).await? {
             return Ok(());
         }
+        let reference = reference.clone();
+        self.with_bulk(move |bulk| {
+            Box::pin(async move { bulk.upload_attachment(&reference).await })
+        })
+        .await
+    }
+
+    async fn upload_attachment(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<()> {
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let reference_copy = reference.clone();
         let bytes = mj_core::runtime::spawn_blocking(move || store.read(&reference_copy))
@@ -854,7 +902,7 @@ impl RelayClient {
             return Ok(());
         }
         let RelayResponsePayload::AttachmentData { data } = self
-            .call(RelayRequest::ReadAttachment {
+            .call_bulk(RelayRequest::ReadAttachment {
                 reference: reference.clone(),
             })
             .await?
@@ -897,6 +945,17 @@ impl RelayClient {
         if self.file_attachment_present(reference).await? {
             return Ok(());
         }
+        let reference = reference.clone();
+        self.with_bulk(move |bulk| {
+            Box::pin(async move { bulk.upload_file_attachment(&reference).await })
+        })
+        .await
+    }
+
+    async fn upload_file_attachment(
+        &mut self,
+        reference: &mj_core::attachment::FileAttachmentRef,
+    ) -> Result<()> {
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let reference_copy = reference.clone();
         let bytes = mj_core::runtime::spawn_blocking(move || store.read_file(&reference_copy))
@@ -930,7 +989,7 @@ impl RelayClient {
             return Ok(());
         }
         let RelayResponsePayload::AttachmentData { data } = self
-            .call(RelayRequest::ReadFileAttachment {
+            .call_bulk(RelayRequest::ReadFileAttachment {
                 reference: reference.clone(),
             })
             .await?
@@ -970,11 +1029,31 @@ impl RelayClient {
             if !files.is_empty() {
                 self.require_file_attachment_protocol()?;
             }
+            let mut missing_images = Vec::new();
+            let mut missing_files = Vec::new();
             for reference in mj_core::attachment::references(prompt)? {
-                self.ensure_attachment(&reference).await?;
+                if !self.attachment_present(&reference).await? {
+                    missing_images.push(reference);
+                }
             }
             for reference in files {
-                self.ensure_file_attachment(&reference).await?;
+                if !self.file_attachment_present(&reference).await? {
+                    missing_files.push(reference);
+                }
+            }
+            if !missing_images.is_empty() || !missing_files.is_empty() {
+                self.with_bulk(move |bulk| {
+                    Box::pin(async move {
+                        for reference in missing_images {
+                            bulk.upload_attachment(&reference).await?;
+                        }
+                        for reference in missing_files {
+                            bulk.upload_file_attachment(&reference).await?;
+                        }
+                        Ok(())
+                    })
+                })
+                .await?;
             }
         }
         match self
@@ -1072,6 +1151,11 @@ impl RelayClient {
         if self.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL {
             return Err(LiveBaselineUnsupported.into());
         }
+        self.with_bulk(|bulk| Box::pin(bulk.read_live_session_baseline()))
+            .await
+    }
+
+    async fn read_live_session_baseline(&mut self) -> Result<mj_core::relay::LiveSessionBaseline> {
         let RelayResponsePayload::LiveBaselineStarted { total_bytes } =
             self.call(RelayRequest::BeginLiveBaseline).await?
         else {

@@ -63,20 +63,22 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
     relay_proxy_plan(locator, session_id, SshTrafficClass::Control)
 }
 
-/// The relay connection that carries one project-memory transaction. A paged
-/// snapshot or upload moves frames of up to 8 MiB; on the shared Control
-/// connection they sit in its send queue ahead of every other session's small
-/// relay RPC and channel open on that host (#1580). This is the only place
-/// that picks the lane for project-memory traffic.
-pub fn project_memory_relay_command(
-    locator: &TargetLocator,
-    session_id: &str,
-) -> Result<CommandSpec> {
+/// Bulk relay transactions (project memory, skills, attachments and live
+/// baselines) share this lane so large frames do not queue ahead of Control RPCs.
+pub fn bulk_relay_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     relay_proxy_plan(locator, session_id, SshTrafficClass::Bulk)?
         .commands
         .into_iter()
         .next()
-        .context("project-memory relay plan is empty")
+        .context("bulk relay plan is empty")
+}
+
+/// The Bulk relay connection for a project-memory transaction.
+pub fn project_memory_relay_command(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    bulk_relay_command(locator, session_id)
 }
 
 fn relay_proxy_plan(

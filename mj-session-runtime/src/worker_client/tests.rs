@@ -5931,3 +5931,181 @@ assert not sys.stdin.readline()
     ));
     assert_eq!(client.next_request, next_request + 4);
 }
+
+// Exercises connection ownership at the relay protocol boundary: a snapshot
+// exists only in the proxy that began it, and failed bulk work must not poison
+// the control stream.
+#[cfg(unix)]
+#[test]
+fn bulk_transfers_preserve_control_connection_ownership() {
+    const CHILD: &str = "MJ_BULK_LANE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "bulk_transfers_preserve_control_connection_ownership",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    mj_core::targets::set_ssh_connection_sharing_for_test(Some(
+        mj_core::targets::SshSharingForTest::Disabled,
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("requests");
+    let script = r#"
+import sys, json, os, base64
+session, log, protocol = sys.argv[1], sys.argv[2], int(sys.argv[3])
+snapshot = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    params = req["request"].get("params", {})
+    with open(log, "a") as f: f.write(str(os.getpid()) + " " + method + "\n")
+    if method == "hello":
+        payload = {"type":"hello", "data":{"negotiated":protocol,"relay_version":"bulk-test","session_id":session}}
+    elif method in ("skills_state", "install_skills"):
+        if method == "install_skills" and base64.b64decode(params["data"]) == b"fail":
+            sys.exit(1)
+        payload = {"type":"skills_state","data":{"present":True,"fingerprint":"test"}}
+    elif method in ("attachment_present", "file_attachment_present"):
+        payload = {"type":"attachment_present","data":{"present":False}}
+    elif method in ("install_attachment", "install_file_attachment"):
+        payload = {"type":"attachment_installed"}
+    elif method == "submit":
+        payload = {"type":"accepted","data":{"command_id":params["command_id"],"ordinal":1}}
+    elif method == "begin_live_baseline":
+        snapshot = b" " * 70000 + b"invalid-json"
+        payload = {"type":"live_baseline_started","data":{"total_bytes":len(snapshot)}}
+    elif method == "read_live_baseline_page":
+        assert snapshot is not None
+        offset = params["offset"]
+        end = min(offset + 35000, len(snapshot))
+        payload = {"type":"live_baseline_page","data":{"page":{"offset":offset,"next_offset":end,"complete":end==len(snapshot),"chunk":base64.b64encode(snapshot[offset:end]).decode()}}}
+    else: raise AssertionError(method)
+    print(json.dumps({"request_id":req["request_id"],"protocol_version":protocol,"result":"ok","payload":payload}), flush=True)
+"#;
+    let local = CommandSpec::new(
+        "python3",
+        [
+            "-c".to_string(),
+            script.into(),
+            SESSION_ID.into(),
+            log.display().to_string(),
+            RELAY_PROTOCOL_VERSION.to_string(),
+        ],
+    );
+    let target = mj_core::targets::SshTarget {
+        destination: "bulk-fixture".into(),
+        ssh_args: Vec::new(),
+    };
+    let control = local
+        .clone()
+        .ssh_session(&target, mj_core::targets::SshTrafficClass::Control);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut client = RelayClient::connect(&control, SESSION_ID).await.unwrap();
+            let bulk = client.bulk_spec.as_ref().unwrap();
+            assert_eq!(bulk.args, control.args);
+            assert_eq!(
+                bulk.ssh_session.as_ref().unwrap().class,
+                mj_core::targets::SshTrafficClass::Bulk
+            );
+            client.install_skills(&vec![b'x'; 70000]).await.unwrap();
+            let bytes = b"\x89PNG\r\n\x1a\nimage";
+            let reference =
+                mj_core::attachment::AttachmentRef::new(bytes, "image/png".into(), 1, 1).unwrap();
+            mj_core::attachment::AttachmentStore::controller(SESSION_ID)
+                .unwrap()
+                .install(&reference, bytes)
+                .unwrap();
+            client.ensure_attachment(&reference).await.unwrap();
+            let file = mj_core::attachment::FileAttachmentRef::new(
+                b"file",
+                "test.txt",
+                "text/plain".into(),
+            )
+            .unwrap();
+            mj_core::attachment::AttachmentStore::controller(SESSION_ID)
+                .unwrap()
+                .install_file(&file, b"file")
+                .unwrap();
+            client
+                .submit(
+                    "batch",
+                    RelayCommand::Prompt {
+                        prompt: vec![reference.content_block(), file.content_block()],
+                    },
+                )
+                .await
+                .unwrap();
+
+            let error = client.live_session_baseline().await.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("decode live recovery baseline"),
+                "{error:#}"
+            );
+            assert!(client.install_skills(b"fail").await.is_err());
+            assert!(client.abandoned.is_none());
+            client.skills_state().await.unwrap();
+            client.bulk_spec = Some(CommandSpec::new("sh", ["-c", "exit 1"]));
+            assert!(client.install_skills(b"connect failure").await.is_err());
+            assert!(client.abandoned.is_none());
+            client.skills_state().await.unwrap();
+            client.detach().await.unwrap();
+            let mut client = RelayClient::connect(&local, SESSION_ID).await.unwrap();
+            assert!(client.bulk_spec.is_none());
+            client.install_skills(b"local").await.unwrap();
+            client.skills_state().await.unwrap();
+            client.detach().await.unwrap();
+        });
+    let text = std::fs::read_to_string(log).unwrap();
+    let entries: Vec<_> = text
+        .lines()
+        .map(|line| line.split_once(' ').unwrap())
+        .collect();
+    let control_pid = entries[0].0;
+    assert!(
+        entries
+            .iter()
+            .filter(|(_, method)| matches!(*method, "attachment_present" | "skills_state"))
+            .take(3)
+            .all(|(pid, _)| *pid == control_pid)
+    );
+    assert!(
+        entries
+            .iter()
+            .filter(|(_, method)| matches!(
+                *method,
+                "install_attachment" | "begin_live_baseline" | "read_live_baseline_page"
+            ))
+            .all(|(pid, _)| *pid != control_pid)
+    );
+    let upload_pids: Vec<_> = entries
+        .iter()
+        .filter(|(_, method)| matches!(*method, "install_attachment" | "install_file_attachment"))
+        .map(|(pid, _)| *pid)
+        .collect();
+    assert_eq!(upload_pids.len(), 3);
+    assert_eq!(
+        upload_pids[1], upload_pids[2],
+        "one Bulk connection for the prompt"
+    );
+    let snapshot_pids: std::collections::BTreeSet<_> = entries
+        .iter()
+        .filter(|(_, method)| matches!(*method, "begin_live_baseline" | "read_live_baseline_page"))
+        .map(|(pid, _)| pid)
+        .collect();
+    assert_eq!(snapshot_pids.len(), 1);
+    let local_entries = &entries[entries.len() - 3..];
+    assert!(
+        local_entries
+            .iter()
+            .all(|(pid, _)| *pid == local_entries[0].0)
+    );
+}
