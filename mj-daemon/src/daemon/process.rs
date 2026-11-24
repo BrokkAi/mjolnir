@@ -866,10 +866,6 @@ pub(super) async fn run_daemon_runtime(
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
-    let mut cache_task = mj_core::runtime::spawn(crate::daemon::mbx_service::run(
-        state.clone(),
-        cancellation.clone(),
-    ));
     let mut mailbox_task = mj_core::runtime::spawn(crate::daemon::mailbox_delivery::run(
         state.clone(),
         manager_control.clone(),
@@ -885,7 +881,6 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     ));
     let mut alert_outcome = None;
-    let mut cache_outcome = None;
     let mut mailbox_outcome = None;
     let mut github_watch_outcome = None;
 
@@ -924,10 +919,6 @@ pub(super) async fn run_daemon_runtime(
                     break;
                 }
                 result = supervise_service(&mut availability, &mut availability_outcome, &cancellation, "availability service") => {
-                    result?;
-                    break;
-                }
-                result = supervise_service(&mut cache_task, &mut cache_outcome, &cancellation, "machine build cache service") => {
                     result?;
                     break;
                 }
@@ -1097,17 +1088,6 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join API activity cleanup",
         activity_cleanup.await.map_err(anyhow::Error::from),
-    );
-    epilogue.record(
-        &mut outcome,
-        "join machine build cache applications",
-        match cache_outcome {
-            Some(result) => result,
-            None => cache_task
-                .await
-                .context("machine cache service failed")
-                .and_then(|result| result),
-        },
     );
     epilogue.record(
         &mut outcome,

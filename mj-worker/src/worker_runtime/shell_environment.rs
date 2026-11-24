@@ -43,24 +43,18 @@ if [ -n "${MJ_GITHUB_CLI_BIN:-}" ]; then
         GIT_ASKPASS=/bin/false
         export GH_CONFIG_DIR GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT GIT_ASKPASS
     fi
-    case ":${PATH:-}:" in
-        *:"${MJ_GITHUB_CLI_BIN}":*) ;;
-        *) PATH="${MJ_GITHUB_CLI_BIN}${PATH:+:${PATH}}"; export PATH ;;
-    esac
 fi
-if [ -n "${MJ_BUILD_TOOL_BIN:-}" ]; then
-    case ":${PATH:-}:" in
-        *:"${MJ_BUILD_TOOL_BIN}":*) ;;
-        *) PATH="${MJ_BUILD_TOOL_BIN}${PATH:+:${PATH}}"; export PATH ;;
-    esac
-fi
+
 "#;
     ensure!(
         !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
         "session shell environment {} is a symbolic link",
         path.display()
     );
-    mj_core::config::atomic_write_existing(path, SCRIPT.as_bytes())?;
+    mj_core::config::atomic_write_existing(
+        path,
+        (SCRIPT.to_owned() + &super::launcher_path_shell()).as_bytes(),
+    )?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     let text = path.to_string_lossy().into_owned();
     // Git preparation and cache preparation can both install this hook. Never

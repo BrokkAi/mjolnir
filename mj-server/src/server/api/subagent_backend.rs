@@ -363,8 +363,10 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("reviewer profiles are unavailable") })
     }
     /// Waits for a profile not in `tried` to report that it offers `model`,
-    /// then returns the ready candidates that were not tried. It fails when
-    /// no further profile does.
+    /// then returns the ready candidates that were not tried. A profile whose
+    /// capability check fails is reported in `unavailable` with its reason,
+    /// and not tried again. It fails when no further profile does and none
+    /// could be checked, or when no profile returned a capability list.
     fn reviewer_candidates_for_model(
         &self,
         _model: String,
@@ -735,6 +737,10 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         branch: String,
     ) -> BoxFuture<'_, Result<PushedBranch, ExportError>>;
+
+    /// The session's whole tracked work as a patch, from its target while it
+    /// has one and from its checkpoint after it stopped.
+    fn export_patch(&self, session_id: String) -> BoxFuture<'_, Result<ExportPatch, ExportError>>;
 
     /// A git bundle of the session's committed work.
     fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>>;

@@ -125,10 +125,11 @@ pub use worker_binary::{
 };
 
 pub use checkpoint::{
-    CheckpointArtifact, CheckpointDeferred, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease,
-    SessionExportLayout, checkpoint_was_deferred, host_snapshot_cache_wakeup,
-    reconcile_managed_checkpoint_archives, sweep_expired_host_snapshot_cache,
-    sweep_local_checkpoint_leftovers,
+    CheckpointArtifact, CheckpointBundle, CheckpointDeferred, CheckpointExportError,
+    CheckpointPatch, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease, SessionExportLayout,
+    checkpoint_bundle, checkpoint_patch, checkpoint_was_deferred, export_reads_checkpoint,
+    host_snapshot_cache_wakeup, reconcile_managed_checkpoint_archives,
+    sweep_expired_host_snapshot_cache, sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,

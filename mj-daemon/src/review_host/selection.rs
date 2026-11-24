@@ -125,12 +125,14 @@ pub(crate) async fn resolve_choice(
     })
 }
 
-async fn configured_choices(
+pub(crate) async fn configured_choices(
     settings: ReviewConfig,
     config: &mj_core::config::Config,
     backend: &Arc<dyn SubagentBackend>,
 ) -> Result<(Vec<SubagentChoice>, bool)> {
     let autoconfigured = settings.is_legacy();
+    // Profiles automatic selection could not check, for the refusal below.
+    let mut unavailable_profiles: Vec<(String, String)> = Vec::new();
     let choices = if autoconfigured {
         let pinned = settings
             .legacy
@@ -176,6 +178,7 @@ async fn configured_choices(
                     ready
                 };
             usage_priced.extend(usage_priced_profiles(&candidates));
+            unavailable_profiles = candidates.unavailable;
             candidates
                 .offered
                 .into_iter()
@@ -204,9 +207,17 @@ async fn configured_choices(
     } else {
         settings.reviewers
     };
-    ensure!(
-        !choices.is_empty(),
-        "No reviewers are configured; choose reviewers or press Autoconfigure in Settings › Code Review."
-    );
+    if choices.is_empty() {
+        let mut message = "No reviewers are configured; choose reviewers or press Autoconfigure in Settings › Code Review.".to_owned();
+        if !unavailable_profiles.is_empty() {
+            let skipped = unavailable_profiles
+                .iter()
+                .map(|(id, reason)| format!("{id} ({reason})"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            message.push_str(&format!(" Could not check: {skipped}."));
+        }
+        anyhow::bail!(message);
+    }
     Ok((choices, autoconfigured))
 }

@@ -550,7 +550,9 @@ pub(super) fn collect_native_tree(
         HarnessKind::Muse => inside && name == "session.jsonl",
         HarnessKind::OpenCode => is_opencode_native_artifact(relative),
         HarnessKind::Antigravity => is_antigravity_native_artifact(relative, session_id),
-        HarnessKind::Dsh => is_dsh_session_record(relative, session_id),
+        HarnessKind::Dsh => {
+            is_dsh_session_record(relative, session_id) || is_dsh_native_log(relative, session_id)
+        }
     };
     if !selected {
         return Ok(());
@@ -580,6 +582,33 @@ pub(super) fn collect_native_tree(
 /// interrupted write's temporary file is never captured.
 pub(super) fn is_dsh_session_record(relative_path: &Path, session_id: &str) -> bool {
     relative_path == Path::new("sessions").join(format!("{session_id}.json"))
+}
+
+/// A DSH native session log lives at
+/// `dsh-home/sessions/<project-key>/<session-id>/session.v4.jsonl.zstd`.
+pub(super) fn is_dsh_native_log(relative_path: &Path, session_id: &str) -> bool {
+    dsh_native_log_parts(relative_path).is_some_and(|session| session == session_id)
+}
+
+pub(super) fn is_dsh_native_log_path(relative_path: &Path) -> bool {
+    dsh_native_log_parts(relative_path).is_some()
+}
+
+fn dsh_native_log_parts(relative_path: &Path) -> Option<&str> {
+    let mut components = relative_path.components();
+    if components.next() != Some(Component::Normal("dsh-home".as_ref())) {
+        return None;
+    }
+    if components.next() != Some(Component::Normal("sessions".as_ref())) {
+        return None;
+    }
+    components.next()?;
+    let session = components.next()?.as_os_str().to_str()?;
+    let log = components.next()?.as_os_str();
+    if components.next().is_some() || log != "session.v4.jsonl.zstd" {
+        return None;
+    }
+    Some(session)
 }
 
 /// OpenCode's database within a session home.

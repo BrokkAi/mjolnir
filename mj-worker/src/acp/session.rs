@@ -2027,6 +2027,8 @@ pub(super) async fn serve_session(
             }
             CommandRequest::ReloadLaunchConfig {
                 launch_config,
+                subagent_mcp_socket,
+                managed_subagent,
                 environment,
                 command,
                 args,
@@ -2040,6 +2042,8 @@ pub(super) async fn serve_session(
                 let preserve_native_session = launch_config.harness == spec.harness;
                 return Ok(Some(SessionRestart::ReloadLaunchConfig {
                     launch_config,
+                    subagent_mcp_socket,
+                    managed_subagent,
                     environment,
                     command,
                     args,

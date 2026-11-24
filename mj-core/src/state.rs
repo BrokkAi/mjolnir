@@ -1507,10 +1507,25 @@ pub struct SessionBuildCache {
     /// policy and Nitro guests use mbx's automatic budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
-    /// A `[target] root` the host's mbx configuration relocates outside the
-    /// cache directory, mounted read-write at the same path as well.
+    /// The effective `[target] root` the session's mbx was provisioned with,
+    /// recorded for every new shared cache: the host's configured root, or
+    /// `<directory>/targets`. A root outside the cache directory is mounted
+    /// read-write at the same path as well (see
+    /// [`SessionBuildCache::mounted_target_root`]). Records from before this
+    /// was recorded hold only an outside root, or `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_root: Option<PathBuf>,
+}
+
+impl SessionBuildCache {
+    /// The recorded target root when it needs a mount of its own, because it
+    /// lies outside the cache directory. The one owner of that decision, for
+    /// provisioning, container recovery, and any other code that attaches the
+    /// cache's mounts.
+    pub fn mounted_target_root(&self) -> Option<&std::path::Path> {
+        let root = self.target_root.as_deref()?;
+        (!crate::target_path::is_within(root, &self.directory)).then_some(root)
+    }
 }
 
 /// How much disk Mjolnir's own copies of sessions use, and how much an

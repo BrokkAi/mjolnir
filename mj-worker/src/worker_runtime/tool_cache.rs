@@ -116,7 +116,8 @@ pub(super) fn prepare(cwd: &Path, environment: &mut BTreeMap<String, String>) ->
                 write_launcher(
                     &bin.join(tool),
                     &format!(
-                        "{BAZEL_PATH}\nif [ \"$#\" = 1 ] && [ \"$1\" = --version ]; then exec {} \"$@\"; fi\nexec {} --bazelrc={} \"$@\"\n",
+                        "{}\nif [ \"$#\" = 1 ] && [ \"$1\" = --version ]; then exec {} \"$@\"; fi\nexec {} --bazelrc={} \"$@\"\n",
+                        bazel_path(),
                         quote_path(&real),
                         quote_path(&real),
                         quote_path(&rc)
@@ -185,6 +186,17 @@ fn has_any(root: &Path, names: &[&str]) -> bool {
     names.iter().any(|name| root.join(name).is_file())
 }
 
+fn bazel_path() -> String {
+    let condition = super::LAUNCHER_BIN_ENVS
+        .iter()
+        .map(|name| {
+            format!("{{ [ -z \"${{{name}:-}}\" ] || [ \"$mj_entry\" != \"${{{name}}}\" ]; }}")
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    BAZEL_PATH.replace("@LAUNCHER_FILTER@", &condition)
+}
+
 // Bazel hashes PATH into action keys. Remove only Mjolnir's private launcher
 // directories; all user toolchain entries, including empty entries, survive.
 const BAZEL_PATH: &str = r#"mj_path=
@@ -195,8 +207,7 @@ while :; do
         *:*) mj_entry=${mj_rest%%:*}; mj_rest=${mj_rest#*:}; mj_more=yes ;;
         *) mj_entry=$mj_rest; mj_more= ;;
     esac
-    if { [ -z "${MJ_BUILD_TOOL_BIN:-}" ] || [ "$mj_entry" != "$MJ_BUILD_TOOL_BIN" ]; } &&
-       { [ -z "${MJ_GITHUB_CLI_BIN:-}" ] || [ "$mj_entry" != "$MJ_GITHUB_CLI_BIN" ]; }; then
+    if @LAUNCHER_FILTER@; then
         if [ -n "$mj_path_set" ]; then mj_path=$mj_path:$mj_entry; else mj_path=$mj_entry; fi
         mj_path_set=yes
     fi
