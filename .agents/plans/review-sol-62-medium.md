@@ -1,10 +1,12 @@
-# Compare Sol 6.2 medium with the saved Sol 6.1 medium evaluation
+# Compare Sol 6.2 medium and low with the saved Sol 6.1 medium evaluation
 
 This living plan follows `.agents/PLANS.md`. Keep Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective current.
 
 ## Purpose / Big Picture
 
 Measure whether one GPT 6.2 Sol reviewer at medium effort improves on GPT 6.1 Sol at medium effort, both alone and together with two GPT 6.1 Terra reviewers at high effort. Reuse the reviewer evaluation's original 70 Mjolnir diffs and saved baseline sessions. The user requested one new reviewer per diff and concurrency 16. The deliverable is a reproducible comparison of confirmed findings, severity, latency, and recorded usage, with a clear account of uncertainty and coverage.
+
+The medium comparison is complete and published. The user then requested the same GPT 6.2 model at low effort. Extend the study with one low-effort review per original diff and compare it with both saved medium configurations, solo and with the same Terra pair, retaining concurrency 16. This measures the quality, price, and latency tradeoff of reducing effort.
 
 ## Progress
 
@@ -14,6 +16,10 @@ Measure whether one GPT 6.2 Sol reviewer at medium effort improves on GPT 6.1 So
 - [x] (2026-11-24) Audited all 34 accepted Neon/medium judge outputs and durable model selections; scored all 70 diffs and 431 sessions with no missing timing or usage. Preserved verify6 checksum manifest.
 - [x] (2026-11-24) Independently reconstructed the raw pool, groups, all four comparisons, paired bootstrap intervals, and model attribution. Published the complete readout and supporting data in the worktree.
 - [x] (2026-11-24) Final result commit `07825127b` passed review and was pushed to origin/master in upstream merge `c6585cfed`.
+- [x] (2026-11-24) Added independently calculated low/medium/high impact counts to the medium readout and pushed documentation commit `510d4f6e2`.
+- [ ] Register and audit one Sol 6.2 low review per original diff as new arm P; run at concurrency 16.
+- [ ] Jointly verify A/B/E/O/P in new round verify8 with the unchanged Neon/medium method and 16 concurrent judges; preserve all prior rounds.
+- [ ] Independently check low-versus-medium comparisons, publish the severity/price/latency readout, commit, obtain required review, and push.
 
 ## Surprises & Discoveries
 
@@ -48,6 +54,9 @@ The initial judge driver found a stale cached workspace ID: all 34 new-session c
 - Decision: Remove the runner's hardcoded two-creation semaphore for future invocations, leaving the requested executor concurrency as the sole admission width. Let the already-running process finish with its existing gate.
   Rationale: An independent history audit traced the gate to the initial study commit without a documented or measured external limit. It is the observed launch bottleneck. The running Python process has no reload or drain interface and holds accepted launch intents; restarting or overlapping drivers could duplicate work or exceed the user's 16 jobs. Source edits will not change its in-memory semaphore. Record this timing limitation in the result.
   Date/Author: 2026-11-24, parent agent.
+- Decision: Add arm P with one `gpt-6.2-sol:low` review per original diff and judge A/B/E/O/P jointly in fresh verify8.
+  Rationale: The user's follow-up explicitly requests 6.2 at low effort. Compare it against 6.2 medium and 6.1 medium under one verdict set, including each with the same two-Terra sample pool. This gives 501 selected reviewer sessions while retaining original 70-diff coverage, and leaves verify6/7 immutable.
+  Date/Author: 2026-11-24, parent agent.
 
 The removal and the existing recovery tests' call signatures are implemented. Python syntax checks, `git diff --check`, and both existing driver recovery tests passed. The current driver was not restarted and retains the original in-memory gate.
 
@@ -62,6 +71,8 @@ Sol 6.2 medium raised confirmed findings from 50.00 to 259.00 solo and from 138.
 The quality improvement has higher recorded resource use: estimated median parallel turn time rises from 46.3 to 106.3 seconds solo and from 54.3 to 109.6 seconds with the pair. Estimated API cost per diff rises from $0.100 to $0.252 solo and from $0.187 to $0.339 with the pair. All counts use the same 70 diffs; costs exclude coordination/judging. The old and new cohorts ran on different dates and harness versions, and one new sample per diff does not measure repeat variance. These are the setups as run, assessed by the same fresh blinded judge round.
 
 The result and reproduction commands are in `.agents/evals/review-arms/results/sol-62-medium/README.md` and `reproduction.md`, with scored CSVs, paired comparisons, Pareto CSVs, usage, coverage, judge attribution/audit, and prior-round consistency data. The main study README links the addition. Real carrier/judge cleanup succeeded after the current-CLI fixes; the two existing recovery tests and applicable script syntax checks passed. No Rust build or installation was needed. Final result commit `07825127b` passed review and reached origin/master in merge `c6585cfed`.
+
+The follow-up low-effort campaign is now assigned to the same execution owner. Its results are pending; no claims about low-effort quality, latency, or price have been made.
 
 ## Context and Orientation
 
@@ -78,6 +89,16 @@ First confirm the study's current executable, persistent instance, available mod
 Run the reviewer jobs at concurrency 16. Retain failures and retry only runs that did not produce an accepted completed review. Audit model and effort, input fidelity, and completion before counting a run. Verify new findings with the existing blinded method and preserve baseline verdicts; if consistent pooling requires a new joint round, explicitly record that choice and compare all requested configurations within that round. Exclude unrelated later experiments that share the raw data directory.
 
 Compute the solo and two-Terra combinations with the established per-diff combination method. Report mean confirmed findings across the corpus, medium/high severity findings, median latency using the slowest member of a combination, and available usage/cost estimates. Use paired resampling of diffs for uncertainty, keeping all sessions belonging to one diff together. One new session per diff limits evidence about within-diff reviewer variability; say so in the result.
+
+### Follow-up milestone: Sol 6.2 low
+
+Register unused arm P as `gpt-6.2-sol:low` and derive its 70 jobs by changing only the arm field in `arm-O-jobs.json`. The same execution worker owns runner registration, new raw jobs, review execution, verify8, and the new result readout. The parent owns this plan, design, independent acceptance, commits, and delivery. No other worker may mutate these files or run a competing driver. No Rust builds or installations are needed.
+
+Use one canary, retained in the 70, to attest the actual low effort, model, input fidelity, image, handback, and prompt clock. Prefer the medium arm's image and harness if available without modifying global profiles; explicitly record any unavoidable cohort difference. Continue at executor concurrency 16 with the redundant creation gate now removed. Preserve accepted outputs and diagnose ambiguous starts before retrying. The previous failed pre-review slot remains archived and is not part of any new sample.
+
+Create stage8 readiness by extending the exact stage7 A/B/E/O rows with P. Joint verify8 includes 221 Terra/high, 140 Sol 6.1/medium, 70 Sol 6.2/medium, and 70 Sol 6.2/low sessions. Copy the unchanged judge specification, use the same verifier checkout and Neon/medium profiles, and run at concurrency 16. Check current workspace validity before launch, since cached pointers were previously stale. Primary comparisons are low versus 6.2 medium, solo and with the shared Terra pair; also report the 6.1 medium baseline. Use separate direct contrasts so each confidence interval subtracts the intended reference.
+
+Publish confirmed low/medium/high and total findings, high+medium totals, the paired diff confidence intervals, simulated median turn latency, and estimated API cost per diff. Preserve verify6/7 and their publications. An independent audit must check all 70 diff IDs, all 501 selected sessions, raw-to-group mappings, actual model/effort selection, shared Terra weights, and the decisive aggregates before acceptance. Store the new readout under `results/sol-62-low/` and link it from the study README.
 
 ## Concrete Steps
 
@@ -114,6 +135,26 @@ After 70 audited successful O records, joint verification and scoring use:
 
 Run long judge work with the same durable detached logging pattern. Record process IDs and inspect existing state before resuming so that a second driver cannot duplicate accepted work. Do not expose credentials or edit shared profiles unnecessarily.
 
+For the new low-effort milestone, keep the same environment above and use these additive paths and commands after confirming arm P is unused:
+
+    jq 'map(.arm = "P")' "$R/arm-O-jobs.json" > "$R/arm-P-jobs.json"
+    jq '[.[] | select(.bug == "diff-05bc8c1e68")] | select(length == 1)' "$R/arm-P-jobs.json" > "$R/arm-P-canary.json"
+    jq -s '.[0] + .[1]' "$R/stage7-ready-jobs.json" "$R/arm-P-jobs.json" > "$R/stage8-ready-jobs.json"
+    python3 -B driver.py --jobs "$R/arm-P-canary.json" --concurrency 1 --same-image "$R/arm-P-image.json"
+    python3 -B driver.py --jobs "$R/arm-P-jobs.json" --concurrency 16 --same-image "$R/arm-P-image.json"
+    mkdir -p "$R/verify8"
+    cp "$R/verify7/SPEC.md" "$R/verify8/SPEC.md"
+    python3 -B build_verify.py verify8 --arms A,B,E,O,P --configs gpt-6.1-terra:high,gpt-6.1-sol:medium,gpt-6.2-sol:medium,gpt-6.2-sol:low --ready-jobs "$R/stage8-ready-jobs.json" --bugs-from "$R/arm-P-jobs.json"
+    python3 -B verify_driver.py verify8 --kind verify --target localhost --model gemini-4-neon --effort medium --profiles gemini,gemini2 --quota-scope gemini --concurrency 16
+    python3 -B score.py verify8
+    python3 -B consistency.py verify7 verify8
+    python3 -B compare.py verify8 gpt-6.2-sol/medium gpt-6.2-sol/low
+    python3 -B compare.py verify8 gpt-6.2-sol/medium+Terra/high+Terra/high gpt-6.2-sol/low+Terra/high+Terra/high
+    python3 -B compare.py verify8 Sol/medium gpt-6.2-sol/low
+    python3 -B compare.py verify8 Sol/medium+Terra/high+Terra/high gpt-6.2-sol/low+Terra/high+Terra/high
+
+Apply the same strict audits, durable detached logging, severity slices, and timing/usage methods as verify7. These commands describe distinct new work; do not relaunch earlier O reviews or verify7 judges.
+
 ## Validation and Acceptance
 
 Acceptance requires 70 audited new reviews, one per original diff, and complete matched baseline coverage for all four requested setups. Verify collection completeness and model/effort from actual session metadata. Check that each scored finding maps to the correct review and judge verdict, that combinations union findings rather than double-counting them, and that comparisons use identical diff coverage. An independent worker checks the decisive aggregates and uncertainty calculation from saved outputs.
@@ -139,3 +180,5 @@ Final reviewer audit: `$REVIEW_ARMS_DIR/arm-O-audit.json`. Failed pre-review att
 Use the installed `mj` CLI and the existing evaluation scripts. User credentials remain managed by Mjolnir. Do not change Rust target directories, run Cargo builds, or install a replacement build for this measurement. Model selection must be explicit and checked against the reviewer session's actual model and effort.
 
 Revision note (2026-11-23): Registered the requested model comparison before any new review outputs were collected. Added the reserved arm, baseline metadata counts, executable, joint verification decision, exact commands, and execution ownership after runner inspection. Recorded the rejected read-only-to-write reassignment and the fresh explicitly authorized execution worker.
+
+Revision note (2026-11-24): Completed, independently audited, reviewed, and pushed the medium comparison and its impact breakdown. Extended the plan for the user's newly requested low-effort arm, preserving the completed results and the concurrency-16 preference.
