@@ -104,24 +104,26 @@ Run the full driver with durable detached logging and record its PID. Accepted c
 Run it only after the reviewer driver exits. It enables shell error exit and pipeline error propagation, prepares or validates ready and reviewer hash manifests, checks new reviewer evidence, builds and audits the private pool, runs and attests one Opus canary, then runs and attests the rest before scoring. The ordered commands below document its gates for inspection and case-specific recovery, with shell error exit required throughout. Normal reproduction uses the canonical scripts; do not run both flows. A matching previously prepared manifest is reusable. Once verify9 exists, diagnose any interruption and resume that stage instead of rerunning fresh-round preparation or rebuilding its key and batches:
 
     set -euo pipefail
-    python3 -B "$S/audit_round.py" "$R" ready
-    python3 -B "$S/audit_reviewers.py" "$R" --hash-file "$C/new-reviewers.sha256"
+    python3 -B "$S/audit_round.py" "$R" ready > "$C/ready-audit.json"
+    python3 -B "$S/audit_reviewers.py" "$R" --hash-file "$C/new-reviewers.sha256" > "$C/reviewer-audit.json"
     (cd "$R" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" && sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256" && sha256sum --quiet -c "$C/new-reviewers.sha256")
     mkdir "$R/verify9"
     cp "$R/verify5/SPEC.md" "$R/verify9/SPEC.md"
     python3 -B build_verify.py verify9 --arms A,B,D,D2,E,G-base,G-plus,H,I,J,K,L,N,O,P,Q,R,S,T --configs gpt-6.1-terra:high,gpt-6.1-terra:xhigh,gpt-6.1-sol:high,gpt-6.1-sol:medium,gpt-6.1-sol:xhigh,greptile:base,greptile:plus,deepseek-flash:low,muse-ember-1.0:xhigh,gemini-4-hydrogen:high,gemini-4-hydrogen:medium,kimi-code/k3.1-pro:high,gpt-6.2-sol:low,gpt-6.2-sol:medium --ready-jobs "$C/ready-jobs.json" --bugs-from "$R/sol-62-repeats/jobs.json"
-    python3 -B "$S/audit_round.py" "$R" pool "$PREFLIGHT/historical-and-op-sessions.jsonl"
+    python3 -B "$S/audit_round.py" "$R" pool "$PREFLIGHT/historical-and-op-sessions.jsonl" > "$C/pool-audit.json"
     (cd "$R" && sha256sum verify9/SPEC.md verify9/batch-*.json private/key-verify9.json) > "$C/verify9-pool.sha256"
     python3 -B verify_driver.py verify9 --kind verify --target localhost --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe --model opus --effort high --profiles claude4 --quota-scope claude --concurrency 1 --batch 0
-    python3 -B "$S/audit_round.py" "$R" judges "$OPUS_JUDGE_STORE" --batch 0
+    python3 -B "$S/audit_round.py" "$R" judges "$OPUS_JUDGE_STORE" --batch 0 > "$C/judge-canary-audit.json"
     (cd "$R" && sha256sum --quiet -c "$C/verify9-pool.sha256")
     python3 -B verify_driver.py verify9 --kind verify --target localhost --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe --model opus --effort high --profiles claude4 --quota-scope claude --concurrency 16
-    python3 -B "$S/audit_round.py" "$R" judges "$OPUS_JUDGE_STORE"
+    python3 -B "$S/audit_round.py" "$R" judges "$OPUS_JUDGE_STORE" > "$C/judge-audit.json"
     (cd "$R" && sha256sum --quiet -c "$C/verify9-pool.sha256" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" && sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256" && sha256sum --quiet -c "$C/new-reviewers.sha256")
-    python3 -B score.py verify9
-    python3 -B pareto.py verify9 --exclude DSF/low --bootstrap 300 --sessions Sol/medium=2,Terra/xhigh=2,Sol/xhigh=2,Greptile/base=1,Greptile/plus=1,Ember/xhigh=1,Gemini/high=1,Gemini/medium=1,Kimi/high=1,gpt-6.2-sol/low=3,gpt-6.2-sol/medium=3
+    python3 -B score.py verify9 | tee "$C/score.json"
+    bash "$S/run_analysis.sh"
 
 The execution owner preserved the preflight manifests in `$C/preflight`. The `ready` preparation/audit derives exactly 1,064 jobs from the historical and new manifests, requires their exact completed paths and an unused verify9, and creates `$C/ready-jobs.json` only if absent. An existing file must have the exact expected membership and is preserved. `audit_reviewers.py --hash-file` similarly creates or verifies the frozen source manifest without refreshing changed evidence. The `pool` audit compares the generated private key against exactly the frozen 1,446 IDs plus 280 newly accepted reviewers, including all empty reports, and verifies source text/index/commit membership and the original specification before any judge is submitted. Merely passing `--ready-jobs` is insufficient.
+
+Recovery writes the same audit and score receipt paths as the wrapper. In particular, `$C/judge-audit.json` and `$C/score.json` must contain the successful verified results before `run_analysis.sh` can proceed. Keep shell error exit and pipeline error propagation enabled so failed audits cannot advance to scoring or analysis.
 
 Require the built first batch to be ID 0 before using the shown canary command; otherwise substitute the existing first ID in both the driver and audit. The selected `judges --batch 0` audit requires a completed accepted output and joins its stable command to durable usage and selection: opus/high on claude4, fast and ultracode off, main provider `claude-opus-5-5`, and no provider outside that model plus the original known `claude-haiku-5-5` auxiliary. Failure prevents full judging. The full invocation skips the completed batch. The unfiltered `judges` audit repeats these checks for every built batch and validates group coverage before scoring. Each audit exits nonzero on missing, unknown or mismatched evidence. The quota scope does not add a quota floor; it only interprets any explicitly configured existing floor using standard Claude windows rather than Fable windows.
 
