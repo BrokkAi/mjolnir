@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"strings"
 	"time"
 
@@ -354,7 +353,7 @@ func StartWorker(owner *store.WorkerPermit, executor core.CommandExecutor, locat
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(backend, *locator) {
+	if !backend.Equal(*locator) {
 		return errors.New("worker launch does not match its admitted placement")
 	}
 	if err := store.AdmitEnvironmentWorker(owner.SessionID(), target); err != nil {
