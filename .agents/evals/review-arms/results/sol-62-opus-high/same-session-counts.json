@@ -1,0 +1,48 @@
+{
+  "verify8": {
+    "Sol 6.1 medium": {
+      "low": 1.5,
+      "medium": 34.0,
+      "high": 14.5,
+      "medium+high": 48.5,
+      "all": 50.0
+    },
+    "Sol 6.2 medium original": {
+      "low": 55.0,
+      "medium": 164.0,
+      "high": 37.0,
+      "medium+high": 201.0,
+      "all": 256.0
+    },
+    "Sol 6.2 low original": {
+      "low": 30.0,
+      "medium": 101.0,
+      "high": 24.0,
+      "medium+high": 125.0,
+      "all": 155.0
+    }
+  },
+  "verify9": {
+    "Sol 6.1 medium": {
+      "low": 9.0,
+      "medium": 31.0,
+      "high": 9.5,
+      "medium+high": 40.5,
+      "all": 49.5
+    },
+    "Sol 6.2 medium original": {
+      "low": 100.0,
+      "medium": 96.0,
+      "high": 20.0,
+      "medium+high": 116.0,
+      "all": 216.0
+    },
+    "Sol 6.2 low original": {
+      "low": 63.0,
+      "medium": 57.0,
+      "high": 11.0,
+      "medium+high": 68.0,
+      "all": 131.0
+    }
+  }
+}

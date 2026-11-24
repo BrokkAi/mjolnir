@@ -1,0 +1,67 @@
+{
+  "O": {
+    "n": 70,
+    "profiles": {
+      "codex3": 68,
+      "codex2": 2
+    },
+    "median_seconds": 106.2715,
+    "mean_tokens": 755063.3857142857,
+    "mean_cost_usd": 0.2517653771428571,
+    "median_job_seconds": 268.2986928085
+  },
+  "P": {
+    "n": 70,
+    "profiles": {
+      "codex3": 67,
+      "codex2": 3
+    },
+    "median_seconds": 45.9945,
+    "mean_tokens": 290193.3142857143,
+    "mean_cost_usd": 0.11950018285714285,
+    "median_job_seconds": 241.676094121
+  },
+  "Q": {
+    "n": 70,
+    "profiles": {
+      "codex3": 67,
+      "codex2": 3
+    },
+    "median_seconds": 50.480000000000004,
+    "mean_tokens": 303861.4857142857,
+    "mean_cost_usd": 0.11439117714285714,
+    "median_job_seconds": 203.546400316
+  },
+  "R": {
+    "n": 70,
+    "profiles": {
+      "codex3": 68,
+      "codex2": 2
+    },
+    "median_seconds": 108.126,
+    "mean_tokens": 709023.7857142857,
+    "mean_cost_usd": 0.23299086285714285,
+    "median_job_seconds": 231.79013823399998
+  },
+  "S": {
+    "n": 70,
+    "profiles": {
+      "codex3": 67,
+      "codex2": 3
+    },
+    "median_seconds": 46.4605,
+    "mean_tokens": 289581.7571428571,
+    "mean_cost_usd": 0.10825807428571428,
+    "median_job_seconds": 175.8275644235
+  },
+  "T": {
+    "n": 70,
+    "profiles": {
+      "codex3": 70
+    },
+    "median_seconds": 115.4085,
+    "mean_tokens": 742778.6714285715,
+    "mean_cost_usd": 0.23730308,
+    "median_job_seconds": 251.291475717
+  }
+}

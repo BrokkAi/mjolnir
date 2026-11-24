@@ -1,0 +1,22 @@
+{
+ "diffs": 70,
+ "sessions": 1726,
+ "sessions_per_model": {
+  "gpt-6.1-terra": 361,
+  "gpt-6.1-sol": 490,
+  "greptile": 140,
+  "deepseek-flash": 35,
+  "muse-ember-1.0": 70,
+  "gemini-4-hydrogen": 140,
+  "kimi-code/k3.1-pro": 70,
+  "gpt-6.2-sol": 420
+ },
+ "groups": 528,
+ "verdicts": {
+  "confirmed": 342,
+  "rejected": 124,
+  "plausible": 62
+ },
+ "missing_latency": 0,
+ "unverified_diffs_left_out": []
+}
