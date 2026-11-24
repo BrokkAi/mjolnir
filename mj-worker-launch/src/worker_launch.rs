@@ -402,8 +402,8 @@ pub fn stage_worker_files_for(
     } = &preparation
     {
         use mj_core::worker_launch::{ReloadCandidateManifest, ReloadSharedLogin};
-        install_build_cache_shim(session, backend, &launch, executor)
-            .context("stage the session's mbx and configuration")?;
+        // In-place Move reuses the running environment's mbx binary/config/shims.
+        // Phase B's link_build_cache_configuration links the destination XDG config after commit.
         let (clear_paths, protected_paths) = profile_clear_spec(profile.kind);
         let manifest = ReloadCandidateManifest {
             operation_id: operation_id.clone(),
@@ -1214,6 +1214,12 @@ mod tests {
             worker_root: root.to_string_lossy().into_owned(),
         };
         let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "localhost".into(),
+            directory: dir.path().join("cache"),
+            max_size: None,
+            target_root: None,
+        });
         session.last_profile = "codex".into();
         session.harness_kind = HarnessKind::Codex;
         session.native_session_id = None;
@@ -1229,7 +1235,30 @@ mod tests {
         for name in ["launch.json", "ownership.json"] {
             std::fs::write(root.join(name), "live").unwrap();
         }
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        for name in ["cargo", "mbx"] {
+            std::fs::write(root.join("bin").join(name), "live shim").unwrap();
+        }
         let state = crate::database::load_state().unwrap();
+        // Candidate staging must not consult host mbx or alter live cache shims.
+        #[cfg(unix)]
+        {
+            let no_host_mbx = dir.path().join("no-host-mbx");
+            std::fs::create_dir(&no_host_mbx).unwrap();
+            for utility in [
+                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat",
+            ] {
+                let executable = ["/usr/bin", "/bin"]
+                    .into_iter()
+                    .map(|directory| Path::new(directory).join(utility))
+                    .find(|path| path.exists())
+                    .expect("system filesystem utility");
+                std::os::unix::fs::symlink(executable, no_host_mbx.join(utility)).unwrap();
+            }
+            unsafe {
+                std::env::set_var("PATH", &no_host_mbx);
+            }
+        }
         crate::database::test_fixtures::worker_test_scope(id, || {
             prepare_worker_files_for(
                 &config,
@@ -1247,6 +1276,12 @@ mod tests {
             )
             .unwrap();
         });
+        for name in ["cargo", "mbx"] {
+            assert_eq!(
+                std::fs::read(root.join("bin").join(name)).unwrap(),
+                b"live shim"
+            );
+        }
         let candidate = root.join("reload-candidates/candidate");
         let launch = WorkerLaunchConfig::read(&candidate.join("launch.json")).unwrap();
         assert_eq!(launch.accepted_reload_operation_id.as_deref(), Some("move"));

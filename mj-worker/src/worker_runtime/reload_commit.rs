@@ -323,6 +323,98 @@ mod tests {
     }
 
     #[test]
+    fn reload_commit_reconciles_crash_before_relay_commit_without_downgrading_holds() {
+        use crate::relay::DurableRelay;
+        use mj_core::relay::*;
+        use mj_core::worker_launch::WorkerLaunchConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut relay = DurableRelay::open(root, "session-1", "1.0.0").unwrap();
+        let store = relay.operational_state().store_id.clone().unwrap();
+        let mut pending = fixture(root);
+        pending.expected_store_id = store.clone();
+        let candidate = root.join("reload-candidates/candidate");
+        let mut manifest: ReloadCandidateManifest =
+            serde_json::from_slice(&std::fs::read(candidate.join("manifest.json")).unwrap())
+                .unwrap();
+        manifest.expected_store_id = store.clone();
+        std::fs::write(
+            candidate.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut launch =
+            crate::worker_runtime::relay_tests::launch_config(root.join("home").to_str().unwrap());
+        launch.accepted_reload_operation_id = Some("move".into());
+        launch.write(&candidate.join("launch.json")).unwrap();
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store.clone(),
+            },
+        });
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+        commit_pending_reload(root, &pending).unwrap();
+        drop(relay); // Crash before the relay's Committed phase is persisted.
+        roll_forward_pending_reload_if_any(root).unwrap();
+        let launch = WorkerLaunchConfig::read(&root.join("launch.json")).unwrap();
+        let mut relay = DurableRelay::open(root, "session-1", "1.0.0").unwrap();
+        relay.reconcile_committed_reload("older-move").unwrap();
+        assert_eq!(
+            relay
+                .operational_state()
+                .in_place_move_hold
+                .as_ref()
+                .unwrap()
+                .reload_phase,
+            None
+        );
+        relay
+            .reconcile_committed_reload(launch.accepted_reload_operation_id.as_deref().unwrap())
+            .unwrap();
+        drop(relay);
+        let mut relay = DurableRelay::open(root, "session-1", "1.0.0").unwrap();
+        assert_eq!(
+            relay
+                .operational_state()
+                .in_place_move_hold
+                .as_ref()
+                .unwrap()
+                .reload_phase,
+            Some(InPlaceReloadPhase::Committed)
+        );
+        relay.finish_committed_reload().unwrap();
+        relay.reconcile_committed_reload("move").unwrap();
+        let hold = relay
+            .operational_state()
+            .in_place_move_hold
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(hold.reload_phase, Some(InPlaceReloadPhase::Started));
+        assert!(hold.harness_restarted);
+        relay
+            .mark_in_place_harness_failed_after_commit("move", &store, "failed".into())
+            .unwrap();
+        relay.reconcile_committed_reload("move").unwrap();
+        drop(relay);
+        let relay = DurableRelay::open(root, "session-1", "1.0.0").unwrap();
+        assert_eq!(
+            relay
+                .operational_state()
+                .in_place_move_hold
+                .as_ref()
+                .unwrap()
+                .reload_phase,
+            Some(InPlaceReloadPhase::FailedAfterCommit {
+                message: "failed".into()
+            })
+        );
+    }
+
+    #[test]
     fn reload_commit_resolves_relative_ssh_profile_home_from_startup_directory() {
         let cwd = std::env::current_dir().unwrap();
         let dir = tempfile::tempdir_in(&cwd).unwrap();

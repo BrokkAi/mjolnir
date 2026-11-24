@@ -1828,6 +1828,9 @@ pub async fn run_daemon_owned(
             &config.initial_commands,
         )?
     };
+    if let Some(operation_id) = config.accepted_reload_operation_id.as_deref() {
+        durable_relay.reconcile_committed_reload(operation_id)?;
+    }
     // A sealed relay only finishes its accepted close. An unsealed capture
     // must drain writers before it can admit a checkpoint barrier.
     if checkpoint_only
@@ -2154,6 +2157,17 @@ pub async fn run_daemon_owned(
     let running_harness = match preparation_outcome {
         Ok(PreparationOutcome::Started(running)) => *running,
         Ok(PreparationOutcome::Failed(error)) => {
+            let mut durable = relay.lock().expect("relay lock");
+            if let Some((operation_id, store_id)) = durable.committed_reload_operation()
+                && let Err(persist_error) = durable.mark_in_place_harness_failed_after_commit(
+                    &operation_id,
+                    &store_id,
+                    format!("{error:#}"),
+                )
+            {
+                tracing::warn!(%persist_error, "could not persist committed reload preparation failure");
+            }
+            drop(durable);
             // The exit record carries the typed failure, so the daemon stops
             // restarting this harness and reports why it could not start.
             client_task.abort();
