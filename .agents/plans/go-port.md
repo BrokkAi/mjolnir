@@ -83,6 +83,9 @@ Cost so far: about 100 agent tokens per Rust line.
 
 ## Decision Log
 
+- Decision (retrospective, 2026-11-24): the port's bottom-up order (mj-core first, mj-cli last) was a fundamental mistake. The owner: it lets a large amount of work produce nothing runnable and gives no way to know how close the port is. A port should start from the user-facing CLI and one end-to-end path, runnable against the existing Rust pieces, then fill in layers beneath it. The owner chose to continue in the current order for this port.
+  Date/Author: 2026-11-24, agent (owner's assessment).
+
 - Decision: the Go build is a separate program in `go/`, not a component the Rust daemon drives.
   Rationale: the owner asked for a replacement; mixing the two was never asked for.
   Date/Author: 2026-11-20, agent.
