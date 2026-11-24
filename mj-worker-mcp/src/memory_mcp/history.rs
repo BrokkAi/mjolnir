@@ -168,15 +168,15 @@ impl<R: BufRead> BufRead for ShutdownReader<R> {
     }
 }
 
-/// Six tools are advertised. `search_sessions` and `search_session` still
-/// dispatch through [`Client::call`] for resumed transcripts, but are no longer
-/// listed. Retire them with `HistoryQuery::SearchSessions`/`SearchSession` once
-/// `MINIMUM_WORKER_PROTOCOL >= RELAY_SEARCH_HISTORY_PROTOCOL`.
+/// Advertise `search_history`, `get_session_brief`, and `read_session`.
+/// `search_sessions` and `search_session` still dispatch through
+/// [`Client::call`] for resumed transcripts and older workers; retire their
+/// variants and handlers once
+/// `MINIMUM_WORKER_PROTOCOL > RELAY_SEARCH_HISTORY_PROTOCOL`.
 pub(super) fn tool_definitions() -> Vec<Value> {
     let page = json!({"type":"integer","minimum":1,"maximum":100,"default":20});
     let chars = json!({"type":"integer","minimum":1,"maximum":64000,"default":16000});
     let id = json!({"type":"string","description":"A session ID, a unique prefix of one, or a native session UUID, as returned by search_history or another history tool."});
-    let text = json!({"type":"string"});
     let index = json!({"type":"integer","minimum":0,"default":0});
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| {
         json!({"name":name,"description":description,
@@ -225,24 +225,6 @@ Indexed snapshots can lag live sessions and may omit timestamps or older tool ou
             "Read a bounded transcript page. To expand a search_history hit, pass its i as start (start=max(0, i-2), limit=6 shows context) and, to continue a cut message, its next_offset as offset. Follow next.start/offset to continue inside long messages. role=user produces an outline. session_id accepts a session ID, a unique prefix, or a native session UUID. Cite session ID and message indices.",
             json!({"session_id":id,"start":index,"offset":index,"role":{"type":"string","enum":["user","assistant","tool"]},"limit":page,"max_chars":chars}),
             vec!["session_id"],
-        ),
-        tool(
-            "trace_file",
-            "Find sessions that edited a recorded path or repository-relative suffix. Returns matched paths; equal suffixes do not establish repository identity.",
-            json!({"path":text,"limit":page}),
-            vec!["path"],
-        ),
-        tool(
-            "session_files",
-            "List recorded files changed by one session, to judge whether its conversation is relevant. Empty evidence does not prove no files changed. session_id accepts a session ID, a unique prefix, or a native session UUID.",
-            json!({"session_id":id,"start":index,"limit":page}),
-            vec!["session_id"],
-        ),
-        tool(
-            "blame_file",
-            "Attribute an inclusive range of up to 1000 lines using Git on this target and indexed session evidence. Paths are relative to the session working directory. Confidence is heuristic; inspect candidates' conversations.",
-            json!({"path":text,"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
-            vec!["path", "start_line", "end_line"],
         ),
     ]
 }
