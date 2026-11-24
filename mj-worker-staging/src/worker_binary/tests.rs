@@ -1259,7 +1259,7 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
 
 #[cfg(unix)]
 #[test]
-fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
+fn dsh_preflight_requires_compatible_node_even_with_a_current_binary() {
     let directory = tempfile::tempdir().unwrap();
     let current = format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp {}'; fi\n",
@@ -1275,18 +1275,6 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
         ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, directory.path().to_path_buf())
     };
 
-    preflight_harness(
-        &mj_core::config::TargetTemplate::LocalBare,
-        &profile,
-        &ProcessExecutor,
-    )
-    .unwrap();
-
-    mj_core::test_hooks::install_fake_command(
-        directory.path(),
-        "dsh-acp",
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dsh-acp 0.3.0'; fi\n",
-    );
     let error = format!(
         "{:#}",
         preflight_harness(
@@ -1297,10 +1285,29 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
         .unwrap_err()
     );
     assert!(
-        error.contains("provide Node.js 22+ with npm and npx")
+        error.contains("provide Node.js 24.9.0+ with npm and npx")
             && error.contains("managed Node.js has no artifact"),
         "{error}"
     );
+
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "node",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.21.0; fi\nexit 0\n",
+    );
+    for command in ["npm", "npx"] {
+        mj_core::test_hooks::install_fake_command(
+            directory.path(),
+            command,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.19.0; fi\nexit 0\n",
+        );
+    }
+    preflight_harness(
+        &mj_core::config::TargetTemplate::LocalBare,
+        &profile,
+        &ProcessExecutor,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -2675,9 +2682,14 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     let bin = root.path().join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\"\n"
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'dsh-acp {DSH_ACP_VERSION}\\n'; exit 0; fi\nprintf '%s|%s|%s|%s' \"$*\" \"$DSH_ACP_SYSTEM_PROMPT\" \"$DSH_ACP_DATA_DIR\" \"$DSH_ACP_DSH_HOME\"\n"
     );
     mj_core::test_hooks::install_fake_command(&bin, "dsh-acp", &script);
+    mj_core::test_hooks::install_fake_command(
+        &bin,
+        "node",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.21.0; fi\nexit 0\n",
+    );
     let staged = root.path().join("staged");
     std::fs::create_dir_all(&staged).unwrap();
     let instructions =
@@ -2703,7 +2715,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("||{}", staged.display())
+        format!("||{}|{}/dsh-home", staged.display(), staged.display())
     );
 
     // The native loader accepts instruction files up to 1 MiB. Mjolnir checks
@@ -2744,7 +2756,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("||{}", staged.display())
+        format!("||{}|{}/dsh-home", staged.display(), staged.display())
     );
     std::fs::write(&own, format!("{largest}x")).unwrap();
     // Hard-won: DSH campaign 2026-10-23: one byte too many reached the user only as relay noise naming the staged copy
@@ -2825,7 +2837,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("||{}", staged.display())
+        format!("||{}|{}/dsh-home", staged.display(), staged.display())
     );
 
     let output = launch(None);
@@ -2897,8 +2909,23 @@ fn dsh_launch_does_not_select_a_pre_native_loader() {
         stderr.contains(&format!(
             "requires dsh-acp {} or newer",
             mj_core::harness_runtime::DSH_ACP_VERSION
-        )) && stderr.contains("upgrade it or install Node.js 22+, npm, and npx"),
+        )) && stderr.contains(
+            "install or upgrade dsh-acp, Node.js, npm, and npx in the target environment"
+        ),
         "{stderr}"
+    );
+
+    mj_core::test_hooks::install_fake_command(
+        &tools_bin,
+        "node",
+        "#!/bin/sh\nif [ \"$1\" = -e ]; then exit 1; fi\nexit 0\n",
+    );
+    let output = launch(&fallback_path);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Node.js 24.9.0+") && stderr.contains("npm, and npx"),
+        "{output:?}"
     );
 }
 

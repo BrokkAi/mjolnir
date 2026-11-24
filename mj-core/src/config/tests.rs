@@ -2812,6 +2812,21 @@ fn profile_cannot_override_its_isolated_home() {
     );
 }
 
+#[test]
+fn dsh_profile_cannot_redirect_the_native_runtime_home() {
+    let profile = HarnessProfile {
+        environment: BTreeMap::from([("DSH_ACP_DSH_HOME".into(), "/shared-and-racy".into())])
+            .into(),
+        ..HarnessProfile::new(HarnessKind::Dsh, PathBuf::from("/home/test/.dsh"))
+    };
+    let error = profile.validate("dsh").unwrap_err().to_string();
+    assert!(
+        error.contains("must not set DSH_ACP_DSH_HOME")
+            && error.contains("native DSH state lives under the profile home"),
+        "{error}"
+    );
+}
+
 // Hard-won: 02e00ba4: named instances collided on the default viewer port and API commands stopped
 #[test]
 fn named_instances_default_to_their_own_stable_viewer_port() {
