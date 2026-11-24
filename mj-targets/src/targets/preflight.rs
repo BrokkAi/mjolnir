@@ -1540,21 +1540,24 @@ pub struct ProbeFrames {
     pub status: &'static str,
 }
 
-const PODMAN_PROBE_FRAMES: ProbeFrames = ProbeFrames {
+/// The frames [`PROBE_HELPER_SH`] prints and [`parse_framed_probes`] reads.
+pub const DEFAULT_PROBE_FRAMES: ProbeFrames = ProbeFrames {
     begin: PROBE_BLOCK_BEGIN,
     end: PROBE_BLOCK_END,
     status: PROBE_STATUS_PREFIX,
 };
 
-/// Run every remote Podman probe in one SSH round trip.
-///
-/// Each probe's stdout is captured in a shell variable and reprinted between
-/// framing markers, while its stderr is written straight to the saved stdout
-/// inside its own frame, so multi-line and arbitrary output survives intact.
-/// The version probe short-circuits the rest: without Podman the later probes
-/// can only repeat its failure.
-pub const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
-exec 3>&1
+/// The shell function every batched remote probe script shares. A script
+/// that starts with it runs `probe <name> <command...>` for each question and
+/// parses the output with [`parse_framed_probes`] and [`DEFAULT_PROBE_FRAMES`].
+/// Each probe's stdout is captured in `$out`, reprinted between framing
+/// markers, and its stderr is written straight to the saved stdout inside its
+/// own frame, so multi-line and arbitrary output survives intact. The function
+/// returns the probe's status, so a script can stop where later probes could
+/// only repeat an earlier failure.
+macro_rules! probe_helper_sh {
+    () => {
+        r#"exec 3>&1
 probe() {
     name=$1
     shift
@@ -1566,13 +1569,28 @@ probe() {
     printf '__mj_probe_status__ %s %s\n' "$name" "$status"
     return "$status"
 }
-probe platform uname -s || exit 0
+"#
+    };
+}
+
+/// See [`probe_helper_sh`]; the one text every batched probe script starts with.
+pub const PROBE_HELPER_SH: &str = probe_helper_sh!();
+
+/// Run every remote Podman probe in one SSH round trip.
+///
+/// The version probe short-circuits the rest: without Podman the later probes
+/// can only repeat its failure. See [`PROBE_HELPER_SH`] for the framing.
+pub const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = concat!(
+    "\n",
+    probe_helper_sh!(),
+    r#"probe platform uname -s || exit 0
 [ "$out" = Linux ] || exit 0
 probe version podman --version || exit 0
 probe info podman info --format json
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0
-"#;
+"#
+);
 
 pub(super) fn run_ssh_podman_probes(
     host: PodmanHost<'_>,
@@ -1638,7 +1656,7 @@ pub fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
 /// A probe appears only once its status line has been read, so output truncated
 /// mid-probe is reported as a missing probe rather than a partial result.
 pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, CommandOutput> {
-    parse_framed_probes(stdout, PODMAN_PROBE_FRAMES)
+    parse_framed_probes(stdout, DEFAULT_PROBE_FRAMES)
 }
 
 /// Split framed output into one result per probe, as
