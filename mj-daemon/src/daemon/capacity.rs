@@ -949,8 +949,21 @@ pub(super) fn spawn_capacity_service(
         let mut revisions = state.revisions();
         let mut storage = mj_controller::target_storage::subscribe();
         let mut full_hosts = BTreeSet::new();
+        let mut storage_warning = None;
         let mut target_refresh_at = None;
         loop {
+            let current_warning = targets_tx
+                .borrow()
+                .targets
+                .iter()
+                .find(|target| target.local)
+                .and_then(|target| target.storage_warning.clone());
+            if current_warning != storage_warning {
+                if let Some(warning) = &current_warning {
+                    state.push_notice("", warning.clone());
+                }
+                storage_warning = current_warning;
+            }
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 changed = revisions.changed(), if target_refresh_at.is_none() => {
@@ -1250,6 +1263,7 @@ mod tests {
             local: true,
             probes: Vec::new(),
             local_storage_paths: Vec::new(),
+            storage_warning: None,
             probe_error: None,
         };
         let usage = mj_controller::targets::DeploymentCapacityUsage {
@@ -1878,6 +1892,7 @@ mod tests {
             local: true,
             probes: Vec::new(),
             local_storage_paths: Vec::new(),
+            storage_warning: None,
             probe_error: None,
         };
         let usage = mj_controller::targets::DeploymentCapacityUsage {

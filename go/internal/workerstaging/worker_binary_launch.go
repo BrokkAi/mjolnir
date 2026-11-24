@@ -268,6 +268,7 @@ func WorkerLaunchConfigWithCheckout(session *core.SessionRecord, checkout core.C
 		if err != nil {
 			return fail(err)
 		}
+		targetEnvironment[core.SessionMbxBinEnv] = core.Text(core.Join(workerRoot, "bin"))
 		targetEnvironment["MBX_SHIMS_DIR"] = core.Text(core.Join(workerRoot, "mbx-shims"))
 		// The per-build summary and savings lines are for a human at a
 		// terminal; in a harness session they only add noise to Cargo
@@ -288,7 +289,7 @@ func WorkerLaunchConfigWithCheckout(session *core.SessionRecord, checkout core.C
 		remotePrefix := core.MbxRemoteEnvPrefix
 		maps.DeleteFunc(targetEnvironment, func(name, _ string) bool { return strings.HasPrefix(name, remotePrefix) })
 		maps.DeleteFunc(environment, func(name, _ string) bool { return strings.HasPrefix(name, remotePrefix) })
-		for _, key := range []string{"MBX_CACHE_DIR", "MBX_SHIMS_DIR"} {
+		for _, key := range []string{"MBX_CACHE_DIR", "MBX_SHIMS_DIR", "MJ_MBX_BIN"} {
 			environment[key] = targetEnvironment[key]
 		}
 		delete(environment, "MJ_MBX_CONFIG_DIR")

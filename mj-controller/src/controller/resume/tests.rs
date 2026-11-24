@@ -31,6 +31,24 @@ const CLAUDE_PRIOR_TRANSCRIPT: &str = r#"{"type":"user","message":{"content":"wo
 {"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"content":"native prior state"}}
 "#;
 
+const ANTIGRAVITY_PRIOR_TRANSCRIPT: &str = r#"{"type":"USER_INPUT","status":"DONE","content":"work"}
+{"type":"PLANNER_RESPONSE","status":"DONE","content":"answer","thinking":"hidden"}
+{"type":"CHECKPOINT","status":"DONE","content":"native antigravity state"}
+"#;
+
+fn antigravity_prior_snapshot() -> Arc<CanonicalSessionSnapshot> {
+    use mj_checkpoint::archive::CanonicalTranscriptBody;
+    use serde_json::json;
+
+    let mut snapshot = Arc::unwrap_or_clone(claude_prior_snapshot());
+    snapshot.transcript[1].body = CanonicalTranscriptBody::Agent {
+        chunks: vec![json!({"content":{"type":"text","text":"answer"}})],
+        streaming: false,
+    };
+    snapshot.transcript[1].latest_content_event_ordinal = Some(2);
+    Arc::new(snapshot)
+}
+
 fn claude_prior_snapshot() -> Arc<CanonicalSessionSnapshot> {
     use mj_checkpoint::archive::{
         CanonicalExecutionState, CanonicalSessionState, CanonicalTranscriptBody,
@@ -105,13 +123,44 @@ async fn claude_prior_reads_local_bare_profile_home() {
 }
 
 #[tokio::test]
-async fn claude_prior_streams_remote_output_and_distinguishes_failure_from_cancellation() {
-    const CHILD: &str = "MJ_CLAUDE_PRIOR_REMOTE_TEST_CHILD";
+async fn antigravity_prior_reads_local_bare_profile_home() {
+    let worker_root = tempfile::tempdir().unwrap();
+    let logs = worker_root
+        .path()
+        .join("profile/antigravity-cli/brain/native-1/.system_generated/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(
+        logs.join("transcript_full.jsonl"),
+        ANTIGRAVITY_PRIOR_TRANSCRIPT,
+    )
+    .unwrap();
+    let target = targets::TargetLocator::LocalBare {
+        worker_root: worker_root.path().to_str().unwrap().to_owned(),
+    };
+
+    let prior = native_prior_from_target_while_cancellable(
+        "session-1",
+        &target,
+        HarnessKind::Antigravity,
+        Some("native-1"),
+        &antigravity_prior_snapshot(),
+        &ProcessExecutor,
+    )
+    .await
+    .unwrap()
+    .expect("local transcript should align with the canonical prefix");
+    assert_eq!(prior.summary, "native antigravity state");
+    assert_eq!(prior.through_position, 1);
+}
+
+#[tokio::test]
+async fn native_prior_streams_remote_output_and_distinguishes_failure_from_cancellation() {
+    const CHILD: &str = "MJ_NATIVE_PRIOR_REMOTE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(crate::controller::test_support::test_name(
             module_path!(),
-            "claude_prior_streams_remote_output_and_distinguishes_failure_from_cancellation",
+            "native_prior_streams_remote_output_and_distinguishes_failure_from_cancellation",
         ))
         .env(CHILD, "1")
         .isolated_store(directory.path())
@@ -129,6 +178,8 @@ async fn claude_prior_streams_remote_output_and_distinguishes_failure_from_cance
     }
 
     struct RemoteTranscript {
+        transcript: &'static str,
+        script_marker: &'static str,
         outcome: ReadOutcome,
         started: std::cell::Cell<bool>,
     }
@@ -174,15 +225,16 @@ async fn claude_prior_streams_remote_output_and_distinguishes_failure_from_cance
             let remote = command.args.last().unwrap();
             assert!(remote.contains(".local/share/hel/profiles/session-1"));
             assert!(remote.contains("native-1"));
+            assert!(remote.contains(self.script_marker));
             let (status, stderr) = match self.outcome {
                 ReadOutcome::Transcript => {
-                    output.write_all(CLAUDE_PRIOR_TRANSCRIPT.as_bytes())?;
+                    output.write_all(self.transcript.as_bytes())?;
                     (0, Vec::new())
                 }
                 ReadOutcome::Missing => (0, Vec::new()),
                 ReadOutcome::FailedStatus => {
                     // A failed command can leave a partial or even parseable spool.
-                    output.write_all(CLAUDE_PRIOR_TRANSCRIPT.as_bytes())?;
+                    output.write_all(self.transcript.as_bytes())?;
                     (1, b"read failed".to_vec())
                 }
                 ReadOutcome::TransportError => bail!("connection refused"),
@@ -208,39 +260,57 @@ async fn claude_prior_streams_remote_output_and_distinguishes_failure_from_cance
         workspace: ".local/share/hel/workspaces/session-1".into(),
         worker_id: None,
     };
-    let canonical = claude_prior_snapshot();
-    for outcome in [
-        ReadOutcome::Transcript,
-        ReadOutcome::Missing,
-        ReadOutcome::FailedStatus,
-        ReadOutcome::TransportError,
-        ReadOutcome::Cancelled,
-    ] {
-        let executor = RemoteTranscript {
-            outcome,
-            started: std::cell::Cell::new(false),
-        };
-        let result = native_prior_from_target_while_cancellable(
-            "session-1",
-            &target,
+    for (harness_kind, transcript, script_marker, canonical, summary) in [
+        (
             HarnessKind::Claude,
-            Some("native-1"),
-            &canonical,
-            &executor,
-        )
-        .await;
-        assert!(executor.started.get());
-        match outcome {
-            ReadOutcome::Transcript => {
-                let prior = result.unwrap().expect("streamed transcript should align");
-                assert_eq!(prior.summary, "native prior state");
-                assert_eq!(prior.through_position, 1);
+            CLAUDE_PRIOR_TRANSCRIPT,
+            "/projects",
+            claude_prior_snapshot(),
+            "native prior state",
+        ),
+        (
+            HarnessKind::Antigravity,
+            ANTIGRAVITY_PRIOR_TRANSCRIPT,
+            "transcript_full.jsonl",
+            antigravity_prior_snapshot(),
+            "native antigravity state",
+        ),
+    ] {
+        for outcome in [
+            ReadOutcome::Transcript,
+            ReadOutcome::Missing,
+            ReadOutcome::FailedStatus,
+            ReadOutcome::TransportError,
+            ReadOutcome::Cancelled,
+        ] {
+            let executor = RemoteTranscript {
+                transcript,
+                script_marker,
+                outcome,
+                started: std::cell::Cell::new(false),
+            };
+            let result = native_prior_from_target_while_cancellable(
+                "session-1",
+                &target,
+                harness_kind,
+                Some("native-1"),
+                &canonical,
+                &executor,
+            )
+            .await;
+            assert!(executor.started.get());
+            match outcome {
+                ReadOutcome::Transcript => {
+                    let prior = result.unwrap().expect("streamed transcript should align");
+                    assert_eq!(prior.summary, summary);
+                    assert_eq!(prior.through_position, 1);
+                }
+                ReadOutcome::Cancelled => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("operation cancelled while reading native compaction"));
+                }
+                _ => assert!(result.unwrap().is_none()),
             }
-            ReadOutcome::Cancelled => {
-                let error = result.unwrap_err().to_string();
-                assert!(error.contains("operation cancelled while reading native compaction"));
-            }
-            _ => assert!(result.unwrap().is_none()),
         }
     }
 }

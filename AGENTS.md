@@ -27,6 +27,10 @@ label to any issue you begin working on to avoid overlapping work. Remove the
 label if you stand down without resolving the issue. Avoid working on
 tasks assigned to other people unless explicitly directed to do so.
 
+# Go port
+
+Only work on go/ if you are explicitly instructed to do so.
+
 # ExecPlans
 
 Use an ExecPlan for a complex feature or a significant refactor. Follow `.agents/PLANS.md` from design through implementation.

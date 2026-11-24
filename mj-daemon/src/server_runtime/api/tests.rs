@@ -9256,6 +9256,7 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
     projection.records.insert(parked.id.clone(), parked);
     projection.metadata.host_capacities = vec![RuntimeHostCapacity {
         reading: HostCapacityRow {
+            storage_warning: None,
             id: "host".into(),
             host: "builder".into(),
             target_ids: vec!["nitro".into()],

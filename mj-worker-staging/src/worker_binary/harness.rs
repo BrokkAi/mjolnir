@@ -91,15 +91,7 @@ pub fn preflight_harness(
     // compatible runtime. The worker performs that download, so the
     // controller only needs to establish that one of the two paths exists
     // before provisioning creates target state.
-    let script = if profile.kind == HarnessKind::Dsh {
-        format!(
-            "if command -v dsh-acp >/dev/null 2>&1 && {}; then exit 0; fi; {}",
-            mj_core::harness_runtime::dsh_acp_version_supported_script(),
-            node_or_downloader_preflight_script()
-        )
-    } else {
-        node_or_downloader_preflight_script()
-    };
+    let script = node_or_downloader_preflight_script(profile.kind);
     let mut args = if profile.environment.contains_key("PATH") {
         vec![
             "-c".to_owned(),
@@ -141,15 +133,23 @@ pub fn preflight_harness(
         anyhow::anyhow!(detail)
     };
     Err(failure.context(format!(
-        "{} launch preflight failed on {destination}; provide Node.js 22+ with npm and npx on the target PATH, or use a target where Mjolnir's managed runtime can run",
-        profile.kind.display_name()
+        "{} launch preflight failed on {destination}; provide Node.js {}+ with npm and npx on the target PATH, or use a target where Mjolnir's managed runtime can run",
+        profile.kind.display_name(),
+        mj_core::harness_runtime::harness_node_minimum_version(profile.kind)
     )))
 }
 
-fn node_or_downloader_preflight_script() -> String {
+fn node_or_downloader_preflight_script(harness: HarnessKind) -> String {
+    let minimum = mj_core::harness_runtime::harness_node_minimum_version(harness);
+    let installed_node_check = mj_core::harness_runtime::node_version_check_script(minimum);
+    let managed_node_check =
+        mj_core::harness_runtime::node_version_check_for_script("\"$managed/bin/node\"", minimum);
     format!(
-        "if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; managed_target=''; loader=''; system=$(uname -s 2>/dev/null) || system=''; machine=$(uname -m 2>/dev/null) || machine=''; case \"$system:$machine\" in Linux:x86_64) managed_target=linux-x64; loader=/lib64/ld-linux-x86-64.so.2 ;; Linux:aarch64|Linux:arm64) managed_target=linux-arm64; loader=/lib/ld-linux-aarch64.so.1 ;; Darwin:x86_64) managed_target=darwin-x64 ;; Darwin:arm64) managed_target=darwin-arm64 ;; *) echo \"Mjolnir's managed Node.js has no artifact for $system $machine; install Node.js 22 or newer with npm and npx on the target PATH\" >&2; exit 127 ;; esac; managed=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/mjolnir/node/node-v{}-$managed_target\"; if [ -x \"$managed/bin/node\" ] && \"$managed/bin/node\" -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' && [ -x \"$managed/bin/npm\" ] && \"$managed/bin/npm\" --version >/dev/null 2>&1 && [ -x \"$managed/bin/npx\" ] && \"$managed/bin/npx\" --version >/dev/null 2>&1; then exit 0; fi; if [ -n \"$loader\" ] && [ ! -f \"$loader\" ]; then echo \"Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter $loader is missing; install Node.js 22 or newer with npm and npx in the target environment\" >&2; exit 127; fi; exit 0",
-        mj_core::harness_runtime::NODE_VERSION
+        "if command -v node >/dev/null 2>&1 && {installed_node_check} && command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then exit 0; fi; managed_target=''; loader=''; system=$(uname -s 2>/dev/null) || system=''; machine=$(uname -m 2>/dev/null) || machine=''; case \"$system:$machine\" in Linux:x86_64) managed_target=linux-x64; loader=/lib64/ld-linux-x86-64.so.2 ;; Linux:aarch64|Linux:arm64) managed_target=linux-arm64; loader=/lib/ld-linux-aarch64.so.1 ;; Darwin:x86_64) managed_target=darwin-x64 ;; Darwin:arm64) managed_target=darwin-arm64 ;; *) echo \"Mjolnir's managed Node.js has no artifact for $system $machine; install Node.js {minimum} or newer with npm and npx on the target PATH\" >&2; exit 127 ;; esac; managed=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/mjolnir/node/node-v{}-$managed_target\"; if [ -x \"$managed/bin/node\" ] && {managed_node_check} && [ -x \"$managed/bin/npm\" ] && \"$managed/bin/npm\" --version >/dev/null 2>&1 && [ -x \"$managed/bin/npx\" ] && \"$managed/bin/npx\" --version >/dev/null 2>&1; then exit 0; fi; if [ -n \"$loader\" ] && [ ! -f \"$loader\" ]; then echo \"Mjolnir's pinned Node.js for this target is a glibc build, but the required program interpreter $loader is missing; install Node.js {minimum} or newer with npm and npx in the target environment\" >&2; exit 127; fi; exit 0",
+        mj_core::harness_runtime::NODE_VERSION,
+        installed_node_check = installed_node_check,
+        managed_node_check = managed_node_check,
+        minimum = minimum,
     )
 }
 
@@ -204,8 +204,9 @@ fn profile_configuration_entries(harness: HarnessKind) -> Vec<(&'static str, boo
             ("antigravity-cli/settings.json", false),
             ("config/projects/default-cli-project.json", false),
         ],
-        // dsh-acp keeps no configuration or login of its own; only the
-        // instruction file and skills tree below are staged.
+        // DSH owns its native home, but a session starts with only the
+        // generated instructions and inert skills tree below. Its API key is
+        // resolved into the launch environment, not copied from DSH's store.
         mj_core::config::HarnessKind::Dsh => &[],
     };
     harness_files

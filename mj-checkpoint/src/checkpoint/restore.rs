@@ -1004,9 +1004,21 @@ pub(super) fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        // OpenCode's database records session directories itself, and
-        // dsh-acp records its directory inside the session file; neither has
-        // a per-workspace path key to rewrite.
+        HarnessKind::Dsh if super::native_scan::is_dsh_native_log_path(relative_path) => {
+            if components.next() != Some(Component::Normal("dsh-home".as_ref()))
+                || components.next() != Some(Component::Normal("sessions".as_ref()))
+                || components.next().is_none()
+            {
+                return Ok(relative_path.to_path_buf());
+            }
+            let mut rewritten = PathBuf::from("dsh-home").join("sessions");
+            rewritten.push(dsh_project_key(target_cwd)?);
+            rewritten.extend(components);
+            Ok(rewritten)
+        }
+        // OpenCode's database records session directories itself. The dsh-acp
+        // projection records its directory inside the JSON file; only DSH's
+        // native log has a per-workspace path key.
         HarnessKind::Codex
         | HarnessKind::Muse
         | HarnessKind::OpenCode
@@ -1028,7 +1040,8 @@ pub(super) fn target_primary_cwd(
 
 enum NativeRelocation {
     Muse,
-    Dsh,
+    DshProjection,
+    DshNativeLog,
     Antigravity,
     OpenCode,
     GrokSummary,
@@ -1043,7 +1056,10 @@ fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<Nativ
         HarnessKind::Muse if path.file_name().is_some_and(|name| name == "session.jsonl") => {
             Some(NativeRelocation::Muse)
         }
-        HarnessKind::Dsh if path.starts_with("sessions") => Some(NativeRelocation::Dsh),
+        HarnessKind::Dsh if super::native_scan::is_dsh_native_log_path(path) => {
+            Some(NativeRelocation::DshNativeLog)
+        }
+        HarnessKind::Dsh if path.starts_with("sessions") => Some(NativeRelocation::DshProjection),
         HarnessKind::Antigravity
             if super::native_scan::is_sqlite_native_database(harness, path) =>
         {
@@ -1079,7 +1095,12 @@ pub(super) fn restored_native_artifact_bytes(
     match native_artifact_relocation(harness, relative_path) {
         None => return Ok(data.to_vec()),
         Some(NativeRelocation::Muse) => return crate::native::muse::relocate(data, target_cwd),
-        Some(NativeRelocation::Dsh) => return rewrite_dsh_session_cwd(data, target_cwd),
+        Some(NativeRelocation::DshProjection) => {
+            return rewrite_dsh_session_cwd(data, target_cwd);
+        }
+        Some(NativeRelocation::DshNativeLog) => {
+            return rewrite_dsh_native_log_cwd(data, native_session_id, target_cwd);
+        }
         Some(NativeRelocation::Antigravity) => {
             return crate::native::antigravity::relocate(data, target_cwd).with_context(|| {
                 format!(
@@ -1148,6 +1169,85 @@ fn rewrite_dsh_session_cwd(data: &[u8], target_cwd: &Path) -> Result<Vec<u8>> {
         ),
     );
     Ok(serde_json::to_vec(&record)?)
+}
+
+/// DSH's native session log starts with its own zstd frame containing exactly
+/// one JSON header line. Rewrite that frame and recompress the remaining log
+/// separately; merging the frames makes DSH reject the session.
+fn rewrite_dsh_native_log_cwd(
+    data: &[u8],
+    native_session_id: &str,
+    target_cwd: &Path,
+) -> Result<Vec<u8>> {
+    let unpacked = zstd::stream::decode_all(data).context("decompress native DSH session log")?;
+    let newline = unpacked
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .context("native DSH session log has no header line")?;
+    let (header, rest) = unpacked.split_at(newline + 1);
+    let mut header: Value =
+        serde_json::from_slice(header).context("parse native DSH session header")?;
+    let object = header
+        .as_object_mut()
+        .context("native DSH session header is not a JSON object")?;
+    ensure!(
+        object.get("type").and_then(Value::as_str) == Some("session"),
+        "native DSH session log does not start with a session header"
+    );
+    ensure!(
+        object.get("id").and_then(Value::as_str) == Some(native_session_id),
+        "native DSH session header names another session"
+    );
+    object.insert(
+        "cwd".into(),
+        Value::String(
+            target_cwd
+                .to_str()
+                .context("native DSH target cwd is not valid UTF-8")?
+                .to_owned(),
+        ),
+    );
+    let mut header = serde_json::to_vec(&header)?;
+    header.push(b'\n');
+    let mut rewritten =
+        zstd::stream::encode_all(header.as_slice(), 0).context("compress native DSH header")?;
+    rewritten
+        .extend(zstd::stream::encode_all(rest, 0).context("compress native DSH session events")?);
+    Ok(rewritten)
+}
+
+/// DSH names a session-log directory after the UTF-16 code units in its cwd.
+pub(super) fn dsh_project_key(cwd: &Path) -> Result<String> {
+    let cwd = cwd
+        .to_str()
+        .context("native DSH target cwd is not valid UTF-8")?;
+    ensure!(!cwd.is_empty(), "native DSH target cwd is empty");
+    let mut readable = String::new();
+    let mut separator_run = false;
+    for unit in cwd.encode_utf16() {
+        let ascii = u8::try_from(unit).ok();
+        if matches!(ascii, Some(b'/' | b'\\' | b':')) {
+            if !separator_run {
+                readable.push('-');
+            }
+            separator_run = true;
+        } else if let Some(byte) = ascii.filter(|byte| {
+            *byte != b'~' && (byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        }) {
+            readable.push(char::from(byte));
+            separator_run = false;
+        } else {
+            use std::fmt::Write as _;
+            write!(readable, "~{unit:04X}")?;
+            separator_run = false;
+        }
+    }
+    let slug = readable.trim_start_matches('-');
+    let slug = if slug.is_empty() { "root" } else { slug };
+    Ok(format!(
+        "--{}--",
+        slug.chars().take(251).collect::<String>()
+    ))
 }
 
 /// Write `relative` under `root` with owner-only permissions, refusing to

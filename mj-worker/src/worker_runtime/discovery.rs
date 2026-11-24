@@ -24,7 +24,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     let managed_node = if spec.harness_runtime.may_install()
         && super::harness_launch::needs_node_runtime(spec.harness, &environment).await?
     {
-        super::harness::ensure_node_runtime(&mut environment)
+        super::harness::ensure_node_runtime_for(spec.harness, &mut environment)
             .await
             .with_context(|| {
                 format!(

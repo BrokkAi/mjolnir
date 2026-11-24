@@ -127,7 +127,7 @@ fn capacity_cpu_and_memory(
 fn capacity_disks_cell(dashboard: &DashboardState, detail: &RuntimeHostCapacity) -> Line<'static> {
     use mj_core::targets::storage::StorageCondition;
     let reading = &detail.reading;
-    if reading.filesystems.is_empty() {
+    if reading.filesystems.is_empty() && reading.storage_warning.is_none() {
         return Line::default();
     }
     let mark = if dashboard.capacity_disks_menu_open(&detail.reading.id) {
@@ -153,6 +153,10 @@ fn capacity_disks_cell(dashboard: &DashboardState, detail: &RuntimeHostCapacity)
                 storage_condition_flag(filesystem.condition)
             ),
             storage_condition_style(filesystem.condition),
+        ),
+        None if reading.storage_warning.is_some() => Line::styled(
+            format!("Disks ! {mark}"),
+            Style::default().fg(theme::palette().warning),
         ),
         None => Line::raw(format!("Disks {mark}")),
     }
@@ -187,6 +191,12 @@ pub(crate) fn capacity_disks_menu_lines(detail: &RuntimeHostCapacity) -> Vec<Lin
                 storage_condition_style(filesystem.condition),
             )
         })
+        .chain(reading.storage_warning.iter().map(|warning| {
+            Line::styled(
+                warning.clone(),
+                Style::default().fg(theme::palette().warning),
+            )
+        }))
         .collect()
 }
 

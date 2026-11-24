@@ -252,6 +252,7 @@ impl Controller {
                         local: false,
                         probes,
                         local_storage_paths: Vec::new(),
+                        storage_warning: None,
                         probe_error,
                     });
                 }
@@ -261,7 +262,24 @@ impl Controller {
             // CPU and memory come from sysinfo; storage is measured over the
             // paths by `targets::measure_local_storage`.
             let mut paths = Vec::new();
-            let mbx_paths = super::mbx::local_storage_paths();
+            let (mbx_paths, storage_warning) = match super::mbx::local_storage_paths() {
+                Ok(paths) => (paths, None),
+                Err(error) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "local mbx configuration could not be read; omitting mbx paths from local disk capacity"
+                    );
+                    (
+                        Vec::new(),
+                        Some(
+                            format!("mbx config: {error:#}")
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                    )
+                }
+            };
             for target_id in &local_ids {
                 if let Some(template) = self.config.targets.get(target_id) {
                     push_unique(&mut paths, local_storage_paths(template, &mbx_paths));
@@ -276,6 +294,7 @@ impl Controller {
                 local: true,
                 probes: Vec::new(),
                 local_storage_paths: paths,
+                storage_warning,
                 probe_error: None,
             });
         }
@@ -300,6 +319,7 @@ impl Controller {
                             })
                             .collect(),
                         local_storage_paths: Vec::new(),
+                        storage_warning: None,
                         probe_error: None,
                     },
                 ),

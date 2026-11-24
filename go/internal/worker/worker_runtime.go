@@ -147,11 +147,91 @@ func RecordStartupFailure(root string, step string, errorText string) {
 
 const githubCLIBinEnv = "MJ_GITHUB_CLI_BIN"
 
+// Highest precedence first; all launcher PATH consumers share this contract.
+// Git wrappers precede MJ_MBX_BIN so resumed workers shadow any legacy `gh`/
+// `slopcop` wrappers left in `<worker_root>/bin` before Git setup isolation.
+var launcherBinEnvs = [...]string{"MJ_BUILD_TOOL_BIN", githubCLIBinEnv, core.SessionMbxBinEnv}
+
+func launcherPathShell() string {
+	var result strings.Builder
+	result.WriteString("mj_prefix=\n")
+	var conditions []string
+	for _, name := range launcherBinEnvs {
+		fmt.Fprintf(&result, `if [ -n "${%[1]s:-}" ]; then case "$mj_prefix:" in *:"${%[1]s}":*|"${%[1]s}":*) ;; *) mj_prefix=${mj_prefix:+$mj_prefix:}${%[1]s} ;; esac; fi
+`, name)
+		conditions = append(conditions, fmt.Sprintf(`{ [ -z "${%[1]s:-}" ] || [ "$mj_entry" != "${%[1]s}" ]; }`, name))
+	}
+	result.WriteString(strings.ReplaceAll(`if [ -n "$mj_prefix" ]; then
+    case ":${PATH:-}:" in
+        ":${mj_prefix}:"*) ;;
+        *)
+            mj_path=
+            mj_path_set=
+            if [ -n "${PATH:-}" ]; then
+                mj_rest=${PATH}
+                while :; do
+                    case "$mj_rest" in
+                        *:*) mj_entry=${mj_rest%%:*}; mj_rest=${mj_rest#*:}; mj_more=yes ;;
+                        *) mj_entry=$mj_rest; mj_more= ;;
+                    esac
+                    if @FILTER@; then
+                        if [ -n "$mj_path_set" ]; then mj_path=$mj_path:$mj_entry; else mj_path=$mj_entry; fi
+                        mj_path_set=yes
+                    fi
+                    [ -n "$mj_more" ] || break
+                done
+            fi
+            PATH=$mj_prefix${mj_path_set:+:$mj_path}
+            export PATH
+            ;;
+    esac
+fi
+unset mj_prefix mj_path mj_path_set mj_rest mj_entry mj_more
+`, "@FILTER@", strings.Join(conditions, " && ")))
+	return result.String()
+}
+
 func githubCLILoginShellCommand(command string) string {
-	return fmt.Sprintf(
-		`if [ -n "${%[1]s:-}" ]; then PATH="$%[1]s:$PATH"; export PATH; fi; unset %[1]s GH_TOKEN GITHUB_TOKEN; %[2]s`,
-		githubCLIBinEnv, command,
-	)
+	return launcherPathShell() + "unset " + githubCLIBinEnv + " GH_TOKEN GITHUB_TOKEN; " + command
+}
+
+func restoreMbxLauncher(root string, home *string, environment map[string]string) error {
+	if _, present := environment[core.SessionMbxBinEnv]; !present {
+		if _, cached := environment["MBX_SHIMS_DIR"]; cached {
+			bin := filepath.Join(root, "bin")
+			if info, err := os.Stat(bin); err == nil && info.IsDir() {
+				absolute, err := filepath.Abs(bin)
+				if err != nil {
+					return fmt.Errorf("resolve mbx launcher directory: %w", err)
+				}
+				bin = absolute
+				environment[core.SessionMbxBinEnv] = bin
+			}
+		}
+	}
+	if bin := environment[core.SessionMbxBinEnv]; bin != "" {
+		if !filepath.IsAbs(bin) {
+			if home != nil && filepath.IsAbs(*home) {
+				bin = filepath.Join(*home, bin)
+			} else {
+				bin = filepath.Join(root, "bin")
+			}
+			absolute, err := filepath.Abs(bin)
+			if err != nil {
+				return fmt.Errorf("resolve mbx launcher directory: %w", err)
+			}
+			bin = absolute
+			environment[core.SessionMbxBinEnv] = bin
+		}
+		entries := []string{bin}
+		for _, entry := range filepath.SplitList(environment["PATH"]) {
+			if entry != bin {
+				entries = append(entries, entry)
+			}
+		}
+		environment["PATH"] = strings.Join(entries, string(os.PathListSeparator))
+	}
+	return nil
 }
 
 // AcpSupervisorSpec is the launch description the ACP supervisor re-execs

@@ -168,6 +168,8 @@ func isDefaultSubtleSubagents(value bool) bool { return value }
 // mbx settings authoritative.
 const SessionNitroMbxEnv = "MJ_SESSION_NITRO_MBX"
 
+const SessionMbxBinEnv = "MJ_MBX_BIN"
+
 const MbxRemoteEnvPrefix = "MBX_REMOTE_"
 
 var MbxRemoteEnvironment = [3]string{"MBX_REMOTE_URL", "MBX_REMOTE_NAMESPACE", "MBX_REMOTE_MODE"}
