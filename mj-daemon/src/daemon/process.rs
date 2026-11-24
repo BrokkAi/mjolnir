@@ -1613,27 +1613,6 @@ pub(super) fn spawn_manager_target_refresher(
             };
             let controller = inputs.controller();
             state.session_manager.update_model_policies(&controller.config, &controller.state);
-            let config = controller.config;
-            if auth_profiles.as_ref() != Some(&config.profiles) {
-                let mut cache = auth.clone();
-                let profiles = config.profiles.clone();
-                match mj_core::runtime::spawn_blocking(move || {
-                    cache.refresh(&config);
-                    cache
-                })
-                .await
-                {
-                    Ok(cache) => {
-                        auth = cache;
-                        auth_profiles = Some(profiles);
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "provider refresh task stopped");
-                        cancellation.cancel();
-                        return;
-                    }
-                }
-            }
             if !installed
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &inputs))
@@ -1684,6 +1663,28 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 state.review_host().retain_sessions(retained);
                 installed = Some(inputs.clone());
+            }
+            // Publish worker targets before probing profile homes for credential sync.
+            let config = controller.config;
+            if auth_profiles.as_ref() != Some(&config.profiles) {
+                let mut cache = auth.clone();
+                let profiles = config.profiles.clone();
+                match mj_core::runtime::spawn_blocking(move || {
+                    cache.refresh(&config);
+                    cache
+                })
+                .await
+                {
+                    Ok(cache) => {
+                        auth = cache;
+                        auth_profiles = Some(profiles);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "provider refresh task stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
             }
             let closing = state.owner().close_requested.clone();
             if !staged_sources

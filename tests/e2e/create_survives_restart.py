@@ -211,6 +211,13 @@ def failed_launch_retry(lab, cli, record, run, command, environment, instance):
 def interrupted_after_worker(lab, cli, record):
     reached = lab.hooks / f"{lab.hook_name}.reached"
     continuation = lab.hooks / f"{lab.hook_name}.continue"
+
+    def reached_by(pid):
+        try:
+            return reached.read_text().strip() == f"pid={pid}"
+        except FileNotFoundError:
+            return False
+
     prompt = "complete this startup prompt after Create recovery"
     prompt_file = lab.runtime_root / "startup-prompt"
     prompt_file.write_text(prompt)
@@ -219,14 +226,13 @@ def interrupted_after_worker(lab, cli, record):
         "--target", "localhost", "--project-directory", str(lab.project),
         "--subagents", "none", "--prompt-file", str(prompt_file), "--json",
     ))["session_id"]
-    wait_for(reached.exists, "the first worker to serve before Create commits")
+    pid = json.loads((lab.data / "daemon.json").read_text())["pid"]
+    wait_for(lambda: reached_by(pid), "the first worker to serve before Create commits")
     assert record(session)["state"] != "running"
     assert durable_rows(lab, """
         SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?
     """, (session,)) == [(0,)], "Create readiness applied worker events before commit"
 
-    pid = json.loads((lab.data / "daemon.json").read_text())["pid"]
-    assert reached.read_text().strip() == f"pid={pid}"
     os.kill(pid, signal.SIGKILL)
     wait_for(lambda: not reliability_lab.process_is_running(pid), "the crashed daemon to exit")
     reached.unlink()
@@ -244,9 +250,9 @@ def interrupted_after_worker(lab, cli, record):
         """, ("a" * 64, session)).rowcount == 1
 
     cli("sessions", "--session", session, "--json")
-    wait_for(reached.exists, "the replacement worker to serve before Create commits")
     replacement_pid = json.loads((lab.data / "daemon.json").read_text())["pid"]
-    assert replacement_pid != pid and reached.read_text().strip() == f"pid={replacement_pid}"
+    assert replacement_pid != pid
+    wait_for(lambda: reached_by(replacement_pid), "the replacement worker to serve before Create commits")
 
     def first_target_publication():
         for log in (lab.data / "logs").glob(f"mj-daemon-*-{replacement_pid}.log"):
