@@ -1,0 +1,136 @@
+[
+  {
+    "model": "gpt-6.1-sol",
+    "effort": "medium",
+    "sessions": 140,
+    "profiles": {
+      "codex3": 140
+    },
+    "metrics": {
+      "latency_s": {
+        "covered": 140,
+        "mean": 47.630714285714284,
+        "median": 46.05
+      },
+      "total_tokens": {
+        "covered": 140,
+        "mean": 235047.42142857143,
+        "median": 233341.0
+      },
+      "output_tokens": {
+        "covered": 140,
+        "mean": 946.5214285714286,
+        "median": 905.5
+      },
+      "cost_usd": {
+        "covered": 140,
+        "mean": 0.09984214285714285,
+        "median": 0.09625
+      }
+    },
+    "runtime_versions": {
+      "cli": {
+        "unobserved": 140
+      },
+      "bridge": {
+        "unobserved": 140
+      },
+      "codex": {
+        "unobserved": 140
+      },
+      "image_digest": {
+        "unobserved": 140
+      }
+    }
+  },
+  {
+    "model": "gpt-6.2-sol",
+    "effort": "medium",
+    "sessions": 70,
+    "profiles": {
+      "codex3": 68,
+      "codex2": 2
+    },
+    "metrics": {
+      "latency_s": {
+        "covered": 70,
+        "mean": 112.68571428571428,
+        "median": 106.3
+      },
+      "total_tokens": {
+        "covered": 70,
+        "mean": 755063.3857142857,
+        "median": 709941.5
+      },
+      "output_tokens": {
+        "covered": 70,
+        "mean": 3528.6428571428573,
+        "median": 3396.0
+      },
+      "cost_usd": {
+        "covered": 70,
+        "mean": 0.25177,
+        "median": 0.2531
+      }
+    },
+    "runtime_versions": {
+      "cli": {
+        "mj 2.74.0": 70
+      },
+      "bridge": {
+        "1.15.1": 70
+      },
+      "codex": {
+        "0.170.0": 70
+      },
+      "image_digest": {
+        "sha256:1f5469c1c7264c025668e465a852199bc165938f6e84e925303f4fb46ca5e0db": 70
+      }
+    }
+  },
+  {
+    "model": "gpt-6.1-terra",
+    "effort": "high",
+    "sessions": 221,
+    "profiles": {
+      "codex2": 207,
+      "codex3": 14
+    },
+    "metrics": {
+      "latency_s": {
+        "covered": 221,
+        "mean": 47.56470588235294,
+        "median": 42.7
+      },
+      "total_tokens": {
+        "covered": 221,
+        "mean": 244350.83257918552,
+        "median": 229441.0
+      },
+      "output_tokens": {
+        "covered": 221,
+        "mean": 1095.420814479638,
+        "median": 1091.0
+      },
+      "cost_usd": {
+        "covered": 221,
+        "mean": 0.04358144796380091,
+        "median": 0.0422
+      }
+    },
+    "runtime_versions": {
+      "cli": {
+        "unobserved": 221
+      },
+      "bridge": {
+        "unobserved": 221
+      },
+      "codex": {
+        "unobserved": 221
+      },
+      "image_digest": {
+        "unobserved": 221
+      }
+    }
+  }
+]

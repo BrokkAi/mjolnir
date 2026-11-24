@@ -136,6 +136,7 @@ impl ChatState {
                         text: prompt.text.clone(),
                         kind: QueuedCommandKind::Prompt,
                         images: Vec::new(),
+                        files: Vec::new(),
                         attachments_unsupported: false,
                     });
                 }
@@ -144,11 +145,13 @@ impl ChatState {
                 self.queued_prompts.retain(|prompt| prompt.id != *queue_id);
                 self.pending_queue_removals.remove(queue_id);
                 self.pending_queue_images.remove(queue_id);
+                self.pending_queue_files.remove(queue_id);
             }
             WorkerEvent::QueuedPromptPromoted { prompt, .. } => {
                 self.queued_prompts.retain(|queued| queued.id != prompt.id);
                 self.pending_queue_removals.remove(&prompt.id);
                 self.pending_queue_images.remove(&prompt.id);
+                self.pending_queue_files.remove(&prompt.id);
                 self.phase = WorkerPhase::Running;
                 self.prompt_in_flight = true;
                 self.start_turn_clock(event.recorded_at_ms);

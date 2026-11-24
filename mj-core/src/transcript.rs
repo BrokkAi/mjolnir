@@ -1305,7 +1305,11 @@ pub fn content_block_text(content: &ContentBlock) -> Option<String> {
         ContentBlock::Text(text) => Some(text.text.clone()),
         ContentBlock::Image(_) => Some("[image]".into()),
         ContentBlock::Audio(_) => Some("[audio]".into()),
-        ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
+        ContentBlock::ResourceLink(link) => match crate::attachment::file_reference(link) {
+            Ok(Some(reference)) => Some(format!("[file: {}]", reference.filename)),
+            Ok(None) => Some(format!("[{}]({})", link.name, link.uri)),
+            Err(_) => Some("[invalid file attachment]".into()),
+        },
         ContentBlock::Resource(resource) => Some(match &resource.resource {
             EmbeddedResourceResource::TextResourceContents(resource) => resource.text.clone(),
             EmbeddedResourceResource::BlobResourceContents(resource) => {
@@ -1376,6 +1380,31 @@ mod tests {
             },
         })));
         entry
+    }
+
+    #[test]
+    fn transcript_file_attachment_uses_filename_without_internal_uri() {
+        let reference = crate::attachment::FileAttachmentRef::new(
+            b"%PDF",
+            "report.pdf",
+            "application/pdf".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::materialized_content_text(&[
+                serde_json::to_value(reference.content_block()).unwrap()
+            ]),
+            "[file: report.pdf]"
+        );
+        let broken =
+            agent_client_protocol::v1::schema::ResourceLink::new("broken", reference.uri());
+        assert_eq!(
+            super::content_block_text(
+                &agent_client_protocol::v1::schema::ContentBlock::ResourceLink(broken)
+            )
+            .as_deref(),
+            Some("[invalid file attachment]")
+        );
     }
 
     #[test]

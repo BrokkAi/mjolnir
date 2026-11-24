@@ -600,7 +600,7 @@ impl ChatState {
                     accepted_ordinal: None,
                     command_id: prompt.id.clone(),
                     kind: prompt.kind.clone(),
-                    content: prompt_content_blocks(&prompt.text, &prompt.images),
+                    content: prompt_content_blocks(&prompt.text, &prompt.images, &prompt.files),
                     queued_at_ms: 0,
                 })
                 .collect(),

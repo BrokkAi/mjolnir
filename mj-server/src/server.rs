@@ -33,7 +33,10 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use mj_core::attachment::{AttachmentRef, AttachmentStore, MAX_IMAGE_BYTES, MAX_IMAGES};
+use mj_core::attachment::{
+    AttachmentRef, AttachmentStore, FileAttachmentRef, MAX_FILE_BYTES, MAX_FILES, MAX_IMAGE_BYTES,
+    MAX_IMAGES,
+};
 use mj_core::config::{Config, TargetTemplate, project_history_host, validate_id};
 use mj_core::elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};

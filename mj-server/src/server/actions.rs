@@ -220,6 +220,8 @@ pub enum ControllerAction {
         /// the ACP image content block its prompt path already speaks.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ViewerPromptImage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<mj_core::attachment::FileAttachmentRef>,
     },
     RunShell {
         #[serde(default, skip_serializing_if = "Option::is_none")]

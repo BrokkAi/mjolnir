@@ -1124,7 +1124,7 @@ test('a request answered without content still reads the empty body to its end',
       showLogin: () => {},
       JSON,
     });
-    vm.runInContext(sourceBetween('async function request(', '/// Upload one image'), context);
+    vm.runInContext(sourceBetween('async function request(', 'async function uploadAttachment('), context);
     const result = await vm.runInContext(
       "request('/api/v1/actions', { method: 'POST', body: '{}' })",
       context,

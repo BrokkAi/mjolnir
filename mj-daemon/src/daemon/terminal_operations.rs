@@ -123,6 +123,7 @@ impl TerminalOperations for RuntimeState {
             // Validate references before persistence: raw image bytes never belong
             // in a durable command, including while the destination is unknown.
             mj_core::attachment::references(&prompt)?;
+            mj_core::attachment::file_references(&prompt)?;
             mj_core::draft::validate_reference_draft(&encoded_draft)?;
             if let Some(draft) = &inherited_draft {
                 mj_core::draft::validate_reference_draft(draft)?;
@@ -136,7 +137,11 @@ impl TerminalOperations for RuntimeState {
                             "queued images must be installed attachments"
                         );
                     }
-                    _ => bail!("startup prompts support text and installed images"),
+                    ContentBlock::ResourceLink(link)
+                        if mj_core::attachment::file_reference(link)?.is_some() => {}
+                    _ => {
+                        bail!("startup prompts support text, installed images, and installed files")
+                    }
                 }
             }
             let command = RelayCommand::Prompt { prompt };

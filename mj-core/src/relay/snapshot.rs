@@ -318,6 +318,9 @@ impl RelayCommand {
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
             Self::GoalControl { .. } => 11,
             Self::CancelTurn => 7,
+            Self::Prompt { prompt } if crate::attachment::has_file_references(prompt) => {
+                super::RELAY_FILE_ATTACHMENT_PROTOCOL
+            }
             Self::Prompt { prompt }
                 if matches!(
                     crate::acp::context_command(prompt),

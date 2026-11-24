@@ -22,6 +22,7 @@ pub(super) struct HistorySearch {
     original_input: String,
     original_cursor: usize,
     original_images: Vec<super::PromptImage>,
+    original_files: Vec<super::PromptFile>,
     generation: u64,
     pub(super) query: TextInput,
     pub(super) scope: HistoryScope,
@@ -191,6 +192,7 @@ impl ChatState {
             self.history_index = None;
             self.history_draft.clear();
             self.history_draft_images.clear();
+            self.history_draft_files.clear();
         }
     }
 
@@ -209,6 +211,7 @@ impl ChatState {
             original_input: self.input.clone(),
             original_cursor: self.input_cursor,
             original_images: self.input_images.clone(),
+            original_files: self.input_files.clone(),
             generation: self.next_history_search_generation,
             query: TextInput::new(),
             scope: HistoryScope::All,
@@ -240,6 +243,7 @@ impl ChatState {
         let original = PromptPayload {
             text: search.original_input.clone(),
             images: search.original_images.clone(),
+            files: search.original_files.clone(),
         };
         let original_cursor = search.original_cursor;
         self.set_input_payload(original);
@@ -325,6 +329,7 @@ impl ChatState {
                 let original = PromptPayload {
                     text: search.original_input.clone(),
                     images: search.original_images.clone(),
+                    files: search.original_files.clone(),
                 };
                 let original_cursor = search.original_cursor;
                 self.set_input_payload(original);
@@ -394,6 +399,7 @@ impl ChatState {
         self.set_input_payload(PromptPayload {
             text: search.original_input,
             images: search.original_images,
+            files: search.original_files,
         });
         self.input_cursor = search.original_cursor;
         self.update_autocomplete();
@@ -458,6 +464,7 @@ impl ChatState {
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_images.clear();
+        self.history_draft_files.clear();
     }
 
     /// Stored prompts, then this visit's, oldest first. A prompt in both, or
@@ -492,6 +499,7 @@ impl ChatState {
             (None, true) => {
                 self.history_draft.clone_from(&self.input);
                 self.history_draft_images.clone_from(&self.input_images);
+                self.history_draft_files.clone_from(&self.input_files);
                 Some(history.len() - 1)
             }
             (None, false) => None,
@@ -508,6 +516,7 @@ impl ChatState {
             self.set_input_payload(PromptPayload {
                 text: self.history_draft.clone(),
                 images: self.history_draft_images.clone(),
+                files: self.history_draft_files.clone(),
             });
         }
         self.history_index = next;

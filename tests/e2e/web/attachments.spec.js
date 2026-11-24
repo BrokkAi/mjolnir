@@ -94,7 +94,7 @@ function snapshot() {
   };
 }
 
-async function mockViewer(page, uploadHandler) {
+async function mockViewer(page, uploadHandler, configure = () => {}) {
   const root = path.resolve(__dirname, '../../../mj-server/src/web');
   await page.route('**/*', route => {
     const pathname = new URL(route.request().url()).pathname;
@@ -105,6 +105,7 @@ async function mockViewer(page, uploadHandler) {
     return route.fulfill({ path: asset });
   });
   const state = { snapshot: snapshot(), actions: [], draft: '' };
+  configure(state.snapshot);
   await page.route('**/api/v1/snapshot', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -115,31 +116,31 @@ async function mockViewer(page, uploadHandler) {
     headers: { 'content-type': 'text/event-stream' },
     body: ': mocked event stream\n\n',
   }));
-  await page.route(`**/api/v1/conversations/${SESSION_ID}/read`, route => route.fulfill({ status: 204, body: '' }));
-  await page.route(`**/api/v1/conversations/${SESSION_ID}*`, route => route.fulfill({
+  await page.route(/\/api\/v1\/conversations\/[^/?]+\/read$/, route => route.fulfill({ status: 204, body: '' }));
+  await page.route(/\/api\/v1\/conversations\/[^/?]+(?:\?.*)?$/, route => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify({ latest_seq: 0, window_start_seq: 0, reset: false, entries: [] }),
   }));
-  await page.route(`**/api/v1/sessions/${SESSION_ID}/client-state`, route => route.fulfill({
+  await page.route(/\/api\/v1\/sessions\/[^/?]+\/client-state$/, route => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify({ draft: state.draft, through_event_ordinal: 0 }),
   }));
-  await page.route(`**/api/v1/sessions/${SESSION_ID}/draft`, async route => {
+  await page.route(/\/api\/v1\/sessions\/[^/?]+\/draft$/, async route => {
     const body = JSON.parse(route.request().postData() || '{}');
     state.draft = body.draft || '';
     await route.fulfill({ status: 204, body: '' });
   });
-  await page.route(`**/api/v1/sessions/${SESSION_ID}/attachments`, uploadHandler);
+  await page.route(/\/api\/v1\/sessions\/attachment-session\/attachments(?:\?.*)?$/, uploadHandler);
   await page.route('**/api/v1/actions', async route => {
     const body = JSON.parse(route.request().postData() || '{}');
     state.actions.push(body);
     await route.fulfill({ status: 202, body: '' });
   });
   await page.goto('https://viewer.test/#workspace/workspace-1');
-  await expect(page.locator('#sessions .session')).toHaveCount(1);
-  await page.locator('#sessions .session h3').click();
+  await expect(page.locator('#sessions .session')).toHaveCount(state.snapshot.sessions.length);
+  await page.locator('#sessions .session h3').filter({ hasText: 'Attachment browser test' }).click();
   await expect(page).toHaveURL(new RegExp(`#conversation/${SESSION_ID}$`));
   // The hash changes before the `hashchange` task opens the conversation, and
   // an image selected before then is dropped for having no session. The title
@@ -286,4 +287,136 @@ test('the eleventh selected image is refused while the first ten remain sendable
     Array.from({ length: 10 }, (_, index) => `digest-${index + 1}`),
   );
   expect(state.actions[0].images.every(image => image.data_base64 === '')).toBe(true);
+});
+
+async function transfer(page, selector, type, files, text) {
+  await page.locator(selector).evaluate((target, { type, files, text }) => {
+    const data = new DataTransfer();
+    for (const { name, mimeType, bytes, size } of files) {
+      data.items.add(new File([bytes ? new Uint8Array(bytes) : new Uint8Array(size)], name, { type: mimeType }));
+    }
+    if (text) data.setData('text/plain', text);
+    const event = type === 'paste'
+      ? new ClipboardEvent(type, { bubbles: true, cancelable: true, clipboardData: data })
+      : new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: data });
+    target.dispatchEvent(event);
+  }, { type, files, text });
+}
+
+async function replyWithFile(route, uploads) {
+  const request = route.request();
+  expect(new URL(request.url()).searchParams.get('mode')).toBe('file');
+  const header = request.headers()['x-mjolnir-filename'];
+  const filename = decodeURIComponent(header);
+  expect(header).toBe(encodeURIComponent(filename));
+  const ref = {
+    filename,
+    sha256: `digest-${filename}`,
+    mime_type: request.headers()['content-type'],
+    size: request.postDataBuffer()?.length || 0,
+  };
+  uploads.push(ref);
+  await route.fulfill({ json: { file: ref } });
+}
+
+test('dropping files on the composer sends ordered references without text', async ({ page }) => {
+  const uploads = [];
+  const state = await mockViewer(page, route => replyWithFile(route, uploads));
+  await transfer(page, '#prompt-form', 'drop', [
+    { name: 'café notes.txt', mimeType: 'text/plain', size: 30 },
+    { name: 'report.pdf', mimeType: 'application/pdf', size: 2048 },
+  ]);
+  const chips = page.locator('#attachments .attachment-ready');
+  await expect(chips).toHaveCount(2);
+  await expect(chips.nth(0)).toContainText('café notes.txt · 30 B');
+  await expect(chips.nth(1)).toContainText('report.pdf · 2.0 KiB');
+  await page.locator('#send-button').click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toMatchObject({
+    text: '',
+    images: [],
+    files: ['café notes.txt', 'report.pdf'].map(name => uploads.find(ref => ref.filename === name)),
+  });
+  await expect(page.locator('#pending-submissions')).toContainText('[file: café notes.txt]');
+});
+
+test('an oversized file fails independently and can be removed before sending', async ({ page }) => {
+  const uploads = [];
+  const state = await mockViewer(page, route => replyWithFile(route, uploads));
+  await transfer(page, '#prompt-text', 'drop', [
+    { name: 'too-large.pdf', mimeType: 'application/pdf', size: 5 * 1024 * 1024 + 1 },
+    { name: 'notes.txt', mimeType: 'text/plain', size: 30 },
+  ]);
+  await expect(page.locator('#attachments .attachment-ready')).toContainText('notes.txt');
+  await expect(page.locator('#attachments .attachment-failed')).toContainText('5 MiB');
+  await expect(page.locator('#send-button')).toBeDisabled();
+  await page.getByRole('button', { name: 'Remove too-large.pdf' }).click();
+  await page.locator('#send-button').click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(uploads.map(ref => ref.filename)).toEqual(['notes.txt']);
+  expect(state.actions[0].files).toEqual(uploads);
+});
+
+test('a session without image support accepts a PNG as a file', async ({ page }) => {
+  const uploads = [];
+  const state = await mockViewer(page, route => replyWithFile(route, uploads), snapshot => {
+    snapshot.sessions[0].prompt_images_supported = false;
+  });
+  const paperclip = page.getByRole('button', { name: 'Attach one or more files' });
+  await expect(paperclip).toBeVisible();
+  await Promise.all([page.waitForEvent('filechooser'), paperclip.click()]);
+  await transfer(page, '#prompt-text', 'drop', [
+    { name: 'diagram.png', mimeType: 'image/png', bytes: [...ONE_PIXEL_PNG] },
+  ]);
+  await expect(page.locator('#attachments .attachment-ready')).toContainText(`diagram.png · ${ONE_PIXEL_PNG.length} B`);
+  await page.locator('#send-button').click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toMatchObject({ images: [], files: uploads, text: '' });
+  expect(uploads[0]).toMatchObject({ filename: 'diagram.png', mime_type: 'image/png' });
+});
+
+test('switching sessions aborts an in-flight file upload and ignores its late response', async ({ page }) => {
+  let release;
+  let replied;
+  const replyFinished = new Promise(resolve => { replied = resolve; });
+  await mockViewer(page, async route => {
+    await new Promise(resolve => { release = resolve; });
+    try {
+      await route.fulfill({ json: { file: { filename: 'late.txt', sha256: 'digest-late' } } });
+    } finally {
+      replied();
+    }
+  }, snapshot => {
+    snapshot.sessions.push({ ...snapshot.sessions[0], id: 'second-session', title: 'Second session' });
+  });
+  await page.locator('#image-picker').setInputFiles(file('late.txt', 'text/plain', Buffer.from('late')));
+  await expect.poll(() => typeof release).toBe('function');
+  await expect(page.locator('#attachments .attachment-processing')).toHaveCount(1);
+  const aborted = page.waitForEvent('requestfailed', request => request.url().includes('/attachments?mode=file'));
+  await page.evaluate(() => { location.hash = '#conversation/second-session'; });
+  await expect(page.locator('#conversation-title')).toHaveText('Second session');
+  expect((await aborted).failure().errorText).toContain('ERR_ABORTED');
+  release();
+  await replyFinished;
+  await expect(page.locator('#attachments .attachment')).toHaveCount(0);
+  await page.evaluate(id => { location.hash = `#conversation/${id}`; }, SESSION_ID);
+  await expect(page.locator('#conversation-title')).toHaveText('Attachment browser test');
+  await expect(page.locator('#attachments .attachment')).toHaveCount(0);
+});
+
+test('plain text pastes and drops insert text while a pasted file becomes an attachment', async ({ page }) => {
+  const uploads = [];
+  await mockViewer(page, route => replyWithFile(route, uploads));
+  await page.locator('#prompt-text').focus();
+  await transfer(page, '#prompt-text', 'paste', [], 'plain text');
+  await expect(page.locator('#prompt-text')).toHaveText('plain text');
+  await expect(page.locator('#attachments .attachment')).toHaveCount(0);
+  await transfer(page, '#prompt-form', 'drop', [], ' dropped');
+  await expect(page.locator('#prompt-text')).toHaveText('plain text dropped');
+  await transfer(page, '#prompt-text', 'paste', [
+    { name: 'clipboard.txt', mimeType: 'text/plain', size: 12 },
+  ]);
+  await expect(page.locator('#attachments .attachment-ready')).toContainText('clipboard.txt · 12 B');
+  await expect(page.locator('#prompt-text')).toHaveText('plain text dropped');
+  expect(uploads.map(ref => ref.filename)).toEqual(['clipboard.txt']);
 });

@@ -1,4 +1,5 @@
 use super::*;
+use axum::extract::FromRequest;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -318,32 +319,119 @@ async fn read_notification_message(
     Ok(response)
 }
 
-/// Optimize and install one image off the async request task. The
-/// request body is deliberately raw bytes: base64 would inflate the upload,
-/// and the response contains only the small immutable reference the prompt
-/// needs.
+#[derive(Deserialize)]
+pub(super) struct UploadAttachmentQuery {
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(super) enum UploadedAttachment {
+    Image(ViewerPromptImage),
+    File { file: FileAttachmentRef },
+}
+
+/// Stage a raw attachment and return the reference the prompt needs.
 pub(super) async fn upload_attachment(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<ViewerPromptImage>, ApiError> {
+    Query(query): Query<UploadAttachmentQuery>,
+    mut request: Request,
+) -> Result<Response<Body>, ApiError> {
+    let image_mode = match query.mode.as_deref() {
+        None | Some("image") => true,
+        Some("file") => false,
+        _ => return Err(ApiError::bad_request("unsupported attachment upload mode")),
+    };
     validate_public_id(&session_id)?;
     // The terminal stages attachments even while a worker is starting, before
     // the viewer projection can advertise the harness's image capability.
-    if !api::loopback_authenticated(&state, &headers) {
+    if !api::loopback_authenticated(&state, request.headers()) {
         let snapshot = state.snapshot_rx.borrow();
-        if !require_session_record(&snapshot, &session_id)?.prompt_images_supported {
+        let session = require_session_record(&snapshot, &session_id)?;
+        if image_mode && !session.prompt_images_supported {
             return Err(ApiError::bad_request(
                 "this session does not support image prompts",
             ));
         }
     }
+    if !image_mode {
+        DefaultBodyLimit::max(MAX_FILE_BYTES).apply(&mut request);
+    }
+    let file_headers = (!image_mode).then(|| request.headers().clone());
+    let body = match Bytes::from_request(request, &state).await {
+        Ok(body) => body,
+        Err(error) if !image_mode && error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "file is too large; files must be 5 MiB or smaller",
+            ));
+        }
+        Err(error) => return Ok(error.into_response()),
+    };
+    let result = if let Some(headers) = file_headers {
+        let file = upload_file_attachment(session_id, headers, body).await?;
+        UploadedAttachment::File { file }
+    } else {
+        UploadedAttachment::Image(upload_image_attachment(session_id, body).await?)
+    };
+    Ok(Json(result).into_response())
+}
+
+async fn upload_file_attachment(
+    session_id: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<FileAttachmentRef, ApiError> {
+    let filename = headers
+        .get("x-mjolnir-filename")
+        .map(|value| percent_encoding::percent_decode(value.as_bytes()).decode_utf8())
+        .transpose()
+        .map_err(|_| ApiError::bad_request("the attachment filename must be valid UTF-8"))?
+        .filter(|name| !name.trim().is_empty())
+        .map_or_else(|| "attachment".to_owned(), |name| name.into_owned());
+    let mime_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| value.len() <= 128)
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .filter(|value| value.type_() != mime::STAR && value.subtype() != mime::STAR)
+        .unwrap_or(mime::APPLICATION_OCTET_STREAM)
+        .to_string();
+    let store_error = |_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store the file attachment",
+        )
+    };
+    mj_core::runtime::spawn_blocking(move || {
+        let reference = FileAttachmentRef::new(&body, &filename, mime_type)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let store = AttachmentStore::controller(&session_id).map_err(store_error)?;
+        store.install_file(&reference, &body).map_err(store_error)?;
+        Ok(reference)
+    })
+    .await
+    .map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the server could not process the file upload",
+        )
+    })?
+}
+
+async fn upload_image_attachment(
+    session_id: String,
+    body: Bytes,
+) -> Result<ViewerPromptImage, ApiError> {
     if body.is_empty() {
         return Err(ApiError::bad_request("image upload must not be empty"));
     }
 
-    let result = mj_core::runtime::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let optimized = optimize_image(&body).map_err(|_| {
             ApiError::bad_request("unsupported image format or image could not be decoded")
         })?;
@@ -391,9 +479,7 @@ pub(super) async fn upload_attachment(
             StatusCode::INTERNAL_SERVER_ERROR,
             "the server could not process the image upload",
         )
-    })??;
-
-    Ok(Json(result))
+    })?
 }
 
 /// Hand one validated action to the controller and answer as soon as the
@@ -480,7 +566,7 @@ pub(super) async fn action(
         };
     }
     identify_raw_project(&mut action);
-    let action = decode_prompt_images_off_task(action).await?;
+    let action = decode_prompt_attachments_off_task(action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
     state
         .action_tx

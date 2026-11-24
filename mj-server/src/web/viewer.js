@@ -222,18 +222,14 @@ async function drainBody(response) {
   await response.arrayBuffer().catch(() => {});
 }
 
-/// Upload one image as raw bytes. JSON action requests have a deliberately
-/// different content type and body limit, so keeping this path separate makes
-/// it impossible to accidentally base64 an image back into the prompt.
-async function uploadAttachment(sessionId, file, signal) {
+/// Upload raw bytes and keep only the returned reference in the composer.
+async function uploadAttachment(sessionId, file, kind, signal) {
+  const headers = { 'content-type': file.type || 'application/octet-stream' };
+  const isFile = kind === 'file';
+  if (isFile) headers['X-Mjolnir-Filename'] = encodeURIComponent(file.name || 'attachment');
   const response = await upgradeAwareFetch(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
-    {
-      method: 'POST',
-      body: file,
-      signal,
-      headers: { 'content-type': file.type || 'application/octet-stream' },
-    },
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/attachments${isFile ? '?mode=file' : ''}`,
+    { method: 'POST', body: file, signal, headers },
   );
   if (response.status === 401) {
     showLogin();
@@ -241,13 +237,13 @@ async function uploadAttachment(sessionId, file, signal) {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error || 'the image upload failed');
+    throw new Error(body.error || 'the attachment upload failed');
   }
-  const image = await response.json();
-  if (!image.attachment || image.data_base64) {
-    throw new Error('the server returned an invalid image attachment');
+  const upload = await response.json();
+  if (isFile ? !upload.file : !upload.attachment || upload.data_base64) {
+    throw new Error('the server returned an invalid attachment');
   }
-  return image;
+  return upload;
 }
 
 /// Say something once, for a screen reader.
@@ -1724,7 +1720,7 @@ function inboxNoticeCards() {
           renderRoute();
           return;
         }
-        if (currentSession === destination && (composerText() || promptImages.length)) {
+        if (currentSession === destination && (composerText() || promptAttachments.length)) {
           notice.note = "Hand to conversation needs an empty composer. Your text is kept here.";
           renderRoute();
           return;
@@ -5714,13 +5710,13 @@ function moveQueueItemText(item) {
     if (kind === 'set_config') return `/${details?.key || 'config'} ${details?.value || ''}`.trim();
   }
   const content = Array.isArray(item?.content) ? item.content : [];
-  const text = content.find(block => block?.type === 'text')?.text;
-  const image = content.find(block => block?.type === 'image');
-  if (typeof text === 'string' && text) {
-    if (image) return `${text} [Image attachment: ${image.mimeType || image.mime_type || 'image'}]`;
-    return text;
-  }
-  if (image) return `[Image attachment: ${image.mimeType || image.mime_type || 'image'}]`;
+  const parts = content.flatMap(block => {
+    if (block?.type === 'text' && block.text) return [block.text];
+    if (block?.type === 'image') return [`[Image attachment: ${block.mimeType || block.mime_type || 'image'}]`];
+    if (block?.type === 'resource_link') return [`[file: ${block.name || 'attachment'}]`];
+    return [];
+  });
+  if (parts.length) return parts.join(' ');
   try {
     return JSON.stringify(item?.content || item).slice(0, 400);
   } catch (_) {
@@ -6794,7 +6790,7 @@ function showLogin() {
   entryNodes.clear();
   elicitationCards.clear();
   sentElicitations.clear();
-  clearPromptImages();
+  clearPromptAttachments();
   forgetSettings();
   bootStatus.classList.add('hidden');
   login.classList.remove('hidden');
@@ -8343,14 +8339,16 @@ async function submitElicitation(sessionId, elicitationId, response, surface = '
 const MAX_PROMPT_REQUEST_BYTES = 32 * 1024 * 1024;
 const MAX_PROMPT_IMAGES = 10;
 const MAX_IMAGE_UPLOAD_BYTES = 64 * 1024 * 1024;
-const MAX_IMAGE_UPLOADS_IN_FLIGHT = 2;
+// Match mj_core::attachment limits for file uploads and prompt admission.
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_PROMPT_FILES = 10;
+const MAX_ATTACHMENT_UPLOADS_IN_FLIGHT = 2;
 const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 let composerRevision = 0,
   composerPreserveEmptyBreak = false,
-  promptImages = [],
-  imageUploadQueue = [],
-  imageUploadsInFlight = 0,
-  nextPromptImageId = 1;
+  promptAttachments = [],
+  attachmentUploadQueue = [],
+  attachmentUploadsInFlight = 0;
 function composerText() {
   let text = '';
   const blocks = new Set(['DIV', 'P']);
@@ -8474,7 +8472,7 @@ function syncSendButtonDisabled() {
   );
   sendButton.disabled = !canPrompt
     || promptInFlight
-    || promptImages.some(image => image.state !== 'ready');
+    || promptAttachments.some(image => image.state !== 'ready');
 }
 
 let composerActionPointerDown = false;
@@ -8483,7 +8481,7 @@ function syncComposerLayout() {
   const editor = typeof promptText === 'undefined' ? null : promptText;
   const editorFocused = Boolean(editor && document.activeElement === editor);
   const hasText = Boolean(editor?.textContent?.trim());
-  const hasAttachments = typeof promptImages !== 'undefined' && promptImages.length > 0;
+  const hasAttachments = typeof promptAttachments !== 'undefined' && promptAttachments.length > 0;
   promptForm.classList.toggle(
     'composer-has-intent',
     editorFocused || hasText || hasAttachments || composerActionPointerDown,
@@ -8519,156 +8517,157 @@ function imageDimensions(file) {
   });
 }
 
-function imageFileError(file) {
-  const name = file.name || 'That file';
-  if (!file.type.startsWith('image/')) return `${name} is not an image`;
-  if (!SUPPORTED_IMAGE_TYPES.has(file.type))
-    return `${name} is not a supported image; use JPEG, PNG, or WebP`;
-  if (file.size > MAX_IMAGE_UPLOAD_BYTES)
-    return `${name} is too large; images must be 64 MiB or smaller`;
-  return null;
+function attachmentSizeError(file, kind) {
+  if (kind === 'image' && file.size > MAX_IMAGE_UPLOAD_BYTES)
+    return 'Images must be 64 MiB or smaller.';
+  if (kind === 'file' && file.size > MAX_FILE_BYTES)
+    return 'Files must be 5 MiB or smaller.';
+  return '';
 }
 
-function revokePromptImage(image) {
-  if (image.controller) image.controller.abort();
-  if (image.preview_url) {
-    URL.revokeObjectURL(image.preview_url);
-    image.preview_url = null;
+function revokePromptAttachment(item) {
+  item.controller.abort();
+  if (item.preview_url) {
+    URL.revokeObjectURL(item.preview_url);
+    item.preview_url = null;
   }
-  image.cancelled = true;
 }
 
-function clearPromptImages() {
-  imageUploadQueue = [];
-  for (const image of promptImages) revokePromptImage(image);
-  promptImages = [];
+function clearPromptAttachments() {
+  attachmentUploadQueue = [];
+  for (const item of promptAttachments) revokePromptAttachment(item);
+  promptAttachments = [];
   renderAttachments();
 }
 
-function imageIsCurrent(image, sessionId) {
-  return currentSession === sessionId && !image.cancelled && promptImages.includes(image);
+function attachmentIsCurrent(item, sessionId) {
+  return currentSession === sessionId && !item.controller.signal.aborted && promptAttachments.includes(item);
 }
 
-async function processImageUpload(image, sessionId) {
+async function processAttachmentUpload(item, sessionId) {
   try {
-    const size = await imageDimensions(image.file);
-    if (!size.width || !size.height) throw new Error('the image has no usable dimensions');
-    if (!imageIsCurrent(image, sessionId)) return;
-    const uploaded = await uploadAttachment(sessionId, image.file, image.controller.signal);
-    if (!imageIsCurrent(image, sessionId)) return;
-    image.state = 'ready';
-    image.error = '';
-    image.attachment = uploaded.attachment;
-    image.mime_type = uploaded.mime_type;
-    image.width = uploaded.width || size.width;
-    image.height = uploaded.height || size.height;
-    image.file = null;
+    let size;
+    if (item.kind === 'image') {
+      size = await imageDimensions(item.file);
+      if (!size.width || !size.height) throw new Error('the image has no usable dimensions');
+      if (!attachmentIsCurrent(item, sessionId)) return;
+    }
+    const uploaded = await uploadAttachment(sessionId, item.file, item.kind, item.controller.signal);
+    if (!attachmentIsCurrent(item, sessionId)) return;
+    if (item.kind === 'image') {
+      item.reference = uploaded.attachment;
+      item.mime_type = uploaded.mime_type;
+      item.width = uploaded.width || size.width;
+      item.height = uploaded.height || size.height;
+    } else {
+      item.reference = uploaded.file;
+    }
+    item.state = 'ready';
   } catch (error) {
-    if (!imageIsCurrent(image, sessionId)) return;
-    if (error.name === 'AbortError') return;
-    image.state = 'failed';
-    image.error = error.message || 'the image could not be uploaded';
-    image.file = null;
+    if (!attachmentIsCurrent(item, sessionId) || error.name === 'AbortError') return;
+    item.state = 'failed';
+    item.error = error.message || 'the attachment could not be uploaded';
   } finally {
-    if (imageIsCurrent(image, sessionId)) renderAttachments();
+    item.file = null;
+    if (attachmentIsCurrent(item, sessionId)) renderAttachments();
   }
 }
 
-function pumpImageUploads() {
-  while (imageUploadsInFlight < MAX_IMAGE_UPLOADS_IN_FLIGHT && imageUploadQueue.length) {
-    const job = imageUploadQueue.shift();
-    if (!imageIsCurrent(job.image, job.sessionId)) continue;
-    imageUploadsInFlight += 1;
-    processImageUpload(job.image, job.sessionId).finally(() => {
-      imageUploadsInFlight -= 1;
-      pumpImageUploads();
+function pumpAttachmentUploads() {
+  while (attachmentUploadsInFlight < MAX_ATTACHMENT_UPLOADS_IN_FLIGHT && attachmentUploadQueue.length) {
+    const job = attachmentUploadQueue.shift();
+    if (!attachmentIsCurrent(job.item, job.sessionId)) continue;
+    attachmentUploadsInFlight += 1;
+    processAttachmentUpload(job.item, job.sessionId).finally(() => {
+      attachmentUploadsInFlight -= 1;
+      pumpAttachmentUploads();
     });
   }
 }
 
-async function attachImageFiles(files) {
-  const session = sessionById(currentSession);
-  if (!currentSession || !session?.prompt_images_supported || !files.length) return;
+function attachFiles(files) {
   const sessionId = currentSession;
-  const remaining = MAX_PROMPT_IMAGES - promptImages.length;
-  const selected = files.slice(0, Math.max(0, remaining));
-  const error = document.querySelector('#conversation-error');
-  if (files.length > selected.length) {
-    error.textContent = 'A prompt may contain at most 10 images.';
-  } else {
-    error.textContent = '';
-  }
-  for (const file of selected) {
-    const image = {
-      id: nextPromptImageId++,
-      name: file.name || 'Pasted image',
-      file,
-      preview_url: URL.createObjectURL(file),
-      mime_type: file.type,
-      width: 0,
-      height: 0,
-      attachment: null,
-      state: 'processing',
-      error: '',
-      controller: new AbortController(),
-      cancelled: false,
-    };
-    const invalid = imageFileError(file);
-    if (invalid) {
-      image.state = 'failed';
-      image.error = invalid;
-      image.file = null;
-    } else {
-      imageUploadQueue.push({ image, sessionId });
+  const session = sessionById(sessionId);
+  if (!session?.capabilities?.prompt || !files.length) return;
+  const remaining = { image: MAX_PROMPT_IMAGES, file: MAX_PROMPT_FILES };
+  for (const item of promptAttachments) remaining[item.kind] -= 1;
+  const refused = new Set();
+  for (const file of files) {
+    const inlineImage = session.prompt_images_supported && SUPPORTED_IMAGE_TYPES.has(file.type);
+    const kind = inlineImage ? 'image' : 'file';
+    if (remaining[kind] === 0) {
+      refused.add(kind === 'image'
+        ? 'A prompt may contain at most 10 images.'
+        : 'A prompt may contain at most 10 files.');
+      continue;
     }
-    promptImages.push(image);
+    remaining[kind] -= 1;
+    const error = attachmentSizeError(file, kind);
+    const item = {
+      kind,
+      name: file.name || (inlineImage ? 'Pasted image' : 'attachment'),
+      size: file.size,
+      file: error ? null : file,
+      preview_url: inlineImage && !error ? URL.createObjectURL(file) : null,
+      reference: null,
+      state: error ? 'failed' : 'processing',
+      error,
+      controller: new AbortController(),
+    };
+    promptAttachments.push(item);
+    if (!error) attachmentUploadQueue.push({ item, sessionId });
   }
+  document.querySelector('#conversation-error').textContent = [...refused].join(' ');
   renderAttachments();
-  pumpImageUploads();
+  pumpAttachmentUploads();
 }
 
-function removePromptImage(image) {
-  const index = promptImages.indexOf(image);
+function removePromptAttachment(item) {
+  const index = promptAttachments.indexOf(item);
   if (index < 0) return;
-  promptImages.splice(index, 1);
-  revokePromptImage(image);
-  imageUploadQueue = imageUploadQueue.filter(job => job.image !== image);
+  promptAttachments.splice(index, 1);
+  revokePromptAttachment(item);
+  attachmentUploadQueue = attachmentUploadQueue.filter(job => job.item !== item);
   renderAttachments();
-  pumpImageUploads();
+  pumpAttachmentUploads();
 }
 
 function renderAttachments() {
-  // The draft the daemon keeps is text. An attachment lives in this browser
-  // only, and a photograph that quietly disappears on reload is worse than one
-  // somebody was told about.
   const session = sessionById(currentSession);
-  attachImage.hidden = !session?.prompt_images_supported;
+  attachImage.hidden = !session?.capabilities?.prompt;
   attachments.replaceChildren();
-  if (promptImages.length) {
+  if (promptAttachments.length) {
     attachments.append(
-      el('p', 'dim', 'Images stay on this device until sent; a draft keeps only the text.'),
+      el('p', 'dim', 'Attachments stay on this device until sent; a draft keeps only the text.'),
     );
   }
-  for (const image of promptImages) {
-    const chip = document.createElement('div');
-    chip.className = `attachment attachment-${image.state}`;
-    chip.setAttribute('aria-busy', String(image.state === 'processing'));
-    const thumb = document.createElement('img');
-    thumb.alt = '';
-    thumb.src = image.preview_url;
-    const caption = document.createElement('span');
-    caption.textContent = image.state === 'processing'
-      ? `${image.name} \u00b7 Uploading…`
-      : image.state === 'failed'
-        ? `${image.name} \u00b7 ${image.error}`
-        : `${image.name} \u00b7 ${image.width}\u00d7${image.height}`;
+  for (const item of promptAttachments) {
+    const chip = el('div', `attachment attachment-${item.state}`);
+    chip.setAttribute('aria-busy', String(item.state === 'processing'));
+    if (item.preview_url) {
+      const thumb = document.createElement('img');
+      thumb.alt = '';
+      thumb.src = item.preview_url;
+      chip.append(thumb);
+    } else if (item.kind === 'file') {
+      const badge = el('span', 'attachment-file-badge', 'FILE');
+      badge.setAttribute('aria-hidden', 'true');
+      chip.append(badge);
+    }
+    const detail = item.state === 'processing'
+      ? 'Uploading…'
+      : item.state === 'failed'
+        ? item.error
+        : item.kind === 'file' ? formatBytes(item.size) : `${item.width}×${item.height}`;
+    const caption = el('span', item.kind === 'file' ? 'attachment-file-caption' : '', `${item.name} · ${detail}`);
+    caption.title = caption.textContent;
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'danger';
-    remove.setAttribute('aria-label', `Remove ${image.name}`);
-    remove.textContent = '\u00d7';
-    remove.onclick = () => removePromptImage(image);
-    chip.append(thumb, caption, remove);
+    remove.setAttribute('aria-label', `Remove ${item.name}`);
+    remove.textContent = '×';
+    remove.onclick = () => removePromptAttachment(item);
+    chip.append(caption, remove);
     attachments.append(chip);
   }
   syncSendButtonDisabled();
@@ -8679,9 +8678,8 @@ function renderAttachments() {
 // ---------------------------------------------------------------------------
 //
 // A draft is stored by the daemon against this viewer and this session, so it
-// survives a reload, a closed tab and a new phone. Unsent image attachments are
-// not: they live in this browser's memory only, and the composer says so, since
-// a photograph that quietly disappears is worse than one you were told about.
+// survives a reload, a closed tab and a new phone. Unsent attachments live in
+// this browser's memory only.
 
 const DRAFT_DEBOUNCE_MS = 400;
 let draftTimer = null;
@@ -8763,7 +8761,7 @@ async function restoreDraft(sessionId, generation) {
         setComposerText(draft);
         updateCommandPalette();
         draftComposerBaseline = composerGeneration;
-      } else if (handoff && !composerText() && !promptImages.length) {
+      } else if (handoff && !composerText() && !promptAttachments.length) {
         setComposerText(handoff.text);
         updateCommandPalette();
         // Leaving this conversation must save the hand-off just like typed text.
@@ -9238,19 +9236,20 @@ function renderPendingSubmissions() {
     row.append(el('strong', 'entry-label', 'You'));
     const body = el('div', 'entry-body');
     body.append(renderMarkdown(pending.text));
-    for (const image of pending.images) {
-      body.append(el('span', 'attachment-name', image.name || '[Image]'));
+    for (const item of pending.attachments) {
+      const label = item.kind === 'file' ? `[file: ${item.name}]` : item.name || '[Image]';
+      body.append(el('span', 'attachment-name', label));
     }
     row.append(body, el('span', 'entry-time', pending.status));
     if (pending.failed) {
       const restore = button('Put back in composer', 'secondary', {});
       restore.addEventListener('click', () => {
-        if (composerText() || promptImages.length) {
+        if (composerText() || promptAttachments.length) {
           document.querySelector('#conversation-error').textContent = 'Empty the composer before restoring this submission.';
           return;
         }
         setComposerText(pending.recoveryText ?? pending.text);
-        promptImages = pending.images;
+        promptAttachments = pending.attachments;
         pendingSubmissions.delete(pending.id);
         renderPendingSubmissions();
         renderAttachments();
@@ -9268,12 +9267,12 @@ function newCommandId(action) {
   return `web-${action}-${Array.from(entropy, byte => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
-async function sendSubmission(body, images = [], prerequisite = null, recoveryText = null) {
+async function sendSubmission(body, attachments = [], prerequisite = null, recoveryText = null) {
   const id = newCommandId(body.action);
   body.command_id = id;
   const pending = {
     id, sessionId: body.session_id, text: body.action === 'run-shell' ? `!${body.command}` : body.text,
-    images, recoveryText, status: prerequisite ? 'Changing mode…' : 'Sending…', represented: false, finished: false,
+    attachments, recoveryText, status: prerequisite ? 'Changing mode…' : 'Sending…', represented: false, finished: false,
   };
   pendingSubmissions.set(id, pending);
   renderPendingSubmissions();
@@ -9290,7 +9289,7 @@ async function sendSubmission(body, images = [], prerequisite = null, recoveryTe
     // projection gives its divider no command ID. The relay's "Clearing
     // context…" line and divider record it instead, so a row of our own would
     // stay pinned as "Queued".
-    const isContextClear = body.action === 'prompt' && !images.length && /^\/clear$/i.test(body.text.trim());
+    const isContextClear = body.action === 'prompt' && !attachments.length && /^\/clear$/i.test(body.text.trim());
     if (pending.represented || isContextClear) pendingSubmissions.delete(id);
   } catch (err) {
     pending.finished = true;
@@ -9316,21 +9315,23 @@ let promptInFlight = false;
 /// quick reply both build their submission here and send it with
 /// `sendSubmission`, so a line means the same thing on both. Throws a message
 /// for a line that cannot be sent.
-function submissionBody(sessionId, value, images) {
-  if (value.startsWith('!') && images.length) throw new Error('Shell commands cannot carry images.');
+function submissionBody(sessionId, value, attachments) {
+  if (value.startsWith('!') && attachments.length) throw new Error('Shell commands cannot carry attachments.');
+  const files = attachments.filter(item => item.kind === 'file').map(item => item.reference);
   const body = value.startsWith('!')
     ? { action: 'run-shell', session_id: sessionId, command: value.slice(1) }
     : {
         action: 'prompt',
         session_id: sessionId,
         text: value,
-        images: images.map(image => ({
+        images: attachments.filter(item => item.kind === 'image').map(image => ({
           data_base64: '',
           mime_type: image.mime_type,
           width: image.width,
           height: image.height,
-          attachment: image.attachment,
+          attachment: image.reference,
         })),
+        ...(files.length ? { files } : {}),
       };
   if (new TextEncoder().encode(JSON.stringify(body)).byteLength > MAX_PROMPT_REQUEST_BYTES) {
     throw new Error('Prompt attachments exceed the 32 MiB request limit.');
@@ -9341,11 +9342,11 @@ function submissionBody(sessionId, value, images) {
 async function submitPrompt() {
   if (!currentSession || promptInFlight) return;
   const value = composerText();
-  const images = promptImages;
-  if (!value.trim() && !images.length) return;
+  const items = promptAttachments;
+  if (!value.trim() && !items.length) return;
   const error = document.querySelector('#conversation-error');
-  if (images.some(image => image.state !== 'ready' || !image.attachment)) {
-    error.textContent = 'Wait for every image to finish uploading, or remove failed images.';
+  if (items.some(item => item.state !== 'ready' || !item.reference)) {
+    error.textContent = 'Wait for every attachment to finish uploading, or remove failed attachments.';
     renderAttachments();
     return;
   }
@@ -9358,13 +9359,13 @@ async function submitPrompt() {
 
     let body;
     try {
-      body = submissionBody(currentSession, value, images);
+      body = submissionBody(currentSession, value, items);
     } catch (refusal) {
       error.textContent = refusal.message;
       return;
     }
     setComposerText('');
-    clearPromptImages();
+    clearPromptAttachments();
     updateCommandPalette();
     // The stored copy goes with the one on screen, so reopening does not put
     // back a prompt that has already run.
@@ -9373,7 +9374,7 @@ async function submitPrompt() {
     promptInFlight = false;
     ownsSubmitGuard = false;
     syncSendButtonDisabled();
-    await sendSubmission(body, images.map(image => ({ ...image, preview_url: null, cancelled: false })));
+    await sendSubmission(body, items.map(item => ({ ...item, preview_url: null, controller: new AbortController() })));
   } catch (err) {
     error.textContent = err.message;
   } finally {
@@ -9935,7 +9936,7 @@ async function openConversation(id) {
   renderElicitations(session);
   renderTurnReview(session);
   renderConversationHeader(session);
-  clearPromptImages();
+  clearPromptAttachments();
   restoreDraft(id, conversationGeneration);
   if (!session?.verdict?.transition) await loadConversation(false);
 }
@@ -10361,7 +10362,7 @@ function leaveConversation() {
   presentationKey = null;
   acknowledged = 0;
   clearConversationContents();
-  clearPromptImages();
+  clearPromptAttachments();
 }
 
 document.querySelector('#login-form').onsubmit = async e => {
@@ -10912,7 +10913,7 @@ promptForm.addEventListener('pointerdown', event => {
   const action = event.target instanceof Element
     ? event.target.closest('#send-button, #attach-image')
     : null;
-  if (!action) return;
+  if (!action || !promptForm.classList.contains('composer-has-intent')) return;
   composerActionPointerDown = true;
   syncComposerLayout();
 });
@@ -11006,16 +11007,12 @@ promptText.addEventListener('beforeinput', e => {
 });
 promptText.addEventListener('paste', e => {
   const files = Array.from(e.clipboardData?.items || [])
-    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .filter(item => item.kind === 'file')
     .map(item => item.getAsFile())
     .filter(Boolean);
   if (files.length) {
     e.preventDefault();
-    const session = sessionById(currentSession);
-    if (session?.prompt_images_supported) attachImageFiles(files);
-    else
-      document.querySelector('#conversation-error').textContent =
-        'This session does not support image prompts.';
+    attachFiles(files);
     return;
   }
   const text = e.clipboardData?.getData('text/plain');
@@ -11023,7 +11020,7 @@ promptText.addEventListener('paste', e => {
   e.preventDefault();
   insertComposerText(text);
 });
-promptText.addEventListener('dragover', e => {
+promptForm.addEventListener('dragover', e => {
   e.preventDefault();
   const types = Array.from(e.dataTransfer?.types || []);
   if (e.dataTransfer)
@@ -11031,22 +11028,18 @@ promptText.addEventListener('dragover', e => {
       ? 'copy'
       : 'none';
 });
-promptText.addEventListener('drop', e => {
+promptForm.addEventListener('drop', e => {
   e.preventDefault();
-  placeComposerCaretAtPoint(e.clientX, e.clientY);
-  const files = Array.from(e.dataTransfer?.files || []).filter(file =>
-    file.type.startsWith('image/'),
-  );
+  const files = Array.from(e.dataTransfer?.files || []);
   if (files.length) {
-    const session = sessionById(currentSession);
-    if (session?.prompt_images_supported) attachImageFiles(files);
-    else
-      document.querySelector('#conversation-error').textContent =
-        'This session does not support image prompts.';
+    attachFiles(files);
     return;
   }
   const text = e.dataTransfer?.getData('text/plain') || '';
-  if (text) insertComposerText(text);
+  if (text) {
+    if (promptText.contains(e.target)) placeComposerCaretAtPoint(e.clientX, e.clientY);
+    insertComposerText(text);
+  }
 });
 // A touch keyboard has no Shift+Enter, so where touch is the primary input
 // its Enter key starts a new line and the Send button sends. This one query
@@ -11109,7 +11102,7 @@ attachImage.onclick = () => imagePicker.click();
 imagePicker.onchange = () => {
   const files = Array.from(imagePicker.files || []);
   imagePicker.value = '';
-  attachImageFiles(files);
+  attachFiles(files);
 };
 queue.onclick = async e => {
   const edit = e.target.closest('button[data-edit-queue-id]');

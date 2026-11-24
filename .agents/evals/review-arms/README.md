@@ -393,6 +393,18 @@ Results (`results/stage4-hydrogen-medium/`):
   to `2× Terra/xhigh` (stays 10.00/30, vs 11.00/30 with `Gemini/high`,
   `Sol/high`, `Sol/medium`, `Sol/xhigh`, or `Greptile/base`).
 
+### Stage 4 follow-up: Sol 6.2 medium (arm O, verified by Neon/medium)
+
+One Sol 6.2 medium review per diff increased Neon-confirmed findings from
+50.00 to 259.00 across the original 70 diffs. With two Terra 6.1 high
+reviewers, replacing Sol 6.1 medium with Sol 6.2 medium increased the total
+from 138.50 to 284.33. The corresponding high and medium severity counts
+were 47.50 to 189.00 solo and 122.33 to 210.00 with the Terra pair. The
+new arm's solo median turn took 106.3 s versus 46.3 s, with estimated API
+cost per diff of $0.252 versus $0.100. Round `verify7` judged the old and new
+findings jointly across 431 selected sessions. The report covers uncertainty,
+historical timing limits, and reproducibility. [Full results](results/sol-62-medium/README.md)
+
 ## Missing-fact labels (for a static-analysis hypothesis)
 
 Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed

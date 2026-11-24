@@ -218,7 +218,9 @@ pub const RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL: u32 = 87;
 pub const RELAY_GUARDIAN_PERMISSION_DECISION_PROTOCOL: u32 = 88;
 /// 89 includes verified delegated parent instructions in guardian requests.
 pub const RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL: u32 = 89;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL;
+/// 90 adds file attachment transfers and prompt references.
+pub const RELAY_FILE_ATTACHMENT_PROTOCOL: u32 = 90;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FILE_ATTACHMENT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
