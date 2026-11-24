@@ -23,7 +23,10 @@ Fresh managed Suspend, a user's retry, and startup recovery will enter one captu
 - [x] (2026-11-24 01:56Z) Dev CLI/worker builds, launch compatibility (1), checkpoint-only worker tests (3), worker control golden (1), and sealed-capture restart E2E passed.
 - [x] (2026-11-24 02:00Z) Additional targeted tests passed: older live worker (1), legacy Closing (4), SSH scope routing (1), Podman scope routing (1), uncancelled wait (1), daemon clone recovery (2). These remain valid across the private exporter correction.
 - [x] (2026-11-24 02:10Z) Corrected exporter scope validation and completed 17 focused Rust tests plus 9 E2Es; all pass. No isolated test process remains.
-- [ ] Complete affected-crate Clippy on the merged tree and before-push review.
+- [x] (2026-11-24 02:14Z) Strict all-targets Clippy passed across 7 affected crates on merged a741a1061.
+- [x] (2026-11-24 02:24Z) Fixed both first-review findings in the common route/post-stop decision; 2 new persisted-boundary tests plus 7 affected controller cases pass.
+- [x] (2026-11-24 02:24Z) Controller strict all-targets Clippy and formatting passed after the two review fixes.
+- [ ] Obtain clean final review and push the completed fix.
 - [ ] Run targeted regression/controls and affected-crate Clippy under one build owner.
 - [ ] Review integrated simplicity and behavior, commit on the current branch, obtain before-push review, push origin/master, and dispatch platform CI.
 
@@ -80,7 +83,7 @@ Date/Author: 2026-11-24, parent agent after bounded exporter reachability trace 
 ## Outcomes & Retrospective
 
 
-Manual recovery and implementation are complete; 17 focused Rust tests and 9 E2Es pass. Affected-crate Clippy, final review, and delivery remain. The initial command-based plan was rejected before production edits. The implementation deletes the parked and failed-lease recovery reroutes, dead pending-worker startup, swap-failure Harness revival, synthetic missing receipt, dead-request early return, and exporter PID proof. One existing root-lock owner proves writers stopped and captures journal state, using a shared drain. The narrowly live reattach-only pending-intent branch remains for its shipped startup ownership contract. Production Rust diff before upstream merge is +373/-353 lines; ownership and removed special cases, rather than raw size alone, are the simplicity criterion. Non-origin-delta checkouts retain their relay-first missing-worker limitation. Dead-worker process visibility, crash continuation, and refusal Harness restart remain the documented limits.
+Manual recovery and implementation are complete; 17 focused Rust tests and 9 E2Es pass. Affected-crate Clippy passed on the merged tree. Both first-review preserved-behavior findings are fixed; two new persisted-boundary regressions and seven affected existing controller cases pass, as does controller Clippy. Final review and delivery remain. The initial command-based plan was rejected before production edits. The implementation deletes the parked and failed-lease recovery reroutes, dead pending-worker startup, swap-failure Harness revival, synthetic missing receipt, dead-request early return, and exporter PID proof. One existing root-lock owner proves writers stopped and captures journal state, using a shared drain. The narrowly live reattach-only pending-intent branch remains for its shipped startup ownership contract. Production Rust diff before upstream merge is +373/-353 lines; ownership and removed special cases, rather than raw size alone, are the simplicity criterion. Non-origin-delta checkouts retain their relay-first missing-worker limitation. Dead-worker process visibility, crash continuation, and refusal Harness restart remain the documented limits.
 
 ## Context and Orientation
 
@@ -178,3 +181,7 @@ Revision note (2026-11-24 01:41Z): Replaced the unapproved target command design
 Revision note (2026-11-24 01:43Z): Final advisor approval incorporated: omit None launch field, unchanged capture reattachment, monotonic sealed cleanup, bounded resumable target start, typed holder refusal, and explicit post-gate hook. Implementation is authorized and no further plan review is pending.
 
 Revision note (2026-11-24 02:10Z): Completed implementation and behavior checks, documented stale fixture repairs and reachable legacy exporter scope, and recorded exact test totals. Clippy/review/delivery remain.
+
+Revision note (2026-11-24 02:14Z): First code review completed with two accepted findings. Extend the shared route to accepted Parked captures under every checkout policy and consume a matching persisted stop refusal after worker exit. Keep these in the common pipeline, add persisted-boundary regressions, and retain all passing unaffected validation.
+
+Revision note (2026-11-24 02:24Z): The common route now recognizes durable parked acceptance independently of export policy, and one common post-stop receipt decision honors recorded refusal after original-worker exit. Both new fixtures and 7 affected existing controller cases pass; fixture-only Path qualification and short session IDs were corrected during validation.

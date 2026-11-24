@@ -499,7 +499,10 @@ impl OriginDeltaSuspend {
         )
     }
 
-    fn receipt(&self, executor: &(impl CommandExecutor + Sync)) -> Result<Option<SuspendReceipt>> {
+    pub(super) fn receipt(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<Option<SuspendReceipt>> {
         Ok(read_wire::<SuspendReceipt>(
             &self.backend,
             &self.session_id,
@@ -543,7 +546,7 @@ impl OriginDeltaSuspend {
     pub(super) async fn wait_for_stop(
         &self,
         executor: &(impl CommandExecutor + Sync),
-    ) -> Result<Option<SuspendReceipt>> {
+    ) -> Result<()> {
         self.wait_for_stop_with_uncancelled(executor, &ProcessExecutor)
             .await
     }
@@ -552,7 +555,7 @@ impl OriginDeltaSuspend {
         &self,
         executor: &(impl CommandExecutor + Sync),
         uncancelled: &(impl CommandExecutor + Sync),
-    ) -> Result<Option<SuspendReceipt>> {
+    ) -> Result<()> {
         executor.begin_resumable_work()?;
         let outcome = async {
             let initial_cancelled =
@@ -613,12 +616,7 @@ impl OriginDeltaSuspend {
                     )?
                 };
                 if !poll_executor_alive {
-                    let receipt = if use_uncancelled {
-                        self.receipt(uncancelled)?
-                    } else {
-                        self.receipt(executor)?
-                    };
-                    return Ok(receipt);
+                    return Ok(());
                 }
                 let mut notice = if cancellation_recorded {
                     "Restarting after the previous agent exits".to_owned()

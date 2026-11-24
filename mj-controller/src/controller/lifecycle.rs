@@ -1144,7 +1144,7 @@ impl Controller {
             // receipt carries the stop across a controller handoff.
             if let Some(reason) = attempt.restart_reason(executor)? {
                 if attempt.request_recorded() {
-                    let _ = attempt.wait_for_stop(executor).await?;
+                    attempt.wait_for_stop(executor).await?;
                 }
                 drop(held_relay.take());
                 return Err(self.restart_after_refused_origin_delta(
@@ -1226,11 +1226,11 @@ impl Controller {
                     }
                     attempt.wait_for_stop(executor).await
                 }.await;
-                let receipt = match stopped {
-                    Ok(receipt) => receipt,
+                match stopped {
+                    Ok(()) => {},
                     Err(error) if executor.shutdown_interrupted() => return Err(error),
                     Err(error) => match attempt.live_worker_mode(executor) {
-                        Ok(None | Some(WorkerRunMode::CheckpointOnly)) => None,
+                        Ok(None | Some(WorkerRunMode::CheckpointOnly)) => {},
                         Ok(Some(WorkerRunMode::Harness)) => {
                             if !attempt.request_recorded()
                                 && let Err(cleanup) = attempt.clear_after_restart(executor)
@@ -1246,27 +1246,22 @@ impl Controller {
                         ))),
                     },
                 };
-                // Capture must connect to the replacement, never to the stopped worker.
-                drop(held_relay.take());
-                let post_stop_restart_reason =
-                    if executor.cancellation_requested() && !executor.shutdown_interrupted() {
-                        attempt.restart_reason(&ProcessExecutor)?
-                    } else {
-                        attempt.restart_reason(executor)?
-                    };
-                if let Some(reason) = post_stop_restart_reason {
-                    return Err(self.restart_after_refused_origin_delta(
-                        admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
-                    ).await);
-                }
-                if let Some(reason) = receipt.and_then(|receipt| receipt.error) {
-                    return Err(self.restart_after_refused_origin_delta(
-                        admission, session_id, executor, manager, attempt, &previous,
-                        mj_core::refusal::Refusal::precondition(reason).into(),
-                    ).await);
-                }
-            } else {
-                drop(held_relay.take());
+            }
+            // Capture must connect to the replacement, never to the stopped worker.
+            drop(held_relay.take());
+            let (restart, receipt) =
+                if executor.cancellation_requested() && !executor.shutdown_interrupted() {
+                    (attempt.restart_reason(&ProcessExecutor)?, attempt.receipt(&ProcessExecutor)?)
+                } else {
+                    (attempt.restart_reason(executor)?, attempt.receipt(executor)?)
+                };
+            if let Some(error) = restart.map(anyhow::Error::msg).or_else(|| {
+                receipt.and_then(|receipt| receipt.error)
+                    .map(|reason| mj_core::refusal::Refusal::precondition(reason).into())
+            }) {
+                return Err(self.restart_after_refused_origin_delta(
+                    admission, session_id, executor, manager, attempt, &previous, error,
+                ).await);
             }
             held_relay = Some(match attempt.start_worker(
                 self, admission, session_id, executor,
@@ -1987,14 +1982,21 @@ impl Controller {
         } else {
             None
         };
-        // A verified legacy close without the origin-delta acceptance marker
-        // may already have sealed its old relay.
-        if let Some(policy @ (CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff)) = policy
-            && (verified.is_none() || if cancelled {
-                OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?.accepted()
-            } else {
-                OriginDeltaSuspend::load(self, session_id, executor)?.accepted()
-            })
+        let origin_policy = matches!(policy, Some(
+            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+        ));
+        // Parked acceptance is independent of the export policy. A verified
+        // legacy close without acceptance may already have sealed its old relay.
+        if let Some(policy) = policy
+            && (origin_policy && verified.is_none()
+                || self.state.sessions[session_id].target.is_some() && {
+                    let attempt = if cancelled {
+                        OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?
+                    } else {
+                        OriginDeltaSuspend::load(self, session_id, executor)?
+                    };
+                    attempt.already_quiescent() || (origin_policy && attempt.accepted())
+                })
         {
             return self.suspend_session_controlled_with_manager(
                 admission, session_id, executor, Some(manager), None,

@@ -4216,6 +4216,173 @@ fn attach_local_managed_clone(session: &mut SessionRecord, clone: PathBuf, origi
     }));
 }
 
+#[cfg(unix)]
+fn interrupted_local_suspend_fixture(
+    directory: &std::path::Path,
+    session_id: &str,
+) -> (Controller, PathBuf) {
+    let worker_root = directory.join("workers").join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Closing;
+    session.target_template_id = "local".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    (controller, worker_root)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel() {
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    const NAME: &str = "interrupted_parked_suspend_with_raw_export_restores_parked_on_cancel";
+    const SESSION_ID: &str = "interrupted-parked-raw-suspend";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (mut controller, worker_root) =
+        interrupted_local_suspend_fixture(directory.path(), SESSION_ID);
+    let checkout = directory.path().join("attached");
+    std::fs::create_dir(&checkout).unwrap();
+    controller
+        .state
+        .sessions
+        .get_mut(SESSION_ID)
+        .unwrap()
+        .project_directory = Some(checkout.clone());
+    persist_controller_fixture(&mut controller);
+    let mut attempt = OriginDeltaSuspend::load(&controller, SESSION_ID, &ProcessExecutor).unwrap();
+    attempt.accept(&ProcessExecutor, true).unwrap();
+    assert_eq!(
+        controller
+            .explicit_suspend_export_policy(SESSION_ID)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDeltaRaw
+    );
+
+    // A parked session has no relay for the old close-recovery path to lease.
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let cancelled = targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)));
+    let error = controller
+        .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(SESSION_ID),
+            SESSION_ID,
+            &cancelled,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("cancelled suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    manager.shutdown.shutdown().await.unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("cancelled before parked capture"),
+        "{error:#}"
+    );
+    let record = crate::database::read_durable_session_record(SESSION_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, SessionState::Parked);
+    assert!(checkout.is_dir());
+    assert!(!worker_root.join(mj_core::worker_suspend::ACCEPTED).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_suspend_honors_dead_workers_refusal_receipt() {
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+
+    const NAME: &str = "interrupted_suspend_honors_dead_workers_refusal_receipt";
+    const SESSION_ID: &str = "refused-dead-suspend";
+    const REFUSAL: &str = "checkout was still held when the original worker stopped";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (mut controller, worker_root) =
+        interrupted_local_suspend_fixture(directory.path(), SESSION_ID);
+    let (origin, checkout) = init_managed_clone_with_origin(directory.path(), SESSION_ID);
+    attach_local_managed_clone(
+        controller.state.sessions.get_mut(SESSION_ID).unwrap(),
+        checkout.clone(),
+        origin,
+    );
+    persist_controller_fixture(&mut controller);
+    let operation = "origin-delta-suspend-refused".to_owned();
+    wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    wire::write(
+        &worker_root,
+        wire::REQUEST,
+        &SuspendRequest {
+            operation: operation.clone(),
+            worker: WorkerIdentity {
+                pid: std::process::id(),
+                start: 0,
+            },
+            checkout: checkout.clone(),
+            child_sessions: Vec::new(),
+        },
+    )
+    .unwrap();
+    wire::write(
+        &worker_root,
+        wire::RECEIPT,
+        &SuspendReceipt {
+            operation: operation.clone(),
+            error: Some(REFUSAL.into()),
+        },
+    )
+    .unwrap();
+
+    // An empty worker root has no lock holder. The fixture leaves the launch
+    // profile absent so rollback records its durable intent before booting.
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    let error = controller
+        .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(SESSION_ID),
+            SESSION_ID,
+            &ProcessExecutor,
+            &manager.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            Some(Box::pin(async {
+                panic!("refused suspend entered teardown")
+            })),
+            SuspendSettlement::Suspend,
+        )
+        .await
+        .unwrap_err();
+    manager.shutdown.shutdown().await.unwrap();
+    assert_eq!(
+        mj_core::refusal::Refusal::of(&error).unwrap().message(),
+        REFUSAL
+    );
+    let restart: SuspendReceipt = wire::read(&worker_root, wire::RESTART).unwrap().unwrap();
+    assert_eq!(restart.operation, operation);
+    assert_eq!(restart.error.as_deref(), Some(REFUSAL));
+    assert!(checkout.is_dir());
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn failed_move_keep_lookup_recovers_the_accepted_suspend() {
@@ -5409,8 +5576,8 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     attempt.request_stop(&fake).unwrap();
     assert!(attempt.request_recorded());
 
-    let receipt = attempt.wait_for_stop(&fake).await.unwrap().unwrap();
-    assert!(receipt.error.is_none());
+    attempt.wait_for_stop(&fake).await.unwrap();
+    assert!(attempt.receipt(&fake).unwrap().unwrap().error.is_none());
 
     attempt
         .record_restart(&anyhow::anyhow!("cancelled"), &fake)
@@ -5647,7 +5814,8 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     attempt.request_stop(&fake).unwrap();
     // The worker exited without proving quiescence. The capture worker,
     // which holds the root lock, owns that proof.
-    assert!(attempt.wait_for_stop(&fake).await.unwrap().is_none());
+    attempt.wait_for_stop(&fake).await.unwrap();
+    assert!(attempt.receipt(&fake).unwrap().is_none());
 
     let commands = fake.commands.lock().unwrap();
     assert!(!commands.is_empty());
@@ -6000,12 +6168,18 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let attempt =
         origin_delta::OriginDeltaSuspend::load(&controller, session_id, &target_fake).unwrap();
-    let receipt = attempt
+    attempt
         .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
         .await
-        .unwrap()
         .unwrap();
-    assert!(receipt.error.is_none());
+    assert!(
+        attempt
+            .receipt(&target_fake)
+            .unwrap()
+            .unwrap()
+            .error
+            .is_none()
+    );
     assert_eq!(target_fake.alive_polls.load(Ordering::SeqCst), 2);
     assert_eq!(
         attempt.restart_reason(&target_fake).unwrap().as_deref(),
