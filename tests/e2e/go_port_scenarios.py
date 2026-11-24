@@ -462,7 +462,10 @@ class Suite:
                 raise ScenarioFailure(f"after answering {action}: {json.dumps(outcome)[:2000]}")
             current = self.config_value(session, "collaboration_mode")
             written = plan.is_file() and plan.read_text().strip() == line
-            if current != mode or written != (action == "implement"):
+            # Keeping the plan must leave no plan.txt at all, not merely
+            # none with the planned line.
+            settled = written if action == "implement" else not plan.exists()
+            if current != mode or not settled:
                 raise ScenarioFailure(f"after answering {action} the session is in {current} mode and "
                                       f"{plan} holds {plan.read_text() if plan.exists() else 'nothing'!r}")
             answers.append(f"plan {action} -> finished in {mode} mode, plan.txt "
@@ -523,9 +526,18 @@ class Suite:
 
     def suspend_resume(self, session: str) -> None:
         checkout = self.checkout(session)
-        # Suspension keeps tracked work and refuses to drop untracked files:
-        # notes.txt, and Codex's plan.txt.
-        subprocess.run(["git", "-C", str(checkout), "add", "--all"], check=True)
+        # Suspension keeps tracked work and refuses to drop untracked files.
+        # The earlier scenarios leave exactly notes.txt, plus plan.txt on
+        # Codex; anything else in the checkout is unexpected and fails here
+        # instead of being staged and carried through the suspension.
+        expected = {"notes.txt"} | ({"plan.txt"} if self.kind == "codex" else set())
+        untracked = set(subprocess.run(
+            ["git", "-C", str(checkout), "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, check=True).stdout.split())
+        if untracked != expected:
+            raise ScenarioFailure(f"untracked files before suspend are {sorted(untracked)}, "
+                                  f"expected {sorted(expected)}")
+        subprocess.run(["git", "-C", str(checkout), "add", "--", *sorted(expected)], check=True)
         self.cli("suspend", "--session", session)
         self.wait_for("the session to be suspended",
                       lambda: self.session(session)["state"] == "suspended", CLI_SECONDS)
