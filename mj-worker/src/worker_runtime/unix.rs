@@ -277,7 +277,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
     publish_git_setup(&root, git_setup)?;
-    let review_tools = config.review_tools();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let reviewer = Arc::new(ReviewCapture {
         session_id: config.session_id.clone(),
@@ -372,36 +371,18 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         ],
         environment: session_environment,
         bridge_spec_path: Some(supervisor_path.clone()),
-        cwd: config.cwd,
+        cwd: config.cwd.clone(),
         additional_directories,
-        extra_mcp_servers: config
-            .reviewer_launch
-            .as_ref()
-            .map(|reviewer| {
-                reviewer
-                    .mcp_servers
-                    .iter()
-                    .cloned()
-                    .map(crate::acp::ReviewerMcpServer::new)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        subagent_policy: if config.handback_tool {
-            mj_core::subagent::SubagentPolicy::None
-        } else {
-            config.subagents.clone()
-        },
+        extra_mcp_servers: crate::acp::launch_extra_mcp_servers(&config),
+        subagent_policy: crate::acp::launch_subagent_policy(&config),
         managed_subagent,
         instruction_role,
-        subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
-            path: root.join(super::subagents::SUBAGENT_SOCKET),
-            role,
-            oracle: config.oracle,
-            orchestrators_enabled: config.orchestrators_enabled,
-            subtle_subagents: config.subtle_subagents,
-            review_tools,
+        subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
+            &root,
+            &config,
+            subagent_role,
             profile_registration,
-        }),
+        ),
         project_memory: config.project_memory,
         resume_session,
         native_session_history,
@@ -853,6 +834,7 @@ async fn restart_harness_in_place_response(
     relay: &Arc<RelayCell>,
     credentials: &SharedCredentials,
     relay_root: &std::path::Path,
+    has_subagent_socket: bool,
 ) -> RelayResponseEnvelope {
     if let Some(body) = mj_core::relay::protocol::relay_protocol_rejection(&envelope) {
         return RelayResponseEnvelope {
@@ -938,6 +920,16 @@ async fn restart_harness_in_place_response(
             body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
         };
     }
+    if !has_subagent_socket && launch_config.subagent_mcp_role().is_some() {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                "An in-place harness restart cannot enable sub-agent MCP tools on a worker started without a sub-agent socket; restart the worker instead.",
+            ),
+        };
+    }
     let cancel = CancellationToken::new();
     let prepared = writer
         .track(
@@ -957,7 +949,12 @@ async fn restart_harness_in_place_response(
         git_setup,
         boundary_mailbox_hook_available,
         mailbox_delivery_mode: updated_mailbox_delivery_mode,
-        ..
+        profile_registration,
+        managed_subagent,
+        subagent_role,
+        // Project tools belong to the retained environment's startup lifecycle,
+        // rather than to each bridge reload.
+        project_tools_install: _,
     } = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -994,6 +991,13 @@ async fn restart_harness_in_place_response(
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
+            subagent_mcp_socket: crate::acp::launch_subagent_mcp_socket(
+                relay_root,
+                &launch_config,
+                subagent_role,
+                profile_registration,
+            ),
+            managed_subagent,
             launch_config,
             environment: prepared.environment,
             command: None,
@@ -4029,6 +4033,7 @@ pub(super) async fn serve_client_with_shared_credentials(
                         &relay,
                         &credentials,
                         &relay_root,
+                        request_subagents.is_some(),
                     )
                     .await
                 };
@@ -5480,6 +5485,7 @@ mod preparation_tests {
             &relay,
             &credentials,
             root,
+            true,
         ))
         .await;
         drop(commands);
@@ -5620,6 +5626,7 @@ mod preparation_tests {
                 &relay,
                 &credentials,
                 root,
+                true,
             ),
         )
         .await
@@ -5684,6 +5691,7 @@ mod preparation_tests {
             &relay,
             &credentials,
             root,
+            true,
         )
         .await;
         drop(commands);
@@ -5697,6 +5705,105 @@ mod preparation_tests {
             "{response:?}"
         );
         accepted.await.unwrap();
+    }
+
+    // Hard-won: d796c7d91: in-place reload discarded the new MCP registration mode.
+    #[tokio::test]
+    async fn restart_harness_in_place_refreshes_socket_and_refuses_enabling_it() {
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let store_id = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .store_id
+            .clone()
+            .unwrap();
+        let mut config = super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        config.cwd = root.path().to_path_buf();
+        config.harness = HarnessKind::Antigravity;
+        config.subagents = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+            orchestrators: false,
+        };
+        config.review_trigger = mj_core::config::ReviewTrigger::Push;
+        let home = root.path().join("agy-home");
+        config
+            .environment
+            .insert("MJ_ANTIGRAVITY_HOME".into(), home.to_str().unwrap().into());
+        config
+            .environment
+            .insert("MJ_SESSION_MESSAGE_MCP".into(), "1".into());
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&config));
+        let request = || RelayRequestEnvelope {
+            request_id: "restart".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::RestartHarnessInPlace {
+                operation_id: "move".into(),
+                expected_store_id: store_id.clone(),
+                launch_config: Box::new(config.clone()),
+            },
+        };
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        let (commands, mut receiver) = mpsc::channel(1);
+        let response = restart_harness_in_place_response(
+            request(),
+            Some(&commands),
+            &relay,
+            &credentials,
+            root.path(),
+            false,
+        )
+        .await;
+        let RelayResponseBody::Error { error } = response.body else {
+            panic!("expected refusal")
+        };
+        assert_eq!(error.code, RelayErrorCode::InvalidState);
+        assert!(error.message.contains("without a sub-agent socket"));
+        assert!(!home.exists(), "refusal must precede profile staging");
+        assert!(receiver.try_recv().is_err());
+        let acceptor = mj_core::runtime::spawn(async move {
+            let Some(CommandRequest::ReloadLaunchConfig {
+                subagent_mcp_socket,
+                managed_subagent,
+                resolved,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("expected reload")
+            };
+            let socket = subagent_mcp_socket.unwrap();
+            assert!(!socket.profile_registration);
+            assert_eq!(socket.role, mj_core::subagent::SubagentMcpRole::Parent);
+            assert!(socket.review_tools);
+            assert!(!managed_subagent);
+            resolved.send(Ok(())).unwrap();
+        });
+        let response = restart_harness_in_place_response(
+            request(),
+            Some(&commands),
+            &relay,
+            &credentials,
+            root.path(),
+            true,
+        )
+        .await;
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { .. }),
+            "{response:?}"
+        );
+        acceptor.await.unwrap();
     }
 
     // Hard-won: e2c147489: an in-place profile switch discarded Claude's agent and review tools.
@@ -5745,6 +5852,7 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            true,
         )
         .await;
         assert!(matches!(
@@ -5793,6 +5901,7 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            true,
         )
         .await;
         drop(commands_tx);
@@ -5921,6 +6030,7 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            true,
         )
         .await;
         let RelayResponseBody::Error { error } = failed.body else {
@@ -5956,6 +6066,7 @@ mod preparation_tests {
             &relay,
             &shared_credentials,
             root.path(),
+            true,
         )
         .await;
         drop(ok_tx);
