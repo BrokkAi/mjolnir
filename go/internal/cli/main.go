@@ -666,7 +666,7 @@ func runMain(parsed cli) error {
 	}
 	var owned *controller.StoreAlreadyOwnedError
 	if daemonRun && result != nil && errors.As(result, &owned) {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", result)
+		_, _ = io.WriteString(os.Stderr, core.MainErrorReport(result))
 		return &exitStatus{code: int(core.StoreOwnedExitCode)}
 	}
 	return result

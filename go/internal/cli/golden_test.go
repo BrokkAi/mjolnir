@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -118,6 +119,46 @@ func TestGoldenRepeatedArgumentsAreRefusedPerCommandLevel(t *testing.T) {
 // Hard-won: 9fd6c692b: an option given no value did not list the values it takes
 func TestGoldenMissingValueListsThePossibleValues(t *testing.T) {
 	assertParseErrorGolden(t, "missing-value-of-enumerated-option", "", []string{"--instance", "go-port-golden", "new", "--oracle"})
+}
+
+// The files in testdata/error-report were captured from the Rust mj at the
+// pinned commit, run from this directory with its own MJ_DATA_DIR and
+// MJ_CONFIG_DIR and the same command lines. A failed command prints anyhow's
+// report: the context, then its cause on its own line under "Caused by:",
+// an OS error read as Rust's io::Error ("(os error N)"). The command runs as
+// Main runs it, without the process setup around it (runMain), which a test
+// binary cannot do: it has no build identity.
+//
+// Hard-won: 5425a414d: a failed command printed its causes on one line, a file error in Go's words
+func TestGoldenFailedCommandsReportTheirErrorsAsTheRustBuild(t *testing.T) {
+	if rerunInIsolatedChild(t, "MJ_TEST_ERROR_REPORT_CHILD") {
+		return
+	}
+	unsetHelpEnvironment(t)
+	// The captures ran outside a session; inside one, `mj prompt` refuses.
+	for _, name := range []string{"MJ_SESSION_ID", "MJ_SESSION_BASH_ENV"} {
+		t.Setenv(name, "")
+		check(t, os.Unsetenv(name))
+	}
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{"missing-prompt-file", []string{"prompt", "--session", "abc", "--prompt-file", "/nonexistent/prompt.txt"}},
+		{"response-file-is-a-directory", []string{"respond", "--session", "abc", "--elicitation", "e", "--response-file", "testdata/error-report"}},
+		{"prompt-file-not-utf8", []string{"prompt", "--session", "abc", "--prompt-file", "testdata/error-report/invalid-utf8-prompt"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := parseCommandLine(test.args)
+			check(t, err)
+			var stderr bytes.Buffer
+			result := runCommand(context.Background(), parsed.command, parsed.workspace, parsed.noSplash)
+			if code := reportError(&stderr, result); code != 1 {
+				t.Fatalf("exit %d: %s", code, stderr.String())
+			}
+			assertGolden(t, filepath.Join("error-report", test.name+".txt"), stderr.String())
+		})
+	}
 }
 
 // assertParseErrorGolden parses args, which must fail, and compares what mj
