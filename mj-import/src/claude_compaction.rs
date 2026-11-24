@@ -28,7 +28,9 @@ use crate::compaction::{
 use crate::quota::ProfileQuota;
 use crate::utility_llm::{MAX_PAGE_BYTES, UtilityLlmRuntime, UtilityQuotaClass, classify_quota};
 use mj_core::config::{Config, HarnessHost, HarnessKind, HarnessLoginStore, HarnessProfile};
-use mj_core::credentials::{ClaudeEnvironmentAuth, claude_environment_auth};
+use mj_core::credentials::{
+    ClaudeEnvironmentAuth, claude_environment_auth, claude_environment_flag,
+};
 
 #[cfg(unix)]
 type Installation = mj_harness_install::harness_install::Located;
@@ -133,13 +135,17 @@ const AWS_SETTING_VARIABLES: &[&str] = &[
     "AWS_STS_REGIONAL_ENDPOINTS",
 ];
 
-/// Vertex and Foundry settings taken from the host unless the profile sets them.
-const EXTERNAL_PROVIDER_VARIABLES: &[&str] = &[
+/// Vertex settings taken from the host unless the profile sets them.
+const VERTEX_VARIABLES: &[&str] = &[
     "CLOUD_ML_REGION",
     "ANTHROPIC_VERTEX_PROJECT_ID",
     "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_CLOUD_QUOTA_PROJECT",
     "CLOUDSDK_CONFIG",
+];
+
+/// Foundry settings taken from the host unless the profile sets them.
+const FOUNDRY_VARIABLES: &[&str] = &[
     "AZURE_TENANT_ID",
     "AZURE_CLIENT_ID",
     "AZURE_CLIENT_SECRET",
@@ -148,6 +154,27 @@ const EXTERNAL_PROVIDER_VARIABLES: &[&str] = &[
     "ANTHROPIC_FOUNDRY_API_KEY",
     "ANTHROPIC_FOUNDRY_RESOURCE",
     "ANTHROPIC_FOUNDRY_BASE_URL",
+];
+
+/// Credentials a Bedrock profile sets itself instead of signing in through
+/// the AWS SSO token cache.
+const STATIC_AWS_CREDENTIALS: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+];
+
+/// Variables holding a path the CLI resolves itself. The request's working
+/// directory is an empty sandbox, so a relative one must be made absolute.
+const CLOUD_PATH_VARIABLES: &[&str] = &[
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUDSDK_CONFIG",
 ];
 
 /// How long one request may run. This is the per-request progress timeout
@@ -249,6 +276,13 @@ fn stageable_login(bytes: &[u8], now_ms: i64) -> Result<Vec<u8>> {
         bail!("the stored access token has expired and a staged copy cannot refresh it");
     }
     Ok(mj_core::credentials::credential_copy_for_harness(HarnessKind::Claude, bytes).into_owned())
+}
+
+/// The daemon's environment, without entries that are not UTF-8.
+fn host_environment() -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
 }
 
 fn now_ms() -> i64 {
@@ -369,40 +403,55 @@ fn cloud_environment(
             }
         }
         Some(ClaudeEnvironmentAuth::ExternalProvider) => {
-            for name in EXTERNAL_PROVIDER_VARIABLES {
-                if let Some(value) = host.get(*name) {
-                    forward(name, value.clone());
+            if claude_environment_flag(profile, "CLAUDE_CODE_USE_VERTEX") {
+                for name in VERTEX_VARIABLES {
+                    if let Some(value) = host.get(*name) {
+                        forward(name, value.clone());
+                    }
+                }
+                // A profile that names its own gcloud directory or key file
+                // is not given the host's application default credentials.
+                if !profile.contains_key("GOOGLE_APPLICATION_CREDENTIALS")
+                    && !profile.contains_key("CLOUDSDK_CONFIG")
+                {
+                    let adc = host
+                        .get("GOOGLE_APPLICATION_CREDENTIALS")
+                        .map(PathBuf::from)
+                        .or_else(|| {
+                            host_file(
+                                host,
+                                "CLOUDSDK_CONFIG",
+                                "application_default_credentials.json",
+                            )
+                        })
+                        .or_else(|| {
+                            host_file(
+                                host,
+                                "XDG_CONFIG_HOME",
+                                "gcloud/application_default_credentials.json",
+                            )
+                        })
+                        .or_else(|| {
+                            host_file(
+                                host,
+                                "HOME",
+                                ".config/gcloud/application_default_credentials.json",
+                            )
+                        });
+                    if let Some(path) = adc.filter(|path| path.is_file()) {
+                        forward(
+                            "GOOGLE_APPLICATION_CREDENTIALS",
+                            path.to_string_lossy().into_owned(),
+                        );
+                    }
                 }
             }
-            let adc = host
-                .get("GOOGLE_APPLICATION_CREDENTIALS")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    host_file(
-                        host,
-                        "CLOUDSDK_CONFIG",
-                        "application_default_credentials.json",
-                    )
-                })
-                .or_else(|| {
-                    host_file(
-                        host,
-                        "XDG_CONFIG_HOME",
-                        "gcloud/application_default_credentials.json",
-                    )
-                })
-                .or_else(|| {
-                    host_file(
-                        host,
-                        "HOME",
-                        ".config/gcloud/application_default_credentials.json",
-                    )
-                });
-            if let Some(path) = adc.filter(|path| path.is_file()) {
-                forward(
-                    "GOOGLE_APPLICATION_CREDENTIALS",
-                    path.to_string_lossy().into_owned(),
-                );
+            if claude_environment_flag(profile, "CLAUDE_CODE_USE_FOUNDRY") {
+                for name in FOUNDRY_VARIABLES {
+                    if let Some(value) = host.get(*name) {
+                        forward(name, value.clone());
+                    }
+                }
             }
         }
         _ => {}
@@ -410,13 +459,18 @@ fn cloud_environment(
     forwarded
 }
 
-/// The host's AWS SSO token cache, for a Bedrock profile. The request's empty
-/// `HOME` hides it otherwise.
+/// The host's AWS SSO token cache, for a Bedrock profile that signs in through
+/// it rather than with credentials of its own. The request's empty `HOME`
+/// hides it otherwise.
 fn sso_cache_source(
     host: &BTreeMap<String, String>,
     profile: &BTreeMap<String, String>,
 ) -> Option<PathBuf> {
-    if claude_environment_auth(profile) != Some(ClaudeEnvironmentAuth::Bedrock) {
+    if claude_environment_auth(profile) != Some(ClaudeEnvironmentAuth::Bedrock)
+        || STATIC_AWS_CREDENTIALS
+            .iter()
+            .any(|name| profile.contains_key(*name))
+    {
         return None;
     }
     let cache = Path::new(host.get("HOME").filter(|home| !home.is_empty())?)
@@ -557,7 +611,7 @@ impl ClaudePrintCompactionBackend {
         if candidates.is_empty() {
             return Ok(None);
         }
-        let host = std::env::vars().collect::<BTreeMap<_, _>>();
+        let host = host_environment();
         let Some(cli) = locate_pinned_cli(&host, cancel).await? else {
             return Ok(None);
         };
@@ -638,6 +692,13 @@ impl ClaudePrintCompactionBackend {
                 _ => {
                     environment.insert(name.clone(), value.clone());
                 }
+            }
+        }
+        for name in CLOUD_PATH_VARIABLES {
+            if let Some(value) = environment.get_mut(*name)
+                && let Ok(absolute) = std::path::absolute(&*value)
+            {
+                *value = absolute.to_string_lossy().into_owned();
             }
         }
         environment.extend(sandbox.clone());
@@ -782,8 +843,14 @@ fn stage_sandbox(auth: &ClaudeAuth, sso_cache: Option<&Path>) -> Result<Sandbox>
         )?;
     }
     if let Some(source) = sso_cache {
-        copy_sso_cache(source, &root.path().join("home/.aws/sso/cache"))
-            .context("stage the AWS SSO token cache")?;
+        // The profile may work without the cache, so a failure is reported
+        // and the request still runs.
+        if let Err(error) = copy_sso_cache(source, &root.path().join("home/.aws/sso/cache")) {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not stage the AWS SSO token cache for Claude print-mode compaction"
+            );
+        }
     }
     Ok(Sandbox { root })
 }
@@ -795,18 +862,27 @@ fn copy_sso_cache(source: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
     for entry in std::fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-        let entry = entry?;
-        // A symlink could point anywhere; only the cache's own files are copied.
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let target = destination.join(entry.file_name());
-        std::fs::copy(entry.path(), &target)
-            .with_context(|| format!("copy {}", entry.path().display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+        let copied = entry.map_err(anyhow::Error::from).and_then(|entry| {
+            // A symlink could point anywhere; only the cache's own files are
+            // copied.
+            if !entry.file_type()?.is_file() {
+                return Ok(());
+            }
+            let target = destination.join(entry.file_name());
+            std::fs::copy(entry.path(), &target)
+                .with_context(|| format!("copy {}", entry.path().display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(())
+        });
+        if let Err(error) = copied {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "skipping an AWS SSO cache entry for Claude print-mode compaction"
+            );
         }
     }
     Ok(())
@@ -1128,6 +1204,25 @@ mod tests {
             "the profile's own project wins"
         );
         assert!(!inherited.contains_key("HOME"));
+        assert!(
+            !inherited.contains_key("AZURE_TENANT_ID"),
+            "a Vertex profile gets no Foundry variables"
+        );
+
+        // A profile with its own gcloud directory is not given the host's
+        // application default credentials; gcloud reads its own.
+        let mut own_config = vertex.clone();
+        own_config.insert("CLOUDSDK_CONFIG".into(), "/profile/gcloud".into());
+        let inherited = inherited_environment(&host, &own_config);
+        assert!(!inherited.contains_key("GOOGLE_APPLICATION_CREDENTIALS"));
+        assert!(!inherited.contains_key("CLOUDSDK_CONFIG"));
+
+        // A Foundry profile gets the Azure variables and none of Google's.
+        let foundry = map([("CLAUDE_CODE_USE_FOUNDRY", "true")]);
+        let inherited = inherited_environment(&host, &foundry);
+        assert_eq!(inherited["AZURE_TENANT_ID"], "tenant");
+        assert!(!inherited.contains_key("GOOGLE_APPLICATION_CREDENTIALS"));
+        assert!(!inherited.contains_key("CLOUD_ML_REGION"));
 
         // An explicit variable on the host names the file, whatever exists.
         let mut explicit = host.clone();
@@ -1183,6 +1278,57 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert!(cache.join("token.json").exists());
+
+        // A profile with credentials of its own does not sign in through the cache.
+        let mut keyed = bedrock();
+        keyed.insert("AWS_ACCESS_KEY_ID".into(), "profile-key".into());
+        assert_eq!(sso_cache_source(&host, &keyed), None);
+        let mut named = bedrock();
+        named.insert("AWS_PROFILE".into(), "sso-profile".into());
+        assert_eq!(sso_cache_source(&host, &named), Some(cache));
+
+        // A cache that cannot be read does not stop the request.
+        let sandbox = stage_sandbox(
+            &ClaudeAuth::Environment,
+            Some(&home.path().join("missing-cache")),
+        )
+        .unwrap();
+        assert!(sandbox.directory("cwd").is_dir());
+    }
+
+    #[test]
+    fn cloud_credential_paths_are_absolute_once_the_cli_runs_in_the_sandbox() {
+        let backend = ClaudePrintCompactionBackend::new(
+            PathBuf::from("/pinned/claude"),
+            &BTreeMap::new(),
+            BTreeMap::new(),
+            Vec::new(),
+            CancellationToken::new(),
+            None,
+        );
+        let candidate = ClaudeCandidate {
+            profile_id: "profile".into(),
+            environment: map([
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_SHARED_CREDENTIALS_FILE", "relative/credentials"),
+                ("CLOUDSDK_CONFIG", "relative/gcloud"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", "/already/absolute.json"),
+            ]),
+            auth: ClaudeAuth::Environment,
+            choose_model: true,
+            page_bytes: DEFAULT_PAGE_BYTES,
+        };
+
+        let environment = backend.invocation_environment(&candidate, &BTreeMap::new());
+
+        for name in ["AWS_SHARED_CREDENTIALS_FILE", "CLOUDSDK_CONFIG"] {
+            assert!(Path::new(&environment[name]).is_absolute(), "{name}");
+        }
+        assert!(environment["AWS_SHARED_CREDENTIALS_FILE"].ends_with("relative/credentials"));
+        assert_eq!(
+            environment["GOOGLE_APPLICATION_CREDENTIALS"],
+            "/already/absolute.json"
+        );
     }
 
     #[test]
@@ -1723,7 +1869,7 @@ esac
         let seen = SeenRequests::default();
         let address = fake_anthropic(seen.clone()).await;
         let base_url = format!("http://{address}");
-        let host = std::env::vars().collect::<BTreeMap<_, _>>();
+        let host = host_environment();
         let with_key = BTreeMap::from([
             ("ANTHROPIC_BASE_URL".to_owned(), base_url.clone()),
             (
