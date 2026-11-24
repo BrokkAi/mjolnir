@@ -6741,3 +6741,64 @@ fn session_state_instructions_are_appended_once_for_every_harness() {
         assert!(actual.contains(text), "{harness:?}");
     }
 }
+
+#[test]
+fn worker_url_override_precedes_build_pin_and_validates_checksum() {
+    const CASE: &str = "MJ_TEST_WORKER_URL_BUILD_PIN";
+    let Ok(case) = std::env::var(CASE) else {
+        for case in ["valid", "missing", "malformed"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut test = IsolatedTest::new(test_name(
+                module_path!(),
+                "worker_url_override_precedes_build_pin_and_validates_checksum",
+            ))
+            .isolated_store(directory.path())
+            .env(CASE, case)
+            .env_remove("MJ_WORKER_BINARY")
+            .env_remove("MJ_WORKER_DIR")
+            .env("MJ_WORKER_URL", "https://example.invalid/{target}")
+            .env_remove("MJ_WORKER_SHA256");
+            if case != "missing" {
+                test = test.env(
+                    "MJ_WORKER_SHA256",
+                    if case == "valid" {
+                        "a".repeat(64)
+                    } else {
+                        "invalid".into()
+                    },
+                );
+            }
+            test.run();
+        }
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let source = directory.path().join("source");
+    std::fs::write(&source, stamped_worker(b"cached worker")).unwrap();
+    WorkerBinarySourceSnapshot::capture(&cache, |_, _| {
+        Ok(WorkerBinaryAvailability::Local {
+            path: source.clone(),
+            source: "installed".into(),
+        })
+    });
+    let result = super::binary_source::worker_binary_prerequisite_with_cache(
+        "x86_64",
+        WorkerBinaryRequirement::PortableLinux,
+        &directory.path().join("missing-controller"),
+        &|p| p.is_file(),
+        &verify_worker_build,
+        Some(&cache),
+    );
+    match case.as_str() {
+        "valid" => assert!(
+            matches!(result.unwrap(), WorkerBinaryAvailability::Remote { sha256, .. } if sha256 == "a".repeat(64))
+        ),
+        "missing" => assert!(
+            format!("{:#}", result.unwrap_err())
+                .contains("MJ_WORKER_URL requires MJ_WORKER_SHA256")
+        ),
+        "malformed" => assert!(result.is_err()),
+        _ => panic!("unknown test case"),
+    }
+}

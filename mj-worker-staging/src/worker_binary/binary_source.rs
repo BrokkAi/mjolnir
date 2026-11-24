@@ -1,6 +1,9 @@
 use super::*;
 use mj_core::hex::lower_hex;
 
+const WORKER_BINARY_OVERRIDE_SOURCE: &str = "MJ_WORKER_BINARY";
+const PINNED_WORKER_CACHE_SOURCE: &str = "pinned worker cache";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerBinaryAvailability {
     Local {
@@ -265,13 +268,17 @@ impl WorkerBinarySourceSnapshot {
                     let (outcome, pin_elapsed) = &pinned_paths[&path];
                     match outcome {
                         Ok(cached) => {
-                            record_build_pin(
-                                cache_root,
-                                worker_build_id(),
-                                arch,
-                                requirement,
-                                cached,
-                            );
+                            if source != WORKER_BINARY_OVERRIDE_SOURCE
+                                && source != PINNED_WORKER_CACHE_SOURCE
+                            {
+                                record_build_pin(
+                                    cache_root,
+                                    worker_build_id(),
+                                    arch,
+                                    requirement,
+                                    cached,
+                                );
+                            }
                             tracing::info!(
                                 triple = requirement.triple(arch),
                                 source = source.as_str(),
@@ -765,7 +772,9 @@ fn resolve_worker_source_again(
         Ok(WorkerBinaryAvailability::Local { path, source }) => {
             let path = copy_worker_source_to_cache(&path, &cache_root)
                 .context("pin the re-resolved worker source")?;
-            record_build_pin(&cache_root, worker_build_id(), arch, requirement, &path);
+            if source != WORKER_BINARY_OVERRIDE_SOURCE && source != PINNED_WORKER_CACHE_SOURCE {
+                record_build_pin(&cache_root, worker_build_id(), arch, requirement, &path);
+            }
             tracing::info!(
                 arch,
                 requirement = ?requirement,
@@ -848,7 +857,7 @@ pub(super) fn worker_binary_prerequisite_with_cache(
         )?;
         return Ok(WorkerBinaryAvailability::Local {
             path,
-            source: "MJ_WORKER_BINARY".into(),
+            source: WORKER_BINARY_OVERRIDE_SOURCE.into(),
         });
     }
     // A rebuilt or renamed checkout leaves a running controller pointing at a
@@ -891,14 +900,6 @@ pub(super) fn worker_binary_prerequisite_with_cache(
             source: source.into(),
         });
     }
-    if let Some(path) = cache_root.and_then(|root| {
-        lookup_build_pinned_worker(root, worker_build_id(), arch, requirement, is_file, verify)
-    }) {
-        return Ok(WorkerBinaryAvailability::Local {
-            path,
-            source: "pinned worker cache".into(),
-        });
-    }
     if let Some(template) = mj_core::config::env_override("WORKER_URL") {
         let expected = mj_core::config::env_override("WORKER_SHA256")
             .context("MJ_WORKER_URL requires MJ_WORKER_SHA256")?;
@@ -907,6 +908,14 @@ pub(super) fn worker_binary_prerequisite_with_cache(
             url: template.replace("{target}", &triple),
             sha256: expected,
             triple,
+        });
+    }
+    if let Some(path) = cache_root.and_then(|root| {
+        lookup_build_pinned_worker(root, worker_build_id(), arch, requirement, is_file, verify)
+    }) {
+        return Ok(WorkerBinaryAvailability::Local {
+            path,
+            source: PINNED_WORKER_CACHE_SOURCE.into(),
         });
     }
     let rejected = rejected.into_inner();
@@ -931,6 +940,41 @@ pub(super) fn worker_binary_prerequisite_with_cache(
 #[cfg(test)]
 mod build_pin_tests {
     use super::*;
+
+    #[test]
+    fn build_pin_capture_does_not_register_unscoped_override_or_cache_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("override-worker");
+        std::fs::write(
+            &worker,
+            format!("override{}", mj_core::worker_build::worker_build_stamp()),
+        )
+        .unwrap();
+        for source in [WORKER_BINARY_OVERRIDE_SOURCE, PINNED_WORKER_CACHE_SOURCE] {
+            let cache = directory.path().join(source);
+            let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |_, _| {
+                Ok(WorkerBinaryAvailability::Local {
+                    path: worker.clone(),
+                    source: source.into(),
+                })
+            });
+            for ((arch, requirement), result) in &snapshot.entries {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(!build_pin_entry(&cache, worker_build_id(), arch, *requirement).exists());
+                assert!(
+                    lookup_build_pinned_worker(
+                        &cache,
+                        worker_build_id(),
+                        arch,
+                        *requirement,
+                        &|path| path.is_file(),
+                        &verify_worker_build,
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
 
     #[test]
     fn build_pin_survives_install_replacement_and_rejects_corruption() {
@@ -976,7 +1020,7 @@ mod build_pin_tests {
             lookup().unwrap(),
             WorkerBinaryAvailability::Local {
                 path: pinned.clone(),
-                source: "pinned worker cache".into()
+                source: PINNED_WORKER_CACHE_SOURCE.into()
             }
         );
         let fresh = WorkerBinarySourceSnapshot::capture(&cache, |candidate_arch, req| {
@@ -993,7 +1037,7 @@ mod build_pin_tests {
             fresh.entries[&(arch.to_owned(), requirement)],
             Ok(WorkerBinaryAvailability::Local {
                 path: pinned.clone(),
-                source: "pinned worker cache".into()
+                source: PINNED_WORKER_CACHE_SOURCE.into()
             })
         );
         // A daemon with B's verifier prefers the installed B even while A is pinned.
@@ -1089,7 +1133,7 @@ mod build_pin_tests {
             .unwrap(),
             WorkerBinaryAvailability::Local {
                 path: portable_pin,
-                source: "pinned worker cache".into()
+                source: PINNED_WORKER_CACHE_SOURCE.into()
             },
         );
         // A stamp verifier can still succeed after unrelated bytes are corrupted.
