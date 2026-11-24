@@ -1584,7 +1584,33 @@ pub async fn run_daemon_owned(
             .into());
         }
     }
-    if checkpoint_only && let Some(capture) = config.suspend_capture.take() {
+    let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
+    let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
+    // Validate and recover durable state before publishing a socket. A
+    // failed startup must never leave a fresh endpoint that looks live.
+    super::record_startup_step(&root, "durable-relay");
+    let mut durable_relay = if checkpoint_only {
+        DurableRelay::open_for_checkpoint_with_initial_commands(
+            &root,
+            &config.session_id,
+            env!("CARGO_PKG_VERSION"),
+            &config.initial_commands,
+        )?
+    } else {
+        DurableRelay::open_for_harness(
+            &root,
+            &config.session_id,
+            env!("CARGO_PKG_VERSION"),
+            config.harness,
+            &config.initial_commands,
+        )?
+    };
+    // A sealed relay only finishes its accepted close. An unsealed capture
+    // must drain writers before it can admit a checkpoint barrier.
+    if checkpoint_only
+        && !durable_relay.sealed_by_close()
+        && let Some(capture) = config.suspend_capture.take()
+    {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             super::record_startup_step(&root, "checkout-quiescence");
@@ -1610,27 +1636,6 @@ pub async fn run_daemon_owned(
             .into());
         }
     }
-    let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
-    let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
-    // Validate and recover durable state before publishing a socket. A
-    // failed startup must never leave a fresh endpoint that looks live.
-    super::record_startup_step(&root, "durable-relay");
-    let mut durable_relay = if checkpoint_only {
-        DurableRelay::open_for_checkpoint_with_initial_commands(
-            &root,
-            &config.session_id,
-            env!("CARGO_PKG_VERSION"),
-            &config.initial_commands,
-        )?
-    } else {
-        DurableRelay::open_for_harness(
-            &root,
-            &config.session_id,
-            env!("CARGO_PKG_VERSION"),
-            config.harness,
-            &config.initial_commands,
-        )?
-    };
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.

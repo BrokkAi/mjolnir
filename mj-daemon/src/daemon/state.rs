@@ -697,12 +697,13 @@ impl RuntimeState {
         prefix: &str,
     ) {
         let cause = failure.public_message(prefix, reference);
+        let reason = failure.reason;
         let applied = blocking({
             let session_id = session_id.to_owned();
             let cause = cause.clone();
             move || {
                 let mut controller = Controller::load()?;
-                controller.record_failed_close(&session_id, &cause)
+                controller.record_failed_close(&session_id, &cause, reason)
             }
         })
         .await;

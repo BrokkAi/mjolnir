@@ -549,6 +549,7 @@ impl OriginDeltaSuspend {
     ) -> Result<()> {
         self.wait_for_stop_with_uncancelled(executor, &ProcessExecutor)
             .await
+            .context(LifecycleFailureReason::SuspendStopPending)
     }
 
     pub(super) async fn wait_for_stop_with_uncancelled(

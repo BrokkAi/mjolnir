@@ -8647,6 +8647,21 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     state.prepare_suspension(&session.id).await.unwrap();
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[&session.id].state, SessionState::Closing);
+    let pending = LifecycleFailure::of(
+        &anyhow::anyhow!("private SSH diagnostic")
+            .context(mj_controller::controller::LifecycleFailureReason::SuspendStopPending),
+    );
+    state
+        .record_failed_close(&session.id, "lifecycle-pending-stop", &pending)
+        .await;
+    let retained = mj_controller::database::read_durable_session_record(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.state, SessionState::Closing);
+    let notice = retained.public_error().unwrap();
+    assert!(notice.contains("Retry Suspend"), "{notice}");
+    assert!(notice.contains("lifecycle-pending-stop"), "{notice}");
+    assert!(!notice.contains("private SSH diagnostic"), "{notice}");
     assert!(interrupted_suspend_session_ids(&Controller::load().unwrap()).contains(&session.id));
     // A new runtime has no in-memory requests from the earlier daemon.
     let restarted = test_runtime_state_loading_the_store();
@@ -8982,6 +8997,7 @@ esac
                         "{}: Teardown was interrupted; retry suspension.",
                         mj_core::state::CLOSE_FAILURE_PREFIX
                     ),
+                    None,
                 )
                 .unwrap();
             let teardown = test_runtime_state_loading_the_store();

@@ -1232,9 +1232,10 @@ impl Controller {
                     Err(error) => match attempt.live_worker_mode(executor) {
                         Ok(None | Some(WorkerRunMode::CheckpointOnly)) => {},
                         Ok(Some(WorkerRunMode::Harness)) => {
-                            if !attempt.request_recorded()
-                                && let Err(cleanup) = attempt.clear_after_restart(executor)
-                            {
+                            if attempt.request_recorded() {
+                                return Err(error);
+                            }
+                            if let Err(cleanup) = attempt.clear_after_restart(executor) {
                                 tracing::warn!(session_id, %cleanup, "could not clear an unstarted suspend");
                             }
                             let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -2341,7 +2342,12 @@ impl Controller {
     /// Publish a safe lifecycle failure even if a previous internal error exists.
     /// Detailed diagnostics belong in logs; the stored outcome must be visible
     /// on all control surfaces. Reports whether the session still exists.
-    pub fn record_failed_close(&mut self, session_id: &str, cause: &str) -> Result<bool> {
+    pub fn record_failed_close(
+        &mut self,
+        session_id: &str,
+        cause: &str,
+        reason: Option<LifecycleFailureReason>,
+    ) -> Result<bool> {
         let Some(record) = self.state.sessions.get(session_id) else {
             return Ok(false);
         };
@@ -2352,8 +2358,11 @@ impl Controller {
         record.updated_at = now();
         // The writer decides from the durable close owner in the same
         // transaction as failure publication; admission may have been refused.
-        let saved = crate::database::save_failed_close(&record)
-            .context("persist the reason a close did not finish")?;
+        let saved = crate::database::save_failed_close(
+            &record,
+            reason == Some(LifecycleFailureReason::SuspendStopPending),
+        )
+        .context("persist the reason a close did not finish")?;
         self.state.sessions.insert(session_id.to_owned(), saved);
         Ok(true)
     }

@@ -24,6 +24,7 @@ RECOVERY_HOOKS = {
     "dead-worker-startup": "origin_delta_after_preflight",
     "dead-worker-error": "origin_delta_after_preflight",
     "verified-before-destroy": "origin_delta_after_close_ack",
+    "verified-before-destroy-dead-capture": "origin_delta_after_close_ack",
 }
 
 
@@ -270,6 +271,12 @@ def main():
                 os.kill(pid, signal.SIGKILL)
                 wait_for(lambda: not reliability_lab.process_is_running(pid), f"PID {pid} to exit")
 
+            def start_checkout_holder():
+                return subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(3600)", str(lab.runtime_root)],
+                    cwd=checkout, env=env, start_new_session=True,
+                )
+
             def start_writer():
                 ready = lab.runtime_root / "writer-started"
                 ready.unlink(missing_ok=True)
@@ -304,7 +311,6 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
                 return row
 
             def restart_daemon(pid):
-                kill_owned(pid)
                 checkpoint_hook.touch()
                 run("workspaces", "list", "--json")
                 assert daemon_pid() != pid
@@ -340,10 +346,7 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
             if live_race or retry_error:
                 # An independently launched checkout holder lacks session
                 # ownership. Suspension must leave it alive and report its PID.
-                holder = subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(3600)", str(lab.runtime_root)],
-                    cwd=checkout, env=env, start_new_session=True,
-                )
+                holder = start_checkout_holder()
                 writer, ready = start_writer()
                 wait_for(ready.exists, "marked writer to start before refusal")
                 expected = patches()
@@ -390,20 +393,31 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
             old_worker = worker_pid() if not retry_error else None
             closing = pause_suspend()
             checkpoint = closing.get("checkpoint")
-            if args.case == "verified-before-destroy":
+            dead_capture = args.case == "verified-before-destroy-dead-capture"
+            if dead_capture or args.case == "verified-before-destroy":
                 assert checkpoint is not None, closing
                 archive = Path(checkpoint["archive_path"])
                 assert hashlib.sha256(archive.read_bytes()).hexdigest() == checkpoint["sha256"]
-                assert worker_pid() != old_worker
+                capture_pid = worker_pid()
+                assert capture_pid != old_worker
                 assert json.loads((root / "launch.json").read_text())["run_mode"] == "checkpoint_only"
                 relay = json.loads((root / "relay-state.json").read_text())
                 assert relay["execution"] in {"closing", "closed"}, relay["execution"]
+                if dead_capture:
+                    kill_owned(capture_pid)
+                kill_owned(old_daemon)
+                if dead_capture:
+                    # This process gained access after Close was acknowledged.
+                    # Teardown must leave it alone.
+                    holder = start_checkout_holder()
+                    assert holder.poll() is None
                 restart_daemon(old_daemon)
             else:
                 assert checkpoint is None, closing
                 if old_worker is not None:
                     kill_owned(old_worker)
                 if args.case == "dead-worker-startup":
+                    kill_owned(old_daemon)
                     restart_daemon(old_daemon)
                 else:
                     checkpoint_hook.touch()
@@ -417,6 +431,9 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
             stopped = wait_for(stopped_record, "interrupted Suspend to complete")
             assert not stopped.get("last_error") and not stopped.get("last_checkpoint_error"), stopped
             assert not checkout.exists(), checkout
+            if dead_capture:
+                assert holder.poll() is None, "sealed cleanup signalled the unrelated holder"
+                assert not root.exists(), root
             assert writer.wait(timeout=WAIT) < 0, "capture left the marked writer running"
             assert harness_opens() == opens, harness_opens()
             saved = stopped["checkpoint"]
@@ -434,10 +451,11 @@ with open(sys.argv[2], "r+b", buffering=0) as tracked:
                            for line in log.read_text().splitlines()
                            if session in line and "checkpoint archive exported on the target" in line]
                 assert len(exports) == 1, exports
-                replacement_log, = daemon_logs.glob(f"mj-daemon-*-{daemon_pid()}.log")
-                starts = [line for line in replacement_log.read_text().splitlines()
-                          if session in line and "start detached Mjolnir worker" in line]
-                assert not starts, starts
+                if not dead_capture:
+                    replacement_log, = daemon_logs.glob(f"mj-daemon-*-{daemon_pid()}.log")
+                    starts = [line for line in replacement_log.read_text().splitlines()
+                              if session in line and "start detached Mjolnir worker" in line]
+                    assert not starts, starts
             if live_race:
                 assert not acp_requests({"session/cancel"}), "dead prompt was treated as a live CancelTurn"
             run("resume", "--session", session, "--queue", "start", "--json")
