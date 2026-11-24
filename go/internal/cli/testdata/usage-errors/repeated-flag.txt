@@ -1,0 +1,5 @@
+error: the argument '--json' cannot be used multiple times
+
+Usage: mj sessions [OPTIONS]
+
+For more information, try '--help'.

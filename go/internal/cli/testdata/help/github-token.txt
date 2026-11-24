@@ -1,0 +1,10 @@
+Print a valid GitHub App token for an owner or repository
+
+Usage: mj github-token [OPTIONS] <--owner <OWNER>|--repo <REPO>>
+
+Options:
+  -i, --instance <NAME>  Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --owner <OWNER>    GitHub owner login whose installation should receive a token
+      --no-splash        Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --repo <REPO>      Repository in OWNER/NAME form. May be repeated to limit the token to several repositories from one installation
+  -h, --help             Print help

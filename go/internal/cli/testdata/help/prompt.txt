@@ -1,0 +1,17 @@
+Send a prompt as the user and wait for its turn to end
+
+Usage: mj prompt [OPTIONS] --session <SESSION> [TEXT]
+
+Arguments:
+  [TEXT]  The prompt text. `-` reads it from standard input
+
+Options:
+      --command-id <COMMAND_ID>    Stable producer-chosen identity; repeat it after an ambiguous reply
+  -i, --instance <NAME>            Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash                  Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --session <SESSION>          Session id, as `mj sessions` lists it
+      --prompt-file <PROMPT_FILE>  Read the prompt from this file instead
+      --timeout <TIMEOUT>          Seconds to wait for the turn to end before answering `timeout`
+      --return-on-input            Return when the harness asks for structured input
+      --json                       Print the turn's outcome as JSON instead of text
+  -h, --help                       Print help

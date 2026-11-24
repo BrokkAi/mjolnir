@@ -1,0 +1,12 @@
+Destroy an untracked managed resource after exact-ID confirmation
+
+Usage: mj recover destroy [OPTIONS] --session <SESSION> --target <TARGET> --confirm <CONFIRM>
+
+Options:
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --session <SESSION>  Session id of the worker, as `mj recover scan` lists it
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --target <TARGET>    Target the worker runs on, as `mj recover scan` lists it
+      --confirm <CONFIRM>  The session id again, to confirm the destruction
+      --all-instances      Allow destroying a worker another instance created, or one with no instance stamp
+  -h, --help               Print help

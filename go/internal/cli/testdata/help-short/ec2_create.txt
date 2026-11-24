@@ -1,0 +1,48 @@
+Launch a host (Ubuntu with rootless Podman, or Amazon Linux with Nitro Sandboxes) and add an SSH machine/target. Charges continue until you stop or destroy the VM
+
+Usage: mj ec2 create [OPTIONS] --cpus <CPUS> --memory-gib <MEMORY_GIB> [INSTANCE_TYPE]...
+
+Arguments:
+  [INSTANCE_TYPE]...  Instance types in preference order (comma-separated). Also accepts --type
+
+Options:
+  -i, --instance <NAME>
+          Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --type <TYPES>
+          Instance types in preference order; repeat or separate with commas
+      --no-splash
+          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --runtime <RUNTIME>
+          Host runtime to install. Nitro hosts run workloads in isolated microVMs [default: podman] [possible values: podman, nitro]
+      --cpus <CPUS>
+          Default CPU count for each session container
+      --memory-gib <MEMORY_GIB>
+          Default memory in GiB for each session container
+      --mbx-remote <MBX_REMOTE>
+          Read-only S3 build cache for Nitro sandboxes, as s3://bucket/prefix
+      --mbx-remote-region <MBX_REMOTE_REGION>
+          Region of the S3 bucket. Defaults to the Nitro host's region
+      --zone <ZONE>
+          Zones in preference order; repeat or separate with commas. Listed regions without explicit zones try all available ordinary zones
+      --region <REGION>
+          Regions in preference order; repeat or separate with commas. Omitted infers regions from --zone. Tries regions, then types, then zones
+      --aws-profile <AWS_PROFILE>
+          AWS CLI credential profile (independent of an mj harness profile)
+      --name <NAME>
+          Machine and target name. Omitted generates a unique name
+      --subnet <SUBNET>
+          Public subnet in the selected zone. Omitted uses its default subnet
+      --ssh-cidr <SSH_CIDR>
+          Allowed SSH source CIDR. Omitted discovers this controller's public IPv4
+      --disk-gib <DISK_GIB>
+          Encrypted gp3 data disk size in GiB (Podman adds a 16 GiB OS root disk); separate from local SSDs [default: 200]
+      --disk-mbps <DISK_MBPS>
+          EBS gp3 throughput in MiB/s for the `--disk-gib` volume. Omitted uses the AWS default
+      --disk-iops <DISK_IOPS>
+          EBS gp3 provisioned IOPS for the `--disk-gib` volume. Omitted uses the AWS default
+      --zfs-cache
+          Require local NVMe storage (used automatically when available). ZFS/lz4 holds Podman and mbx; stop/start clears this storage
+      --json
+          Print the created host as JSON. Progress still goes to stderr
+  -h, --help
+          Print help

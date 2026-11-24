@@ -1,0 +1,11 @@
+Stop the daemon. A graceful stop leaves detached workers running unless `--suspend-sessions` suspends them first
+
+Usage: mj daemon stop [OPTIONS]
+
+Options:
+      --force              Stop an unresponsive or still-starting daemon, including workers in its container, or clear an unreachable legacy container record
+  -i, --instance <NAME>    Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence [env: MJ_INSTANCE=]
+      --no-splash          Start the dashboard without the animated startup splash, for example over a slow remote connection [env: MJ_NO_SPLASH=]
+      --suspend-sessions   Suspend every active session first, saving a recovery copy of each, then stop the daemon. A session that does not suspend keeps the daemon running and is named
+      --discard-untracked  Discard untracked files, nested repositories, untracked stashes, and `.mj/keep/` contents when suspending sessions
+  -h, --help               Print help

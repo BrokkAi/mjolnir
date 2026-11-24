@@ -11,7 +11,7 @@ reach the agent; a turn survives a daemon restart; a suspended session comes
 back with its checkout and conversation; and destroying sessions leaves no
 process or file behind.
 
-It is the acceptance suite for the Go port's milestone 1 (see
+It is the acceptance suite for the Go port's milestones (see
 .agents/plans/go-port.md). Run it against a Rust daemon with the Rust worker
 (the control) and with `--worker-binary <go worker>`, which the daemon this
 script starts runs instead of its own worker:
@@ -19,6 +19,19 @@ script starts runs instead of its own worker:
     tests/e2e/go_port_scenarios.py --mj target/debug/mj --instance go-e2e-rust
     tests/e2e/go_port_scenarios.py --mj target/debug/mj --instance go-e2e \\
         --worker-binary go/bin/mj-worker
+
+`--daemon-mj <binary>` starts every daemon the suite starts (at the beginning
+and after the daemon-restart scenario stops it) with that `mj` and drives
+every other command with `--mj`, so a Go `mj` can be judged against a Rust
+daemon:
+
+    tests/e2e/go_port_scenarios.py --mj go/bin/mj --daemon-mj target/debug/mj \\
+        --instance go-e2e --worker-binary go/bin/mj-worker
+
+The two must then be the same build (go/scripts/build.sh with the Rust
+build's revision, commit time, worker inputs and MJ_BUILD_EXECUTABLE_TIME_FROM
+naming its `mj`): a client that orders itself newer replaces the daemon, and
+the suite fails when `--mj` does not report that the daemon runs its build.
 
 The instance's config.toml must define a bare target `localhost` and an
 OpenCode profile `oc` (`kind = "open-code"`, its `home` an OpenCode
@@ -91,6 +104,7 @@ class Suite:
         self.nonce = str(int.from_bytes(os.urandom(4), "big") % 1_000_000).zfill(6)
         self.args = args
         self.mj = args.mj.resolve()
+        self.daemon_mj = (args.daemon_mj or args.mj).resolve()
         self.instance = args.instance
         self.config_path = product_directory("config") / "instances" / self.instance / "config.toml"
         self.data = product_directory("data") / "instances" / self.instance
@@ -113,15 +127,17 @@ class Suite:
         self.trace.write(json.dumps({"time": time.time(), "scenario": scenario,
                                      "event": event, "value": value}) + "\n")
 
-    def run(self, *args: str, timeout: float = CLI_SECONDS) -> subprocess.CompletedProcess:
-        result = subprocess.run([str(self.mj), "--instance", self.instance, *args],
+    def run(self, *args: str, timeout: float = CLI_SECONDS,
+            mj: Path | None = None) -> subprocess.CompletedProcess:
+        mj = mj or self.mj
+        result = subprocess.run([str(mj), "--instance", self.instance, *args],
                                 env=self.env, capture_output=True, text=True, timeout=timeout)
-        self.record("cli", "run", {"args": args, "status": result.returncode,
+        self.record("cli", "run", {"mj": str(mj), "args": args, "status": result.returncode,
                                    "stdout": result.stdout[-4000:], "stderr": result.stderr[-4000:]})
         return result
 
-    def cli(self, *args: str, timeout: float = CLI_SECONDS) -> str:
-        result = self.run(*args, timeout=timeout)
+    def cli(self, *args: str, timeout: float = CLI_SECONDS, mj: Path | None = None) -> str:
+        result = self.run(*args, timeout=timeout, mj=mj)
         if result.returncode != 0:
             raise ScenarioFailure(f"mj {' '.join(args)} exited {result.returncode}: "
                                   f"{result.stderr.strip()} {result.stdout.strip()}")
@@ -141,6 +157,16 @@ class Suite:
         except json.JSONDecodeError as error:
             raise ScenarioFailure(f"mj {' '.join(args)} printed no outcome "
                                   f"({result.returncode}): {result.stderr.strip()}") from error
+
+    def start_daemon(self) -> None:
+        """Start the instance's daemon with --daemon-mj: any command that needs
+        the daemon starts it, and the daemon inherits this environment."""
+        self.cli("sessions", mj=self.daemon_mj)
+        status = self.cli("daemon", "status")
+        self.record("daemon", "status", status)
+        if self.daemon_mj != self.mj and "This daemon runs this build." not in status:
+            raise ScenarioFailure(f"{self.mj} is not the build of the daemon {self.daemon_mj} "
+                                  f"started, so it would replace that daemon: {status.strip()}")
 
     def session(self, session: str) -> dict:
         return self.cli_json("sessions", "--session", session)
@@ -231,6 +257,7 @@ class Suite:
         subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
         subprocess.run([*git, "add", "README.md"], check=True)
         subprocess.run([*git, "commit", "-q", "-m", "scenario project"], check=True)
+        self.start_daemon()
         self.cli("workspaces", "create", WORKSPACE)
         status = self.cli("daemon", "status")
         self.record("setup", "daemon", status)
@@ -369,7 +396,7 @@ class Suite:
             raise ScenarioFailure("the worker stopped with the daemon")
         if not self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"):
             raise ScenarioFailure("the turn's tool stopped with the daemon")
-        self.cli("sessions")  # starts the next daemon
+        self.start_daemon()
         outcome = self.turn("wait", "--session", session)
         if outcome["outcome"] != "finished" or "done-thirty-one" not in outcome.get("final_message", ""):
             raise ScenarioFailure(f"turn across the restart: {json.dumps(outcome)[:2000]}")
@@ -444,6 +471,8 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mj", type=Path, required=True, help="the mj binary to drive")
     parser.add_argument("--instance", required=True, help="named test instance; never default")
+    parser.add_argument("--daemon-mj", type=Path,
+                        help="the mj binary that starts every daemon (default: --mj)")
     parser.add_argument("--worker-binary", type=Path,
                         help="worker the daemon runs instead of its own (sets MJ_WORKER_BINARY)")
     parser.add_argument("--profile", default="oc", help="OpenCode profile (default oc)")

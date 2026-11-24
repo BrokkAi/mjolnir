@@ -262,7 +262,10 @@ pub struct RepositoryMetadata {
     pub plain_directory: bool,
     /// Immutable launch base for managed network workspaces; raw DeltaFrom
     /// snapshots record their capture base. Legacy SessionDelta snapshots
-    /// exclude origin refs instead and leave this empty.
+    /// exclude origin refs instead and leave this empty. Origin-delta
+    /// snapshots of a managed network workspace record its launch base so a
+    /// resume keeps it; other origin-delta snapshots, and archives written
+    /// before this was recorded, leave it empty.
     pub base_commit: String,
     pub head_commit: String,
     pub branch: Option<String>,

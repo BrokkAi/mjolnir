@@ -119,6 +119,51 @@ pub struct SubagentMcpSocket {
     pub profile_registration: bool,
 }
 
+pub(crate) fn launch_subagent_policy(
+    config: &mj_core::worker_launch::WorkerLaunchConfig,
+) -> mj_core::subagent::SubagentPolicy {
+    if config.handback_tool {
+        mj_core::subagent::SubagentPolicy::None
+    } else {
+        config.subagents.clone()
+    }
+}
+
+pub(crate) fn launch_extra_mcp_servers(
+    config: &mj_core::worker_launch::WorkerLaunchConfig,
+) -> Vec<ReviewerMcpServer> {
+    config
+        .reviewer_launch
+        .as_ref()
+        .map(|reviewer| {
+            reviewer
+                .mcp_servers
+                .iter()
+                .cloned()
+                .map(ReviewerMcpServer::new)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+pub(crate) fn launch_subagent_mcp_socket(
+    root: &std::path::Path,
+    config: &mj_core::worker_launch::WorkerLaunchConfig,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
+    profile_registration: bool,
+) -> Option<SubagentMcpSocket> {
+    role.map(|role| SubagentMcpSocket {
+        path: root.join(crate::worker_runtime::subagents::SUBAGENT_SOCKET),
+        role,
+        oracle: config.oracle,
+        orchestrators_enabled: config.orchestrators_enabled,
+        subtle_subagents: config.subtle_subagents,
+        review_tools: config.review_tools(),
+        profile_registration,
+    })
+}
+
 /// One configured MCP server exposed to the reviewer harness.
 #[derive(Debug, Clone)]
 pub struct ReviewerMcpServer {

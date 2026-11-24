@@ -69,9 +69,15 @@ The 2026-11-24 audit of the ported tests (below) found the same weakening habits
 
 ## Resume here
 
-State on 2026-11-24 (evening): milestone 1 is done; everything merged is pushed to origin/master. The Go worker held up after two seam defects, which is the plan's "keep the translated code" case. Nothing runs now. Partial work from stopped agents is pinned under `refs/go-port/wip/*` in the clone at `/home/ryansvihla/code/mjolnir/.mj/clones/dc6166cb2ec39f9967531a714cab0e2e`.
+State on 2026-11-24, 18:30: milestone 1 is done. Milestone 2, slice 2a (the Go `mj` command surface the scenario suite drives, against the Rust daemon) was stopped at the owner's request (token budget) in its live-validation step:
 
-Next step, for the owner to decide: replay the 117 Rust commits to the target 5b68df737 (`go/scripts/rust-changes.sh`), then milestone 2 (the Go `mj` CLI and dashboard against the Rust daemon), each through the gates.
+- Done and pushed (db58bc711): slice 2a's declarations and bodies (two groups, cli-client and cli-commands, merged into go/internal/cli), the scenario suite's `--daemon-mj` option (5c9f83f98), and the declared arguments of the remaining commands (e4ecdb995). Live validation had not reported: the scenario suite has not yet been run with `go/bin/mj`, and the independent review has not run. Treat slice 2a as unvalidated.
+- Not committed: the validator's in-progress work on `go/internal/cli/clapstyle.go` and `root.go` (help-output goldens) was left in the main checkout's working tree and saved as `/home/ryansvihla/.cache/mjolnir/build/go-port-tools/slice2a-validator-wip.patch`.
+- Agent worktree commits are pinned under `refs/go-port/wip/*`. Test daemons are stopped.
+
+To resume: rerun the slice 2a workflow from its cache with `Workflow({scriptPath: <session workflows dir>/go-port-milestone2-slice2a-wf_0652f4d5-a54.js, resumeFromRunId: "wf_0652f4d5-a54"})`. The declare, merge and implement agents return from the cache, and the live validation and the review run again. The script is also reproducible from this plan: validate live (build go/bin/mj and go/bin/mj-worker with the Rust daemon's build identity, run tests/e2e/go_port_scenarios.py with `--mj go/bin/mj --daemon-mj <rust mj> --worker-binary go/bin/mj-worker` on go-e2e and the Rust control, fix at the root, add help goldens captured from the Rust mj), then the independent review. Decide first whether to apply or discard the saved WIP patch. Start the recurring push job again when work resumes.
+
+After slice 2a: slice 2b (the Charm dashboard against the Rust daemon), then the replay to the target commit 5b68df737, then milestone 3.
 
 
 ## Milestones

@@ -152,6 +152,12 @@ func (MaterializedExecutionStateClosed) MarshalJSON() ([]byte, error) {
 	return stateMarshalTagged("state", "closed", nil)
 }
 
+// UnmarshalMaterializedExecutionStateJSON decodes a MaterializedExecutionState
+// from its serde JSON form.
+func UnmarshalMaterializedExecutionStateJSON(data []byte) (MaterializedExecutionState, error) {
+	return unmarshalMaterializedExecutionState(data)
+}
+
 func unmarshalMaterializedExecutionState(data []byte) (MaterializedExecutionState, error) {
 	tag, err := stateTag(data, "state")
 	if err != nil {

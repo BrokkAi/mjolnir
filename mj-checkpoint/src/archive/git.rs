@@ -3670,33 +3670,49 @@ pub fn session_diff_patch(
     Ok(session_diff_with_mode(runner, repository, base, branch, None)?.diff)
 }
 
-fn session_diff_with_mode(
+/// Locate the checkout and name the revision a session export compares
+/// against: the caller's `base`, else the launch base the checkout recorded.
+/// `None` means no base is recorded anywhere.
+fn locate_session_base(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
-    // None selects the whole-checkout patch used by export.
-    paths: Option<&[String]>,
-) -> Result<SessionDiff, SessionExportError> {
-    if paths.unwrap_or_default().iter().any(|path| path.is_empty()) {
-        return Err(SessionExportError::refused("diff paths must not be empty"));
-    }
+) -> Result<(PathBuf, Option<String>), SessionExportError> {
     let checkout = locate_checkout(runner, repository)?;
     let repository = &checkout.top_level;
     let base = match base.map(str::trim) {
         Some("") => return Err(SessionExportError::refused("diff base must not be empty")),
-        Some(base) => base.to_owned(),
-        None => {
-            let recorded = match branch {
-                Some(branch) => match remote_workspace_base(runner, repository)? {
-                    Some(base) => Some(base),
-                    None => branch_creation_commit(runner, repository, branch)?,
-                },
-                None => remote_workspace_base(runner, repository)?,
-            };
-            recorded.ok_or_else(|| SessionExportError::refused("no session base recorded"))?
-        }
+        Some(base) => Some(base.to_owned()),
+        None => match branch {
+            Some(branch) => match remote_workspace_base(runner, repository)? {
+                Some(base) => Some(base),
+                None => branch_creation_commit(runner, repository, branch)?,
+            },
+            None => remote_workspace_base(runner, repository)?,
+        },
     };
+    Ok((checkout.top_level, base))
+}
+
+/// Locate the checkout and resolve the commit a session diff compares against.
+fn resolve_session_diff_base(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> Result<(PathBuf, String), SessionExportError> {
+    let (top_level, base) = locate_session_base(runner, repository, base, branch)?;
+    let base = base.ok_or_else(|| SessionExportError::refused("no session base recorded"))?;
+    resolve_commit(runner, top_level, &base)
+}
+
+fn resolve_commit(
+    runner: &dyn GitCommandRunner,
+    top_level: PathBuf,
+    base: &str,
+) -> Result<(PathBuf, String), SessionExportError> {
+    let repository = &top_level;
     let resolved = run_git(
         runner,
         repository,
@@ -3714,6 +3730,127 @@ fn session_diff_with_mode(
         )));
     }
     let base = trim_output(&resolved.stdout, "resolve the session diff base")?;
+    Ok((top_level, base))
+}
+
+/// Export the session's committed history as a native Git bundle.
+///
+/// The bundle holds `HEAD`, the local branches and the tags, and the commits
+/// they reach beyond the session base. The base is `base`, else the launch
+/// base the checkout recorded; with none recorded and `fallback_origin` set,
+/// it is everything `origin` already has. Stashes, operation state and
+/// Mjolnir's own refs are not bundled, so the bundle is committed history and
+/// nothing else. A session with no commits beyond its base is refused, because
+/// Git cannot write an empty bundle and its edits are in the patch export.
+///
+/// `selected_refs` names exactly the refs to bundle besides `HEAD`, for a
+/// checkout whose branches and tags are not all the session's: one rebuilt
+/// from a seed repository also holds what the seed gained since. `None`
+/// bundles every local branch and tag.
+pub fn session_bundle_bytes(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+    fallback_origin: bool,
+    selected_refs: Option<&[String]>,
+) -> Result<Vec<u8>, SessionExportError> {
+    if let Some(refs) = selected_refs
+        && let Some(bad) = refs.iter().find(|name| !name.starts_with("refs/"))
+    {
+        return Err(SessionExportError::Failed(anyhow!(
+            "{bad:?} is not a full ref name"
+        )));
+    }
+    let (top_level, recorded) = locate_session_base(runner, repository, base, branch)?;
+    let (exclusion, none_message) = match recorded {
+        Some(recorded) => {
+            let (_, resolved) = resolve_commit(runner, top_level.clone(), &recorded)?;
+            (
+                vec![format!("^{resolved}")],
+                "no commits beyond the session base; use `mj export --kind patch` for uncommitted edits",
+            )
+        }
+        None if fallback_origin => {
+            if !has_origin_refs(runner, &top_level)? {
+                return Err(SessionExportError::refused(
+                    "no session base is recorded and the checkout has no origin refs to bundle against; use `mj export --kind patch` for uncommitted edits",
+                ));
+            }
+            (
+                vec!["--not".to_owned(), "--remotes=origin".to_owned()],
+                "no commits beyond origin; use `mj export --kind patch` for uncommitted edits",
+            )
+        }
+        None => return Err(SessionExportError::refused("no session base recorded")),
+    };
+    let selection = |verb: &[&str]| -> Vec<String> {
+        let mut arguments: Vec<String> = verb.iter().map(|word| (*word).to_owned()).collect();
+        match selected_refs {
+            Some(refs) => {
+                arguments.push("HEAD".to_owned());
+                arguments.extend(
+                    refs.iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .cloned(),
+                );
+            }
+            None => arguments.extend(
+                ["HEAD", "--branches", "--tags"]
+                    .into_iter()
+                    .map(String::from),
+            ),
+        }
+        arguments.extend(exclusion.iter().cloned());
+        arguments
+    };
+    let count = String::from_utf8(git_bytes_owned(
+        runner,
+        &top_level,
+        &selection(&["rev-list", "--count"]),
+        "count commits beyond the session base",
+    )?)
+    .context("decode the commit count")?
+    .trim()
+    .parse::<u64>()
+    .context("parse the commit count")?;
+    if count == 0 {
+        return Err(SessionExportError::refused(none_message));
+    }
+    Ok(git_bytes_owned(
+        runner,
+        &top_level,
+        &selection(&["bundle", "create", "-"]),
+        "create the session bundle",
+    )?)
+}
+
+/// Export the whole-checkout patch as the exact bytes Git wrote. File content
+/// is not required to be UTF-8, so this must not go through a `String`.
+pub fn session_diff_patch_bytes(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> Result<Vec<u8>, SessionExportError> {
+    let (repository, base) = resolve_session_diff_base(runner, repository, base, branch)?;
+    Ok(session_patch_bytes(runner, &repository, &base, None)?)
+}
+
+fn session_diff_with_mode(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+    // None selects the whole-checkout patch used by export.
+    paths: Option<&[String]>,
+) -> Result<SessionDiff, SessionExportError> {
+    if paths.unwrap_or_default().iter().any(|path| path.is_empty()) {
+        return Err(SessionExportError::refused("diff paths must not be empty"));
+    }
+    let (repository, base) = resolve_session_diff_base(runner, repository, base, branch)?;
+    let repository = repository.as_path();
     let head = git_text(
         runner,
         repository,
@@ -3790,6 +3927,18 @@ fn session_patch(
     base: &str,
     paths: Option<&[String]>,
 ) -> Result<String> {
+    Ok(
+        String::from_utf8_lossy(&session_patch_bytes(runner, repository, base, paths)?)
+            .into_owned(),
+    )
+}
+
+fn session_patch_bytes(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+    paths: Option<&[String]>,
+) -> Result<Vec<u8>> {
     let mut arguments = SESSION_DIFF_CONFIG.map(String::from).to_vec();
     if paths.is_some() {
         arguments.push("--literal-pathspecs".to_owned());
@@ -3812,8 +3961,7 @@ fn session_patch(
     } else {
         arguments.push(":/".to_owned());
     }
-    let patch = git_bytes_owned(runner, repository, &arguments, "diff tracked session paths")?;
-    Ok(String::from_utf8_lossy(&patch).into_owned())
+    git_bytes_owned(runner, repository, &arguments, "diff tracked session paths")
 }
 
 fn nul_records(bytes: &[u8]) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {

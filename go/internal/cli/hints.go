@@ -11,8 +11,13 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
@@ -58,11 +63,26 @@ func seenHintsLoad() seenHints {
 // seenHintsLoadFrom reads the hints already shown from path. A missing or
 // unreadable file, or entries that are not names, count as nothing seen.
 func seenHintsLoadFrom(path string) seenHints {
-	panic("unported: mj-cli/src/hints.rs SeenHints::load_from")
+	seen := map[string]struct{}{}
+	if body, err := os.ReadFile(path); err == nil {
+		var value any
+		if json.Unmarshal(body, &value) == nil {
+			if object, ok := value.(map[string]any); ok {
+				if entries, ok := object["seen"].([]any); ok {
+					for _, entry := range entries {
+						if name, ok := entry.(string); ok {
+							seen[name] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+	return seenHints{seen: seen, path: path}
 }
 
 // pending is whether the hint still has to be shown.
-func (s *seenHints) pending(shown hint) bool {
+func (s seenHints) pending(shown hint) bool {
 	_, seen := s.seen[shown.name()]
 	return !seen
 }
@@ -73,12 +93,28 @@ func (s *seenHints) pending(shown hint) bool {
 // actually carried may be recorded: writing one into a bar that never draws
 // it spends it unread.
 func (s *seenHints) markShown(shown hint) {
-	panic("unported: mj-cli/src/hints.rs SeenHints::mark_shown")
+	name := shown.name()
+	if _, seen := s.seen[name]; seen {
+		return
+	}
+	if s.seen == nil {
+		s.seen = map[string]struct{}{}
+	}
+	s.seen[name] = struct{}{}
+	if err := s.save(); err != nil {
+		slog.Warn("could not record a shown hint", "error", err.Error())
+	}
 }
 
 // save writes the seen hints, sorted, to the file.
 func (s *seenHints) save() error {
-	panic("unported: mj-cli/src/hints.rs SeenHints::save")
+	body, err := core.SerdeJSONPretty(struct {
+		Seen []string `json:"seen"`
+	}{slices.Sorted(maps.Keys(s.seen))})
+	if err != nil {
+		return fmt.Errorf("serialize client hints: %w", err)
+	}
+	return core.AtomicWrite(s.path, body)
 }
 
 // multiplexerName is the terminal multiplexer the dashboard is running
@@ -143,5 +179,38 @@ func (p *pendingHints) queue(waiting hint, text string) {
 // now that a frame has carried it. It answers whether the bar changed, so
 // the caller can draw the frame that shows it.
 func (p *pendingHints) pump(notices *chat.Notices, ready bool, now time.Time) bool {
-	panic("unported: mj-cli/src/hints.rs PendingHints::pump")
+	barHoldsAHint := false
+	if showing := p.showing; showing != nil {
+		// It was set before the previous frame, so it has been drawn.
+		if !showing.recorded {
+			p.seen.markShown(showing.hint)
+			showing.recorded = true
+		}
+		current, ok := notices.Current()
+		barHoldsAHint = ok && current == showing.text
+		// Instant::saturating_duration_since: never negative.
+		shown := max(now.Sub(showing.since), 0)
+		if barHoldsAHint && shown < chat.NoticeMinimumDisplay {
+			return false
+		}
+		p.showing = nil
+	}
+	if !ready || len(p.queued) == 0 {
+		return false
+	}
+	// Anything else in the bar is about what the user just did, and that
+	// outranks a hint; the hint whose turn has ended is ours to replace.
+	if _, occupied := notices.Current(); !barHoldsAHint && occupied {
+		return false
+	}
+	next := p.queued[0]
+	p.queued = p.queued[1:]
+	notices.Set(next.text)
+	if current, ok := notices.Current(); !ok || current != next.text {
+		// A failure still holds the bar for its minimum display; wait.
+		p.queued = append([]queuedHint{next}, p.queued...)
+		return false
+	}
+	p.showing = &shownHint{hint: next.hint, text: next.text, since: now}
+	return true
 }

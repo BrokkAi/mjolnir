@@ -24,11 +24,14 @@ use drive::*;
 #[cfg(unix)]
 pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
 #[cfg(unix)]
+pub(crate) use launch::launch_subagent_mcp_socket;
+#[cfg(unix)]
 pub(crate) use launch::read_claude_login_fingerprint;
 use launch::*;
 pub use launch::{
     ClaudeLoginIdentity, ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket,
 };
+pub(crate) use launch::{launch_extra_mcp_servers, launch_subagent_policy};
 pub use opencode_logins::ImportedLogins;
 use permissions::*;
 use session::*;
@@ -327,6 +330,8 @@ pub enum CommandRequest {
     /// without stopping the worker daemon or its non-harness processes.
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        subagent_mcp_socket: Option<SubagentMcpSocket>,
+        managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
         args: Option<Vec<String>>,
@@ -439,6 +444,8 @@ pub(super) enum SessionRestart {
     /// Restart only the harness bridge under a new launch configuration.
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        subagent_mcp_socket: Option<SubagentMcpSocket>,
+        managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
         args: Option<Vec<String>>,
@@ -488,6 +495,8 @@ impl Eq for SessionRestart {}
 
 struct LaunchConfigReload {
     launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+    subagent_mcp_socket: Option<SubagentMcpSocket>,
+    managed_subagent: bool,
     environment: BTreeMap<String, String>,
     command: Option<PathBuf>,
     args: Option<Vec<String>>,
@@ -713,6 +722,8 @@ async fn run_inner(
         restart_notice = Some(restart.notice);
         if let Some(LaunchConfigReload {
             launch_config,
+            subagent_mcp_socket,
+            managed_subagent,
             environment,
             command,
             args,
@@ -758,6 +769,10 @@ async fn run_inner(
                     spec.approval_choices = launch_config.approval_choices();
                     spec.instruction_role = InstructionRole::from_launch(&launch_config);
                     spec.project_memory = launch_config.project_memory.clone();
+                    spec.subagent_mcp_socket = subagent_mcp_socket;
+                    spec.managed_subagent = managed_subagent;
+                    spec.subagent_policy = launch_subagent_policy(&launch_config);
+                    spec.extra_mcp_servers = launch_extra_mcp_servers(&launch_config);
                     _active_reload_leases = leases;
                     pending_reload_ack = Some(resolved);
                     #[cfg(unix)]
@@ -1003,6 +1018,8 @@ async fn run_bridge(
         })),
         Ok(Some(SessionRestart::ReloadLaunchConfig {
             launch_config,
+            subagent_mcp_socket,
+            managed_subagent,
             environment,
             command,
             args,
@@ -1018,6 +1035,8 @@ async fn run_bridge(
             resume_session,
             reload_launch_config: Some(LaunchConfigReload {
                 launch_config,
+                subagent_mcp_socket,
+                managed_subagent,
                 environment,
                 command,
                 args,

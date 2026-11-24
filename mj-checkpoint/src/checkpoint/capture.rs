@@ -1045,6 +1045,7 @@ fn collect_origin_delta(
         .remove(&repository.id)
         .context("origin delta snapshot is missing")?;
 
+    let base_commit = remote_workspace_base(git, &location.top_level)?.unwrap_or_default();
     Ok(RepositorySnapshot {
         metadata: crate::archive::RepositoryMetadata {
             id: repository.id.clone(),
@@ -1057,7 +1058,7 @@ fn collect_origin_delta(
             push_urls: Vec::new(),
             remote_workspace: false,
             plain_directory: false,
-            base_commit: String::new(),
+            base_commit,
             head_commit: snapshot.head.commit().to_owned(),
             branch: match &snapshot.head {
                 SnapshotHead::Branch { name, .. } => Some(name.clone()),
@@ -1212,6 +1213,7 @@ fn collect_origin_delta_cutoff(
         .remove(&repository.id)
         .context("history-cutoff origin delta snapshot is missing")?;
 
+    let base_commit = remote_workspace_base(git, &location.top_level)?.unwrap_or_default();
     Ok(RepositorySnapshot {
         metadata: crate::archive::RepositoryMetadata {
             id: repository.id.clone(),
@@ -1221,7 +1223,7 @@ fn collect_origin_delta_cutoff(
             push_urls: Vec::new(),
             remote_workspace: false,
             plain_directory: false,
-            base_commit: String::new(),
+            base_commit,
             head_commit: snapshot.head.commit().to_owned(),
             branch: match &snapshot.head {
                 SnapshotHead::Branch { name, .. } => Some(name.clone()),

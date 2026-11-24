@@ -391,6 +391,9 @@ var ioErrorKinds = map[syscall.Errno]string{
 	syscall.EAGAIN:        "WouldBlock",
 }
 
+// LossyUTF8 is Rust's String::from_utf8_lossy, for callers outside core.
+func LossyUTF8(bytes []byte) string { return lossyUTF8(bytes) }
+
 // lossyUTF8 is Rust's String::from_utf8_lossy: each maximal invalid
 // sequence becomes one U+FFFD.
 func lossyUTF8(bytes []byte) string {

@@ -1,0 +1,5 @@
+error: the argument '--no-splash' cannot be used multiple times
+
+Usage: mj usage [OPTIONS]
+
+For more information, try '--help'.
