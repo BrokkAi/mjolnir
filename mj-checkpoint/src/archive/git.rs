@@ -3746,7 +3746,9 @@ fn resolve_commit(
 /// `selected_refs` names exactly the refs to bundle besides `HEAD`, for a
 /// checkout whose branches and tags are not all the session's: one rebuilt
 /// from a seed repository also holds what the seed gained since. `None`
-/// bundles every local branch and tag.
+/// bundles every local branch and tag of a checkout that owns its Git
+/// directory. A linked worktree shares branches and tags with its siblings, so
+/// it bundles only its own `HEAD` and the branch checked out there.
 pub fn session_bundle_bytes(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -3784,9 +3786,30 @@ pub fn session_bundle_bytes(
         }
         None => return Err(SessionExportError::refused("no session base recorded")),
     };
+    let (git_dir, common_dir) = git_directories(runner, &top_level)?;
+    let linked_worktree = !same_directory(&git_dir, &common_dir)?;
+    let own_refs: Option<Vec<String>> = match selected_refs {
+        Some(refs) => Some(refs.to_vec()),
+        None if linked_worktree => {
+            // Git lets one worktree hold a branch, and it names the same
+            // commit as `HEAD`; a detached `HEAD` has none.
+            let branch = run_git(runner, &top_level, ["symbolic-ref", "--quiet", "HEAD"], &[])?;
+            Some(match branch.status {
+                0 => vec![trim_output(&branch.stdout, "read the checked-out branch")?],
+                1 => Vec::new(),
+                _ => {
+                    return Err(SessionExportError::Failed(git_failure(
+                        "read the checked-out branch",
+                        &branch,
+                    )));
+                }
+            })
+        }
+        None => None,
+    };
     let selection = |verb: &[&str]| -> Vec<String> {
         let mut arguments: Vec<String> = verb.iter().map(|word| (*word).to_owned()).collect();
-        match selected_refs {
+        match own_refs.as_deref() {
             Some(refs) => {
                 arguments.push("HEAD".to_owned());
                 arguments.extend(

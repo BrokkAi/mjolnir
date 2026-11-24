@@ -154,7 +154,10 @@ fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
 /// long, so it is kept short enough to be unsurprising and long enough to
 /// cover a whole provision.
 #[cfg(unix)]
-const CONTROL_PERSIST: &str = "60";
+// A 14.5-hour EC2 daemon audit measured 151 Bulk master reopens per host,
+// with 230–277 s median inter-burst gaps. 600 s spans normal intervals;
+// MASTER_KEEPALIVE (15 s × 4 = 60 s) still cleans up dead hosts.
+const CONTROL_PERSIST: &str = "600";
 
 /// The master's `ServerAliveInterval` seconds and `ServerAliveCountMax`: a
 /// host silent for a minute is gone. Patient enough that a stall of a few

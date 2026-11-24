@@ -285,12 +285,6 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("workspace file injection is unavailable") })
     }
 
-    /// Checkpoint a session now, returning the archive it wrote.
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>>;
-
     fn spawn_subagent(
         self: Arc<Self>,
         _request: mj_controller::controller::RegisterSubagentRequest,
@@ -716,13 +710,6 @@ impl ExportRuntime for RuntimeState {
         session_id: String,
     ) -> BoxFuture<'_, Result<mj_controller::session_manager::ManagedSessionHandle>> {
         Box::pin(async move { self.workspace_session_handle(&session_id).await })
-    }
-
-    fn checkpoint_now(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { self.checkpoint_for_bundle_export(&session_id).await })
     }
 
     fn spawn_subagent(
@@ -4296,14 +4283,6 @@ where
         .with_context(|| format!("{label} task panicked"))?
 }
 
-fn checkpoint_export_error(error: anyhow::Error) -> ExportError {
-    if mj_controller::controller::checkpoint_was_deferred(&error) {
-        ExportError::Refused(format!("{error:#}"))
-    } else {
-        ExportError::Failed(error)
-    }
-}
-
 /// Run one blocking export step off the async runtime.
 async fn export_blocking<T, F>(label: &'static str, job: F) -> Result<T, ExportError>
 where
@@ -4325,39 +4304,6 @@ async fn export_layout(session_id: String) -> Result<SessionExportLayout, Export
         Controller::load()?.session_export_layout(&session_id, &executor)
     })
     .await
-}
-
-/// Checkpoint a session in a task that owns the work to the end.
-///
-/// A checkpoint marks the session `Checkpointing` in the database before it
-/// starts and holds a barrier on the worker while it runs. Awaiting it inline
-/// in an HTTP handler meant a client that gave up part-way dropped the handler
-/// future and abandoned the capture there, leaving the session marked busy
-/// with nothing left to finish or fail it, so every retry was refused for
-/// minutes (#1010). The spawned task keeps running whether or not anyone is
-/// still waiting for its answer, and the guard it holds is released when it
-/// ends. The outer task reports a failure no requester is left to receive.
-async fn supervised_checkpoint(
-    exports: Arc<dyn ExportRuntime>,
-    session_id: String,
-) -> Result<mj_core::state::CheckpointMetadata> {
-    let upgrade_work = mj_controller::upgrade::activity("API checkpoint")?;
-    let checkpoint = mj_core::runtime::spawn(async move {
-        let _upgrade_work = upgrade_work;
-        exports.checkpoint_now(session_id).await
-    });
-    mj_core::runtime::spawn(async move {
-        let result = match checkpoint.await {
-            Ok(result) => result,
-            Err(error) => Err(anyhow!("the session checkpoint task failed: {error}")),
-        };
-        if let Err(error) = &result {
-            tracing::warn!(?error, "API bundle export checkpoint failed");
-        }
-        result
-    })
-    .await
-    .unwrap_or_else(|error| Err(anyhow!("the session checkpoint task failed: {error}")))
 }
 
 /// The directory on the target the session's agent runs in.
@@ -4382,22 +4328,7 @@ fn session_diff_arguments(
 ) -> Result<Vec<String>, ExportError> {
     let repository = agent_working_directory(layout)?;
     let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
-    if let Some(base) = options.base {
-        arguments.push(format!("--base={base}"));
-    } else if let Some(worktree) = &layout.managed_worktree {
-        match &worktree.base_commit {
-            Some(base) => {
-                arguments.push("--base".to_owned());
-                arguments.push(base.clone());
-            }
-            // Sessions created before the base was recorded still name
-            // their branch, whose reflog says where it started.
-            None => {
-                arguments.push("--branch".to_owned());
-                arguments.push(worktree.branch.clone());
-            }
-        }
-    }
+    arguments.extend(session_base_arguments(layout, options.base));
     if options.json {
         arguments.push("--json".to_owned());
     }
@@ -4408,6 +4339,23 @@ fn session_diff_arguments(
             .map(|path| format!("--path={path}")),
     );
     Ok(arguments)
+}
+
+/// The arguments naming the commit an export compares against: the caller's
+/// own, else the session's recorded launch base.
+fn session_base_arguments(layout: &SessionExportLayout, requested: Option<String>) -> Vec<String> {
+    if let Some(base) = requested {
+        return vec![format!("--base={base}")];
+    }
+    match &layout.managed_worktree {
+        Some(worktree) => match &worktree.base_commit {
+            Some(base) => vec!["--base".to_owned(), base.clone()],
+            // Sessions created before the base was recorded still name
+            // their branch, whose reflog says where it started.
+            None => vec!["--branch".to_owned(), worktree.branch.clone()],
+        },
+        None => Vec::new(),
+    }
 }
 
 fn primary_repository(
@@ -4673,18 +4621,55 @@ async fn worker_command_with_input(
     purpose: &'static str,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
+    worker_command_staging(
+        layout,
+        session_id,
+        arguments,
+        purpose,
+        input,
+        mj_controller::controller::ControlWorker,
+    )
+    .await
+}
+
+/// Run a worker command, staging `stager`'s control worker beside a root
+/// whose own `hel` is too old to know the subcommand.
+async fn worker_command_staging(
+    layout: SessionExportLayout,
+    session_id: String,
+    arguments: Vec<String>,
+    purpose: &'static str,
+    input: Option<Vec<u8>>,
+    stager: impl targets::ControlWorkerStager + Send + 'static,
+) -> Result<Vec<u8>, ExportError> {
     // Dropping this future (the client left, or the server is stopping)
     // cancels the target command instead of leaving it to run to its timeout.
     let token = tokio_util::sync::CancellationToken::new();
     let _cancel = token.clone().drop_guard();
     let output: CommandOutput = export_blocking(purpose, move || {
-        let mut command = worker_command_spec(layout, &session_id, arguments, purpose)?;
-        if let Some(input) = input {
-            command = command.with_sensitive_stdin(input);
+        let executor =
+            CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).with_cancellation(token);
+        let run = |binary: &str| -> Result<CommandOutput> {
+            let mut command =
+                worker_command_spec_for(&layout, &session_id, binary, arguments.clone(), purpose)?;
+            if let Some(input) = &input {
+                command = command.with_sensitive_stdin(input.clone());
+            }
+            executor.execute(&command)
+        };
+        let first = run("hel")?;
+        // A worker installed before this subcommand existed answers clap's
+        // usage failure, and it stays until the session is next resumed. The
+        // current build's worker serves the call from the control name beside
+        // it: staging it replaces nothing, so no swap admission is needed.
+        if first.status != CLAP_USAGE_EXIT_CODE || executor.cancellation_requested() {
+            return Ok(first);
         }
-        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT)
-            .with_cancellation(token)
-            .execute(&command)
+        let root = targets::worker_root(&layout.backend, &session_id)?;
+        stager
+            .stage_control_worker(&executor, &layout.backend, &session_id, &root)
+            .with_context(|| format!("stage the current worker in {root} for the {purpose}"))?;
+        run(targets::CONTROL_WORKER_NAME)
     })
     .await?;
     worker_output(output, purpose)
@@ -4696,7 +4681,21 @@ fn worker_command_spec(
     arguments: Vec<String>,
     purpose: &'static str,
 ) -> Result<mj_core::targets::CommandSpec> {
-    let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
+    worker_command_spec_for(&layout, session, "hel", arguments, purpose)
+}
+
+/// `worker <arguments>` run by `binary`, a file in the session's worker root.
+fn worker_command_spec_for(
+    layout: &SessionExportLayout,
+    session: &str,
+    binary: &str,
+    arguments: Vec<String>,
+    purpose: &'static str,
+) -> Result<mj_core::targets::CommandSpec> {
+    let binary = format!(
+        "{}/{binary}",
+        targets::worker_root(&layout.backend, session)?
+    );
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
     targets::command_on_locator(
@@ -6279,52 +6278,19 @@ impl SubagentBackend for ApiBackend {
             if mj_controller::controller::export_reads_checkpoint(&record) {
                 return bundle_from_stored_checkpoint(record).await;
             }
-            // A live session's work is only in the archive once it has been
-            // checkpointed, so take a fresh checkpoint.
-            let archive_path =
-                match supervised_checkpoint(self.exports.clone(), session_id.clone()).await {
-                    Ok(checkpoint) => checkpoint.archive_path,
-                    // The session has its own lifecycle operation in flight
-                    // (resume/close/move); a fresh checkpoint would fight it, so
-                    // export the last durable checkpoint, which predates that
-                    // operation, rather than failing (#1010).
-                    Err(error)
-                        if error
-                            .downcast_ref::<crate::daemon::SessionLifecycleBusy>()
-                            .is_some() =>
-                    {
-                        if record.checkpoint.is_none() {
-                            return Err(ExportError::Refused(format!(
-                                "{error}, and has no earlier checkpoint to export a bundle from"
-                            )));
-                        }
-                        return bundle_from_stored_checkpoint(record).await;
-                    }
-                    Err(error) => return Err(checkpoint_export_error(error)),
-                };
-            let bundles = export_blocking("verify the checkpoint bundles", move || {
-                mj_checkpoint::archive::verify_repository_bundles_streaming(&archive_path)
-            })
-            .await?;
-            let repository = bundles
-                .repositories
-                .iter()
-                .find(|repository| repository.metadata.id == bundles.primary_repository)
-                .ok_or_else(|| {
-                    ExportError::Failed(anyhow!(
-                        "the checkpoint has no repository {:?}",
-                        bundles.primary_repository
-                    ))
-                })?;
-            if repository.committed_bundle.is_empty() {
-                return Err(ExportError::Refused(
-                    "no commits beyond the session base".into(),
-                ));
-            }
-            Ok(BundleExport {
-                repository: repository.metadata.id.clone(),
-                bytes: repository.committed_bundle.clone(),
-            })
+            // A live session's committed history is in its checkout, so Git
+            // writes the bundle there. No checkpoint is taken, so the export
+            // neither waits for nor competes with the session's own lifecycle.
+            let layout = export_layout(session_id.clone()).await?;
+            let repository = primary_repository(&layout)?.id.clone();
+            let mut arguments = vec![
+                "bundle".to_owned(),
+                "--repository".to_owned(),
+                agent_working_directory(&layout)?,
+            ];
+            arguments.extend(session_base_arguments(&layout, None));
+            let bytes = worker_command(layout, session_id, arguments, "session bundle").await?;
+            Ok(BundleExport { repository, bytes })
         })
     }
 }

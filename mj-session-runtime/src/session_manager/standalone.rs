@@ -221,58 +221,37 @@ impl StandaloneSession {
         client: &mut RelayClient,
         baseline: &mj_core::relay::LiveSessionBaseline,
     ) -> Result<()> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
         for queued in baseline
             .queue
             .iter()
             .chain(&baseline.delivered_initial_prompts)
         {
             if let Some(prompt) = queued.command.prompt_blocks() {
-                Self::cache_prompt_attachments_with(client, &baseline.state.session_id, &prompt)
-                    .await?;
+                images.extend(mj_core::attachment::references(&prompt)?);
+                files.extend(mj_core::attachment::file_references(&prompt)?);
             }
         }
-        Ok(())
-    }
-
-    async fn cache_prompt_attachments(
-        &mut self,
-        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
-    ) -> Result<()> {
-        Self::cache_prompt_attachments_with(&mut self.client, &self.materialized.session_id, prompt)
-            .await
-    }
-
-    async fn cache_prompt_attachments_with(
-        client: &mut RelayClient,
-        session_id: &str,
-        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
-    ) -> Result<()> {
-        for reference in mj_core::attachment::references(prompt)? {
-            if let Err(error) = client.cache_attachment(&reference).await {
-                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
-            }
-        }
-        for reference in mj_core::attachment::file_references(prompt)? {
-            if let Err(error) = client.cache_file_attachment(&reference).await {
-                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache file attachment during recovery");
-            }
-        }
-        Ok(())
+        client.cache_attachments(&images, &files).await
     }
 
     async fn cache_event_attachments(
         &mut self,
         events: &[mj_core::relay::RelayEvent],
     ) -> Result<()> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
         for event in events {
             if let mj_core::relay::RelayObservation::CommandQueued { command, .. } =
                 &event.observation
                 && let Some(prompt) = command.prompt_blocks()
             {
-                self.cache_prompt_attachments(&prompt).await?;
+                images.extend(mj_core::attachment::references(&prompt)?);
+                files.extend(mj_core::attachment::file_references(&prompt)?);
             }
         }
-        Ok(())
+        self.client.cache_attachments(&images, &files).await
     }
 
     pub async fn prepare_adoption(spec: &CommandSpec, session_id: &str) -> Result<RelayClient> {
