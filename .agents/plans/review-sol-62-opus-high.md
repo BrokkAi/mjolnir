@@ -81,24 +81,44 @@ Commands run from this checkout, with study scripts run from `.agents/evals/revi
     export REVIEW_ARMS_DIFFS="$REVIEW_ARMS_DIR/corpus/diffs.jsonl"
     unset REVIEW_ARMS_MJ REVIEW_ARMS_MJ_WORKER REVIEW_ARMS_SCRIPTS REVIEW_ARMS_REPO REVIEW_ARMS_BUNDLE REVIEW_ARMS_REPO_DIR
     R=$REVIEW_ARMS_DIR
+    C="$R/sol-62-repeats"
+    S="$PWD/results/sol-62-opus-high"
+    PREFLIGHT="$C/preflight"
+    OPUS_JUDGE_STORE=/home/jonathan/.local/share/mjolnir/mj.sqlite3
 
 After recording exact unused names and a saved interleaved manifest, the reviewer interfaces are:
 
     python3 -B driver.py --jobs "$R/sol-62-repeats/canaries.json" --concurrency 2 --same-image "$R/sol-62-repeats/image.json" --stop-on-failure
     python3 -B driver.py --jobs "$R/sol-62-repeats/jobs.json" --concurrency 16 --same-image "$R/sol-62-repeats/image.json"
 
-Run the full driver with durable detached logging and record its PID. Accepted canaries must skip on the full invocation. Before judging, fill in and record the exact preflight-confirmed Opus and pool arguments; no placeholders may reach a live command:
+Run the full driver with durable detached logging and record its PID. Accepted canaries must skip on the full invocation. The canonical judging entrypoint is the checked-in campaign orchestrator:
 
-    jq -s '.[0] + .[1]' "$PREFLIGHT/historical-and-op-ready-jobs.json" "$R/sol-62-repeats/jobs.json" > "$R/stage9-ready-jobs.json"
+    bash "$S/run_verification.sh"
+
+Run it only after the reviewer driver exits. It enables shell error exit and pipeline error propagation, verifies new reviewer evidence and hashes, checks exact ready membership, builds and audits the private pool, runs and attests one Opus canary, then runs and attests the rest before scoring. The ordered commands below document its gates for inspection and recovery; do not run both flows. On interruption, resume the diagnosed stage instead of rebuilding an existing round:
+
+    set -euo pipefail
+    jq -s '.[0] + .[1]' "$PREFLIGHT/historical-and-op-ready-jobs.json" "$R/sol-62-repeats/jobs.json" > "$C/ready-jobs.json"
+    python3 -B "$S/audit_round.py" "$R" ready
+    python3 -B "$S/audit_reviewers.py" "$R" --hash-file "$C/new-reviewers.sha256"
+    (cd "$R" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" && sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256" && sha256sum --quiet -c "$C/new-reviewers.sha256")
     mkdir "$R/verify9"
     cp "$R/verify5/SPEC.md" "$R/verify9/SPEC.md"
-    python3 -B build_verify.py verify9 --arms A,B,D,D2,E,G-base,G-plus,H,I,J,K,L,N,O,P,Q,R,S,T --configs gpt-6.1-terra:high,gpt-6.1-terra:xhigh,gpt-6.1-sol:high,gpt-6.1-sol:medium,gpt-6.1-sol:xhigh,greptile:base,greptile:plus,deepseek-flash:low,muse-ember-1.0:xhigh,gemini-4-hydrogen:high,gemini-4-hydrogen:medium,kimi-code/k3.1-pro:high,gpt-6.2-sol:low,gpt-6.2-sol:medium --ready-jobs "$R/stage9-ready-jobs.json" --bugs-from "$R/sol-62-repeats/jobs.json"
+    python3 -B build_verify.py verify9 --arms A,B,D,D2,E,G-base,G-plus,H,I,J,K,L,N,O,P,Q,R,S,T --configs gpt-6.1-terra:high,gpt-6.1-terra:xhigh,gpt-6.1-sol:high,gpt-6.1-sol:medium,gpt-6.1-sol:xhigh,greptile:base,greptile:plus,deepseek-flash:low,muse-ember-1.0:xhigh,gemini-4-hydrogen:high,gemini-4-hydrogen:medium,kimi-code/k3.1-pro:high,gpt-6.2-sol:low,gpt-6.2-sol:medium --ready-jobs "$C/ready-jobs.json" --bugs-from "$R/sol-62-repeats/jobs.json"
+    python3 -B "$S/audit_round.py" "$R" pool "$PREFLIGHT/historical-and-op-sessions.jsonl"
+    (cd "$R" && sha256sum verify9/SPEC.md verify9/batch-*.json private/key-verify9.json) > "$C/verify9-pool.sha256"
     python3 -B verify_driver.py verify9 --kind verify --target localhost --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe --model opus --effort high --profiles claude4 --quota-scope claude --concurrency 1 --batch 0
+    python3 -B "$S/audit_round.py" "$R" judges "$OPUS_JUDGE_STORE" --batch 0
+    (cd "$R" && sha256sum --quiet -c "$C/verify9-pool.sha256")
     python3 -B verify_driver.py verify9 --kind verify --target localhost --repo-commit 3c3fa4b13bc32ba99fc349355081ee0d007831fe --model opus --effort high --profiles claude4 --quota-scope claude --concurrency 16
+    python3 -B "$S/audit_round.py" "$R" judges "$OPUS_JUDGE_STORE"
+    (cd "$R" && sha256sum --quiet -c "$C/verify9-pool.sha256" && sha256sum --quiet -c "$PREFLIGHT/historical-and-op.sha256" && sha256sum --quiet -c "$PREFLIGHT/previous-rounds.sha256" && sha256sum --quiet -c "$C/new-reviewers.sha256")
     python3 -B score.py verify9
     python3 -B pareto.py verify9 --exclude DSF/low --bootstrap 300 --sessions Sol/medium=2,Terra/xhigh=2,Sol/xhigh=2,Greptile/base=1,Greptile/plus=1,Ember/xhigh=1,Gemini/high=1,Gemini/medium=1,Kimi/high=1,gpt-6.2-sol/low=3,gpt-6.2-sol/medium=3
 
-Here `PREFLIGHT` is `.mj/agents/f75b54121d7b1bc32ae30aa6c5981737` under this checkout, or a preserved copy of that report directory. Require the built first batch to be ID 0 before using the shown canary command; otherwise substitute the existing first ID. After its accepted Opus/high output and provider attestation, the full invocation skips the completed batch. The quota scope does not add a quota floor; it only interprets any explicitly configured existing floor using standard Claude windows rather than Fable windows.
+The execution owner preserved the preflight manifests in `$C/preflight`. The `ready` audit requires exactly 1,064 completed job paths and an unused verify9. The `pool` audit compares the generated private key against exactly the frozen 1,446 IDs plus 280 newly accepted reviewers, including all empty reports, and verifies source text/index/commit membership and the original specification before any judge is submitted. Merely passing `--ready-jobs` is insufficient.
+
+Require the built first batch to be ID 0 before using the shown canary command; otherwise substitute the existing first ID in both the driver and audit. The selected `judges --batch 0` audit requires a completed accepted output and joins its stable command to durable usage and selection: opus/high on claude4, fast and ultracode off, main provider `claude-opus-5-5`, and no provider outside that model plus the original known `claude-haiku-5-5` auxiliary. Failure prevents full judging. The full invocation skips the completed batch. The unfiltered `judges` audit repeats these checks for every built batch and validates group coverage before scoring. Each audit exits nonzero on missing, unknown or mismatched evidence. The quota scope does not add a quota floor; it only interprets any explicitly configured existing floor using standard Claude windows rather than Fable windows.
 
 Existing previous publications have complete environment and timing/scoring interfaces. Record all final commands, cohort definitions, audits and logs in the new result's reproduction document. Never execute the old Neon judge commands from those historical documents.
 
@@ -126,4 +146,4 @@ Both canaries completed; `$R/sol-62-repeats/canary-audit.json` is the receipt. T
 
 Use installed Mjolnir, existing study wrappers, Python scripts, managed credentials, and the existing historical corpus. Do not install or rebuild Mjolnir, redirect Rust target storage, restart daemons, or change shared profiles. The parent will supply an explicit supported Opus/high route after read-only preflight; identity and effort checks must fail visibly when that route is not honored.
 
-Revision note (2026-11-24): Registered the user's corrected judge mandate and additional sample counts before new outputs. Exact Opus/cohort commands are awaiting the delegated preflight; reviewer execution can proceed independently.
+Revision note (2026-11-24): Registered the user's corrected judge mandate and additional sample counts before new outputs. The Opus/cohort preflight is complete, both repeat canaries passed, and the 280-slot reviewer driver is active. Added exact executable cohort, provider and hash gates plus the canonical verification script after publication review; an independent audit verified the actual gate ordering. Final live pool/provider validation and result reconstruction remain pending.
