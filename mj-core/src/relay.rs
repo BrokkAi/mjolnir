@@ -221,7 +221,9 @@ pub const RELAY_GUARDIAN_PARENT_INSTRUCTIONS_PROTOCOL: u32 = 89;
 /// 90 adds file attachment transfers and prompt references.
 pub const RELAY_FILE_ATTACHMENT_PROTOCOL: u32 = 90;
 pub const RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL: u32 = 91;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL;
+/// 92 adds the unified `search_history` history query.
+pub const RELAY_SEARCH_HISTORY_PROTOCOL: u32 = 92;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SEARCH_HISTORY_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

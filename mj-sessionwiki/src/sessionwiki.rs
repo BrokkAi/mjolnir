@@ -11,9 +11,11 @@
 
 mod harness_tools;
 pub mod history;
+mod indexed_messages;
 #[cfg(test)]
 mod native_tests;
 mod provenance;
+mod search_history;
 mod search_query;
 pub mod tags;
 mod top_level;
@@ -54,6 +56,7 @@ use mj_store::managed_archive::managed_checkpoint_archive_name;
 /// search partition; reconciliation is scoped per instance instead (see
 /// [`Adapter::reconcile_scope`]).
 const TOOL: &str = "mjolnir";
+#[cfg(test)]
 const CONVERSATION_ROLES: &[Role] = &[Role::User, Role::Assistant];
 
 /// The low token slot identifies the `Session` projection format. Raising it
@@ -1271,6 +1274,7 @@ fn sync_blocking(
         .ownership
         .clone();
     let mut connection = open_for_sync()?;
+    migrate_tokenizer(&connection)?;
     // An incremental pass skips sessions older than `since` that the cache
     // does not hold, so it is only sound on the cache the last full pass
     // filled. Opening may itself have rebuilt the cache, and so may another
@@ -2076,9 +2080,54 @@ fn copy_session(session: &Session) -> Session {
 pub const MAX_WIKI_LIMIT: usize = 200;
 /// The page size a caller that names none gets.
 pub const DEFAULT_WIKI_LIMIT: usize = 50;
-/// SessionWiki's full-text index needs three characters; shorter queries fall
-/// back to a substring scan.
-const MIN_FULLTEXT_QUERY: usize = 3;
+/// Tokenizer installed by the background indexer for history and UI search.
+pub(super) const TARGET_TOKENIZER: &str = "porter unicode61";
+
+pub(super) fn is_trigram_tokenizer(spec: &str) -> bool {
+    spec.split_whitespace()
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("trigram"))
+}
+
+fn ensure_search_tokenizer(connection: &rusqlite::Connection) -> Result<()> {
+    if is_trigram_tokenizer(&sessionwiki::index::tokenizer_spec(connection)?) {
+        anyhow::bail!("session history index is migrating to porter unicode61; retry shortly");
+    }
+    Ok(())
+}
+
+/// Whether the index is still on the trigram tokenizer, so full-text queries
+/// must wait. It opens and closes its own connection, holding no transaction.
+/// An unreadable index answers `false`: the query that follows says why.
+pub(super) fn tokenizer_is_migrating() -> Result<bool> {
+    let Some(connection) = readable_index()? else {
+        return Ok(false);
+    };
+    Ok(is_trigram_tokenizer(&sessionwiki::index::tokenizer_spec(
+        &connection,
+    )?))
+}
+
+fn migrate_tokenizer(connection: &rusqlite::Connection) -> Result<()> {
+    let spec = sessionwiki::index::tokenizer_spec(connection)?;
+    if is_trigram_tokenizer(&spec) {
+        let started = std::time::Instant::now();
+        tracing::info!("starting SessionWiki tokenizer migration");
+        sessionwiki::index::set_tokenizer_spec(connection, TARGET_TOKENIZER)?;
+        tracing::info!(elapsed = ?started.elapsed(), "completed SessionWiki tokenizer migration");
+    } else if !spec
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .eq_ignore_ascii_case(TARGET_TOKENIZER)
+    {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(
+            || tracing::warn!(tokenizer = %spec, "leaving custom SessionWiki tokenizer unchanged"),
+        );
+    }
+    Ok(())
+}
 /// One page of the index, newest first or best match first.
 ///
 /// `live` is the set of session ids this daemon still holds, which is what
@@ -2102,14 +2151,15 @@ pub fn query_rows(
     };
     let ownership = top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();
+    // Rows skipped as unclassifiable are logged by the visibility; the
+    // listing itself has no place to carry notices.
     query_rows_from(
         &connection,
         query,
         limit,
         live,
         include_tool_matches,
-        &ownership,
-        &cache,
+        &mut top_level::QueryVisibility::new(&ownership, &cache),
     )
 }
 
@@ -2137,9 +2187,12 @@ fn query_rows_from(
     limit: usize,
     live: &BTreeSet<String>,
     include_tool_matches: bool,
-    ownership: &top_level::Snapshot,
-    cache: &crate::import::NativeScanCache,
+    visibility: &mut top_level::QueryVisibility<'_>,
 ) -> Result<Vec<WikiRow>> {
+    let _snapshot = connection
+        .is_autocommit()
+        .then(|| connection.unchecked_transaction())
+        .transpose()?;
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
     let query = query.trim();
     if query.is_empty() {
@@ -2150,7 +2203,7 @@ fn query_rows_from(
             if visible.len() >= limit {
                 break;
             }
-            if top_level::is_child(&row, ownership, cache)? {
+            if visibility.is_child_lenient(&row) {
                 continue;
             }
             visible.push(wiki_row(row, None, live));
@@ -2159,18 +2212,60 @@ fn query_rows_from(
         fill_session_tags(connection, &mut rows)?;
         return Ok(rows);
     }
+    // Only a text search reads the FTS table; listing recent sessions must keep
+    // working while the tokenizer migrates.
+    ensure_search_tokenizer(connection)?;
     // SessionWiki filters conversational roles before its candidate cap and
     // session grouping. Native-child filtering still happens here, so
     // over-fetch to keep children ranked first from shortening a page.
     let search_limit = MAX_WIKI_LIMIT;
-    let roles = if include_tool_matches {
-        None
-    } else {
-        Some(CONVERSATION_ROLES)
-    };
-    let hits =
-        sessionwiki::index::search_with_roles(connection, query, search_limit, None, None, roles)
-            .context("search the SessionWiki index")?;
+    // One representative message per session, best rank first. The snippet is
+    // built later, only for the sessions that make the page, because building
+    // it for every duplicate message in the ranked scan is the expensive part.
+    let mut hits: Vec<(i64, sessionwiki::index::SessionRow)> = Vec::new();
+    let mut match_expression = None;
+    if let Some(fts) = search_query::compile_fts_match(&search_query::parse_query(query).groups) {
+        let mut statement = connection.prepare(
+            "SELECT m.id, f.session_id, f.tool, f.path, f.project, f.title, f.started, f.msg_count, f.kind, f.archived_at IS NOT NULL
+             FROM msgs CROSS JOIN messages m ON m.id = msgs.rowid
+             JOIN files f ON f.session_id = m.session_id
+             WHERE msgs MATCH ?1 AND (?2 OR m.role IN ('user', 'assistant')) ORDER BY rank",
+        )?;
+        let candidates =
+            statement.query_map(rusqlite::params![fts, include_tool_matches], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    sessionwiki::index::SessionRow {
+                        session_id: r.get(1)?,
+                        tool: r.get(2)?,
+                        path: r.get(3)?,
+                        project: r.get(4)?,
+                        title: r.get(5)?,
+                        started: r.get(6)?,
+                        msg_count: r.get(7)?,
+                        kind: r.get(8)?,
+                        archived: r.get(9)?,
+                        last_active: None,
+                        preview: None,
+                        summary: None,
+                        tags: None,
+                        account: None,
+                    },
+                ))
+            })?;
+        let mut seen = BTreeSet::new();
+        for candidate in candidates {
+            let (message_id, row) = candidate?;
+            if !seen.insert(row.session_id.clone()) {
+                continue;
+            }
+            hits.push((message_id, row));
+            if hits.len() >= search_limit {
+                break;
+            }
+        }
+        match_expression = Some(fts);
+    }
     let mut rows = Vec::with_capacity(hits.len().min(limit));
     let mut found = BTreeSet::new();
     // A pasted session id names the session itself, so it ranks above the
@@ -2179,21 +2274,35 @@ fn query_rows_from(
         if rows.len() >= limit {
             break;
         }
-        if top_level::is_child(&row, ownership, cache)? {
+        if visibility.is_child_lenient(&row) {
             continue;
         }
         found.insert(row.session_id.clone());
         rows.push(wiki_row(row, None, live));
     }
-    for hit in hits {
-        if rows.len() >= limit {
-            break;
+    if let Some(fts) = &match_expression {
+        let mut snippet_of = connection.prepare(
+            "SELECT snippet(msgs, 0, char(2), char(3), char(8230), 18) FROM msgs WHERE msgs.rowid = ?1 AND msgs MATCH ?2",
+        )?;
+        for (message_id, row) in hits {
+            if rows.len() >= limit {
+                break;
+            }
+            if found.contains(&row.session_id) || visibility.is_child_lenient(&row) {
+                continue;
+            }
+            let snippet: String =
+                snippet_of.query_row(rusqlite::params![message_id, fts], |r| r.get(0))?;
+            let plain = snippet.replace(['\u{2}', '\u{3}'], "");
+            let redacted = sessionwiki::redact::redact(&plain);
+            let snippet = if redacted != plain {
+                redacted.into_owned()
+            } else {
+                snippet
+            };
+            found.insert(row.session_id.clone());
+            rows.push(wiki_row(row, Some(snippet), live));
         }
-        if found.contains(&hit.row.session_id) || top_level::is_child(&hit.row, ownership, cache)? {
-            continue;
-        }
-        found.insert(hit.row.session_id.clone());
-        rows.push(wiki_row(hit.row, Some(hit.snippet), live));
     }
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
@@ -2203,7 +2312,7 @@ fn query_rows_from(
             if rows.len() >= limit {
                 break;
             }
-            if found.contains(&row.session_id) || top_level::is_child(&row, ownership, cache)? {
+            if found.contains(&row.session_id) || visibility.is_child_lenient(&row) {
                 continue;
             }
             found.insert(row.session_id.clone());
@@ -2241,50 +2350,21 @@ fn text_matches_in(
     live: &BTreeSet<String>,
     ownership: &top_level::Snapshot,
 ) -> Result<Vec<SessionTextMatch>> {
-    let terms = search_query::terms(query);
-    if terms.is_empty() {
+    ensure_search_tokenizer(connection)?;
+    let Some(fulltext) = search_query::compile_fts_match(&search_query::parse_query(query).groups)
+    else {
         return Ok(Vec::new());
-    }
-    let fulltext = terms
-        .iter()
-        .filter(|term| term.chars().count() >= MIN_FULLTEXT_QUERY)
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut sql = if fulltext.is_empty() {
-        // No term is long enough for the trigram index.
-        "SELECT f.session_id, f.path, m.role, f.kind FROM messages m".to_owned()
-    } else {
-        "SELECT f.session_id, f.path, m.role, f.kind
-         FROM msgs JOIN messages m ON m.id = msgs.rowid"
-            .to_owned()
     };
-    sql.push_str(
-        " JOIN files f ON f.session_id = m.session_id
-          WHERE f.tool = ? AND m.role IN ('user', 'assistant')",
-    );
-    let mut args = vec![rusqlite::types::Value::Text(TOOL.to_owned())];
-    if !fulltext.is_empty() {
-        sql.push_str(" AND msgs MATCH ?");
-        args.push(fulltext.clone().into());
-    }
-    for term in terms
-        .iter()
-        .filter(|term| term.chars().count() < MIN_FULLTEXT_QUERY)
-    {
-        sql.push_str(" AND m.text LIKE ? ESCAPE '\\'");
-        let escaped = term
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        args.push(format!("%{escaped}%").into());
-    }
-    if fulltext.is_empty() {
-        sql.push_str(" ORDER BY m.id DESC");
-    }
-    sql.push_str(" LIMIT ?");
-    args.push(TEXT_SEARCH_MESSAGE_LIMIT.into());
-    let mut statement = connection.prepare(&sql)?;
+    let sql = "SELECT f.session_id, f.path, m.role, f.kind
+         FROM msgs CROSS JOIN messages m ON m.id = msgs.rowid
+         JOIN files f ON f.session_id = m.session_id
+         WHERE msgs MATCH ?1 AND f.tool = ?2 AND m.role IN ('user', 'assistant') LIMIT ?3";
+    let args = vec![
+        rusqlite::types::Value::Text(fulltext),
+        TOOL.to_owned().into(),
+        TEXT_SEARCH_MESSAGE_LIMIT.into(),
+    ];
+    let mut statement = connection.prepare(sql)?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(args), |row| {
             Ok((
@@ -2450,14 +2530,100 @@ pub fn transcript_hits(
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
-    let session = sessionwiki::index::session_from_index(&connection, &row)
-        .context("read an indexed session")?;
-    Ok(Some(hit_transcript(
-        &session,
+    Ok(Some(fts_hit_transcript(
+        &connection,
+        &row.session_id,
         query,
         context_messages,
         per_message_chars,
-    )))
+    )?))
+}
+
+fn fts_hit_transcript(
+    connection: &rusqlite::Connection,
+    id: &str,
+    query: &str,
+    context: usize,
+    chars: usize,
+) -> Result<WikiHitTranscript> {
+    let _snapshot = connection
+        .is_autocommit()
+        .then(|| connection.unchecked_transaction())
+        .transpose()?;
+    ensure_search_tokenizer(connection)?;
+    let messages = indexed_messages::load(connection, id)?;
+    let indices: std::collections::HashMap<_, _> = messages.iter().map(|m| (m.id, m.i)).collect();
+    let mut spans = BTreeMap::new();
+    if let Some(fts) = search_query::compile_fts_match(&search_query::parse_query(query).groups)
+        .filter(|_| !messages.is_empty())
+    {
+        let (low, high): (Option<i64>, Option<i64>) = connection.query_row(
+            "SELECT MIN(id), MAX(id) FROM messages WHERE session_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let Some(low) = low else {
+            return Ok(WikiHitTranscript {
+                blocks: Vec::new(),
+                omitted_after: messages.len(),
+            });
+        };
+        let mut stmt = connection.prepare("SELECT m.id, highlight(msgs, 0, char(2), char(3)) FROM msgs CROSS JOIN messages m ON m.id = msgs.rowid WHERE msgs MATCH ?1 AND msgs.rowid BETWEEN ?2 AND ?3 AND m.session_id = ?4 AND m.role IN ('user', 'assistant')")?;
+        let rows = stmt.query_map(rusqlite::params![fts, low, high, id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (mid, marked) = row?;
+            let i = indices[&mid];
+            // Redact before removing highlight markers so offsets always refer to served text.
+            let marked = sessionwiki::redact::redact(&marked);
+            let mut text = String::new();
+            let mut start = None;
+            let mut ranges = Vec::new();
+            for c in marked.chars() {
+                match c {
+                    '\u{2}' => start = Some(text.len()),
+                    '\u{3}' => {
+                        if let Some(begin) = start.take() {
+                            ranges.push((begin, text.len()));
+                        }
+                    }
+                    _ => text.push(c),
+                }
+            }
+            // Markers can interfere with credential recognition. Never serve or map a different redaction.
+            if messages.get(i).is_some_and(|m| m.text == text) {
+                spans.insert(i, ranges);
+            } else {
+                spans.insert(i, Vec::new());
+            }
+        }
+    }
+    let mut blocks = Vec::new();
+    let mut previous = None;
+    for message in &messages {
+        if spans
+            .range(message.i.saturating_sub(context)..=message.i.saturating_add(context))
+            .next()
+            .is_none()
+        {
+            continue;
+        }
+        let ranges = spans.get(&message.i).map_or(&[][..], Vec::as_slice);
+        let (text, hits, truncated) = transcript_grep::excerpt(&message.text, ranges, chars);
+        blocks.push(WikiHitBlock {
+            role: message.role.to_owned(),
+            text,
+            hits,
+            truncated,
+            omitted_before: previous.map_or(message.i, |p| message.i - p - 1),
+        });
+        previous = Some(message.i);
+    }
+    Ok(WikiHitTranscript {
+        blocks,
+        omitted_after: previous.map_or(messages.len(), |p| messages.len() - p - 1),
+    })
 }
 
 /// The matching passages of one loaded session, converted to the daemon
@@ -2467,6 +2633,7 @@ pub fn transcript_hits(
 /// not write, a hit buried in it would open the preview on a wall of command
 /// output, and the preview collapses tool runs anyway. Tool messages still
 /// appear as context around a real match.
+#[cfg(test)]
 fn hit_transcript(
     session: &Session,
     query: &str,
@@ -2499,6 +2666,7 @@ fn hit_transcript(
     }
 }
 
+#[cfg(test)]
 fn role_name(role: Role) -> &'static str {
     match role {
         Role::User => "user",
@@ -3269,9 +3437,32 @@ mod tests {
             limit,
             &BTreeSet::new(),
             include_tool_matches,
-            ownership,
-            &crate::import::NativeScanCache::new(),
+            &mut top_level::QueryVisibility::new(ownership, &crate::import::NativeScanCache::new()),
         )
+    }
+
+    #[test]
+    fn listing_sessions_works_while_the_tokenizer_migrates_but_searching_asks_to_retry() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        tags::testing::index_row(&connection, "listed", TOOL);
+        sessionwiki::index::set_tokenizer_spec(&connection, "trigram").unwrap();
+        let snapshot = top_level::Snapshot::default();
+        let cache = crate::import::NativeScanCache::new();
+        let mut visibility = top_level::QueryVisibility::new(&snapshot, &cache);
+        let rows =
+            query_rows_from(&connection, "", 10, &BTreeSet::new(), true, &mut visibility).unwrap();
+        assert_eq!(rows.len(), 1);
+        let error = query_rows_from(
+            &connection,
+            "listed",
+            10,
+            &BTreeSet::new(),
+            true,
+            &mut visibility,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("retry shortly"), "{error:#}");
     }
 
     fn item(position: u64, body: CanonicalTranscriptBody) -> CanonicalTranscriptItem {
@@ -5350,7 +5541,7 @@ mod tests {
         for (query, expected) in [
             ("qx", "short-query"),
             ("cafe\u{301}", "nfc-query"),
-            ("東京", "cjk-query"),
+            ("東京*", "cjk-query"),
         ] {
             let rows = query_rows_for_test(query, 10, false)
                 .unwrap_or_else(|error| panic!("search {query:?}: {error:#}"));
@@ -5811,8 +6002,9 @@ mod tests {
                     serde_json::to_string_pretty(&found).unwrap()
                 )
                 .unwrap();
-                for (id, session) in &sessions {
-                    let preview = super::super::hit_transcript(session, query, 0, 4_000);
+                for id in sessions.keys() {
+                    let preview =
+                        super::super::fts_hit_transcript(&connection, id, query, 0, 4_000).unwrap();
                     assert_eq!(
                         !preview.blocks.is_empty(),
                         indexed_ids.contains(id.as_str()),
@@ -5837,17 +6029,17 @@ mod tests {
         }
 
         #[test]
-        fn a_query_too_short_for_the_trigram_index_still_matches() {
+        fn short_tokens_match_with_explicit_prefixes() {
             let _held = super::super::tags::testing::lock();
             let (_directory, connection) = index(&[
-                ("a", &[("user", "go to the zoo")]),
+                ("a", &[("user", "go to the zoo P2 v2")]),
                 ("b", &[("assistant", "zoo")]),
                 ("c", &[("tool", "zoo")]),
             ]);
             assert_eq!(
                 text_matches_in(
                     &connection,
-                    "zo",
+                    "zo*",
                     &live(&["a", "b", "c"]),
                     &super::super::top_level::Snapshot::default(),
                 )
@@ -5857,7 +6049,19 @@ mod tests {
                     ("b", SessionTextMatchKind::Agent),
                 ])
             );
-            // A percent sign is text, not a wildcard.
+            for query in ["P2", "v2"] {
+                assert_eq!(
+                    text_matches_in(
+                        &connection,
+                        query,
+                        &live(&["a"]),
+                        &super::super::top_level::Snapshot::default()
+                    )
+                    .unwrap(),
+                    matches(&[("a", SessionTextMatchKind::User)])
+                );
+            }
+            // Punctuation is handled by the native tokenizer.
             assert_eq!(
                 text_matches_in(
                     &connection,

@@ -53,9 +53,9 @@ pub struct StandaloneSession {
         mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
     subagent_queue: Option<super::subagent_queue::SubagentQueueObserver>,
     subagent_queue_error: Option<String>,
-    history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
+    pub(super) history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
     operator_presence_revision: Option<u64>,
-    history_active: std::collections::BTreeSet<String>,
+    pub(super) history_active: std::collections::BTreeMap<String, tokio::task::AbortHandle>,
     guardian_jobs: tokio::task::JoinSet<GuardianReviewResult>,
     guardian_active: std::collections::BTreeSet<String>,
 }
@@ -554,6 +554,8 @@ impl StandaloneSession {
                     self.history_active.remove(&result.request_id);
                     self.client.complete_history_request(result).await?;
                 }
+                // Aborted below because the worker no longer lists the request.
+                Err(error) if error.is_cancelled() => continue,
                 Err(error) => {
                     tracing::error!(%error, "history task failed; pending requests will retry");
                     self.history_jobs.abort_all();
@@ -568,13 +570,33 @@ impl StandaloneSession {
                 }
             }
         }
-        for request in self.client.history_requests().await? {
+        let pending = self.client.history_requests().await?;
+        // The worker drops a request when its caller gives up or it expires.
+        // Stop that work now, before it waits for a permit or runs a query.
+        let listed: std::collections::BTreeSet<&str> = pending
+            .iter()
+            .map(|request| request.request_id.as_str())
+            .collect();
+        self.history_active.retain(|request_id, task| {
+            let keep = listed.contains(request_id.as_str());
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for request in pending {
             if self.history_active.len() >= mj_core::history::MAX_PENDING {
                 break;
             }
-            if self.history_active.insert(request.request_id.clone()) {
-                self.history_jobs
-                    .spawn(crate::sessionwiki::history::execute(request));
+            if !self.history_active.contains_key(&request.request_id) {
+                let request_id = request.request_id.clone();
+                let task = self
+                    .history_jobs
+                    .spawn(crate::sessionwiki::history::execute(
+                        request,
+                        Some(self.materialized.session_id.clone()),
+                    ));
+                self.history_active.insert(request_id, task);
             }
         }
         Ok(())

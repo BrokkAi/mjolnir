@@ -207,6 +207,7 @@ fn kimi_agent_description(
         .to_owned()
 }
 
+#[cfg(unix)]
 pub(crate) enum ReserveIdleAntigravityCheck {
     ProceedDirectly,
     RejectNow,
@@ -214,6 +215,7 @@ pub(crate) enum ReserveIdleAntigravityCheck {
 }
 
 impl DurableRelay {
+    #[cfg(unix)]
     pub(crate) fn antigravity_needs_fast_poll(&self, last_synced_hook_epoch: Option<u64>) -> bool {
         let work = &self.antigravity_work;
         self.background_work == BackgroundWorkPolicy::AntigravityTasks
@@ -232,10 +234,12 @@ impl DurableRelay {
                         || work.summary_has_running_subagents)))
     }
 
+    #[cfg(unix)]
     pub(crate) fn has_handled_command(&self, command_id: &str) -> bool {
         self.snapshot.handled_commands.contains_key(command_id)
     }
 
+    #[cfg(unix)]
     pub(crate) fn reserve_idle_antigravity_check(
         &self,
         command_id: &str,
