@@ -1,0 +1,14 @@
+Budget maps: best expected review findings within a latency and cost budget
+
+- Each map colors every latency and cost budget by the best expected findings among setups that fit both limits. Region edges are the observed setups' own latencies and costs; nothing is interpolated or binned.
+- 116 priced setups are optimized. 196 setups with an unknown price are omitted, because an unknown price is not a free one. 158 Greptile combinations are omitted. Greptile alone appears as two diamonds at its own measured findings, latency and cost; its repository context could not be pinned to each diff's commit.
+- Both panels share one absolute color scale, so the medium + high panel stays in the lower half of it. Compare colors across panels, not region shapes.
+- Cost covers reviewer turns only. It excludes carrier work, judging and subscriptions. Latency simulates simultaneous starts and takes the slowest reviewer's median; it excludes startup and contention.
+- Findings are expected confirmed totals across 70 historical diffs from current Opus 5.5/high judgments. Inputs are the published CSVs' rounded values, so this is not an audited full-precision frontier. Equal rounded scores count as ties.
+- Priced setups combine 1 to 3 parallel reviewers from Sol 6.1 (medium, high, xhigh), Sol 6.2 (low, medium), Terra 6.1 (high, xhigh). Setups with Ember or Hydrogen or Kimi reviewers have no price and are omitted.
+- Both maps use the color range 0 to 266.7. The all-findings panel peaks at 266.67; the medium + high panel peaks at 137.25.
+- Extent: latency 38.5 to 297.8 s and cost $0.039 to $3.360, chosen to include every option and both Greptile diamonds; the last observed row and column are open-ended.
+- Price break: the vertex of the cost-versus-findings staircase's concave hull where cost per added finding jumps most. It describes this option set only.
+- The existing frontier flags in the CSVs do not define membership here. A setup is marked when it is in the tied best set of at least one budget cell.
+- All confirmed: 34 setups are best at some budget (0 only by tying a setup that is no slower and no costlier); 91 x 115 observed thresholds reduce to 31 x 34 score-changing ones.
+- Medium + high impact: 31 setups are best at some budget (0 only by tying a setup that is no slower and no costlier); 91 x 115 observed thresholds reduce to 27 x 31 score-changing ones.

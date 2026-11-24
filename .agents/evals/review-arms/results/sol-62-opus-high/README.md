@@ -135,6 +135,62 @@ historical frontier and retain the original per-configuration sample caps.
 [High](pareto-sev-high.csv) · [Medium](pareto-sev-medium.csv) ·
 [Low](pareto-sev-low.csv)
 
+### Budget maps
+
+![Best expected confirmed findings within a latency and cost budget, all confirmed findings](review-opus-high-budget-all.png)
+
+![The same map for medium- and high-impact findings, on the same color scale](review-opus-high-budget-medium-high.png)
+
+Each map answers one question: if a team may wait at most T seconds and spend
+at most C dollars per diff, what is the most confirmed findings any measured
+setup delivers? The color is that maximum, F(T,C), over the 116 priced
+non-Greptile setups with latency at most T and cost at most C. F changes only at
+setups' own latencies and costs, so the region edges are those observed values
+(lower bound included, no interpolation or budget bins). White lines mark where
+the best score changes. Blank means no priced setup fits both limits.
+
+The two maps share one absolute color scale (0 to 266.67), so the medium + high
+map, which peaks at 137.25, stays in the lower half of it. The 196 setups with
+an unknown price are omitted, because an unknown price is not a free one, and so
+are all Greptile combinations. Greptile Base and Plus appear as diamonds at
+their own measured findings, latency and cost ($1.00 and $3.00 per diff); the
+background beneath them is the optimization without Greptile. The axes extend
+past the largest priced setup (230.4 s, $0.900) to include both diamonds, and
+the last observed row and column continue to the edge. Setups are named as in
+the frontier charts. White dots mark setups that are best at some budget. A
+setup counts as best when it is in the tied best set of at least one budget
+cell, which here is the same 34 (all) and 31 (medium + high) setups that no
+other setup beats on latency, cost and findings. The labels name three
+data-derived points: the fastest and cheapest setup, the most findings, and the
+"price break", the vertex of the cost-versus-findings concave hull where cost
+per added finding jumps most (Terra 6.1/xhigh in both maps). The price break
+describes this option set only.
+
+Cost covers reviewer turns only and excludes carrier work, judging and
+subscriptions. Latency simulates simultaneous starts and takes the slowest
+reviewer's median, excluding startup and contention. Findings are expected
+confirmed totals over the 70 diffs under the current Opus 5.5/high judgments.
+The CSVs hold rounded values, so equal scores are ties at that precision and
+this is not an audited full-precision frontier. The CSV `frontier` flags do not
+define membership on these maps.
+
+[Interactive map](review-opus-high-budget.html) shows the winning setups, their
+latency, cost and findings, and any ties on hover; click pins the tooltip.
+[All SVG](review-opus-high-budget-all.svg) ·
+[Medium + high SVG](review-opus-high-budget-medium-high.svg) ·
+[Caption](review-opus-high-budget-caption.txt) ·
+[Embedded data](review-opus-high-budget-data.json)
+
+From this results directory, render the maps, the HTML and the caption with
+`python3 plot_budget_maps.py .` using Matplotlib 3.11.2 (the same offline wrapper
+as the frontier charts). Check them with `python3 audit_budget_maps.py .`, which
+recomputes F(T,C) by brute force from the CSVs for every threshold cell, exact
+edges, one float below each edge and 40,000 random budgets, then compares the
+embedded data, the HTML rectangles and sampled PNG pixels. Add
+`--chrome <chrome-headless-shell>` to rasterize the SVGs the same way. Then run
+`node audit_budget_html.mjs . <scratch dir> <chrome-headless-shell>` to drive the
+HTML in headless Chrome and compare real hover tooltips with brute force.
+
 ## Coverage and judging
 
 The 280 new reviews preserved the original 140 Sol 6.2 samples, for 210
