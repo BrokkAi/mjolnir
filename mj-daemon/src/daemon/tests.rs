@@ -5991,6 +5991,80 @@ async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready
     assert!(notice_texts(&state).is_empty(), "delivery posted a notice");
 }
 
+#[tokio::test]
+async fn startup_prompt_delivers_installed_file_without_image_capability() {
+    use mj_chat::chat::{AttachedFile, PromptFile, PromptPayload};
+    use mj_core::attachment::{AttachmentStore, FileAttachmentRef};
+    let Some(_writer) = startup_prompt_test_store(
+        "startup_prompt_delivers_installed_file_without_image_capability",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+
+    let bytes = b"example file";
+    let reference = FileAttachmentRef::new(bytes, "report.txt", "text/plain".into()).unwrap();
+    AttachmentStore::controller("session-1")
+        .unwrap()
+        .install_file(&reference, bytes)
+        .unwrap();
+    let text = mj_core::draft::file_marker(1, &reference.filename);
+    let payload = PromptPayload {
+        files: vec![PromptFile {
+            range: 0..text.len(),
+            number: 1,
+            file: AttachedFile::from_reference(reference.clone()).unwrap(),
+        }],
+        text,
+        images: Vec::new(),
+    };
+    TerminalOperations::terminal_queue_startup_prompt(
+        state.clone(),
+        "session-1".into(),
+        StartupPromptRequest {
+            move_operation_id: None,
+            command_id: "startup-file".into(),
+            text: payload.text.clone(),
+            prompt: payload.content_blocks(),
+            encoded_draft: payload.encode_draft(),
+            inherited_draft: None,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect("queue file prompt");
+    let view = ready_startup_view();
+    assert!(
+        !view
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .operational
+            .accepts_prompt_images()
+    );
+    manager
+        .publisher
+        .publish("session-1".into(), view)
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit {
+        command: RelayCommand::Prompt { prompt },
+        reply,
+        ..
+    } = request
+    else {
+        panic!("expected a submitted prompt");
+    };
+    assert_eq!(prompt, vec![reference.content_block()]);
+    reply.send(Ok(1)).unwrap();
+}
+
 /// Peer messages accepted while a session is starting stay behind its first
 /// prompt, then land in the mailbox in send order. They are not a second
 /// prompt (#1553).

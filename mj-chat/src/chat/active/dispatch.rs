@@ -1,5 +1,5 @@
 use super::*;
-use crate::chat::TurnControlIntent;
+use crate::chat::{PromptPayload, TurnControlIntent};
 use anyhow::Context;
 use mj_core::relay::RelayCommand;
 
@@ -206,15 +206,30 @@ impl ActiveChat {
                 }
             }
             ChatAction::Prompt(text) => {
-                let images = self.state.take_submitting_images();
+                let images = std::mem::take(&mut self.state.submitting_images);
+                let files = std::mem::take(&mut self.state.submitting_files);
                 if !images.is_empty() && !self.state.prompt_images_supported {
-                    restore_unsent_prompt(&mut self.state, text, images);
+                    restore_unsent_prompt(
+                        &mut self.state,
+                        PromptPayload {
+                            text,
+                            images,
+                            files,
+                        },
+                    );
                     self.state
                         .set_notice(super::super::input_state::IMAGE_CAPABILITY_NOTICE);
                     return ChatEventOutcome::Handled;
                 }
                 let Some(command_id) = self.command_id("prompt") else {
-                    restore_unsent_prompt(&mut self.state, text, images);
+                    restore_unsent_prompt(
+                        &mut self.state,
+                        PromptPayload {
+                            text,
+                            images,
+                            files,
+                        },
+                    );
                     return ChatEventOutcome::Handled;
                 };
 
@@ -224,6 +239,7 @@ impl ActiveChat {
                         command_id,
                         text,
                         images,
+                        files,
                     },
                     &mut self.state,
                 );

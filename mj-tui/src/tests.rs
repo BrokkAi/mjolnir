@@ -5272,9 +5272,30 @@ async fn pasted_image_paths_stage_in_a_starting_session_without_an_attachment_st
         "/shots/before-start.png"
     };
     dashboard.handle_event_result(Event::Paste(path.to_owned()));
+    let path = if cfg!(windows) {
+        r"C:\docs\notes.txt"
+    } else {
+        "/docs/notes.txt"
+    };
+    dashboard.handle_event_result(Event::Paste(format!(" {path}")));
+    let command = if cfg!(windows) {
+        r"/attach C:\docs\extra.pdf"
+    } else {
+        "/attach /docs/extra.pdf"
+    };
+    dashboard.handle_event_result(Event::Paste(command.to_owned()));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None,
+        "a second attachment command can stage while files are already pending"
+    );
     let draft = dashboard.standby_prompts.get("session-1").unwrap().draft();
     let payload = mj_chat::chat::PromptPayload::decode_draft(&draft).unwrap();
-    assert_eq!(payload.text, "[image 1]");
+    assert_eq!(
+        payload.text,
+        "[image 1] [file 1: notes.txt][file 2: extra.pdf]"
+    );
+    assert!(payload.files[0].file.is_pending());
     assert!(payload.images[0].image.data_base64.is_empty());
     assert!(payload.images[0].image.reference.is_none());
     assert_eq!(
@@ -5284,7 +5305,7 @@ async fn pasted_image_paths_stage_in_a_starting_session_without_an_attachment_st
     assert_eq!(
         dashboard.standby_prompts.get("session-1").unwrap().draft(),
         draft,
-        "Enter must wait for image installation before durable enqueue"
+        "Enter must wait for attachment installation before durable enqueue"
     );
     assert!(
         dashboard
@@ -5293,6 +5314,6 @@ async fn pasted_image_paths_stage_in_a_starting_session_without_an_attachment_st
             .unwrap()
             .notice()
             .unwrap()
-            .contains("Preparing images")
+            .contains("Preparing files")
     );
 }

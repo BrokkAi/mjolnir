@@ -128,7 +128,7 @@ impl ChatState {
             self.set_autocomplete(None);
             return;
         }
-        if !self.input_images.is_empty() {
+        if self.has_input_attachments() {
             self.set_autocomplete(None);
             return;
         }
@@ -426,11 +426,7 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
             "review committed work now, or report how review is configured",
             Some("status"),
         ),
-        (
-            "attach",
-            "add an image file (PNG, JPEG or WebP) to the prompt",
-            Some("path"),
-        ),
+        ("attach", "add a file or image to the prompt", Some("path")),
     ]
     .into_iter()
     .map(|(name, description, input_hint)| CommandChoice {

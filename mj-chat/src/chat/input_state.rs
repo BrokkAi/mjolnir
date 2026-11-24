@@ -1,3 +1,5 @@
+use super::attachments::AttachmentFailure;
+use super::composer::{PendingMarker, ReadyAttachment};
 use super::*;
 
 /// The command name when `text` is shaped like a slash command: a slash
@@ -18,14 +20,12 @@ fn slash_command_name(text: &str) -> Option<&str> {
 pub(crate) enum AttachmentFallback {
     /// Keep the marker, shown as failed: a clipboard image has no text.
     FailedMarker,
-    /// Remove the marker, restoring the `/attach` command if it was alone.
+    /// Restore the `/attach` command where its marker was.
     Command(String),
     /// Put back the text that was pasted in its place.
     Text(String),
 }
 
-pub(super) const ATTACH_UNSUPPORTED_NOTICE: &str =
-    "/attach adds image files only, and this agent does not accept images";
 pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
     "This agent does not accept images; only text can be pasted";
 pub(super) const IMAGE_CAPABILITY_NOTICE: &str = "This agent has not advertised image support; paste text or remove image markers before sending";
@@ -57,6 +57,7 @@ impl ChatState {
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_images.clear();
+        self.history_draft_files.clear();
         self.preferred_column = None;
         self.history_search = None;
         self.queued_prompts.clear();
@@ -72,7 +73,7 @@ impl ChatState {
         }
         self.voice_active = false;
         self.submitting_images.clear();
-        self.pending_attachment_markers.clear();
+        self.submitting_files.clear();
         self.input_generation = self.input_generation.wrapping_add(1);
         self.feedback.clear();
     }
@@ -102,6 +103,13 @@ impl ChatState {
         let next_cursor = payload.text.len();
         self.input = payload.text;
         self.input_images = payload.images;
+        self.input_files = payload.files;
+        for file in &mut self.input_files {
+            if file.file.is_pending() {
+                file.file = AttachedFile::failed(&file.file.filename);
+            }
+        }
+        self.advance_file_number();
         self.input_cursor = next_cursor;
         self.input_generation = self.input_generation.wrapping_add(1);
         self.feedback.clear();
@@ -127,7 +135,8 @@ impl ChatState {
         }
         match PromptPayload::decode_draft(&draft) {
             Ok(payload) => {
-                let interrupted = payload.images.iter().any(|image| image.image.is_pending());
+                let interrupted_image = payload.images.iter().any(|image| image.image.is_pending());
+                let interrupted_file = payload.files.iter().any(|file| file.file.is_pending());
                 let legacy = payload
                     .images
                     .iter()
@@ -146,7 +155,9 @@ impl ChatState {
                         }
                     }
                 }
-                if interrupted {
+                if interrupted_file {
+                    self.set_notice("A file upload was interrupted. Re-attach the file to retry.");
+                } else if interrupted_image {
                     self.set_notice(
                         "An image upload was interrupted. Re-paste the failed attachment to retry.",
                     );
@@ -165,7 +176,7 @@ impl ChatState {
                     })
                     .unwrap_or_default();
                 self.set_input(fallback);
-                self.set_notice(format!("Saved image draft was discarded: {error}"));
+                self.set_notice(format!("Saved attachment draft was discarded: {error}"));
             }
         }
     }
@@ -205,6 +216,7 @@ impl ChatState {
                 self.input_cursor = attachments::insert_image(
                     &mut self.input,
                     &mut self.input_images,
+                    &mut self.input_files,
                     self.input_cursor,
                     self.next_image_number,
                     image,
@@ -231,77 +243,181 @@ impl ChatState {
         self.input_cursor = attachments::insert_image(
             &mut self.input,
             &mut self.input_images,
+            &mut self.input_files,
             self.input_cursor,
             number,
             ClipboardImage::pending(),
         );
         self.next_image_number = self.next_image_number.saturating_add(1);
-        self.pending_attachment_markers.insert(sequence, number);
+        self.pending_attachment_markers
+            .insert(sequence, PendingMarker::Image(number));
         self.input_generation = self.input_generation.wrapping_add(1);
         self.feedback.clear();
 
         true
     }
 
-    pub(crate) fn finish_attachment(
+    pub(super) fn advance_file_number(&mut self) {
+        self.next_file_number = self.next_file_number.max(
+            self.input_files
+                .iter()
+                .map(|file| file.number.saturating_add(1))
+                .max()
+                .unwrap_or(1),
+        );
+    }
+
+    pub(super) fn has_input_attachments(&self) -> bool {
+        !self.input_images.is_empty() || !self.input_files.is_empty()
+    }
+
+    pub(super) fn has_pending_attachments(&self) -> bool {
+        self.input_images
+            .iter()
+            .any(|image| image.image.is_pending())
+            || self.input_files.iter().any(|file| file.file.is_pending())
+    }
+
+    pub(super) fn reserve_file_attachment(
         &mut self,
         sequence: u64,
-        result: Result<ClipboardImage, String>,
+        path: &pasted_paths::PastedPath,
+    ) -> bool {
+        if self.clipboard_target() != ClipboardTarget::Composer {
+            self.set_notice("File attachments are unavailable in this input field");
+            return false;
+        }
+        if self.input_files.len() >= mj_core::attachment::MAX_FILES {
+            self.set_notice(format!(
+                "A prompt can contain at most {} files",
+                mj_core::attachment::MAX_FILES
+            ));
+            return false;
+        }
+        let mut number = self.next_file_number;
+        while self.input_files.iter().any(|file| file.number == number) {
+            number = number.wrapping_add(1).max(1);
+        }
+        self.input_cursor = attachments::insert_file(
+            &mut self.input,
+            &mut self.input_images,
+            &mut self.input_files,
+            self.input_cursor,
+            number,
+            AttachedFile::pending(&path.display_filename()),
+        );
+        self.next_file_number = number.wrapping_add(1).max(1);
+        self.pending_attachment_markers
+            .insert(sequence, PendingMarker::File(number));
+        self.input_generation = self.input_generation.wrapping_add(1);
+        self.feedback.clear();
+        true
+    }
+
+    pub(super) fn finish_attachment(
+        &mut self,
+        sequence: u64,
+        result: Result<ReadyAttachment, AttachmentFailure>,
         fallback: AttachmentFallback,
     ) {
-        let Some(number) = self.pending_attachment_markers.remove(&sequence) else {
-            // The marker was deleted or the draft was replaced while the
-            // blocking task ran. Its result is intentionally discarded.
+        let Some(marker) = self.pending_attachment_markers.remove(&sequence) else {
             return;
         };
-        let Some(index) = self
-            .input_images
-            .iter()
-            .position(|image| image.number == number && image.image.is_pending())
-        else {
-            return;
-        };
-        match result {
-            Ok(ready) => {
+        let range = match marker {
+            PendingMarker::Image(number) => {
+                let Some(image) = self
+                    .input_images
+                    .iter_mut()
+                    .find(|image| image.number == number && image.image.is_pending())
+                else {
+                    return;
+                };
                 self.composer_runtime.legacy_draft_images.remove(&number);
-                self.input_images[index].image = ready;
-                self.input_generation = self.input_generation.wrapping_add(1);
-                self.feedback.clear();
-            }
-            Err(error) => {
-                match fallback {
-                    AttachmentFallback::FailedMarker => {
-                        self.input_images[index].image = ClipboardImage::failed();
-                        self.input_generation = self.input_generation.wrapping_add(1);
-                        self.feedback.clear();
-                    }
-                    AttachmentFallback::Command(command) => {
-                        let range = self.input_images[index].range.clone();
-                        let only_placeholder = self.input_images.len() == 1
-                            && range.start == 0
-                            && range.end == self.input.len();
-                        self.replace_input_range(range, &PromptPayload::text(""));
-                        if only_placeholder {
-                            self.set_input(command);
-                        }
-                    }
-                    AttachmentFallback::Text(text) => {
-                        // Put the pasted text where the marker was, leaving
-                        // the cursor where the user has since moved it.
-                        let range = self.input_images[index].range.clone();
-                        let cursor = self.input_cursor;
-                        self.replace_input_range(range.clone(), &PromptPayload::text(&*text));
-                        self.input_cursor = if cursor >= range.end {
-                            cursor - range.len() + text.len()
-                        } else {
-                            cursor
-                        };
-                        self.update_autocomplete();
-                    }
+                if let Ok(ReadyAttachment::Image(ready)) = result {
+                    image.image = ready;
+                    self.input_generation = self.input_generation.wrapping_add(1);
+                    return;
                 }
-                self.set_notice(format!("Attachment failed: {error}"));
+                if matches!(fallback, AttachmentFallback::FailedMarker) {
+                    image.image = ClipboardImage::failed();
+                    self.input_generation = self.input_generation.wrapping_add(1);
+                    self.feedback.clear();
+                }
+                image.range.clone()
             }
+            PendingMarker::File(number) => {
+                let Some(file) = self
+                    .input_files
+                    .iter_mut()
+                    .find(|file| file.number == number && file.file.is_pending())
+                else {
+                    return;
+                };
+                let range = file.range.clone();
+                if let Ok(ReadyAttachment::File(ready)) = result {
+                    if file.file.filename == ready.filename {
+                        file.file = ready;
+                        self.input_generation = self.input_generation.wrapping_add(1);
+                    } else {
+                        self.replace_attachment_marker(
+                            range,
+                            &attachments::file_payload(number, ready),
+                            true,
+                        );
+                    }
+                    return;
+                }
+                if matches!(fallback, AttachmentFallback::FailedMarker) {
+                    file.file = AttachedFile::failed(&file.file.filename);
+                    self.input_generation = self.input_generation.wrapping_add(1);
+                    self.feedback.clear();
+                }
+                range
+            }
+        };
+        let Err(error) = result else {
+            tracing::error!(?marker, "attachment result did not match its marker kind");
+            return;
+        };
+        let silent = matches!(
+            (&fallback, &error),
+            (
+                AttachmentFallback::Text(_),
+                AttachmentFailure::NotARegularFile(_)
+            )
+        );
+        match fallback {
+            AttachmentFallback::Text(text) | AttachmentFallback::Command(text) => {
+                self.replace_attachment_marker(range, &PromptPayload::text(text), silent);
+            }
+            AttachmentFallback::FailedMarker => {}
         }
+        if !silent {
+            self.set_notice(format!("Attachment failed: {}", error.message()));
+        }
+    }
+
+    fn replace_attachment_marker(
+        &mut self,
+        range: std::ops::Range<usize>,
+        payload: &PromptPayload,
+        preserve_deferred: bool,
+    ) {
+        let cursor = self.input_cursor;
+        let deferred = self.composer_runtime.submit_when_ready.take();
+        let feedback = preserve_deferred.then(|| std::mem::take(&mut self.feedback));
+        let new_end = range.start + payload.text.len();
+        self.replace_input_range(range.clone(), payload);
+        if let Some(feedback) = feedback {
+            self.composer_runtime.submit_when_ready = deferred;
+            self.feedback = feedback;
+        }
+        self.input_cursor = if cursor >= range.end {
+            new_end + (cursor - range.end)
+        } else {
+            cursor.min(range.start)
+        };
+        self.update_autocomplete();
     }
 
     pub(crate) fn set_prompt_images_supported(&mut self, supported: bool) {
@@ -354,6 +470,7 @@ impl ChatState {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn take_submitting_images(&mut self) -> Vec<PromptImage> {
         std::mem::take(&mut self.submitting_images)
     }
@@ -362,6 +479,7 @@ impl ChatState {
         PromptPayload {
             text: self.input.clone(),
             images: self.input_images.clone(),
+            files: self.input_files.clone(),
         }
     }
 
@@ -408,9 +526,12 @@ impl ChatState {
         self.pending_queue_removals.insert(queued.id.clone());
         self.pending_queue_images
             .insert(queued.id.clone(), queued.images.clone());
+        self.pending_queue_files
+            .insert(queued.id.clone(), queued.files.clone());
         self.set_input_payload(PromptPayload {
             text: queued.text.clone(),
             images: queued.images,
+            files: queued.files,
         });
         self.set_notice(if queued.kind.is_prompt() {
             "Editing the most recently queued prompt"
@@ -432,12 +553,14 @@ impl ChatState {
     ) {
         self.pending_queue_removals.remove(&id);
         let images = self.pending_queue_images.remove(&id).unwrap_or_default();
+        let files = self.pending_queue_files.remove(&id).unwrap_or_default();
         if !self.queued_prompts.iter().any(|prompt| prompt.id == id) {
             self.queued_prompts.push_back(QueuedPrompt {
                 id,
                 text,
                 kind,
                 images,
+                files,
                 attachments_unsupported: false,
             });
         }
@@ -481,7 +604,7 @@ impl ChatState {
         if !matches!(action, ChatAction::None)
             || command == "clear"
             || self.standby
-            || !self.input_images.is_empty()
+            || self.has_input_attachments()
             || self.input != draft
         {
             return action;
@@ -501,7 +624,22 @@ impl ChatState {
     }
 
     fn submit_draft(&mut self) -> ChatAction {
-        if self.standby
+        let prompt = self.input.trim().to_owned();
+        let command_input = if !self.has_input_attachments() {
+            prompt.clone()
+        } else {
+            attachments::text_without_attachments(
+                &self.input,
+                &self.input_images,
+                &self.input_files,
+            )
+            .trim()
+            .to_owned()
+        };
+        let parsed_command = parse_local_command(&command_input);
+        let attaching = matches!(parsed_command, Some((LocalCommand::Attach, _)));
+        let stage_prompt = self.standby && !attaching;
+        if stage_prompt
             && matches!(
                 self.composer_runtime.origin,
                 super::composer::PromptOrigin::PreparingMove(_)
@@ -512,42 +650,46 @@ impl ChatState {
             return ChatAction::None;
         }
 
-        if self.standby && self.composer_runtime.paste_in_flight {
+        if stage_prompt && self.composer_runtime.paste_in_flight {
             self.defer_startup_submission();
             self.set_notice("Reading clipboard before queueing the prompt…");
             return ChatAction::None;
         }
-        if self.standby
-            && self
-                .input_images
-                .iter()
-                .any(|image| image.image.is_pending())
-        {
+        if stage_prompt && self.has_pending_attachments() {
             self.defer_startup_submission();
-            self.set_notice("Preparing images before queueing the prompt…");
+            self.set_notice(
+                if self.input_files.iter().any(|file| file.file.is_pending()) {
+                    "Preparing files before queueing the prompt…"
+                } else {
+                    "Preparing images before queueing the prompt…"
+                },
+            );
             return ChatAction::None;
         }
-        if !self.standby && !self.input_images.is_empty() && !self.prompt_images_supported {
+        if !self.standby
+            && !attaching
+            && !self.input_images.is_empty()
+            && !self.prompt_images_supported
+        {
             self.set_notice(IMAGE_CAPABILITY_NOTICE);
             return ChatAction::None;
         }
-        let prompt = self.input.trim().to_owned();
-        let command_input = if self.input_images.is_empty() {
-            prompt.clone()
-        } else {
-            attachments::text_without_images(&self.input, &self.input_images)
-                .trim()
-                .to_owned()
-        };
-        let parsed_command = parse_local_command(&command_input);
-        if prompt.is_empty() && self.input_images.is_empty() {
+        if prompt.is_empty() && !self.has_input_attachments() {
             return ChatAction::None;
         }
         // No session is attached yet. A plain prompt is handed to the host,
         // which asks the daemon to deliver it once the session is live, and
         // stays visible here as a queued preview. Commands need a live
         // session to answer them, so they keep the draft and say so.
-        if self.standby {
+        if stage_prompt {
+            if self
+                .input_files
+                .iter()
+                .any(|file| file.file.is_placeholder())
+            {
+                self.set_notice("A file attachment failed; remove its marker or attach it again");
+                return ChatAction::None;
+            }
             if prompt.is_empty() || parsed_command.is_some() || command_input.starts_with('!') {
                 self.set_notice("Commands open when the session is live; the draft is kept.");
                 return ChatAction::None;
@@ -581,6 +723,7 @@ impl ChatState {
                 text: payload.text,
                 kind: QueuedCommandKind::Prompt,
                 images: payload.images,
+                files: payload.files,
                 attachments_unsupported: false,
             });
             return ChatAction::Prompt(prompt);
@@ -591,13 +734,15 @@ impl ChatState {
             self.set_notice("A plan-mode transition is still in progress");
             return ChatAction::None;
         }
-        if !self.input_images.is_empty()
+        if self.has_input_attachments()
             && (command_input.starts_with('!')
                 || parsed_command.is_some_and(|(command, _)| command != LocalCommand::Attach))
         {
-            self.set_notice(
-                "Send the image with a message, or delete its marker before using a command",
-            );
+            self.set_notice(if self.input_files.is_empty() {
+                "Send the image with a message, or delete its marker before using a command"
+            } else {
+                "Send the attachment with a message, or delete its marker before using a command"
+            });
             return ChatAction::None;
         }
         if let Some(command) = prompt.strip_prefix('!') {
@@ -878,13 +1023,6 @@ impl ChatState {
                     };
                 }
                 LocalCommand::Attach => {
-                    if !self.prompt_images_supported {
-                        self.set_notice(ATTACH_UNSUPPORTED_NOTICE);
-                        return ChatAction::None;
-                    }
-                    if !self.allow_image_attachment() {
-                        return ChatAction::None;
-                    }
                     if args.is_empty() {
                         self.set_notice("usage: /attach <path>");
                         return ChatAction::None;
@@ -893,30 +1031,44 @@ impl ChatState {
                         self.set_notice("The worker is closing; this attachment was not processed");
                         return ChatAction::None;
                     }
-                    if self.input_images.len() >= MAX_IMAGES {
+                    let path = super::pasted_paths::path_argument(args);
+                    if self.path_uses_image_mode(&path) {
+                        if self.input_images.len() >= MAX_IMAGES {
+                            self.set_notice(format!(
+                                "A prompt can contain at most {MAX_IMAGES} images"
+                            ));
+                            return ChatAction::None;
+                        }
+                    } else if self.input_files.len() >= mj_core::attachment::MAX_FILES {
                         self.set_notice(format!(
-                            "A prompt can contain at most {MAX_IMAGES} images"
+                            "A prompt can contain at most {} files",
+                            mj_core::attachment::MAX_FILES
                         ));
                         return ChatAction::None;
                     }
-                    let path = super::pasted_paths::path_argument(args);
                     let command = command_input.clone();
                     self.record_prompt_history(&command);
-                    if self.input_images.is_empty() {
+                    if !self.has_input_attachments() {
                         self.clear_input();
-                    } else if let Some(slash_start) =
-                        attachments::untracked_ranges(&self.input, &self.input_images)
-                            .into_iter()
-                            .find_map(|range| {
-                                self.input[range.clone()]
-                                    .char_indices()
-                                    .find(|(_, character)| !character.is_whitespace())
-                                    .map(|(offset, _)| range.start + offset)
-                            })
-                    {
-                        for range in attachments::untracked_ranges(&self.input, &self.input_images)
-                            .into_iter()
-                            .rev()
+                    } else if let Some(slash_start) = attachments::untracked_ranges(
+                        &self.input,
+                        &self.input_images,
+                        &self.input_files,
+                    )
+                    .into_iter()
+                    .find_map(|range| {
+                        self.input[range.clone()]
+                            .char_indices()
+                            .find(|(_, character)| !character.is_whitespace())
+                            .map(|(offset, _)| range.start + offset)
+                    }) {
+                        for range in attachments::untracked_ranges(
+                            &self.input,
+                            &self.input_images,
+                            &self.input_files,
+                        )
+                        .into_iter()
+                        .rev()
                         {
                             let start = range.start.max(slash_start);
                             if start < range.end {
@@ -1000,7 +1152,7 @@ impl ChatState {
         if !history.is_empty() {
             self.record_prompt_history(&history);
         }
-        let payload = if self.input_images.is_empty() {
+        let payload = if !self.has_input_attachments() {
             PromptPayload::text(prompt)
         } else {
             self.draft_payload().trimmed()
@@ -1013,7 +1165,12 @@ impl ChatState {
             self.set_notice("Remove failed images or wait for attachments to finish");
             return ChatAction::None;
         }
+        if payload.files.iter().any(|file| file.file.is_placeholder()) {
+            self.set_notice("Remove failed files or wait for attachments to finish");
+            return ChatAction::None;
+        }
         self.submitting_images = payload.images;
+        self.submitting_files = payload.files;
         self.clear_input();
         ChatAction::Prompt(payload.text)
     }
