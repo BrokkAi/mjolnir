@@ -235,6 +235,104 @@ func withAPIVersion(handler http.Handler) http.Handler {
 	})
 }
 
+// captureStdout runs print with os.Stdout redirected to a pipe, drained while
+// print writes, and returns what it wrote.
+func captureStdout(t *testing.T, print func() error) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var captured bytes.Buffer
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&captured, reader)
+		drained <- err
+	}()
+	saved := os.Stdout
+	os.Stdout = writer
+	printed := func() error {
+		defer func() { os.Stdout = saved }()
+		return print()
+	}()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-drained; err != nil {
+		t.Fatal(err)
+	}
+	if printed != nil {
+		t.Fatal(printed)
+	}
+	return captured.String()
+}
+
+// Hard-won: abab87840: `mj transcript` could not read the Rust daemon's page,
+// whose execution state and item bodies are sealed types that plain
+// encoding/json cannot fill. The responses were recorded from the Rust daemon
+// at 3dde0c11b (an OpenCode session that wrote one file) for the queries the
+// Rust mj sends, and each expected output is the Rust mj's for the same page.
+// The session's checkout path reads /tmp/go-port-merge2a/repo in every file.
+func TestTranscriptPrintsRecordedRustDaemonPagesAsTheRustMjDoes(t *testing.T) {
+	const session = "f18d6fd12a430498505115c5c0270be6"
+	const defaultQuery = "role=user&role=agent&role=message&role=thought&role=plan&role=plan_proposal&role=system"
+	read := func(name string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("testdata", "rust_daemon_exchange", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	for _, check := range []struct {
+		argv     []string
+		query    string
+		response string
+		output   string
+	}{
+		{[]string{"transcript", "--session", session}, defaultQuery,
+			"transcript_default_response.json", "transcript_default_output.txt"},
+		{[]string{"transcript", "--session", session, "--json"}, defaultQuery,
+			"transcript_default_response.json", "transcript_default_json_output.txt"},
+		{[]string{"transcript", "--session", session, "--role", "tool"}, "role=tool",
+			"transcript_tool_response.json", "transcript_tool_output.txt"},
+	} {
+		parsed, ok := mustParse(t, check.argv...).(commandTranscript)
+		if !ok {
+			t.Fatalf("%q did not parse as mj transcript", check.argv)
+		}
+		roles, err := requestedTranscriptRoles(&parsed.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := read(check.response)
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /api/v1/sessions/"+session+"/transcript", func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.RawQuery != check.query {
+				t.Errorf("%q asked for %q; the recording answers %q", check.argv, request.URL.RawQuery, check.query)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			writer.Header().Set("content-type", "application/json")
+			_, _ = writer.Write(response)
+		})
+		daemon := httptest.NewServer(withAPIVersion(mux))
+		api, err := newAPIClient(daemon.URL, "test-token")
+		if err != nil {
+			daemon.Close()
+			t.Fatal(err)
+		}
+		printed := captureStdout(t, func() error {
+			return printTranscript(context.Background(), api, parsed.args, roles)
+		})
+		daemon.Close()
+		if want := string(read(check.output)); printed != want {
+			t.Errorf("mj %s printed\n%s\nthe Rust mj printed\n%s", strings.Join(check.argv, " "), printed, want)
+		}
+	}
+}
+
 func TestStopTaskSendsOpaqueIdsAndAllReportsPartialFailures(t *testing.T) {
 	session := waitResponse(t, "finished", map[string]any{}).Session
 	session.BackgroundTasks = nil

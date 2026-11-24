@@ -2273,7 +2273,7 @@ func runDaemonCommand(ctx context.Context, args daemonArgs) error {
 
 	switch command := args.command.(type) {
 	case daemonCommandEndpoint:
-		return printDaemonEndpoint(ctx, command.existing)
+		return printEndpoint(ctx, command.existing)
 	case daemonCommandAfk:
 		daemon, err := ConnectOrStart(ctx)
 		if err != nil {
@@ -2410,42 +2410,6 @@ func runDaemonCommand(ctx context.Context, args daemonArgs) error {
 		}
 		fmt.Printf("Mjolnir daemon restarted as PID %d%s.\n", restarted.Pid, checked)
 	}
-	return nil
-}
-
-// printDaemonEndpoint prints the machine endpoint (daemon.rs's
-// print_endpoint). Machine endpoint discovery is always local to this
-// launcher; in particular, an SSH placement here must not recursively
-// launch another SSH client.
-func printDaemonEndpoint(ctx context.Context, existing bool) error {
-	path := core.ConfigPath()
-	placement, err := core.DaemonConfigLoadPlacement(path)
-	if err != nil {
-		return err
-	}
-	if placement.Runtime == core.DaemonRuntimeSsh {
-		return fmt.Errorf("%s: daemon endpoint cannot follow SSH placement; choose host, docker or podman on this machine", path)
-	}
-	var daemon *client.DaemonClient
-	if existing {
-		daemon, err = client.ConnectExisting(ctx)
-		if err != nil {
-			return fmt.Errorf("no running daemon available for daemon endpoint --existing: %w", err)
-		}
-	} else if daemon, err = ConnectOrStart(ctx); err != nil {
-		return err
-	}
-	defer daemon.Close()
-	endpoint, err := daemon.Endpoint(ctx)
-	if err != nil {
-		return err
-	}
-	endpoint.ConfigPath = &path
-	encoded, err := core.SerdeJSON(endpoint)
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(encoded))
 	return nil
 }
 

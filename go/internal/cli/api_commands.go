@@ -2444,6 +2444,12 @@ func transcript(ctx context.Context, args transcriptArgs) error {
 	if err != nil {
 		return err
 	}
+	return printTranscript(ctx, api, args, roles)
+}
+
+// printTranscript reads the transcript page args and roles ask for from api
+// and prints it.
+func printTranscript(ctx context.Context, api *apiClient, args transcriptArgs, roles []core.TranscriptRole) error {
 	page, err := api.transcript(ctx, args.session, args.afterSeq, args.limit, roles, args.finishedOnly)
 	if err != nil {
 		return err
@@ -3414,19 +3420,6 @@ func reviewLines(review *server.ViewerTurnReview) []string {
 	return lines
 }
 
-// rustStrLines is Rust's `str::lines`: split at `\n`, drop one `\r` before each
-// break, and no final empty line for a trailing break.
-func rustStrLines(text string) []string {
-	if text == "" {
-		return nil
-	}
-	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-	for index, line := range lines {
-		lines[index] = strings.TrimSuffix(line, "\r")
-	}
-	return lines
-}
-
 // finishedReviewLines is a finished review as plain lines, including each
 // reviewer's full handback and the usage its deleted child session still
 // accounts for.
@@ -3464,7 +3457,7 @@ func finishedReviewLines(response *server.FinishedReviewResponse) []string {
 			lines = append(lines, "    verdict: clean")
 		case core.ReviewVerdictFindings:
 			lines = append(lines, "    verdict: findings")
-			for _, line := range rustStrLines(verdict.Synthesis) {
+			for _, line := range rustLines(verdict.Synthesis) {
 				lines = append(lines, "      "+line)
 			}
 		case core.ReviewVerdictFailed:
@@ -3511,7 +3504,7 @@ func finishedReviewLines(response *server.FinishedReviewResponse) []string {
 			if *handback == "" {
 				lines = append(lines, "      (empty)")
 			}
-			for _, line := range rustStrLines(*handback) {
+			for _, line := range rustLines(*handback) {
 				lines = append(lines, "      "+line)
 			}
 		}

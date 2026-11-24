@@ -4,6 +4,9 @@
 package server
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
@@ -504,6 +507,50 @@ type TranscriptResponse struct {
 	LatestSeq uint64                          `json:"latest_seq"`
 	Execution core.MaterializedExecutionState `json:"execution"`
 	Items     []TranscriptItemView            `json:"items"`
+}
+
+// UnmarshalJSON decodes the sealed body through core's decoder, which plain
+// encoding/json cannot fill; the body is required, as in Rust.
+func (v *TranscriptItemView) UnmarshalJSON(data []byte) error {
+	type plain TranscriptItemView
+	wire := struct {
+		*plain
+		Body json.RawMessage `json:"body"`
+	}{plain: (*plain)(v)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Body == nil {
+		return errors.New("missing field `body`")
+	}
+	body, err := core.DecodeTranscriptBody(wire.Body)
+	if err != nil {
+		return fmt.Errorf("field `body`: %w", err)
+	}
+	v.Body = body
+	return nil
+}
+
+// UnmarshalJSON decodes the sealed execution state through core's decoder,
+// which plain encoding/json cannot fill; it is required, as in Rust.
+func (v *TranscriptResponse) UnmarshalJSON(data []byte) error {
+	type plain TranscriptResponse
+	wire := struct {
+		*plain
+		Execution json.RawMessage `json:"execution"`
+	}{plain: (*plain)(v)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Execution == nil {
+		return errors.New("missing field `execution`")
+	}
+	execution, err := core.UnmarshalMaterializedExecutionStateJSON(wire.Execution)
+	if err != nil {
+		return fmt.Errorf("field `execution`: %w", err)
+	}
+	v.Execution = execution
+	return nil
 }
 
 // PushedBranch is a branch the daemon pushed on the caller's behalf.
