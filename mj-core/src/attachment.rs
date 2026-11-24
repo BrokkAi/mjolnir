@@ -1,7 +1,6 @@
-//! Session-private immutable image blobs. Internal image references are resolved
-//! only at the ACP boundary; image bytes never belong in durable relay commands.
+//! Session-private immutable attachment blobs resolved at the ACP boundary.
 use crate::hex::lower_hex;
-use agent_client_protocol::v1::schema::{ContentBlock, ImageContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, ResourceLink, TextContent};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -14,9 +13,14 @@ use std::{
 
 pub const MAX_IMAGES: usize = 10;
 pub const MAX_IMAGE_BYTES: usize = 700 * 1024;
+pub const MAX_FILES: usize = 10;
+// A 5 MiB payload expands to about 6.67 MiB in base64, leaving room for the
+// JSON envelope within crate::relay::MAX_FRAME_BYTES (8 MiB).
+pub const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
 pub const ATTACHMENT_DIR: &str = "attachments";
 pub const ARCHIVE_ATTACHMENT_DIR: &str = "mj-attachments";
 const URI_PREFIX: &str = "mj-attachment:";
+const FILE_URI_PREFIX: &str = "mj-file-attachment:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +114,168 @@ impl AttachmentRef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileAttachmentRef {
+    pub sha256: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: usize,
+}
+
+pub fn sanitize_filename(name: &str) -> String {
+    const MAX_FILENAME_BYTES: usize = 128;
+    let name = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name = if matches!(name.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic()) {
+        &name[2..]
+    } else {
+        name
+    };
+    let name: String = name
+        .chars()
+        .filter(|ch| !ch.is_ascii_control())
+        .map(|ch| if ch == ':' { '_' } else { ch })
+        .collect();
+    let name = name.trim();
+    if matches!(name, "" | "." | "..") {
+        return "attachment".into();
+    }
+    if name.len() <= MAX_FILENAME_BYTES {
+        return name.into();
+    }
+
+    let (stem, extension) = match name.rfind('.') {
+        Some(index) if index > 0 && name.len() - index < MAX_FILENAME_BYTES => name.split_at(index),
+        _ => (name, ""),
+    };
+    let end = stem.floor_char_boundary(MAX_FILENAME_BYTES - extension.len());
+    let truncated = format!("{}{extension}", stem[..end].trim_end());
+    if matches!(truncated.as_str(), "" | "." | "..") {
+        return "attachment".into();
+    }
+    truncated
+}
+
+impl FileAttachmentRef {
+    pub fn new(bytes: &[u8], filename: &str, mime_type: String) -> Result<Self> {
+        ensure!(
+            !mime_type.chars().any(char::is_control),
+            "invalid file attachment MIME type"
+        );
+        ensure!(
+            bytes.len() <= MAX_FILE_BYTES,
+            "file attachment exceeds 5 MiB"
+        );
+        let reference = Self {
+            sha256: lower_hex(Sha256::digest(bytes)),
+            filename: sanitize_filename(filename),
+            mime_type: mime_type.trim().into(),
+            size: bytes.len(),
+        };
+        reference.verify(bytes)?;
+        Ok(reference)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(valid_digest(&self.sha256), "invalid attachment digest");
+        ensure!(self.size <= MAX_FILE_BYTES, "file attachment exceeds 5 MiB");
+        ensure!(
+            self.filename == sanitize_filename(&self.filename),
+            "invalid attachment filename"
+        );
+        ensure!(
+            !self.mime_type.is_empty()
+                && self.mime_type.len() <= 128
+                && self.mime_type.trim() == self.mime_type
+                && !self.mime_type.chars().any(char::is_control),
+            "invalid file attachment MIME type"
+        );
+        Ok(())
+    }
+
+    pub fn verify(&self, bytes: &[u8]) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            bytes.len() == self.size && lower_hex(Sha256::digest(bytes)) == self.sha256,
+            "attachment data does not match its digest or size"
+        );
+        Ok(())
+    }
+
+    pub fn uri(&self) -> String {
+        format!(
+            "{FILE_URI_PREFIX}{}",
+            URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(self).expect("attachment metadata serializes"))
+        )
+    }
+
+    pub fn from_uri(uri: &str) -> Result<Option<Self>> {
+        let Some(encoded) = uri.strip_prefix(FILE_URI_PREFIX) else {
+            return Ok(None);
+        };
+        ensure!(uri.len() <= 2048, "file attachment reference is too large");
+        let reference: Self = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(encoded)
+                .context("decode file attachment reference")?,
+        )?;
+        reference.validate()?;
+        Ok(Some(reference))
+    }
+
+    pub fn content_block(&self) -> ContentBlock {
+        ContentBlock::ResourceLink(
+            ResourceLink::new(self.filename.clone(), self.uri())
+                .mime_type(self.mime_type.clone())
+                .size(self.size as i64),
+        )
+    }
+}
+
+pub fn file_reference(link: &ResourceLink) -> Result<Option<FileAttachmentRef>> {
+    let reference = FileAttachmentRef::from_uri(&link.uri)?;
+    if let Some(reference) = &reference {
+        ensure!(
+            link.name == reference.filename
+                && link
+                    .mime_type
+                    .as_ref()
+                    .is_none_or(|mime_type| mime_type == &reference.mime_type)
+                && link.size.is_none_or(|size| size == reference.size as i64),
+            "attachment reference conflicts with resource link"
+        );
+    }
+    Ok(reference)
+}
+
+pub fn file_references(prompt: &[ContentBlock]) -> Result<Vec<FileAttachmentRef>> {
+    let mut result = Vec::new();
+    for block in prompt {
+        if let ContentBlock::ResourceLink(link) = block
+            && let Some(reference) = file_reference(link)?
+        {
+            ensure!(
+                result.len() < MAX_FILES,
+                "a message can contain at most 10 files"
+            );
+            result.push(reference);
+        }
+    }
+    Ok(result)
+}
+
+pub fn has_file_references(prompt: &[ContentBlock]) -> bool {
+    prompt.iter().any(|block| matches!(block, ContentBlock::ResourceLink(link) if link.uri.starts_with(FILE_URI_PREFIX)))
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 pub fn image_reference(image: &ImageContent) -> Result<Option<AttachmentRef>> {
     let Some(uri) = image.uri.as_deref() else {
         return Ok(None);
@@ -144,7 +310,7 @@ pub fn references(prompt: &[ContentBlock]) -> Result<Vec<AttachmentRef>> {
     Ok(result)
 }
 pub fn has_references(prompt: &[ContentBlock]) -> bool {
-    prompt.iter().any(|block| matches!(block, ContentBlock::Image(image) if image.uri.as_deref().is_some_and(|uri| uri.starts_with(URI_PREFIX))))
+    has_file_references(prompt) || prompt.iter().any(|block| matches!(block, ContentBlock::Image(image) if image.uri.as_deref().is_some_and(|uri| uri.starts_with(URI_PREFIX))))
 }
 
 #[derive(Debug, Clone)]
@@ -219,31 +385,13 @@ impl AttachmentStore {
         if self.existing_attachment_valid(reference)?.unwrap_or(false) {
             return Ok(());
         }
-        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
-        file.write_all(bytes)?;
-        file.as_file().sync_all()?;
-        // The store lock serializes installers, and `persist` replaces a
-        // corrupt regular blob with one verified above in a single rename.
-        file.persist(&path).map_err(|error| error.error)?;
-        #[cfg(unix)]
-        fs::File::open(&self.root)?.sync_all()?;
-        Ok(())
+        write_attachment(&path, bytes)
     }
     pub fn read(&self, reference: &AttachmentRef) -> Result<Vec<u8>> {
         reference.validate()?;
         let path = self.root.join(&reference.sha256);
-        ensure!(
-            fs::symlink_metadata(&path)
-                .with_context(|| format!("missing image attachment {}", reference.sha256))?
-                .file_type()
-                .is_file(),
-            "attachment is not a regular file"
-        );
-        ensure!(
-            fs::metadata(&path)?.len() == reference.size as u64,
-            "attachment has incorrect size"
-        );
-        let bytes = fs::read(&path)?;
+        let bytes = read_attachment(&path, reference.size)?
+            .with_context(|| format!("missing image attachment {}", reference.sha256))?;
         reference.verify(&bytes)?;
         Ok(bytes)
     }
@@ -252,31 +400,78 @@ impl AttachmentStore {
         Ok(self.existing_attachment_valid(reference)?.unwrap_or(false))
     }
 
-    /// Return whether the existing path is a valid copy of `reference`.
-    /// Missing files and content corruption are ordinary cache misses. Filesystem
-    /// failures and non-regular paths remain errors so callers do not hide a
-    /// broken store or unsafe path.
     fn existing_attachment_valid(&self, reference: &AttachmentRef) -> Result<Option<bool>> {
-        let path = self.root.join(&reference.sha256);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("inspect image attachment {}", reference.sha256));
-            }
-        };
-        ensure!(
-            metadata.file_type().is_file(),
-            "attachment is not a regular file"
-        );
-        if metadata.len() != reference.size as u64 {
-            return Ok(Some(false));
-        }
-        let bytes = fs::read(&path)
-            .with_context(|| format!("read image attachment {}", reference.sha256))?;
-        Ok(Some(reference.verify(&bytes).is_ok()))
+        existing_attachment_valid(
+            &self.root.join(&reference.sha256),
+            reference.size,
+            |bytes| reference.verify(bytes),
+        )
     }
+
+    pub fn install_file(&self, reference: &FileAttachmentRef, bytes: &[u8]) -> Result<()> {
+        let _lock = self.lock()?;
+        self.ensure_open()?;
+        reference.verify(bytes)?;
+        ensure_attachment_directory(&self.root)?;
+        let path = self.root.join(&reference.sha256);
+        if existing_attachment_valid(&path, reference.size, |bytes| reference.verify(bytes))?
+            != Some(true)
+        {
+            write_attachment(&path, bytes)?;
+        }
+        Ok(())
+    }
+
+    pub fn read_file(&self, reference: &FileAttachmentRef) -> Result<Vec<u8>> {
+        let _lock = self.lock()?;
+        self.ensure_open()?;
+        self.read_file_blob(reference)
+    }
+
+    fn read_file_blob(&self, reference: &FileAttachmentRef) -> Result<Vec<u8>> {
+        reference.validate()?;
+        let path = self.root.join(&reference.sha256);
+        let bytes = if attachment_directory_exists(&self.root)? {
+            read_attachment(&path, reference.size)?
+        } else {
+            None
+        }
+        .with_context(|| format!("missing file attachment {}", reference.sha256))?;
+        reference.verify(&bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn contains_file(&self, reference: &FileAttachmentRef) -> Result<bool> {
+        let _lock = self.lock()?;
+        self.ensure_open()?;
+        reference.validate()?;
+        if !attachment_directory_exists(&self.root)? {
+            return Ok(false);
+        }
+        Ok(existing_attachment_valid(
+            &self.root.join(&reference.sha256),
+            reference.size,
+            |bytes| reference.verify(bytes),
+        )? == Some(true))
+    }
+
+    pub fn materialize_file(&self, reference: &FileAttachmentRef) -> Result<PathBuf> {
+        let _lock = self.lock()?;
+        self.ensure_open()?;
+        let bytes = self.read_file_blob(reference)?;
+        let files = self.root.join("files");
+        ensure_attachment_directory(&files)?;
+        let digest_dir = files.join(&reference.sha256[..16]);
+        ensure_attachment_directory(&digest_dir)?;
+        let path = digest_dir.join(&reference.filename);
+        if existing_attachment_valid(&path, reference.size, |bytes| reference.verify(bytes))?
+            != Some(true)
+        {
+            write_attachment(&path, &bytes)?;
+        }
+        Ok(path)
+    }
+
     /// Archive blobs independently of any prompt; references already live in
     /// canonical history. Unfinished temporary files are never exported.
     pub fn archive_artifacts(&self) -> Result<Vec<crate::archive::NativeArtifact>> {
@@ -290,11 +485,7 @@ impl AttachmentStore {
             let Some(digest) = name.to_str() else {
                 continue;
             };
-            if digest.len() != 64
-                || !digest
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
+            if !valid_digest(digest) {
                 continue;
             }
             ensure!(
@@ -302,8 +493,8 @@ impl AttachmentStore {
                 "attachment is not a regular file"
             );
             ensure!(
-                entry.metadata()?.len() <= MAX_IMAGE_BYTES as u64,
-                "attachment exceeds image budget"
+                entry.metadata()?.len() <= MAX_FILE_BYTES as u64,
+                "attachment exceeds file budget"
             );
             let data = fs::read(entry.path())?;
             ensure!(
@@ -332,23 +523,16 @@ impl AttachmentStore {
             .to_str()
             .context("invalid archived attachment digest")?;
         ensure!(
-            bytes.len() <= MAX_IMAGE_BYTES
-                && !bytes.is_empty()
-                && lower_hex(Sha256::digest(bytes)) == digest,
+            bytes.len() <= MAX_FILE_BYTES && lower_hex(Sha256::digest(bytes)) == digest,
             "archived attachment failed integrity check"
         );
         fs::create_dir_all(&self.root)?;
-        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
-        file.write_all(bytes)?;
-        file.as_file().sync_all()?;
-        file.persist(self.root.join(digest))
-            .map_err(|error| error.error)?;
-        #[cfg(unix)]
-        fs::File::open(&self.root)?.sync_all()?;
+        write_attachment(&self.root.join(digest), bytes)?;
         Ok(true)
     }
     pub fn resolve(&self, prompt: &mut [ContentBlock]) -> Result<()> {
         references(prompt)?;
+        file_references(prompt)?;
         for block in prompt {
             if let ContentBlock::Image(image) = block
                 && let Some(reference) = image_reference(image)?
@@ -356,9 +540,121 @@ impl AttachmentStore {
                 image.data =
                     base64::engine::general_purpose::STANDARD.encode(self.read(&reference)?);
                 image.uri = None;
+            } else if let ContentBlock::ResourceLink(link) = block
+                && let Some(reference) = file_reference(link)?
+            {
+                let path = self.materialize_file(&reference)?;
+                *block = ContentBlock::Text(TextContent::new(format!(
+                    "Attached file: {} ({}, {}) at {}",
+                    reference.filename,
+                    reference.mime_type,
+                    format_byte_size(reference.size),
+                    path.display()
+                )));
             }
         }
         Ok(())
+    }
+}
+
+fn ensure_attachment_directory(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            fs::File::open(
+                path.parent()
+                    .context("attachment directory has no parent")?,
+            )?
+            .sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure!(
+                attachment_directory_exists(path)?,
+                "attachment directory disappeared: {}",
+                path.display()
+            );
+        }
+        Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
+    }
+    Ok(())
+}
+
+fn attachment_directory_exists(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    ensure!(
+        metadata.is_dir(),
+        "attachment directory is not a regular directory: {}",
+        path.display()
+    );
+    Ok(true)
+}
+
+fn attachment_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    ensure!(
+        metadata.is_file(),
+        "attachment is not a regular file: {}",
+        path.display()
+    );
+    Ok(Some(metadata))
+}
+
+fn read_attachment(path: &Path, size: usize) -> Result<Option<Vec<u8>>> {
+    let Some(metadata) = attachment_metadata(path)? else {
+        return Ok(None);
+    };
+    ensure!(
+        metadata.len() == size as u64,
+        "attachment has incorrect size"
+    );
+    Ok(Some(
+        fs::read(path).with_context(|| format!("read {}", path.display()))?,
+    ))
+}
+
+/// A missing or corrupt blob is a cache miss. Filesystem errors and unsafe
+/// paths must be reported to the caller.
+fn existing_attachment_valid(
+    path: &Path,
+    size: usize,
+    verify: impl FnOnce(&[u8]) -> Result<()>,
+) -> Result<Option<bool>> {
+    let Some(metadata) = attachment_metadata(path)? else {
+        return Ok(None);
+    };
+    if metadata.len() != size as u64 {
+        return Ok(Some(false));
+    }
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(Some(verify(&bytes).is_ok()))
+}
+
+fn write_attachment(path: &Path, bytes: &[u8]) -> Result<()> {
+    let directory = path.parent().context("attachment path has no parent")?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn format_byte_size(size: usize) -> String {
+    if size < 1024 {
+        format!("{size} B")
+    } else if size < 1024 * 1024 {
+        format!("{:.1} KiB", size as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", size as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -442,5 +738,114 @@ mod tests {
         let bytes = photo();
         let reference = AttachmentRef::new(&bytes, "image/png".into(), 100, 100).unwrap();
         assert!(references(&vec![reference.content_block(); 11]).is_err());
+    }
+    #[test]
+    fn file_attachment_names_and_metadata_are_safe() {
+        for (raw, expected) in [
+            ("../../etc/passwd", "passwd"),
+            (r"C:\foo\bar.txt", "bar.txt"),
+            ("C:relative.txt", "relative.txt"),
+            (" foo\0\n\u{7f}.txt ", "foo.txt"),
+            (".", "attachment"),
+            ("..", "attachment"),
+            ("", "attachment"),
+        ] {
+            assert_eq!(sanitize_filename(raw), expected);
+        }
+        let long = sanitize_filename(&format!("{}.pdf", "界".repeat(200)));
+        assert_eq!(long, format!("{}.pdf", "界".repeat(41)));
+        let reference = FileAttachmentRef::new(b"abc", &long, " text/plain ".into()).unwrap();
+        assert_eq!(reference.mime_type, "text/plain");
+        assert_eq!(
+            FileAttachmentRef::from_uri(&reference.uri()).unwrap(),
+            Some(reference.clone())
+        );
+        assert!(file_references(&vec![reference.content_block(); MAX_FILES + 1]).is_err());
+        assert!(
+            FileAttachmentRef::from_uri(&format!("{FILE_URI_PREFIX}{}", "x".repeat(2048))).is_err()
+        );
+        assert!(reference.verify(b"xyz").is_err());
+        assert!(reference.verify(b"abcd").is_err());
+        assert!(FileAttachmentRef::new(b"", "empty", "text/plain\r\n".into()).is_err());
+        let mut bad = reference.clone();
+        bad.sha256.make_ascii_uppercase();
+        assert!(bad.validate().is_err());
+        bad = reference;
+        bad.size = MAX_FILE_BYTES + 1;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn file_attachment_checkpoint_preserves_blobs_and_resolves_worker_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AttachmentStore::worker(dir.path());
+        let restored_dir = tempfile::tempdir().unwrap();
+        let restored = AttachmentStore::worker(restored_dir.path());
+        let bytes = vec![0xa5; MAX_IMAGE_BYTES + 1];
+        let reference =
+            FileAttachmentRef::new(&bytes, "input.bin", "application/octet-stream".into()).unwrap();
+        let empty = FileAttachmentRef::new(&[], "empty.txt", "text/plain".into()).unwrap();
+        assert!(!store.contains_file(&reference).unwrap());
+        store.install_file(&reference, &bytes).unwrap();
+        store.install_file(&empty, &[]).unwrap();
+        let path = store.materialize_file(&reference).unwrap();
+        fs::write(&path, vec![0; bytes.len()]).unwrap();
+        assert_eq!(store.materialize_file(&reference).unwrap(), path);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+
+        let artifacts = store.archive_artifacts().unwrap();
+        assert_eq!(artifacts.len(), 2);
+        for artifact in artifacts {
+            assert!(
+                restored
+                    .restore_artifact(&artifact.relative_path, &artifact.data.bytes().unwrap())
+                    .unwrap()
+            );
+        }
+        assert_eq!(restored.read_file(&empty).unwrap(), Vec::<u8>::new());
+        let mut prompt = [reference.content_block()];
+        assert!(has_references(&prompt));
+        restored.resolve(&mut prompt).unwrap();
+        let path = restored
+            .root()
+            .join("files")
+            .join(&reference.sha256[..16])
+            .join("input.bin");
+        assert!(
+            matches!(&prompt[0], ContentBlock::Text(text) if text.text.ends_with(&format!(" at {}", path.display())))
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        restored.remove_session_data().unwrap();
+        assert!(restored.contains_file(&reference).is_err());
+        assert!(restored.read_file(&reference).is_err());
+        assert!(restored.materialize_file(&reference).is_err());
+        assert!(restored.install_file(&reference, &bytes).is_err());
+        assert!(!restored.root().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_attachment_materialization_rejects_symlinks_at_each_level() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let store = AttachmentStore::worker(dir.path());
+        let reference = FileAttachmentRef::new(b"abc", "input.txt", "text/plain".into()).unwrap();
+        store.install_file(&reference, b"abc").unwrap();
+        let mut path = store.root().join("files");
+        for component in [&reference.sha256[..16], reference.filename.as_str()] {
+            symlink(outside.path(), &path).unwrap();
+            assert!(store.materialize_file(&reference).is_err());
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+            path.push(component);
+        }
+        let external_file = outside.path().join("external");
+        fs::write(&external_file, b"abc").unwrap();
+        symlink(&external_file, &path).unwrap();
+        assert!(store.materialize_file(&reference).is_err());
+        assert_eq!(fs::read(&external_file).unwrap(), b"abc");
     }
 }

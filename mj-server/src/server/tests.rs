@@ -3465,6 +3465,138 @@ async fn terminal_upload_can_stage_before_image_capability_is_published() {
     }
 }
 
+#[tokio::test]
+async fn generic_attachment_upload_checks_mode_and_limits_on_non_image_sessions() {
+    if !in_isolated_store("generic_attachment_upload_checks_mode_and_limits_on_non_image_sessions")
+    {
+        return;
+    }
+    let (app, _, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    for (query, bytes, expected) in [
+        ("?mode=file", vec![], StatusCode::OK),
+        (
+            "?mode=file",
+            vec![0; MAX_FILE_BYTES + 1],
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        ("?mode=other", vec![], StatusCode::BAD_REQUEST),
+        ("?mode=image", vec![], StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/sessions/session-1/attachments{query}"))
+                    .header(COOKIE, &cookie)
+                    .header("x-mjolnir-filename", "caf%C3%A9%20%2B.txt")
+                    .header(CONTENT_TYPE, "Text/Plain; charset=utf-8")
+                    .body(Body::from(bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        if expected == StatusCode::OK {
+            let reference: FileAttachmentRef =
+                serde_json::from_value(body["file"].clone()).unwrap();
+            assert_eq!(reference.filename, "café +.txt");
+            assert_eq!(reference.mime_type, "text/plain");
+            assert_eq!(reference.size, 0);
+            let store = AttachmentStore::controller("session-1").unwrap();
+            assert!(store.read_file(&reference).unwrap().is_empty());
+        } else {
+            let message = match query {
+                "?mode=file" => "file is too large; files must be 5 MiB or smaller",
+                "?mode=other" => "unsupported attachment upload mode",
+                _ => "this session does not support image prompts",
+            };
+            assert_eq!(body["error"], message);
+        }
+    }
+}
+
+#[tokio::test]
+async fn generic_attachment_prompt_checks_session_scope_before_installing_inline_images() {
+    if !in_isolated_store(
+        "generic_attachment_prompt_checks_session_scope_before_installing_inline_images",
+    ) {
+        return;
+    }
+    let bytes = b"external session data";
+    let reference = FileAttachmentRef::new(bytes, "notes.txt", "text/plain".to_owned()).unwrap();
+    AttachmentStore::controller("other-session")
+        .unwrap()
+        .install_file(&reference, bytes)
+        .unwrap();
+    let store = AttachmentStore::controller("session-1").unwrap();
+    let (app, mut actions, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    let prompt = |files, images| {
+        serde_json::to_string(&ControllerAction::Prompt {
+            command_id: None,
+            session_id: "session-1".into(),
+            text: String::new(),
+            images,
+            files,
+        })
+        .unwrap()
+    };
+    let mut invalid = reference.clone();
+    invalid.filename = "../notes.txt".into();
+    for (files, message) in [
+        (
+            vec![reference.clone()],
+            Some("the file attachment is unavailable"),
+        ),
+        (
+            vec![reference.clone(); MAX_FILES + 1],
+            Some("a prompt may contain at most 10 files"),
+        ),
+        (vec![invalid], None),
+    ] {
+        let response = post_action(
+            app.clone(),
+            cookie.clone(),
+            prompt(files, vec![sample_valid_image()]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        if let Some(message) = message {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+                message
+            );
+        }
+        assert!(actions.try_recv().is_err());
+        assert!(
+            !store.root().exists(),
+            "refused prompt wrote an inline blob"
+        );
+    }
+
+    store.install_file(&reference, bytes).unwrap();
+    let (app, mut actions, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].prompt_images_supported = false;
+    });
+    let cookie = login_cookie(&app).await;
+    let response = mj_core::runtime::spawn(post_action(
+        app,
+        cookie,
+        prompt(vec![reference.clone()], Vec::new()),
+    ));
+    let action = actions.recv().await.unwrap();
+    let ControllerAction::Prompt { files, text, .. } = action.action else {
+        panic!("expected a prompt");
+    };
+    assert_eq!(files, vec![reference]);
+    assert!(text.is_empty());
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
 /// Base64 inflates an upload by a third, so two ordinary photographs pass
 /// the general body limit even when each one fits it. The action route
 /// carries prompts, so it is the route that gets the larger bound.
@@ -3480,6 +3612,7 @@ async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
         command_id: None,
         session_id: "session-1".into(),
         text: "look at these".into(),
+        files: Vec::new(),
         images: vec![image.clone(), image],
     })
     .unwrap();
@@ -3509,6 +3642,7 @@ async fn oversized_normalized_inline_image_prompt_writes_no_blobs() {
         command_id: Some("oversized-inline-image".into()),
         session_id: "session-1".into(),
         text,
+        files: Vec::new(),
         images: vec![sample_valid_image()],
     })
     .unwrap();
@@ -3559,6 +3693,7 @@ async fn a_body_over_the_prompt_limit_is_still_refused() {
         command_id: None,
         session_id: "session-1".into(),
         text: String::new(),
+        files: Vec::new(),
         images: vec![image],
     })
     .unwrap();
@@ -3582,6 +3717,7 @@ async fn malformed_image_payloads_never_reach_the_controller() {
             command_id: None,
             session_id: "session-1".into(),
             text: String::new(),
+            files: Vec::new(),
             images: vec![ViewerPromptImage {
                 data_base64: data.into(),
                 mime_type: mime.into(),
@@ -3758,6 +3894,7 @@ fn shell_action_validation_reserves_bang_prompts_and_checks_cancellation_ids() {
                 command_id: None,
                 session_id: "session-1".into(),
                 text: "!cargo test".into(),
+                files: Vec::new(),
                 images: Vec::new(),
             },
             &snapshot,

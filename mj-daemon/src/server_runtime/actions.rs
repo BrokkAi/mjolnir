@@ -72,6 +72,25 @@ pub(super) async fn record_user_prompt(session_id: String, command_id: String, t
     tracing::warn!(%error, %session_id, "prompt history could not be stored");
 }
 
+pub(super) fn prepare_phone_prompt(
+    text: String,
+    images: Vec<crate::server::ViewerPromptImage>,
+    files: Vec<mj_core::attachment::FileAttachmentRef>,
+) -> Result<(RelayCommand, String)> {
+    let prompt = phone_prompt_blocks(text.clone(), images, files);
+    let history = if text.is_empty() {
+        let blocks = serde_json::to_value(&prompt)?;
+        mj_core::transcript::materialized_content_text(
+            blocks
+                .as_array()
+                .context("serialized prompt content is not an array")?,
+        )
+    } else {
+        text
+    };
+    Ok((RelayCommand::Prompt { prompt }, history))
+}
+
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -243,6 +262,7 @@ pub(super) async fn apply_phone_action(
             session_id,
             text,
             images,
+            files,
             command_id,
         } => {
             let session = services
@@ -250,14 +270,10 @@ pub(super) async fn apply_phone_action(
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?;
             let command_id = command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?;
-            record_user_prompt(session_id, command_id.clone(), text.clone()).await;
+            let (command, history) = prepare_phone_prompt(text, images, files)?;
+            record_user_prompt(session_id, command_id.clone(), history).await;
             session
-                .submit(
-                    command_id,
-                    RelayCommand::Prompt {
-                        prompt: phone_prompt_blocks(text, images),
-                    },
-                )
+                .submit(command_id, command)
                 .await
                 .map_err(prompt_submission_error)?;
             Ok(())
