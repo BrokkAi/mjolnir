@@ -2082,7 +2082,7 @@ L 0 4
      </g>
     </g>
     <g id="text_9">
-     <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #0b0b0b" x="375.84" y="593.469969" transform="rotate(-0 375.84 593.469969)">Latency budget: slowest reviewer's median (seconds, log scale)</text>
+     <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #0b0b0b" x="375.84" y="593.469969" transform="rotate(-0 375.84 593.469969)">Latency budget: simulated median review time (seconds, log scale)</text>
     </g>
    </g>
    <g id="matplotlib.axis_2">

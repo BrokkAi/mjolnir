@@ -288,7 +288,7 @@ def draw(panel, domain, vmax, geometry):
         axis.set_major_locator(FixedLocator([t for t in ticks]))
         axis.set_major_formatter(FuncFormatter(lambda v, _, fmt=fmt: fmt.format(v)))
         axis.set_minor_locator(NullLocator())
-    ax.set_xlabel("Latency budget: slowest reviewer's median (seconds, log scale)",
+    ax.set_xlabel("Latency budget: simulated median review time (seconds, log scale)",
                   fontsize=13, color=INK, labelpad=10)
     ax.set_ylabel("Cost budget: estimated API cost per diff (USD, log scale)",
                   fontsize=13, color=INK, labelpad=10)
@@ -419,7 +419,7 @@ def svg_panel(panel, domain, vmax):
                            f'<text x="{x0 - 9}" y="{p + 4:.2f}" text-anchor="end" class="tl">${tick:g}</text>')
     out.append(f'<rect x="{x0}" y="{y0}" width="{w}" height="{h}" fill="none" stroke="#b9b8b2"/>')
     out.append(f'<text x="{x0 + w / 2}" y="{y0 + h + 46}" text-anchor="middle" class="al">'
-               "Latency budget: slowest reviewer's median (s, log)</text>")
+               "Latency budget: simulated median review time (s, log)</text>")
     out.append(f'<text transform="translate(16 {y0 + h / 2}) rotate(-90)" text-anchor="middle" '
                'class="al">Cost budget: estimated API USD per diff (log)</text>')
     by_name = {o["name"]: o for o in panel["options"]}
@@ -496,10 +496,21 @@ function tied(P, T, C) {
 }
 function upper(a, v) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= v) lo = m + 1; else hi = m; } return lo - 1; }
 function gridScore(P, T, C) { const i = upper(P.ts, T), j = upper(P.cs, C); return i < 0 || j < 0 ? null : P.f[i][j]; }
-function cellRange(P, T, C) {
-  const i = upper(P.ts, T), j = upper(P.cs, C);
-  const t1 = i + 1 < P.ts.length ? fmtT(P.ts[i + 1]) : null, c1 = j + 1 < P.cs.length ? fmtC(P.cs[j + 1]) : null;
-  return `latency ${fmtT(P.ts[i])} to ${t1 ? 'below ' + t1 : 'and above'}, cost ${fmtC(P.cs[j])} to ${c1 ? 'below ' + c1 : 'and above'}`;
+// Closed-lower, open-upper interval of thresholds containing v; below the first threshold nothing fits.
+function span(vals, v, fmt) {
+  const i = upper(vals, v);
+  if (i < 0) return `below ${fmt(vals[0])}`;
+  return i + 1 < vals.length ? `${fmt(vals[i])} to below ${fmt(vals[i + 1])}` : `${fmt(vals[i])} and above`;
+}
+const distinct = (P, key) => [...new Set(P.options.map(o => o[key]))].sort((a, b) => a - b);
+// Budget band between observed setup latencies and costs; the pointer is never rounded into an allowance.
+function budgetBand(P, T, C) { return `latency ${span(distinct(P, 't'), T, fmtT)}, cost ${span(distinct(P, 'c'), C, fmtC)}`; }
+function cellRange(P, T, C) { return `latency ${span(P.ts, T, fmtT)}, cost ${span(P.cs, C, fmtC)}`; }
+// Pure hit test: SVG-space point to budget coordinates, or null outside the plot rectangle.
+function plotBudget(geo, p) {
+  if (p.x < geo.x0 || p.x > geo.x0 + geo.w || p.y < geo.y0 || p.y > geo.y0 + geo.h) return null;
+  return {T: Math.exp(geo.t0 + (p.x - geo.x0) / geo.w * (geo.t1 - geo.t0)),
+          C: Math.exp(geo.c0 + (1 - (p.y - geo.y0) / geo.h) * (geo.c1 - geo.c0))};
 }
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function optionItem(o, note) {
@@ -507,7 +518,7 @@ function optionItem(o, note) {
 }
 function budgetTip(P, T, C) {
   const box = el('div'); const r = tied(P, T, C);
-  box.append(el('div', 'm', `${P.title}: budget ≤ ${fmtT(T)} and ≤ ${fmtC(C)}`));
+  box.append(el('div', 'm', `${P.title}: budget ${budgetBand(P, T, C)}`));
   if (!r) { box.append(el('div', '', 'No priced setup fits both limits.')); return box; }
   const check = gridScore(P, T, C);
   if (check !== r.best) box.append(el('div', '', `DATA MISMATCH: map ${check}, options ${r.best}`));
@@ -546,11 +557,14 @@ function setup(P) {
   const px = t => x0 + w * (Math.log(t) - t0) / (t1 - t0), py = c => y0 + h * (1 - (Math.log(c) - c0) / (c1 - c0));
   const cross = svg.querySelector('.cross');
   crosses.push(cross);
-  function show(ev) {
+  const geo = {x0, y0, w, h, t0, t1, c0, c1};
+  function locate(ev) {
     const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
-    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
-    if (p.x < x0 || p.x > x0 + w || p.y < y0 || p.y > y0 + h) { clearAll(); return false; }
-    const T = Math.exp(t0 + (p.x - x0) / w * (t1 - t0)), C = Math.exp(c0 + (1 - (p.y - y0) / h) * (c1 - c0));
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse()), b = plotBudget(geo, p);
+    return b && {p, T: b.T, C: b.C};
+  }
+  function show(ev, hit) {
+    const {p, T, C} = hit;
     let best = null, bestD = 10;
     const consider = (kind, id, t, c) => { const d = Math.hypot(px(t) - p.x, py(c) - p.y); if (d < bestD) { bestD = d; best = [kind, id]; } };
     P.greptile.forEach((q, i) => consider('g', i, q.t, q.c));
@@ -565,14 +579,20 @@ function setup(P) {
       l.setAttribute('stroke', '#0b0b0b'); l.setAttribute('stroke-width', '.7'); l.setAttribute('stroke-dasharray', '3 3');
       cross.append(l);
     }
-    return true;
   }
-  svg.addEventListener('pointermove', ev => { if (!pinned) show(ev); });
+  svg.addEventListener('pointermove', ev => {
+    if (pinned) return;
+    const hit = locate(ev);
+    if (hit) show(ev, hit); else clearAll();
+  });
   svg.addEventListener('pointerleave', () => { if (!pinned) clearAll(); });
-  // A click pins this map (switching from any other map), or unpins when this map is already pinned.
+  // A click inside this plot pins this map (switching from any other map), or unpins when it is already
+  // pinned. A click outside the plot changes nothing, so it cannot drop an existing pin.
   svg.addEventListener('click', ev => {
-    if (pinned === svg) { pinned = null; show(ev); }
-    else if (show(ev)) pinned = svg;
+    const hit = locate(ev);
+    if (!hit) return;
+    if (pinned === svg) { pinned = null; show(ev, hit); }
+    else { show(ev, hit); pinned = svg; }
   });
 }
 document.addEventListener('keydown', ev => { if (ev.key === 'Escape') { pinned = null; clearAll(); } });
@@ -605,9 +625,10 @@ def notes(payload):
         "its repository context could not be pinned to each diff's commit.",
         "Both panels share one absolute color scale, so the medium + high panel stays in the lower "
         "half of it. Compare colors across panels, not region shapes.",
-        "Cost covers reviewer turns only. It excludes carrier work, judging and subscriptions. "
-        "Latency simulates simultaneous starts and takes the slowest reviewer's median; it "
-        "excludes startup and contention.",
+        "Cost covers reviewer turns only. It excludes carrier work, judging and subscriptions.",
+        "Review time is simulated. Reviewers start together, so each sampled session assignment "
+        "takes the slowest reviewer on every diff; the median of those times across diffs is "
+        "averaged over many sampled assignments. It excludes startup and contention.",
         "Findings are expected confirmed totals across 70 historical diffs from current "
         "Opus 5.5/high judgments. Inputs are the published CSVs' rounded values, so this is not an "
         "audited full-precision frontier. Equal rounded scores count as ties.",

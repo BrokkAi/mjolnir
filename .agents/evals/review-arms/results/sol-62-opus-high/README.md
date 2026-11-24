@@ -167,8 +167,10 @@ per added finding jumps most (Terra 6.1/xhigh in both maps). The price break
 describes this option set only.
 
 Cost covers reviewer turns only and excludes carrier work, judging and
-subscriptions. Latency simulates simultaneous starts and takes the slowest
-reviewer's median, excluding startup and contention. Findings are expected
+subscriptions. Review time is simulated: reviewers start together, so each
+sampled session assignment takes the slowest reviewer on every diff, and the
+median of those times across diffs is averaged over many sampled assignments
+(`pareto.py`). It excludes startup and contention. Findings are expected
 confirmed totals over the 70 diffs under the current Opus 5.5/high judgments.
 The CSVs hold rounded values, so equal scores are ties at that precision and
 this is not an audited full-precision frontier. The CSV `frontier` flags do not
