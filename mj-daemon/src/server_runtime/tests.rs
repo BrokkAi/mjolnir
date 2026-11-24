@@ -956,12 +956,19 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     operational.get_mut("session-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
         started_at_ms: 1_000,
     });
+    operational.get_mut("session-1").unwrap().turn_controls = Some(mj_core::relay::TurnControls {
+        status: mj_core::relay::TurnControlStatus::Ready,
+        primary: None,
+        interrupt: Some(mj_core::relay::RelayCommand::CancelTurn),
+        message: None,
+    });
     assert!(
         project(&operational).sessions[0]
             .capabilities
             .interrupt_turn
     );
     operational.get_mut("session-1").unwrap().harness_turn = None;
+    operational.get_mut("session-1").unwrap().turn_controls = None;
     assert_eq!(
         session
             .available_commands

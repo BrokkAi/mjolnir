@@ -2006,13 +2006,10 @@ impl RuntimeState {
             .subagents
             .get(session_id)
             .is_some_and(|child| {
-                step.group_id.as_deref()
-                    == Some(
-                        mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
-                            &child.request_key,
-                        )
-                        .as_str(),
-                    )
+                let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                    &child.kind.startup_request_key(&child.request_key),
+                );
+                step.group_id.as_deref() == Some(group.as_str())
             })
     }
 
@@ -2142,7 +2139,7 @@ impl RuntimeState {
                 child.kind == mj_core::subagent::SubagentKind::Reviewer
                     || group_id
                         == mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
-                            &child.request_key,
+                            &child.kind.startup_request_key(&child.request_key),
                         )
             });
         if is_initial_child_startup {

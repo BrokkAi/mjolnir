@@ -2018,15 +2018,14 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
     let bin = scratch.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     // The stand-in AWS CLI answers at once, except for a session that names a
-    // file to wait for: its call finishes only after that file exists, and
-    // fails after its own bound otherwise.
+    // file to wait for: its call finishes only after that file exists. The
+    // test's own deadline bounds a regression that runs sessions serially.
     let aws = bin.join("aws");
     std::fs::write(
         &aws,
         "#!/bin/sh\n\
-         tries=0\n\
          while [ -n \"$MJ_AWS_WAIT_FOR\" ] && [ ! -e \"$MJ_AWS_WAIT_FOR\" ]; do\n\
-           tries=$((tries + 1)); [ $tries -gt 200 ] && exit 3; /bin/sleep 0.05\n\
+           /bin/sleep 0.05\n\
          done\n\
          exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"\n",
     )
@@ -2079,7 +2078,9 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
         target("fast-session", &fast_received, None),
     ];
 
-    let outcomes = reconcile_profile(&targets, None).await;
+    let outcomes = tokio::time::timeout(Duration::from_secs(30), reconcile_profile(&targets, None))
+        .await
+        .expect("the fast session completed while the slow one was still minting");
 
     assert_eq!(outcomes.len(), 2, "{outcomes:?}");
     assert!(
@@ -4246,7 +4247,7 @@ async fn a_worker_before_protocol_55_is_left_to_the_automatic_upgrade_and_then_w
     // failure says so; the old worker cannot withdraw either.
     assert_eq!(outcomes[0].step_failures.len(), 1, "{failure}");
     assert!(
-        failure.contains("cannot report the AWS profile"),
+        failure.contains("predates withdrawing AWS credentials"),
         "{failure}"
     );
     assert!(
@@ -5766,10 +5767,10 @@ async fn aws_renewal_uses_the_pinned_profile_for_scoped_and_unscoped_sessions() 
         for (generation, expected) in [("existing", "original"), ("fresh", changed)] {
             let id = format!("{generation}-{changed}");
             let mut session = crate::database::test_fixtures::checkpoint_test_session(&id);
-            session.target = Some(Box::new(TargetLocator::LocalPodman {
+            session.target_template_id = "docker".into();
+            session.target = Some(Box::new(TargetLocator::LocalDocker {
                 container_id: "c".repeat(64),
                 borrowed_from: None,
-                workspace_storage: Default::default(),
             }));
             let root = scratch.path().join(&id);
             std::fs::create_dir(&root).unwrap();

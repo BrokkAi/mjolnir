@@ -716,8 +716,10 @@ impl OriginDeltaSuspend {
         match existing.stdout.as_slice() {
             b"dead\n" => Ok(None),
             b"alive\n" | b"starting\n" => {
-                read_launch_config(&self.backend, &self.session_id, &self.root, executor)
-                    .map(|launch| Some(launch.run_mode))
+                let mode =
+                    read_launch_config(&self.backend, &self.session_id, &self.root, executor)
+                        .map(|launch| Some(launch.run_mode))?;
+                Ok(mode)
             }
             _ => bail!("unexpected retained worker liveness response"),
         }

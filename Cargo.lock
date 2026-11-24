@@ -744,7 +744,6 @@ version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "base64 0.22.1",
  "brokk-mj-core",
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",

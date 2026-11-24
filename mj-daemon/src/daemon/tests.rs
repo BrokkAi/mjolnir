@@ -7518,6 +7518,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         child.state = SessionState::Error;
         child.last_error = Some("provider refused the selected model".into());
         mj_controller::database::save_session(&child).unwrap();
+        state.reload_controller().await.unwrap();
     } else {
         use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand};
         use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
@@ -7593,8 +7594,9 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         child.state = SessionState::Error;
         child.last_error = Some("provider refused the selected model".into());
         mj_controller::database::save_session(&child).unwrap();
+        state.reload_controller().await.unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let review_wait = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(review) =
                 mj_controller::database::finished_review(&parent.id, Some(review_id)).unwrap()
@@ -7610,8 +7612,14 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("{failure} failure must reach the review host and settle its role"));
+    .await;
+    if review_wait.is_err() {
+        let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
+        let record = mj_controller::database::load_session_record(&child.id).unwrap();
+        panic!(
+            "{failure} failure must reach the review host and settle its role; steps={steps:?}; record={record:?}"
+        );
+    }
     let record = mj_controller::database::load_session_record(&child.id)
         .unwrap()
         .unwrap();
@@ -7619,8 +7627,17 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         assert_eq!(record.state, SessionState::Error);
         assert!(record.last_error.is_some());
     } else {
-        let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
-        assert!(steps.iter().all(|step| step.phase == "failed"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
+                if steps.iter().all(|step| step.phase == "failed") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("review settlement must fail every startup step");
         state.cancel_and_join_startup_prompts().await.unwrap();
     }
     state.review_host().shutdown().await.unwrap();
@@ -12917,7 +12934,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
     );
     let mut relation = runtime_test_subagent(CHILD, &parent.id);
     relation.model = Some("chosen-model".into());
-    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    let group_id = relation.startup_group_id();
     let steps = super::startup_followup::api_followup_steps(
         &group_id,
         crate::server::api::StartFollowup {
@@ -13101,7 +13118,7 @@ async fn child_startup_failure_waits_for_confirmed_worker_death() {
     let mut child = runtime_test_session(CHILD, workspace, SessionState::Running);
     child.target = Some(Box::new(target.clone()));
     let relation = runtime_test_subagent(CHILD, PARENT);
-    let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+    let group = relation.startup_group_id();
     let (command_id, step) = super::startup_followup::api_followup_steps(
         &group,
         crate::server::api::StartFollowup {
@@ -13225,6 +13242,7 @@ esac
 
     let exit_record = root.join(mj_core::relay::WORKER_EXIT_FILE);
     channels.shutdown.shutdown().await.unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
     std::fs::remove_file(live).unwrap();
     // Restore Running so the typed-death recovery path can commit its own Error.
     mj_controller::database::save_lifecycle_session(&child).unwrap();
@@ -15798,7 +15816,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
     fs::write(
         &script,
         format!(
-            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec /bin/sleep 600\n",
             mj_core::targets::posix_quote(&started.to_string_lossy())
         ),
     )
@@ -17848,7 +17866,7 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\necho started >> {}\n",
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\nprintf '%s\\n' \"$*\" >> {}\n",
             start_marker.display(),
         ),
     )
@@ -17872,7 +17890,13 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
         .unwrap();
     assert_eq!(saved.state, SessionState::Parked);
     assert_eq!(saved.target, record.target);
-    assert!(!start_marker.exists());
+    let worker_calls = std::fs::read_to_string(&start_marker).unwrap_or_default();
+    assert!(
+        !worker_calls
+            .lines()
+            .any(|call| call.starts_with("worker run")),
+        "checkpoint-only start should fail before launching a worker: {worker_calls}"
+    );
 }
 
 pub(crate) fn seed_legacy_detached_draft(

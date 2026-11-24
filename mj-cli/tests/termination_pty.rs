@@ -1608,12 +1608,13 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_background_chec
     );
     // The creation wizard uses the profiles the daemon feed has published,
     // and the daemon reads the saved configuration on its own schedule.
-    // The Profiles pane lists them once the feed has them, one
-    // `<profile id>: <status>` row per profile under its provider.
+    // The Profiles pane lists their provider once the feed has the profiles.
+    // Credentials are intentionally absent here, so profiles themselves show
+    // as unavailable rather than by id.
     wait_for_screen(
         &mut fixture.master,
         &mut output,
-        b"claude:",
+        b"ANTHROPIC",
         Instant::now() + STARTUP_TIMEOUT,
     );
     fixture.master.write_all(NEW_SESSION_KEY).unwrap();

@@ -953,6 +953,18 @@ impl SubagentKind {
             Self::Oracle => format!("oracle:{key}"),
         }
     }
+
+    /// Distinguish startup groups by role without reusing the colon separator
+    /// from [`Self::request_key`], which relay command IDs reject.
+    #[must_use]
+    pub fn startup_request_key(self, key: &str) -> String {
+        let role = match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Oracle => "oracle",
+        };
+        format!("{role}-{key}")
+    }
 }
 
 /// Durable ownership and launch intent for one child session.
@@ -1169,6 +1181,16 @@ impl SubagentRecord {
     #[must_use]
     pub fn is_child(&self, session_id: &str) -> bool {
         self.child_session_id == session_id
+    }
+
+    /// Stable startup group for this child. The role distinguishes requests
+    /// that reuse the same caller-provided key, and the hyphenated role name
+    /// keeps every derived command ID valid in the relay protocol.
+    #[must_use]
+    pub fn startup_group_id(&self) -> String {
+        crate::continuation::GeneratedPrompt::subagent_spawn_id(
+            &self.kind.startup_request_key(&self.request_key),
+        )
     }
 }
 

@@ -936,7 +936,9 @@ impl CommandExecutor for RootProbeExecutor {
                 stdout: format!("{}\n", self.worker).into_bytes(),
                 stderr: Vec::new(),
             }),
-            "probe Mjolnir worker root" | "stop Mjolnir worker daemon" => {
+            "probe Mjolnir worker root"
+            | "stop Mjolnir worker daemon"
+            | "remove a stopped borrowed-target sub-agent's private worker state" => {
                 ProcessExecutor.execute(command)
             }
             other => anyhow::bail!("unexpected command: {other}"),
@@ -1025,7 +1027,8 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
             "probe Mjolnir worker daemon liveness",
-            "stop Mjolnir worker daemon"
+            "stop Mjolnir worker daemon",
+            "remove a stopped borrowed-target sub-agent's private worker state"
         ]
     );
     let closed = &controller.state.sessions[session_id];
@@ -1155,7 +1158,8 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
             "probe Mjolnir worker daemon liveness",
-            "stop Mjolnir worker daemon"
+            "stop Mjolnir worker daemon",
+            "remove a stopped borrowed-target sub-agent's private worker state"
         ]
     );
     assert_eq!(state, SessionState::Stopped);
@@ -2561,7 +2565,24 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
             .iter()
             .any(|command| command.purpose == "stop Mjolnir worker daemon")
     );
-    assert!(executor.position("rm -rf").is_none());
+    let cleanup = executor
+        .position("rm -rf")
+        .expect("the child's private worker state is removed");
+    let cleanup = executor.commands.lock().unwrap()[cleanup].clone();
+    assert!(
+        cleanup
+            .args
+            .iter()
+            .any(|argument| argument.contains(&format!("/workers/{session_id}"))),
+        "cleanup targets the child's private worker root: {cleanup:?}"
+    );
+    assert!(
+        !cleanup
+            .args
+            .iter()
+            .any(|argument| argument.contains("/workspace/")),
+        "cleanup never removes the workspace borrowed from the parent: {cleanup:?}"
+    );
     assert!(executor.releases().is_empty());
     assert!(!controller.state.sessions.contains_key(session_id));
 }
@@ -4699,7 +4720,6 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_SESSION, close_cut_controller_with};
     use crate::controller::move_session::MoveSourceRelay;
     use mj_core::worker_suspend::{self as wire, WorkerIdentity};
-    use std::os::unix::fs::PermissionsExt;
 
     const NAME: &str = "origin_delta_move_reuses_the_source_lease_until_quiescence";
     const CHILD: &str = "MJ_TEST_ORIGIN_DELTA_MOVE_LEASE";
@@ -4731,8 +4751,14 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
     let worker_root = worker_root.clone();
     attach_local_managed_clone(session, clone, origin);
     persist_controller_fixture(&mut controller);
-
     std::fs::create_dir_all(&worker_root).unwrap();
+    let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+    controller
+        .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+        .unwrap()
+        .write(&worker_root.join("launch.json"))
+        .unwrap();
+
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let start = stat
         .rsplit_once(')')
@@ -4750,9 +4776,29 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
         },
     )
     .unwrap();
-    let worker = worker_root.join("hel");
-    std::fs::write(&worker, "#!/bin/sh\n[ \"$1 $2\" = 'worker quiesce' ] || exit 2\necho 'injected quiescence refusal' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    mj_core::test_hooks::install_fake_worker_from(
+        mj_core::test_hooks::script_only_fake_dispatcher(),
+        &worker_root,
+        "hel",
+        &format!(
+            r#"if [ "$1 $2" = "worker build-id" ]; then
+    echo "{}"
+    exit 0
+fi
+if [ "$1 $2" = "worker liveness" ]; then
+    [ "$3" = "--help" ] && exit 0
+    echo alive
+    exit 0
+fi
+if [ "$1 $2" = "worker quiesce" ]; then
+    echo "injected quiescence refusal" >&2
+    exit 1
+fi
+exit 2
+"#,
+            mj_core::worker_build::worker_build_stamp()
+        ),
+    );
 
     let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
     let mut source_relay =
@@ -4760,8 +4806,9 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
             .await
             .unwrap();
     let held_relay = source_relay.take().expect("Move holds the live relay");
-    let error = controller
-        .suspend_session_controlled_with_manager(
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        controller.suspend_session_controlled_with_manager(
             &admission,
             LATCH_RELAY_SESSION,
             &ProcessExecutor,
@@ -4775,9 +4822,11 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
             LatchExclusivity::HoldThroughClose,
             None,
             SuspendSettlement::Suspend,
-        )
-        .await
-        .unwrap_err();
+        ),
+    )
+    .await
+    .expect("origin-delta Move suspend must reuse the lease and finish")
+    .unwrap_err();
     assert!(
         format!("{error:#}").contains("injected quiescence refusal"),
         "{error:#}"
@@ -6069,6 +6118,12 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     use mj_core::worker_suspend::{self as wire, SuspendRequest, WorkerIdentity};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    if !in_isolated_store(
+        "podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_through_container_exec",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
 
     type RecordedCommands = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 

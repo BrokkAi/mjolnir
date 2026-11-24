@@ -229,11 +229,16 @@ impl ProjectionIndex {
                 terminal_refs,
                 ..
             } => {
+                // A tool that hands work to a terminal may outlive the turn
+                // that launched it. Its terminal result owns completion; a
+                // turn boundary must not turn the still-running tool into a
+                // failed foreground call.
                 if !call.is_fallback()
                     && matches!(
                         call.raw_status().unwrap_or("pending"),
                         "pending" | "in_progress"
                     )
+                    && call.terminal_ids().is_empty()
                 {
                     self.open_foreground_tools.insert(stream);
                 }
