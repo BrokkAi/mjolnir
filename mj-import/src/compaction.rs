@@ -1,10 +1,11 @@
 //! Bounded, provider-neutral transcript compaction for cross-harness resume.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Context, Result, ensure};
-use futures::{TryStreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::Value;
 
 use mj_checkpoint::archive::CanonicalSessionSnapshot;
@@ -217,10 +218,10 @@ pub async fn compact_snapshot_since(
         .max_by_key(|candidate| candidate.through_position);
     let entries = TranscriptSummary::from_snapshot(snapshot).entries;
     let turns = if let Some(prior) = prior {
+        let retained: HashSet<u64> = prior.retained_positions.iter().copied().collect();
         turns_from_entries(
             entries.into_iter().filter(|entry| {
-                entry.position > prior.through_position
-                    || prior.retained_positions.contains(&entry.position)
+                entry.position > prior.through_position || retained.contains(&entry.position)
             }),
             true,
         )?
@@ -341,17 +342,30 @@ fn build_turn_pages(turns: &[Turn], limit: usize) -> Vec<String> {
     pages
 }
 
+async fn map_concurrent_ordered<T, U, F>(
+    items: Vec<T>,
+    mut map: impl FnMut(T) -> F,
+) -> Result<Vec<U>>
+where
+    F: Future<Output = Result<U>>,
+{
+    let mut indexed = stream::iter(items.into_iter().enumerate().map(|(index, item)| {
+        let future = map(item);
+        async move { Ok::<_, anyhow::Error>((index, future.await?)) }
+    }))
+    .buffer_unordered(COMPACTION_CONCURRENCY)
+    .try_collect::<Vec<_>>()
+    .await?;
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    Ok(indexed.into_iter().map(|(_, value)| value).collect())
+}
+
 async fn summarize_pages<B: CompactionBackend>(
     pages: Vec<String>,
     requests: Requests<'_, B>,
 ) -> Result<Vec<String>> {
-    let nested = stream::iter(pages.into_iter().map(|page| {
-        let page_requests = requests;
-        Ok::<_, anyhow::Error>(async move { summarize_page_adaptively(page, page_requests).await })
-    }))
-    .try_buffered(COMPACTION_CONCURRENCY)
-    .try_collect::<Vec<_>>()
-    .await?;
+    let nested =
+        map_concurrent_ordered(pages, |page| summarize_page_adaptively(page, requests)).await?;
     let summaries = nested.into_iter().flatten().collect::<Vec<_>>();
     ensure!(
         !summaries.is_empty(),
@@ -696,6 +710,32 @@ fn pack_reduction_groups(summaries: &[String], page_bytes: usize) -> Result<Vec<
     Ok(groups)
 }
 
+async fn reduce_group_adaptively<B: CompactionBackend>(
+    group: Vec<String>,
+    requests: Requests<'_, B>,
+) -> Result<Vec<String>> {
+    let mut pending = std::collections::VecDeque::from([group]);
+    let mut summaries = Vec::new();
+    while let Some(mut group) = pending.pop_front() {
+        if group.len() == 1 {
+            summaries.append(&mut group);
+            continue;
+        }
+        match requests.run(reduction_prompt(&group)).await? {
+            RequestOutcome::Summary(summary) => summaries.push(summary),
+            RequestOutcome::Splittable(error) => {
+                if group.len() <= 2 {
+                    return Err(error);
+                }
+                let right = group.split_off(group.len() / 2);
+                pending.push_front(right);
+                pending.push_front(group);
+            }
+        }
+    }
+    Ok(summaries)
+}
+
 async fn reduce_summaries<B: CompactionBackend>(
     mut summaries: Vec<String>,
     page_bytes: usize,
@@ -703,27 +743,17 @@ async fn reduce_summaries<B: CompactionBackend>(
 ) -> Result<String> {
     while summaries.len() > 1 {
         let groups = pack_reduction_groups(&summaries, page_bytes)?;
-        // Every group of one passes through untouched, so a round that groups
-        // nothing would repeat forever.
+        let previous_len = summaries.len();
+        summaries =
+            map_concurrent_ordered(groups, |group| reduce_group_adaptively(group, requests))
+                .await?
+                .into_iter()
+                .flatten()
+                .collect();
         ensure!(
-            groups.len() < summaries.len(),
+            summaries.len() < previous_len,
             "compaction cannot merge these snapshots within the page byte budget"
         );
-        summaries = stream::iter(groups.into_iter().map(|group| {
-            let group_requests = requests;
-            Ok::<_, anyhow::Error>(async move {
-                if group.len() == 1 {
-                    return Ok(group.into_iter().next().expect("a group is never empty"));
-                }
-                match group_requests.run(reduction_prompt(&group)).await? {
-                    RequestOutcome::Summary(summary) => Ok(summary),
-                    RequestOutcome::Splittable(error) => Err(error),
-                }
-            })
-        }))
-        .try_buffered(COMPACTION_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
     }
     summaries.pop().context("compaction produced no summaries")
 }

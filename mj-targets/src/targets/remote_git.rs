@@ -23,6 +23,14 @@ impl<E: CommandExecutor> RemoteGitExecutor<'_, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_to_file(&self.remote(command), output)
+    }
+
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         self.executor.pause_deadline()
     }

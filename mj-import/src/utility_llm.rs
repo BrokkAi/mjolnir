@@ -32,7 +32,6 @@ use mj_core::guardian::{
 };
 
 const QUOTA_FRESH_SECONDS: u64 = 20 * 60;
-const MAX_SUMMARY_BYTES: usize = 8 * 1024;
 /// The largest page this pipeline sends, whatever the model could accept.
 /// Beyond about a megabyte a single request stops being a summary and starts
 /// being a bet, and the pages are already independent and concurrent.
@@ -338,16 +337,12 @@ impl UtilityCompactionBackend {
         }
     }
 
-    /// How large a page this backend accepts. Any candidate may answer any
-    /// request once an earlier one fails, so the smallest window governs. The
-    /// floor keeps one small-window candidate from failing the whole
-    /// compaction before a single request is sent; a page that model really
-    /// cannot read comes back as an oversize rejection and is split.
+    /// Start with the primary candidate's window. Failover to a smaller window
+    /// can split pages and reduction groups on demand.
     pub fn page_bytes(&self) -> usize {
         self.candidates
-            .iter()
+            .first()
             .map(|candidate| candidate.page_bytes)
-            .min()
             .unwrap_or(DEFAULT_CONTEXT_BYTES)
             .max(MIN_CONTEXT_BYTES)
     }
@@ -405,7 +400,7 @@ pub async fn infer_structured_with_failover(
         schema,
     };
     let (candidate, output) =
-        infer_candidates(candidates, request, cancel, |_| true, Some, |_| {}).await?;
+        infer_candidates(candidates, request, cancel, |_| true, Ok, |_| {}).await?;
     Ok((
         candidate.profile_id.clone(),
         candidate.model.clone(),
@@ -549,11 +544,12 @@ async fn infer_candidates<T>(
     request: StructuredInferRequest,
     cancel: CancellationToken,
     enabled: impl Fn(usize) -> bool,
-    validate_output: impl Fn(Value) -> Option<T>,
+    validate_output: impl Fn(Value) -> std::result::Result<T, &'static str>,
     disable: impl Fn(usize),
 ) -> Result<(&UtilityCandidate, T)> {
     let mut failures = Vec::new();
-    let mut only_context_length = true;
+    let mut active_context_length = false;
+    let mut active_other_failure = false;
     for (index, candidate) in candidates.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(UtilityRequestError {
@@ -565,6 +561,7 @@ async fn infer_candidates<T>(
         if !enabled(index) {
             continue;
         }
+        let started = Instant::now();
         match infer_structured(
             candidate.backend.as_ref(),
             candidate.model.clone(),
@@ -577,41 +574,70 @@ async fn infer_candidates<T>(
         )
         .await
         {
-            Ok(response) => {
-                if let Some(output) = validate_output(response.output) {
-                    return Ok((candidate, output));
+            Ok(response) => match validate_output(response.output) {
+                Ok(output) => return Ok((candidate, output)),
+                Err(reason) => {
+                    let disabled = !enabled(index);
+                    tracing::warn!(
+                        profile_id = candidate.profile_id,
+                        model = candidate.model,
+                        reason,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        disabled,
+                        "utility candidate failed"
+                    );
+                    active_other_failure |= !disabled;
+                    failures.push(format!(
+                        "{} model {} {reason}",
+                        candidate.profile_id, candidate.model
+                    ));
                 }
-                only_context_length = false;
-                failures.push(format!(
-                    "{} model {} returned invalid output",
-                    candidate.profile_id, candidate.model
-                ));
-            }
+            },
             Err(error) => {
                 let kind = error.kind();
                 failures.push(format!(
-                    "{} model {} ({kind:?}): {error:#}",
+                    "{} model {} ({kind:?})",
                     candidate.profile_id, candidate.model
                 ));
-                match kind {
-                    InferErrorKind::Cancelled | InferErrorKind::InvalidRequest => {
-                        return Err(UtilityRequestError {
-                            kind,
-                            detail: failures.join(", "),
-                        }
-                        .into());
-                    }
+                let retire = matches!(
+                    kind,
                     InferErrorKind::Authentication
-                    | InferErrorKind::RateLimited
-                    | InferErrorKind::Transport
-                    | InferErrorKind::Provider => disable(index),
-                    InferErrorKind::ContextLength | InferErrorKind::StructuredOutput => {}
+                        | InferErrorKind::RateLimited
+                        | InferErrorKind::Transport
+                        | InferErrorKind::Provider
+                );
+                if retire {
+                    disable(index);
                 }
-                only_context_length &= kind == InferErrorKind::ContextLength;
+                let disabled = !enabled(index);
+                if kind != InferErrorKind::Cancelled {
+                    tracing::warn!(
+                        profile_id = candidate.profile_id,
+                        model = candidate.model,
+                        kind = ?kind,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        disabled,
+                        "utility candidate failed"
+                    );
+                }
+                if matches!(
+                    kind,
+                    InferErrorKind::Cancelled | InferErrorKind::InvalidRequest
+                ) {
+                    return Err(UtilityRequestError {
+                        kind,
+                        detail: failures.join(", "),
+                    }
+                    .into());
+                }
+                if !disabled {
+                    active_context_length |= kind == InferErrorKind::ContextLength;
+                    active_other_failure |= kind != InferErrorKind::ContextLength;
+                }
             }
         }
     }
-    let kind = if only_context_length && !failures.is_empty() {
+    let kind = if active_context_length && !active_other_failure {
         InferErrorKind::ContextLength
     } else {
         InferErrorKind::Provider
@@ -630,6 +656,7 @@ impl CompactionBackend for UtilityCompactionBackend {
         prompt: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
+            let started = Instant::now();
             let request = StructuredInferRequest {
                 messages: vec![
                     InferMessage::system(
@@ -652,9 +679,15 @@ impl CompactionBackend for UtilityCompactionBackend {
                         .contains(&index)
                 },
                 |output| {
-                    let summary = output.get("state_snapshot")?.as_str()?.trim();
-                    (!summary.is_empty() && summary.len() <= MAX_SUMMARY_BYTES)
-                        .then(|| summary.to_owned())
+                    let summary = output
+                        .get("state_snapshot")
+                        .and_then(Value::as_str)
+                        .ok_or("returned no state_snapshot string")?
+                        .trim();
+                    if summary.is_empty() {
+                        return Err("returned an empty state_snapshot");
+                    }
+                    Ok(summary.to_owned())
                 },
                 |index| {
                     self.disabled
@@ -667,6 +700,8 @@ impl CompactionBackend for UtilityCompactionBackend {
             tracing::info!(
                 profile_id = candidate.profile_id,
                 model = candidate.model,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                summary_bytes = summary.len(),
                 "utility compaction request completed"
             );
             Ok(summary)
@@ -1504,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_page_bytes_take_the_smallest_candidate() {
+    fn backend_page_bytes_follow_the_primary_candidate() {
         fn candidate(profile_id: &str, page_bytes: usize) -> UtilityCandidate {
             UtilityCandidate {
                 profile_id: profile_id.into(),
@@ -1519,8 +1554,6 @@ mod tests {
             }
         }
 
-        // Failover means any candidate may answer any request, so the smallest
-        // window governs the page size.
         let mixed = UtilityCompactionBackend::new(
             vec![
                 candidate("wide", MAX_PAGE_BYTES),
@@ -1528,7 +1561,7 @@ mod tests {
             ],
             CancellationToken::new(),
         );
-        assert_eq!(mixed.page_bytes(), 300_000);
+        assert_eq!(mixed.page_bytes(), MAX_PAGE_BYTES);
 
         // A window below the compaction floor would fail the whole compaction
         // before a request was sent; an oversize page is split instead.
@@ -1537,6 +1570,74 @@ mod tests {
             CancellationToken::new(),
         );
         assert_eq!(tiny.page_bytes(), MIN_CONTEXT_BYTES);
+    }
+
+    struct CompactionReply(std::result::Result<String, &'static str>);
+
+    impl LlmBackend for CompactionReply {
+        fn list_models(&self) -> futures::future::BoxFuture<'_, Result<Vec<String>>> {
+            panic!("compaction uses the already selected model")
+        }
+
+        fn stream_chat(
+            &self,
+            _: anvil_client::llm_client::StreamChatRequest,
+        ) -> futures::future::BoxFuture<'_, Result<anvil_client::llm_client::LlmResponse>> {
+            use anvil_client::llm_client::LlmResponse;
+            Box::pin(async {
+                match &self.0 {
+                    Ok(summary) => Ok(LlmResponse::Text {
+                        text: json!({"state_snapshot": summary}).to_string(),
+                        reasoning_content: None,
+                        usage: Default::default(),
+                        codex_reasoning: None,
+                    }),
+                    Err(detail) => Err(anyhow!("{detail}")),
+                }
+            })
+        }
+    }
+
+    fn compaction_candidate(
+        profile_id: &str,
+        reply: std::result::Result<String, &'static str>,
+    ) -> UtilityCandidate {
+        let mut candidate = candidate_for(
+            profile_id,
+            HarnessKind::Codex,
+            UtilityFamily::Codex,
+            UtilityQuotaClass::Healthy,
+            100,
+        );
+        candidate.backend = Arc::new(CompactionReply(reply));
+        candidate
+    }
+
+    #[tokio::test]
+    async fn compaction_accepts_a_valid_snapshot_larger_than_eight_kib() {
+        let summary = "s".repeat(12 * 1024);
+        let backend = UtilityCompactionBackend::new(
+            vec![compaction_candidate("primary", Ok(summary.clone()))],
+            CancellationToken::new(),
+        );
+        assert_eq!(backend.compact("history".into()).await.unwrap(), summary);
+    }
+
+    #[tokio::test]
+    async fn disabled_primary_does_not_mask_fallback_context_length_failure() {
+        let backend = UtilityCompactionBackend::new(
+            vec![
+                compaction_candidate("primary", Err("HTTP 401 Unauthorized")),
+                compaction_candidate("fallback", Err("maximum context length exceeded")),
+            ],
+            CancellationToken::new(),
+        );
+        let error = backend.compact("history".into()).await.unwrap_err();
+        assert!(backend.disabled.read().unwrap().contains(&0));
+        assert_eq!(
+            backend.classify_failure(&error),
+            CompactionFailure::Oversize
+        );
     }
 
     #[test]
@@ -1720,7 +1821,6 @@ mod tests {
             .await
             .expect("Muse Spark utility inference");
         assert!(!summary.trim().is_empty());
-        assert!(summary.len() <= MAX_SUMMARY_BYTES);
         eprintln!(
             "Muse utility live ok: model={model}, summary_bytes={}",
             summary.len()
@@ -1768,7 +1868,6 @@ mod tests {
             .await
             .expect("DeepSeek utility inference");
         assert!(!summary.trim().is_empty());
-        assert!(summary.len() <= MAX_SUMMARY_BYTES);
         eprintln!(
             "DeepSeek utility live ok: model={model}, summary_bytes={}",
             summary.len()

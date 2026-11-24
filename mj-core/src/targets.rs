@@ -949,6 +949,27 @@ pub fn default_mount_destination(source: &Path, existing: &[AdditionalMount]) ->
 pub trait CommandExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput>;
 
+    /// Write stdout to the file and return its status and stderr.
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let result = self.execute(command)?;
+        let mut file = output.try_clone().context("clone command output file")?;
+        file.set_len(0).context("reset command output file")?;
+        file.seek(SeekFrom::Start(0))
+            .context("rewind command output file")?;
+        file.write_all(&result.stdout)
+            .context("write command output file")?;
+        Ok(CommandOutput {
+            stdout: Vec::new(),
+            ..result
+        })
+    }
+
     /// Bound cleanup attempts while preserving supervisor cancellation. Durable
     /// owners retry interrupted cleanup under the next lifecycle or daemon.
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -1059,6 +1080,14 @@ struct SshStageReporter<'a> {
 }
 
 impl CommandExecutor for SshStageReporter<'_> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_to_file(command, output)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.executor.execute(command)
     }
@@ -1125,6 +1154,15 @@ impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        // The lifetime pause also covers streamed output.
+        self.executor.execute_to_file(command, output)
+    }
+
     fn pause_deadline(&self) -> DeadlinePause {
         self.executor.pause_deadline()
     }
@@ -1379,6 +1417,14 @@ impl ProcessExecutor {
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        CancellableProcessExecutor::new(Default::default()).execute_to_file(command, output)
+    }
+
     fn pause_deadline(&self) -> DeadlinePause {
         DeadlinePause::none()
     }
@@ -2468,6 +2514,14 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        Self::execute_to_file(self, command, output)
+    }
+
     fn pause_deadline(&self) -> DeadlinePause {
         DeadlinePause::new(self.deadline.clone())
     }
@@ -2579,9 +2633,38 @@ impl BoundedProcessExecutor {
     pub const fn new(timeout: Duration) -> Self {
         Self { timeout }
     }
+
+    fn with_probe_timeout(
+        &self,
+        command: &CommandSpec,
+        run: impl FnOnce(&CancellableProcessExecutor) -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        let executor = CancellableProcessExecutor::with_timeout(self.timeout);
+        run(&executor).map_err(|error| {
+            if executor.is_cancelled() {
+                anyhow::Error::new(CommandTimedOut {
+                    program: command.program.clone(),
+                    purpose: command.purpose.clone(),
+                    timeout: self.timeout,
+                })
+            } else {
+                error
+            }
+        })
+    }
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.with_probe_timeout(command, |executor| {
+            executor.execute_to_file(command, output)
+        })
+    }
+
     fn pause_deadline(&self) -> DeadlinePause {
         DeadlinePause::none()
     }
@@ -2608,18 +2691,7 @@ impl CommandExecutor for BoundedProcessExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let executor = CancellableProcessExecutor::with_timeout(self.timeout);
-        executor.execute(command).map_err(|error| {
-            if executor.is_cancelled() {
-                anyhow::Error::new(CommandTimedOut {
-                    program: command.program.clone(),
-                    purpose: command.purpose.clone(),
-                    timeout: self.timeout,
-                })
-            } else {
-                error
-            }
-        })
+        self.with_probe_timeout(command, |executor| executor.execute(command))
     }
 
     fn execute_cleanup_with_timeout(
@@ -4779,6 +4851,21 @@ mod executor_tests {
         assert!(pending);
         let error = outcome.unwrap_err().to_string();
         assert!(error.contains("cancelled"), "{error}");
+    }
+
+    #[test]
+    fn process_executor_streams_stdout_larger_than_a_pipe_buffer() {
+        use std::io::Seek as _;
+
+        let mut file = tempfile::tempfile().unwrap();
+        let command = CommandSpec::new("head", ["-c", "131072", "/dev/zero"]);
+        let result = CommandExecutor::execute_to_file(&ProcessExecutor, &command, &file).unwrap();
+        assert_eq!(result.status, 0);
+        assert!(result.stdout.is_empty());
+        file.rewind().unwrap();
+        let mut received = Vec::new();
+        file.read_to_end(&mut received).unwrap();
+        assert_eq!(received, vec![0; 128 * 1024]);
     }
 
     #[test]
