@@ -281,8 +281,13 @@ impl TerminalOperations for RuntimeState {
         request: SuspendPreflightRequest,
     ) -> BoxFuture<'static, Result<SuspendPreflight>> {
         Box::pin(async move {
-            self.suspend_preflight(session_id, request.dry_run, request.without_checkpoint)
-                .await
+            self.suspend_preflight(
+                session_id,
+                request.dry_run,
+                request.without_checkpoint,
+                request.history_only,
+            )
+            .await
         })
     }
 

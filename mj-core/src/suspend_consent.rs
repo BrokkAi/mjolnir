@@ -158,9 +158,21 @@ pub struct SuspendConsent {
     pub without_checkpoint: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm_no_checkpoint: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_only: bool,
 }
 
 impl SuspendConsent {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.without_checkpoint && self.history_only {
+            return Err(crate::refusal::Refusal::precondition(
+                "history-only and without-checkpoint suspend are mutually exclusive",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub fn capture_consent(&self) -> CaptureConsent {
         CaptureConsent {
             move_keep: None,
@@ -201,6 +213,74 @@ pub struct SuspendBlocker {
     pub kind: String,
     pub paths: Vec<String>,
     pub remedy: String,
+}
+
+impl SuspendBlocker {
+    /// Normalize either a current snake_case kind code or a legacy Rust Debug
+    /// `SnapshotRefused` string emitted by an older remote worker.
+    pub fn normalized_kind(&self) -> &str {
+        let raw = self.kind.as_str();
+        let prefix = raw
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or(raw);
+        match prefix {
+            "Untracked" | "untracked" => "untracked",
+            "OperationInProgress" | "operation_in_progress" => "operation_in_progress",
+            "DirtySubmodule" | "dirty_submodule" => "dirty_submodule",
+            "MissingManagedOrigin" | "missing_managed_origin" => "missing_managed_origin",
+            "OriginRemovedByTeardown" | "origin_removed_by_teardown" => {
+                "origin_removed_by_teardown"
+            }
+            "UnrepresentedGitState" | "unrepresented_git_state" => "unrepresented_git_state",
+            "HiddenTrackedEdits" | "hidden_tracked_edits" => "hidden_tracked_edits",
+            "IntentToAdd" | "intent_to_add" => "intent_to_add",
+            "UntrackedSubmoduleRegistration" | "untracked_submodule_registration" => {
+                "untracked_submodule_registration"
+            }
+            "TrackedKeepFiles" | "tracked_keep_files" => "tracked_keep_files",
+            _ => raw,
+        }
+    }
+    pub fn title(&self) -> &str {
+        match self.normalized_kind() {
+            "untracked" => "Untracked items",
+            "operation_in_progress" => "Git operation in progress",
+            "dirty_submodule" => "Dirty submodule",
+            "missing_managed_origin" => "Missing Git origin",
+            "origin_removed_by_teardown" => "Origin depends on clone",
+            "unrepresented_git_state" => "External worktrees & Git state",
+            "hidden_tracked_edits" => "Hidden tracked edits",
+            "intent_to_add" => "Intent-to-add files",
+            "untracked_submodule_registration" => "Untracked submodule registration",
+            "tracked_keep_files" => "Tracked .mj/keep files",
+            other => other,
+        }
+    }
+    pub fn is_auto_fixable(&self) -> bool {
+        matches!(
+            self.normalized_kind(),
+            "hidden_tracked_edits" | "unrepresented_git_state"
+        )
+    }
+}
+impl SuspendPreflight {
+    pub fn has_auto_fixable_blockers(&self) -> bool {
+        self.blockers.iter().any(SuspendBlocker::is_auto_fixable)
+    }
+}
+pub fn format_blocker_cleanup_prompt(blockers: &[SuspendBlocker]) -> String {
+    let mut text = String::from(
+        "Inspect and resolve these suspend blockers. Preserve or push wanted work, then report when ready to suspend.\n",
+    );
+    for blocker in blockers {
+        text.push_str(&format!("\n{}\n", blocker.title()));
+        for path in &blocker.paths {
+            text.push_str(&format!("- {path}\n"));
+        }
+        text.push_str(&format!("Fix: {}\n", blocker.remedy));
+    }
+    text
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -391,6 +471,7 @@ impl SuspendPreflight {
             abort_operations: self.shown_operation_consent(),
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }
     }
 
@@ -454,4 +535,85 @@ pub fn format_move_untracked_refusal(count: usize, first_paths: &[String]) -> St
         "{count} untracked files will not be kept: {}{suffix} `git add` (or commit) anything you want to keep, or pass `--discard-untracked`.",
         preview.join(", ")
     )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerResolveBlockersSpec {
+    pub repositories: Vec<WorkerPreflightRepo>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MovedWorktreeSummary {
+    pub from: String,
+    pub to: String,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerResolveBlockersResult {
+    pub cleared_hidden_paths: Vec<String>,
+    pub moved_worktrees: Vec<MovedWorktreeSummary>,
+    pub skipped_worktrees: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveSuspendBlockersResponse {
+    pub cleared_hidden_paths: Vec<String>,
+    pub moved_worktrees: Vec<MovedWorktreeSummary>,
+    pub skipped_worktrees: Vec<String>,
+    pub preflight: SuspendPreflight,
+}
+impl ResolveSuspendBlockersResponse {
+    pub fn summary(&self) -> String {
+        let mut text = format!(
+            "Cleared flags on {} paths; moved {} worktrees; skipped {} worktrees.",
+            self.cleared_hidden_paths.len(),
+            self.moved_worktrees.len(),
+            self.skipped_worktrees.len()
+        );
+        if !self.moved_worktrees.is_empty() {
+            let moves = self
+                .moved_worktrees
+                .iter()
+                .map(|m| format!("{} -> {}", m.from, m.to))
+                .collect::<Vec<_>>()
+                .join(", ");
+            text.push_str(&format!(" Moved: {moves}."));
+        }
+        if !self.skipped_worktrees.is_empty() {
+            text.push_str(&format!(" Skipped: {}.", self.skipped_worktrees.join("; ")));
+        }
+        text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspend_blocker_wire_schema_preserves_legacy_kinds_and_rejects_unknown_fields() {
+        let legacy = r#"{"kind":"HiddenTrackedEdits([Scoped { value: \"linked/file\" }])","paths":["linked/file"],"remedy":"preserve work"}"#;
+        let blocker: SuspendBlocker = serde_json::from_str(legacy).unwrap();
+        assert_eq!(blocker.normalized_kind(), "hidden_tracked_edits");
+        assert_eq!(blocker.title(), "Hidden tracked edits");
+        assert!(blocker.is_auto_fixable());
+        assert_eq!(
+            serde_json::from_str::<SuspendBlocker>(&serde_json::to_string(&blocker).unwrap())
+                .unwrap(),
+            blocker
+        );
+        let unknown: SuspendBlocker = serde_json::from_str(
+            r#"{"kind":"future_custom_blocker","paths":[],"remedy":"fix it"}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown.title(), "future_custom_blocker");
+        assert!(!unknown.is_auto_fixable());
+        assert!(
+            serde_json::from_str::<SuspendBlocker>(
+                r#"{"kind":"hidden_tracked_edits","paths":[],"remedy":"","extra":true}"#
+            )
+            .is_err()
+        );
+    }
 }

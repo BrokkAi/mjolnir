@@ -1373,14 +1373,24 @@ fn git_identity_failure(verb: &'static str, error: anyhow::Error) -> ApiError {
     )
 }
 
+pub(super) async fn ask_resolve_suspend_blockers(
+    state: &ServerState,
+    session_id: String,
+) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, ApiError> {
+    viewer_backend(state)?
+        .resolve_suspend_blockers(session_id)
+        .await?
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
+}
 pub(super) async fn ask_suspend_preflight(
     state: &ServerState,
     session_id: String,
     dry_run: bool,
     without_checkpoint: bool,
+    history_only: bool,
 ) -> Result<mj_core::suspend_consent::SuspendPreflight, ApiError> {
     viewer_backend(state)?
-        .suspend_preflight(session_id, dry_run, without_checkpoint)
+        .suspend_preflight(session_id, dry_run, without_checkpoint, history_only)
         .await?
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
 }

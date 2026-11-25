@@ -1,3 +1,3 @@
 linux/amd64  localhost:5000/projects/app:0123456789abcdef  current
-linux/arm64  localhost:5000/projects/app:fedcba9876543210  recipe changed
+linux/arm64  localhost:5000/projects/app:fedcba9876543210  out of date
 linux/riscv64  localhost:5000/projects/app:0011223344556677  unknown (use --target ID)

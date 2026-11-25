@@ -964,6 +964,14 @@ async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskR
 /// Scratch in `$MJ_KEEP_DIR` travels with Move but is not saved when the session is suspended.
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
+    /// Save conversation history and resume into a fresh checkout.
+    /// Tearing down a managed clone also removes the shared .git directory used by
+    /// any external linked worktrees.
+    #[arg(long, conflicts_with_all = ["without_checkpoint", "fix_blockers"])]
+    history_only: bool,
+    /// Clear hidden index flags and move eligible worktrees inside the clone.
+    #[arg(long, conflicts_with_all = ["without_checkpoint", "dry_run"])]
+    fix_blockers: bool,
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: Option<String>,
@@ -2560,9 +2568,19 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
     let client = ApiClient::connect().await?;
+    if args.fix_blockers && !args.dry_run {
+        let result = client.resolve_suspend_blockers(session).await?;
+        eprintln!("{}", result.summary());
+        if result.preflight.has_blockers() && !args.dry_run {
+            bail!(
+                "Blockers remain after safe remediation:\n{}",
+                format_suspend_dry_run(&result.preflight)
+            );
+        }
+    }
     if args.dry_run {
         let preflight = client
-            .suspend_preflight(session, true, args.without_checkpoint)
+            .suspend_preflight(session, true, args.without_checkpoint, args.history_only)
             .await?;
         if args.json {
             return print_json(&preflight);
@@ -2571,7 +2589,9 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         return Ok(());
     }
     if args.without_checkpoint {
-        let preflight = client.suspend_preflight(session, false, true).await?;
+        let preflight = client
+            .suspend_preflight(session, false, true, false)
+            .await?;
         let has_verified = preflight
             .existing_checkpoint
             .as_ref()
@@ -2583,6 +2603,7 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         }
     }
     let consent = mj_core::suspend_consent::SuspendConsent {
+        history_only: args.history_only,
         discard_untracked: if args.discard_untracked {
             mj_core::suspend_consent::UntrackedConsent::Any
         } else {
@@ -2806,7 +2827,11 @@ pub(crate) fn format_suspend_dry_run(
     if !preflight.blockers.is_empty() {
         let _ = writeln!(out, "blockers:");
         for b in &preflight.blockers {
-            let _ = writeln!(out, "  - {}: {}", b.kind, b.remedy);
+            let _ = writeln!(out, "  {}", b.title());
+            for path in &b.paths {
+                let _ = writeln!(out, "    - {path}");
+            }
+            let _ = writeln!(out, "    fix: {}", b.remedy);
         }
     }
     if !preflight.operations.is_empty() {

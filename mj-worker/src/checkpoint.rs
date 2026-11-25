@@ -183,11 +183,23 @@ pub fn run_suspend_preflight(
             .blockers
             .extend(inventory.blockers.into_iter().map(|b| {
                 mj_core::suspend_consent::SuspendBlocker {
-                    kind: format!("{:?}", b.kind),
+                    kind: b.kind.kind_code().to_owned(),
                     paths: b
                         .paths
                         .into_iter()
-                        .map(|p| p.value.display().to_string())
+                        .map(|p| {
+                            if p.value.is_relative()
+                                && !p.checkout.checkout_path.as_os_str().is_empty()
+                            {
+                                p.checkout
+                                    .checkout_path
+                                    .join(&p.value)
+                                    .display()
+                                    .to_string()
+                            } else {
+                                p.value.display().to_string()
+                            }
+                        })
                         .collect(),
                     remedy: b.remedy,
                 }
@@ -421,6 +433,20 @@ mod recovery_tests {
         assert_eq!(fs::read(absent.join("file")).unwrap(), b"archived");
         assert!(!staged.exists());
     }
+}
+
+pub fn resolve_suspend_blockers_from_spec_file(
+    path: &Path,
+) -> Result<mj_core::suspend_consent::WorkerResolveBlockersResult> {
+    let spec = if path == Path::new(EXPORT_SPEC_STDIN) {
+        read_json_from(
+            &mut std::io::stdin().lock(),
+            "resolve suspend blockers spec",
+        )?
+    } else {
+        serde_json::from_slice(&fs::read(path)?)?
+    };
+    mj_checkpoint::snapshot::resolve_worker_suspend_blockers(&SystemGit, &spec)
 }
 
 #[cfg(test)]

@@ -38,6 +38,7 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         },
         ControllerAction::Restart {
             session_id: "restart-web-session".into(),
@@ -2481,6 +2482,7 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
         abort_operations: mj_core::suspend_consent::OperationConsent::None,
         without_checkpoint: false,
         confirm_no_checkpoint: false,
+        history_only: false,
     };
     assert_eq!(
         admit_phone_action(&close, &mut active, &sessions, &cancellations),

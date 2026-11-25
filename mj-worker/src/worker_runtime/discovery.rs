@@ -53,7 +53,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     let lease_path = located
         .managed
         .as_ref()
-        .map(|managed| managed.lease_path.clone());
+        .and_then(|managed| managed.lease_path.clone());
     let (command, args, managed_environment) = (located.command, located.args, located.environment);
     let managed = located.managed;
     environment.extend(managed_environment);
@@ -77,7 +77,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         harness_lease: lease_path,
         node_lease: managed_node
             .as_ref()
-            .map(|node| node.lease_path().to_path_buf()),
+            .and_then(|node| node.lease_path().map(Path::to_path_buf)),
     }
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {

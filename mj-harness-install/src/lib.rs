@@ -4,6 +4,7 @@
 pub mod harness_install;
 pub mod login_environment;
 pub mod program_path;
+pub mod runtime_manifests;
 pub mod session_image;
 
 #[cfg(test)]

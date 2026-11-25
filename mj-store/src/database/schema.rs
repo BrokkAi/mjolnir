@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 157;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 159;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3760,6 +3760,20 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 159 is breaking: sessions.closing_consent JSON may include
+    // history_only, which older daemons reject via deny_unknown_fields during crash recovery.
+    // O(1): only compatibility metadata changes; no session rows are scanned.
+    if version < 159 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 159 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (159, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=159;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3793,28 +3807,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
 /// deleted last because the follower tests read them.
 fn gone_session_rows_sql(gone: &str) -> String {
     let id = format!("{gone}.session_id");
-    let other_live_follower = format!(
-        "EXISTS (SELECT 1 FROM github_watch_classifications c
-                     JOIN sessions s ON s.session_id = c.session_id
-                     WHERE c.owner = github_watch_items.owner
-                       AND c.repo = github_watch_items.repo
-                       AND c.number = github_watch_items.number
-                       AND c.interested = 1 AND c.created = 0
-                       AND c.session_id <> {id}
-                       AND s.state <> 'destroyed-with-data-loss')"
-    );
+    let watches = github_watch::detach_github_watches_sql(&id).join("\n");
     format!(
         "DELETE FROM mailbox_outbox WHERE target_session_id = {id};
-             DELETE FROM github_watch_items
-                 WHERE (creator_session_id = {id}
-                        OR (creator_session_id IS NULL
-                            AND EXISTS (SELECT 1 FROM github_watch_classifications f
-                                        WHERE f.owner = github_watch_items.owner
-                                          AND f.repo = github_watch_items.repo
-                                          AND f.number = github_watch_items.number
-                                          AND f.session_id = {id})))
-                   AND NOT {other_live_follower};
-             UPDATE github_watch_items SET creator_session_id = NULL WHERE creator_session_id = {id};
+             {watches}
              DELETE FROM github_watch_classifications WHERE session_id = {id};
              DELETE FROM github_watch_classification_failures WHERE session_id = {id};"
     )
@@ -6172,6 +6168,40 @@ mod reader_tests {
     }
 
     #[test]
+    fn revision_159_history_only_consent_round_trips_and_refuses_revision_158() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("history", "project")).unwrap();
+        stamp_schema_version(&path, 158);
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 159);
+        assert_eq!(state.minimum_compatible, Some(159));
+        assert!(state.ensure_supported_by(158).is_err());
+        let consent = mj_core::suspend_consent::SuspendConsent {
+            history_only: true,
+            ..Default::default()
+        };
+        connection
+            .execute(
+                "UPDATE sessions SET closing_consent = ?1 WHERE session_id = 'history'",
+                [serde_json::to_string(&consent).unwrap()],
+            )
+            .unwrap();
+        let json: String = connection
+            .query_row(
+                "SELECT closing_consent FROM sessions WHERE session_id = 'history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<mj_core::suspend_consent::SuspendConsent>(&json).unwrap(),
+            consent
+        );
+    }
+
+    #[test]
     fn revision_158_retired_login_authority_is_compatible_and_cascades() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -6179,9 +6209,9 @@ mod reader_tests {
         stamp_schema_version(&path, 157);
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
-        assert_eq!(state.revision, 158);
-        assert_eq!(state.minimum_compatible, Some(157));
-        state.ensure_supported_by(157).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(state.ensure_supported_by(158).is_err());
         upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source','move','profile','codex','store')", []).unwrap();
         // New harness identifiers never require rebuilding this table.
         upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source','future','profile','future-harness','store')", []).unwrap();

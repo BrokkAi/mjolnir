@@ -3584,7 +3584,7 @@ async fn prepare_and_start_harness(
     let managed_cache_root = prepared_harness
         .managed
         .as_ref()
-        .map(|managed| managed.cache_root.clone());
+        .and_then(|managed| managed.cache_root.clone());
     let managed_harness = prepared_harness.managed;
     let managed_node = prepared_harness.managed_node;
 

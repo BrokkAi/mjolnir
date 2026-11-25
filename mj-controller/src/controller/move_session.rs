@@ -2118,7 +2118,7 @@ impl Controller {
             match self
                 .move_keep_selection(source, &selection, executor)
                 .and_then(|keep| {
-                    self.checkpoint_preflight(&source.id, true, false, Some(&keep), executor)
+                    self.checkpoint_preflight(&source.id, true, false, false, Some(&keep), executor)
                 }) {
                 Ok((preflight, skip_keep_sizes)) => (Some(Box::new(preflight)), skip_keep_sizes),
                 Err(err) => {

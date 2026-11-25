@@ -186,6 +186,8 @@ impl LatchExclusivity {
 pub(in crate::controller) enum CheckpointExportPolicy {
     /// Always export, transfer, and install a new archive.
     Always,
+    /// Save conversation and repository identity without workspace Git state.
+    HistoryOnly,
     /// Explicit suspend of an independent managed clone.
     OriginDelta,
     /// Explicit suspend of a raw Git checkout.

@@ -3,6 +3,82 @@
 use super::*;
 use mj_core::mailbox::{LifecycleRecipient, MailboxEvent, MailboxEventBody};
 
+/// Detach a session without removing watches that other live followers need.
+/// The caller supplies a SQL expression (`?1` or a trigger's session ID).
+pub(super) fn detach_github_watches_sql(id: &str) -> [String; 2] {
+    let other_live_follower = format!(
+        "EXISTS (SELECT 1 FROM github_watch_classifications c
+                     JOIN sessions s ON s.session_id = c.session_id
+                     WHERE c.owner = github_watch_items.owner
+                       AND c.repo = github_watch_items.repo
+                       AND c.number = github_watch_items.number
+                       AND c.interested = 1 AND c.created = 0
+                       AND c.session_id <> {id}
+                       AND s.state <> 'destroyed-with-data-loss')"
+    );
+    [
+        format!(
+            "DELETE FROM github_watch_items
+                 WHERE (creator_session_id = {id}
+                        OR (creator_session_id IS NULL
+                            AND EXISTS (SELECT 1 FROM github_watch_classifications f
+                                        WHERE f.owner = github_watch_items.owner
+                                          AND f.repo = github_watch_items.repo
+                                          AND f.number = github_watch_items.number
+                                          AND f.session_id = {id})))
+                   AND NOT {other_live_follower};"
+        ),
+        format!(
+            "UPDATE github_watch_items SET creator_session_id = NULL WHERE creator_session_id = {id};"
+        ),
+    ]
+}
+
+pub(super) fn clear_github_subscriptions_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<()> {
+    for sql in detach_github_watches_sql("?1") {
+        connection.execute(&sql, [session_id])?;
+    }
+    // Keep classification receipts so the next poll cannot rediscover the
+    // old conversation's items and immediately subscribe the session again.
+    connection.execute(
+        "UPDATE github_watch_classifications SET interested=0, created=0 WHERE session_id=?1",
+        [session_id],
+    )?;
+    connection.execute(
+        "DELETE FROM github_watch_classification_failures WHERE session_id=?1",
+        [session_id],
+    )?;
+    Ok(())
+}
+
+/// Capture before reading classification evidence. The writer checks this
+/// generation again in the transaction that creates subscriptions and mail.
+/// `None` defers a session whose projection is rebuilding behind its receipt.
+pub fn load_github_classification_frontier(session_id: &str) -> Result<Option<u64>> {
+    let mut connection = open_reader(&database_path())?;
+    let tx = connection.transaction()?;
+    github_classification_frontier_with(&tx, session_id)
+}
+
+fn github_classification_frontier_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<u64>> {
+    let (clear_ordinal, applied_ordinal): (u64, u64) = connection.query_row(
+        "SELECT COALESCE((SELECT through_ordinal FROM mailbox_reset_frontiers WHERE session_id=?1), 0),
+                COALESCE((SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?1), 0)",
+        [session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if applied_ordinal < clear_ordinal {
+        return Ok(None);
+    }
+    Ok(Some(clear_ordinal))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubRepoCursor {
     pub updated_at: String,
@@ -28,6 +104,7 @@ pub struct GithubItemClassification {
     pub repo: String,
     pub number: i64,
     pub session_id: String,
+    pub clear_ordinal: u64,
     pub kind: String,
     pub title: String,
     pub url: String,
@@ -107,9 +184,13 @@ pub fn record_github_classification_failure(
     repo: String,
     number: i64,
     session_id: String,
+    clear_ordinal: u64,
 ) -> Result<()> {
     submit_database_write("record_github_classification_failure", move |connection| {
         let tx = connection.transaction()?;
+        if github_classification_frontier_with(&tx, &session_id)? != Some(clear_ordinal) {
+            return Ok(());
+        }
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM github_watch_classifications WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4)",
             params![owner,repo,number,session_id], |row| row.get::<_,bool>(0))? {
             tx.commit()?; return Ok(());
@@ -230,7 +311,8 @@ pub fn load_github_item_classified_sessions(
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT session_id FROM github_watch_classifications
-         WHERE owner=?1 AND repo=?2 AND number=?3",
+         WHERE owner=?1 AND repo=?2 AND number=?3
+",
     )?;
     statement
         .query_map(params![owner, repo, number], |row| row.get(0))?
@@ -247,6 +329,16 @@ pub fn commit_github_item_classification(
     let has_event = event.is_some();
     let inserted = submit_database_write("commit_github_item_classification", move |connection| {
         let tx = connection.transaction()?;
+        let Some(clear_ordinal) =
+            github_classification_frontier_with(&tx, &classification.session_id)?
+        else {
+            return Ok((false, false));
+        };
+        // SQLite serializes this decision with /clear. Evidence from an older
+        // conversation cannot restore a watch or deliver a notification.
+        if clear_ordinal != classification.clear_ordinal {
+            return Ok((false, false));
+        }
         let mut enqueued_lifecycle = false;
         let inserted = tx.execute(
             "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
@@ -883,15 +975,16 @@ fn load_github_session_creation_output_from(
     at_ms: i64,
 ) -> Result<Vec<String>> {
     let connection = open_reader(path)?;
+    let after = materialized::last_materialized_context_boundary(&connection, session_id)?;
     let mut statement = connection.prepare(
         "SELECT stable_id, body_json FROM materialized_transcript_items
-         WHERE session_id=?1 AND created_at_ms <= ?2 + 1000
+         WHERE session_id=?1 AND (?3 IS NULL OR position > ?3) AND created_at_ms <= ?2 + 1000
            AND (last_changed_at_ms >= ?2 - 1000
                 OR json_extract(body_json, '$.call.status') IN ('pending', 'in_progress'))
            AND json_extract(body_json, '$.kind') = 'tool'",
     )?;
     let bodies = statement
-        .query_map(params![session_id, at_ms], |row| {
+        .query_map(params![session_id, at_ms, after], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1097,12 +1190,13 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
     };
     let mut reader = open_reader(path)?;
     let connection = reader.transaction()?;
+    let after = materialized::last_materialized_context_boundary(&connection, session_id)?;
     {
         let mut statement = connection.prepare(
             "SELECT created_at_ms, last_changed_at_ms FROM materialized_transcript_items
-             WHERE session_id=?1 AND (created_at_ms > ?2 OR last_changed_at_ms > ?2)",
+             WHERE session_id=?1 AND (?3 IS NULL OR position > ?3) AND (created_at_ms > ?2 OR last_changed_at_ms > ?2)",
         )?;
-        let mut rows = statement.query(params![session_id, latest])?;
+        let mut rows = statement.query(params![session_id, latest, after])?;
         while let Some(row) = rows.next()? {
             check()?;
             // Withheld from every item whatever it is, so its kind is not read.
@@ -1135,9 +1229,9 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
              FROM (SELECT created_at_ms, last_changed_at_ms, body_json,
                           json_extract(body_json, '$.kind') AS kind
                    FROM materialized_transcript_items
-                   WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2)",
+                   WHERE session_id=?1 AND (?3 IS NULL OR position > ?3) AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2)",
         )?;
-        let mut rows = statement.query(params![session_id, latest])?;
+        let mut rows = statement.query(params![session_id, latest, after])?;
         while let Some(row) = rows.next()? {
             check()?;
             let text = |index: usize| -> rusqlite::Result<Option<&str>> {
@@ -1170,11 +1264,11 @@ fn scan_github_history_from<S: mj_transcript::github_history::HistorySink>(
         let mut statement = connection.prepare(
             "SELECT rowid, created_at_ms, last_changed_at_ms, body_json
              FROM materialized_transcript_items
-             WHERE session_id=?1 AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2
+             WHERE session_id=?1 AND (?3 IS NULL OR position > ?3) AND created_at_ms <= ?2 AND last_changed_at_ms <= ?2
                AND json_extract(body_json, '$.kind') IN ('user', 'agent', 'tool', 'message')
              ORDER BY position, stable_id",
         )?;
-        let mut rows = statement.query(params![session_id, latest])?;
+        let mut rows = statement.query(params![session_id, latest, after])?;
         while let Some(row) = rows.next()? {
             check()?;
             let body = row.get_ref(3)?.as_str()?;
@@ -1261,6 +1355,28 @@ mod tests {
         assert!(output.contains("https://github.com/owner/repo/issues/12"));
         assert!(!output.contains("early"));
         assert!(!output.contains("later"));
+        connection.execute(
+            "INSERT INTO materialized_transcript_items(session_id, stable_id, position, created_at_ms, last_changed_at_ms, body_json)
+             VALUES ('session-1', ?1, 5, 8000, 8000, ?2)",
+            params![format!("{}clear", mj_core::archive::CONTEXT_BOUNDARY_PREFIX), r#"{"kind":"system","text":"Context cleared"}"#],
+        ).unwrap();
+        assert!(
+            load_github_session_creation_output_from(&path, "session-1", 5000)
+                .unwrap()
+                .is_empty(),
+            "late-discovered items must not claim creation from the discarded conversation"
+        );
+        connection.execute(
+            "INSERT INTO materialized_transcript_items(session_id, stable_id, position, created_at_ms, last_changed_at_ms, body_json)
+             VALUES ('session-1', 'fresh-tool', 6, 3000, 6000, ?1)",
+            [tool("fresh", "new conversation output").to_string()],
+        ).unwrap();
+        assert_eq!(
+            load_github_session_creation_output_from(&path, "session-1", 5000)
+                .unwrap()
+                .join("\n"),
+            "new conversation output\nexited 0"
+        );
     }
 
     // Hard-won: b4476dc76: comments a session posted in turns the harness started on its own still came back to it.
@@ -1388,6 +1504,15 @@ mod history_snapshot_tests {
         )
         .unwrap();
         let connection = open_reader(&path).unwrap();
+        // Archived evidence must not affect either the rendered history or
+        // its cutoff counts, even if discovery happens after the clear.
+        connection.execute(
+            "INSERT INTO materialized_transcript_items(session_id, stable_id, position, created_at_ms, last_changed_at_ms, body_json)
+             VALUES ('session-1', 'archived', 1, 1000, 1000, ?1), ('session-1', ?2, 2, 1500, 1500, ?3)",
+            params![r#"{"kind":"user","content":[{"type":"text","text":"discarded interest"}]}"#,
+                format!("{}clear", mj_core::archive::CONTEXT_BOUNDARY_PREFIX),
+                r#"{"kind":"system","text":"Context cleared"}"#],
+        ).unwrap();
         for (id, position, created, changed, body) in [
             (
                 "z",
@@ -1420,7 +1545,7 @@ mod history_snapshot_tests {
                 r#"{"kind":"message","event":{"body":{"type":"new_github_item","number":42,"repo":"OWNER/REPO"}}}"#,
             ),
         ] {
-            connection.execute("INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json) VALUES ('session-1',?1,?2,?3,?4,?5)",params![id,position,created,changed,body]).unwrap();
+            connection.execute("INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json) VALUES ('session-1',?1,?2,?3,?4,?5)",params![id,position + 2,created,changed,body]).unwrap();
         }
         let history = mj_transcript::github_history::SessionHistory::new(
             "session-1",

@@ -43,12 +43,27 @@ pub(crate) fn confirmation_buttons(
             borrowed(&["Cancel", "Retry suspension", "Suspend without checkpoint…"])
         }
         Confirmation::SuspendSession {
+            confirming_history_only: true,
+            ..
+        } => borrowed(&["Back", "Suspend with history only"]),
+        Confirmation::SuspendSession {
             preflight: None, ..
         } => borrowed(&["Cancel"]),
         Confirmation::SuspendSession {
             preflight: Some(preflight),
+            can_prompt,
             ..
-        } if preflight.has_blockers() => borrowed(&["Cancel"]),
+        } if preflight.has_blockers() => {
+            let mut buttons = borrowed(&["Cancel"]);
+            if preflight.has_auto_fixable_blockers() {
+                buttons.push(Cow::Borrowed("Fix safe blockers"));
+            }
+            if *can_prompt {
+                buttons.push(Cow::Borrowed("Ask session to fix"));
+            }
+            buttons.push(Cow::Borrowed("Suspend (history only)…"));
+            buttons
+        }
         Confirmation::SuspendSession {
             preflight: Some(preflight),
             ..
@@ -1587,22 +1602,54 @@ pub(crate) fn confirmation_body(
             child_warning_titles,
             preflight,
             viewing_all_untracked,
+            resolving_blockers,
+            confirming_history_only,
             ..
         } => {
             let mut lines = vec![session_line(session_id, session_name, width)];
+            if *confirming_history_only {
+                lines.push(Line::raw(
+                    "Discard workspace Git changes and save session history only?",
+                ));
+                lines.push(Line::raw("Resuming will start from a fresh checkout with your conversation history intact."));
+                lines.push(Line::raw("Removing the clone removes its shared .git directory, invalidating linked worktrees outside the clone (including locked ones) and discarding their unpushed commits and staged changes."));
+            }
             if let Some(preflight) = preflight {
-                if preflight.has_blockers() {
+                if preflight.has_blockers() && !confirming_history_only {
                     lines.push(Line::styled(
                         "Cannot suspend until these blockers are resolved:",
                         Style::default().fg(theme::palette().error),
                     ));
-                    for blocker in &preflight.blockers {
-                        lines.push(Line::raw(format!(
-                            "  {} — {}",
-                            blocker.kind, blocker.remedy
-                        )));
+                    for (index, blocker) in preflight.blockers.iter().enumerate() {
+                        if index > 0 {
+                            lines.push(Line::raw(""));
+                        }
+                        lines.push(Line::styled(
+                            format!(
+                                "{}. {} ({} items)",
+                                index + 1,
+                                blocker.title(),
+                                blocker.paths.len()
+                            ),
+                            Style::default().fg(theme::palette().warning),
+                        ));
+                        let limit = if *viewing_all_untracked {
+                            blocker.paths.len()
+                        } else {
+                            5
+                        };
+                        for path in blocker.paths.iter().take(limit) {
+                            lines.push(Line::raw(format!("  - {path}")));
+                        }
+                        if blocker.paths.len() > limit {
+                            lines.push(Line::raw(format!(
+                                "  and {} more (v to view all)",
+                                blocker.paths.len() - limit
+                            )));
+                        }
+                        lines.push(Line::raw(format!("  Fix: {}", blocker.remedy)));
                     }
-                } else {
+                } else if !confirming_history_only {
                     lines.push(Line::raw(
                         "Save a recovery copy and release the environment.",
                     ));
@@ -1684,7 +1731,11 @@ pub(crate) fn confirmation_body(
                     ));
                 }
             } else {
-                lines.push(Line::raw("Checking workspace…"));
+                lines.push(Line::raw(if *resolving_blockers {
+                    "Fixing safe blockers…"
+                } else {
+                    "Checking workspace…"
+                }));
             }
             (" Suspend session? ", lines)
         }

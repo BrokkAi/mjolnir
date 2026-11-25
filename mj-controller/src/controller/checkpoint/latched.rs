@@ -78,6 +78,20 @@ impl Controller {
                     repository.origin_override = origin_override.clone();
                 }
             }
+        } else if export_policy == CheckpointExportPolicy::HistoryOnly {
+            let owner = self.state.workspace_owner(session_id).ok();
+            let managed_worktree = self
+                .state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.managed_worktree().cloned());
+            apply_history_only_policy(
+                &mut layout.repositories,
+                owner,
+                &self.config,
+                managed_worktree.as_ref(),
+                executor,
+            );
         } else if export_policy == CheckpointExportPolicy::SessionHandoff {
             for repository in &mut layout.repositories {
                 repository.capture = CheckpointRepositoryCapture::MetadataOnly;
@@ -1189,6 +1203,269 @@ impl Controller {
         })
 
         }).await
+    }
+}
+
+fn apply_history_only_policy(
+    repositories: &mut [CheckpointRepositorySpec],
+    owner: Option<&SessionRecord>,
+    config: &mj_core::config::Config,
+    managed_worktree: Option<&mj_core::state::ManagedWorktree>,
+    executor: &impl CommandExecutor,
+) {
+    let bundle = owner.and_then(|owner| owner.project_bundle(config));
+    let network_sources = owner
+        .and_then(|owner| owner.project.as_deref())
+        .map(|project| &project.network_sources);
+    for repository in repositories {
+        if repository.capture != CheckpointRepositoryCapture::PlainDirectory {
+            repository.capture = CheckpointRepositoryCapture::MetadataOnly;
+        }
+        if repository.origin_override.is_none() {
+            repository.origin_override = history_only_origin_override(
+                &repository.id,
+                owner,
+                bundle,
+                network_sources,
+                managed_worktree,
+                executor,
+            );
+        }
+    }
+}
+
+fn history_only_origin_override(
+    repository_id: &str,
+    owner: Option<&SessionRecord>,
+    bundle: Option<&mj_core::config::ProjectBundle>,
+    network_sources: Option<
+        &std::collections::BTreeMap<String, mj_core::remote_git::NetworkGitSource>,
+    >,
+    managed_worktree: Option<&mj_core::state::ManagedWorktree>,
+    executor: &impl CommandExecutor,
+) -> Option<String> {
+    let accepted_project = owner.and_then(|owner| owner.project.as_deref());
+    let primary_repository_id = bundle.map(|bundle| bundle.primary_repo.as_str());
+    let accepted_source = |id: &str| {
+        accepted_project
+            .and_then(|project| project.network_sources.get(id))
+            .map(|source| source.fetch_url.clone())
+    };
+    accepted_source(repository_id)
+        .or_else(|| {
+            primary_repository_id
+                .filter(|primary| {
+                    repository_id == super::HOST_CHECKOUT_REPOSITORY && *primary != repository_id
+                })
+                .and_then(accepted_source)
+        })
+        .or_else(|| {
+            let source_id = if repository_id == super::HOST_CHECKOUT_REPOSITORY {
+                primary_repository_id.unwrap_or(repository_id)
+            } else {
+                repository_id
+            };
+            let repository = bundle?
+                .repositories
+                .iter()
+                .find(|repository| repository.id == source_id)?;
+            network_sources
+                .and_then(|sources| sources.get(source_id))
+                .map(|source| source.fetch_url.clone())
+                // `github_repositories` reports GitHub owner/name pairs for
+                // credential scoping; resolve_repository is the helper that
+                // returns the fetch URL this manifest must preserve.
+                .or_else(|| {
+                    mj_core::remote_git::resolve_repository(repository, executor)
+                        .ok()
+                        .map(|source| source.fetch_url)
+                })
+        })
+        .or_else(|| {
+            let is_primary = repository_id == super::HOST_CHECKOUT_REPOSITORY
+                || primary_repository_id == Some(repository_id);
+            is_primary
+                .then_some(managed_worktree)
+                .flatten()
+                .and_then(crate::controller::lifecycle::origin_delta::managed_origin_override)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::test_support::{
+        FIXTURE_FETCH_URL, checkout_with_network_remote, checkpoint_test_session, test_git,
+    };
+    use crate::targets::ProcessExecutor;
+    use mj_core::config::{ProjectBundle, ProjectRepository};
+    use mj_core::repository::ProjectBundleSnapshot;
+    use mj_core::state::{ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget};
+    use std::path::PathBuf;
+
+    #[test]
+    fn history_only_capture_preserves_managed_network_origin_provenance() {
+        let (source, _remote_parent, _remote) = checkout_with_network_remote();
+        let project_bundle = ProjectBundle {
+            primary_repo: "source-id".into(),
+            repositories: vec![ProjectRepository {
+                id: "source-id".into(),
+                github: None,
+                local: Some(source.path().to_path_buf()),
+                destination: PathBuf::from("project"),
+                git_ref: None,
+                mbx_namespace: None,
+            }],
+        };
+        let project =
+            crate::project_catalog::snapshot(&project_bundle, &ProcessExecutor, false).unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let root = tempfile::tempdir().unwrap();
+        let worktree = ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
+            source_project_directory: source.path().to_path_buf(),
+            source_repository: source.path().to_path_buf(),
+            worktree_root: root.path().join("managed-clone"),
+            branch: format!("mj/{session_id}"),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: Some(test_git(source.path(), &["rev-parse", "HEAD"])),
+        };
+        super::super::super::worktree::create_managed_worktree(
+            &ProcessExecutor,
+            &worktree,
+            None,
+            super::super::super::worktree::PrimaryCheckoutRequirement::Any,
+        )
+        .unwrap();
+        test_git(&worktree.worktree_root, &["remote", "remove", "origin"]);
+
+        let mut owner = checkpoint_test_session(session_id);
+        owner.project = Some(
+            ProjectBundleSnapshot {
+                bundle: project_bundle,
+                identities: project.identities.clone(),
+                network_sources: project.network_sources.clone(),
+                plain_directories: Default::default(),
+            }
+            .into(),
+        );
+        owner.managed_worktree = Some(Box::new(worktree.clone()));
+
+        let mut repositories = vec![
+            CheckpointRepositorySpec {
+                id: super::super::HOST_CHECKOUT_REPOSITORY.into(),
+                relative_destination: PathBuf::from("project"),
+                capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                origin_override: None,
+            },
+            CheckpointRepositorySpec {
+                id: "plain-project".into(),
+                relative_destination: PathBuf::from("plain-project"),
+                capture: CheckpointRepositoryCapture::PlainDirectory,
+                origin_override: None,
+            },
+        ];
+        apply_history_only_policy(
+            &mut repositories,
+            Some(&owner),
+            &mj_core::config::Config::default(),
+            Some(&worktree),
+            &ProcessExecutor,
+        );
+
+        assert_eq!(
+            repositories[0].capture,
+            CheckpointRepositoryCapture::MetadataOnly
+        );
+        assert_eq!(
+            repositories[0].origin_override.as_deref(),
+            Some(FIXTURE_FETCH_URL)
+        );
+        assert_eq!(
+            repositories[1].capture,
+            CheckpointRepositoryCapture::PlainDirectory
+        );
+        // A secondary repository without a recorded or resolvable network source
+        // must never inherit the primary managed clone's origin.
+        let mut secondary_only = vec![CheckpointRepositorySpec {
+            id: "secondary-repo".into(),
+            relative_destination: PathBuf::from("secondary"),
+            capture: CheckpointRepositoryCapture::RemoteWorkspace,
+            origin_override: None,
+        }];
+        apply_history_only_policy(
+            &mut secondary_only,
+            Some(&owner),
+            &mj_core::config::Config::default(),
+            Some(&worktree),
+            &ProcessExecutor,
+        );
+        assert_eq!(
+            secondary_only[0].capture,
+            CheckpointRepositoryCapture::MetadataOnly
+        );
+        assert_eq!(secondary_only[0].origin_override, None);
+        let snapshot = mj_checkpoint::archive::collect_git_metadata_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            &worktree.worktree_root,
+            &mj_checkpoint::archive::GitCollectionSpec {
+                id: repositories[0].id.clone(),
+                relative_destination: repositories[0].relative_destination.clone(),
+                history: mj_checkpoint::archive::GitHistoryMode::NoBundle,
+                origin_override: repositories[0].origin_override.clone(),
+            },
+        )
+        .unwrap();
+        assert!(snapshot.metadata.review_refs_metadata_only);
+        assert_eq!(snapshot.metadata.origin, FIXTURE_FETCH_URL);
+
+        let manifest = mj_checkpoint::archive::ArchiveManifest {
+            schema_version: 1,
+            format: "hel-checkpoint".into(),
+            session: mj_checkpoint::archive::SessionManifest {
+                id: session_id.into(),
+                title: owner.title.clone(),
+                harness_kind: owner.harness_kind,
+                profile_id: owner.last_profile.clone(),
+                native_session_id: "native".into(),
+                created_at: owner.created_at.clone(),
+                checkpointed_at: owner.updated_at.clone(),
+                hel_version: "test".into(),
+                relay_version: String::new(),
+                adapter_version: String::new(),
+            },
+            target: mj_checkpoint::archive::TargetManifest {
+                template_id: "local-bare".into(),
+                target_kind: "local-bare".into(),
+                details: Default::default(),
+            },
+            bundle: mj_checkpoint::archive::BundleManifest {
+                id: owner.bundle_id.clone(),
+                primary_repository: repositories[0].id.clone(),
+            },
+            repositories: vec![mj_core::archive::RepositoryManifest {
+                metadata: snapshot.metadata,
+                committed_bundle_path: String::new(),
+                staged_patch_path: String::new(),
+                unstaged_patch_path: String::new(),
+                untracked_tar_path: String::new(),
+                conflicted_worktree_tar_path: None,
+                operation_state_tar_path: None,
+                linked_worktrees: Vec::new(),
+                origin_delta_pack_path: None,
+            }],
+            payloads: Vec::new(),
+        };
+        let accepted = crate::controller::network_git::bundle_from_manifest_for_session(
+            &manifest,
+            Some(&owner),
+            Some(&mj_core::config::Config::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.repositories[0].url.as_deref(),
+            Some(FIXTURE_FETCH_URL)
+        );
     }
 }
 
