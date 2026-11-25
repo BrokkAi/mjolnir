@@ -3294,6 +3294,36 @@ fn create_cancellation_and_commit_have_one_winner() {
     }
 }
 
+/// An operation that sees `cancelled` set by shutdown must also see that
+/// shutdown stopped it, or it would take the daemon's exit for a person's
+/// cancel and record a rollback. Shutdown is published before the flag.
+#[test]
+fn a_shutdown_stop_is_visible_before_the_cancelled_flag_is() {
+    for committed in [false, true] {
+        for _ in 0..200 {
+            let control = LifecycleControl::default();
+            if committed {
+                assert!(control.grant_commit());
+            }
+            let observer = {
+                let control = control.clone();
+                std::thread::spawn(move || {
+                    while !control.cancelled.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                    assert!(control.stopped_for_shutdown());
+                })
+            };
+            if committed {
+                control.interrupt();
+            } else {
+                assert!(control.cancel_for_shutdown());
+            }
+            observer.join().unwrap();
+        }
+    }
+}
+
 #[test]
 fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
     let control = LifecycleControl::default();

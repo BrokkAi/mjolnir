@@ -1161,6 +1161,18 @@ pub trait CommandExecutor {
     /// or no deadline return an empty guard. Cancellation remains active.
     fn pause_deadline(&self) -> DeadlinePause;
 
+    /// A view that bounds each command by `timeout`, keeping this executor's
+    /// cancellation, reporting and admission.
+    fn with_cleanup_timeout(&self, timeout: Duration) -> CleanupTimeout<'_, Self>
+    where
+        Self: Sized,
+    {
+        CleanupTimeout {
+            executor: self,
+            timeout,
+        }
+    }
+
     /// A view whose commands stop only for daemon shutdown, for cleanup that
     /// must complete after a person cancels the operation.
     fn shutdown_only(&self) -> ShutdownOnly<'_, Self>
@@ -1433,6 +1445,115 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for ShutdownOnly<'_, E> {
 
     fn pause_deadline(&self) -> DeadlinePause {
         DeadlinePause::none()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.executor.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.executor.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.executor.notify_notice(notice);
+    }
+
+    fn stop_borrowed_workers_before_quiesce(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        self.executor.stop_borrowed_workers_before_quiesce()
+    }
+
+    fn reserve_move_destination(&self) {
+        self.executor.reserve_move_destination();
+    }
+
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.executor.begin_resumable_work()
+    }
+
+    fn yield_admission_if_resumable(&self) -> bool {
+        self.executor.yield_admission_if_resumable()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        self.executor.end_resumable_work(label)
+    }
+}
+
+/// A view of an executor that bounds each command it runs by `timeout`, as
+/// [`CommandExecutor::execute_cleanup_with_timeout`] does, and otherwise
+/// leaves the executor's cancellation, reporting and admission as they are.
+/// Over [`ShutdownOnly`] the bound is the only limit besides daemon shutdown.
+/// Streamed stdin has no per-command cleanup bound and runs as the executor
+/// runs it.
+pub struct CleanupTimeout<'a, E: ?Sized> {
+    executor: &'a E,
+    timeout: Duration,
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for CleanupTimeout<'_, E> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor
+            .execute_cleanup_with_timeout(command, self.timeout)
+    }
+
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_cleanup_with_timeout(command, timeout)
+    }
+
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_to_file(command, output)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor.execute_with_stdin(command, input)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
     }
 
     fn stage_started(&self, stage: ProvisionStage) {
@@ -5777,6 +5898,70 @@ exit 0
                 "path {run}: {error:#}"
             );
         }
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    /// The cleanup bound applies on top of the shutdown-only view: it ignores
+    /// a person's cancel, still stops for shutdown, and still times out a
+    /// wedged command. On the unrestricted executor the same bound keeps the
+    /// person's cancel.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_timeout_bounds_the_shutdown_only_view_without_losing_its_stops() {
+        use tokio_util::sync::CancellationToken;
+
+        let quick = CommandSpec::new("sh", ["-c", "printf ok"]);
+        let stalled = CommandSpec::new("sh", ["-c", "sleep 30"]);
+        let cancelled = |token: &CancellationToken| {
+            CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)))
+                .with_shutdown_cancellation(token.clone())
+                .with_deadline(Duration::ZERO)
+        };
+        let started = Instant::now();
+
+        // A person's cancel and the spent operation deadline do not apply.
+        let token = CancellationToken::new();
+        let executor = cancelled(&token);
+        let view = executor.shutdown_only();
+        let bounded = view.with_cleanup_timeout(Duration::from_secs(20));
+        assert_eq!(bounded.execute(&quick).unwrap().stdout, b"ok");
+
+        // The explicit bound still ends a wedged command.
+        let error = executor
+            .shutdown_only()
+            .with_cleanup_timeout(Duration::from_millis(300))
+            .execute(&stalled)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("timed out after 0.3 s"),
+            "{error:#}"
+        );
+
+        // Shutdown ends it well before a long bound.
+        let canceller = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                token.cancel();
+            })
+        };
+        let error = bounded.execute(&stalled).unwrap_err();
+        canceller.join().unwrap();
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{error:#}"
+        );
+
+        // Without the view, the bound keeps the person's cancel.
+        let token = CancellationToken::new();
+        let error = cancelled(&token)
+            .with_cleanup_timeout(Duration::from_secs(20))
+            .execute(&quick)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{error:#}"
+        );
         assert!(started.elapsed() < Duration::from_secs(20));
     }
 

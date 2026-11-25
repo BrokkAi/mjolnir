@@ -16,6 +16,10 @@ use mj_core::hex::lower_hex;
 use sha2::{Digest, Sha256};
 
 use super::lifecycle::SourceTargetDisposition;
+
+/// The bound each retained-source stop and cleanup command had when these
+/// paths ran on their own 15-second executors (before #1678).
+const MOVE_SOURCE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 use super::{Controller, now};
 use crate::session_manager::move_ownership::set_move_queue_hold;
 pub use crate::session_manager::move_ownership::{
@@ -1355,7 +1359,12 @@ impl Controller {
                     session_id,
                     "stop retained Move source worker before retry",
                 )
-                .and_then(|plan| plan.execute(&executor.shutdown_only(), &super::ControlWorker))
+                .and_then(|plan| {
+                    plan.execute(
+                        &executor.with_cleanup_timeout(MOVE_SOURCE_CLEANUP_TIMEOUT),
+                        &super::ControlWorker,
+                    )
+                })
                 .context("stop retained worker before retry")?;
                 // Clear any OriginDelta quiescence wire files left by the
                 // abandoned Move so a later Suspend on the resumed source
@@ -2832,8 +2841,9 @@ impl Controller {
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 // A person's cancel must not cut the source's cleanup short,
-                // but daemon shutdown still does.
-                let cleanup = executor.shutdown_only();
+                // but daemon shutdown and the bound still do.
+                let shutdown_only = executor.shutdown_only();
+                let cleanup = shutdown_only.with_cleanup_timeout(MOVE_SOURCE_CLEANUP_TIMEOUT);
                 // An in-place Move writes `recovery_session` only after its
                 // relay reported Closed, so the seal is a durable fact of the
                 // Move. Asking the sealed relay again cannot change it and

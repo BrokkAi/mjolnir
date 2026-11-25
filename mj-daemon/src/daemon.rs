@@ -149,10 +149,13 @@ impl LifecycleControl {
             .is_ok();
         if accepted {
             *cancel_cause = Some(cause);
-            self.cancelled.store(true, Ordering::Release);
+            // Shutdown is published before the flag the executor reads, so an
+            // operation that sees `cancelled` for a shutdown cancel also sees
+            // `stopped_for_shutdown()` and never takes it for a person's cancel.
             if cancelled == LIFECYCLE_CANCELLED_FOR_SHUTDOWN {
                 self.shutdown.cancel();
             }
+            self.cancelled.store(true, Ordering::Release);
         }
         accepted
     }
@@ -208,8 +211,9 @@ impl LifecycleControl {
     /// or not it committed. This is not a cancel: the operation fails where it
     /// is, and the next daemon finishes it from its durable record.
     fn interrupt(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        // Shutdown first: see `cancel_as`.
         self.shutdown.cancel();
+        self.cancelled.store(true, Ordering::Release);
     }
 
     /// Stop the cleanup of an operation a person already cancelled, because
