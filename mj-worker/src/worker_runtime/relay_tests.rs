@@ -375,7 +375,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         accepted_reload_operation_id: None,
-        discard_native_session_id: None,
+        parked_move: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -7314,7 +7314,13 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
             .as_deref(),
         Some("old-harness-model")
     );
-    config.discard_native_session_id = Some("native-relay".into());
+    config.parked_move = Some(mj_core::worker_launch::ParkedMoveLaunch {
+        operation_id: "identity-move".into(),
+        discard_native_session_id: Some("native-relay".into()),
+        prompt_context: None,
+        discard_queued_prompts: false,
+        quota_continuation: None,
+    });
     assert_eq!(unix::select_resume_session(&config, &relay), None);
     assert_eq!(
         unix::accepted_config_for_boot(&config, &relay, None),
@@ -10918,4 +10924,151 @@ async fn file_attachment_protocol_90_transfers_binary_and_dispatches_file_only_p
     event_tx.send(RuntimeEvent::Stopped).unwrap();
     drop(event_tx);
     coordinator.await.unwrap().unwrap();
+}
+
+#[test]
+fn parked_move_launch_discards_old_queue_and_replays_without_discarding_new_work() {
+    use mj_core::worker_launch::ParkedMoveLaunch;
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "old-queued-prompt".into(),
+            command: prompt("old queued work"),
+            created_at_ms: 1,
+            insert_at_front: false,
+        })
+        .unwrap();
+    let parked = ParkedMoveLaunch {
+        operation_id: "discard-move".into(),
+        discard_native_session_id: None,
+        prompt_context: Some("source handoff".into()),
+        discard_queued_prompts: true,
+        quota_continuation: None,
+    };
+    drop(relay);
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "new-queued-prompt".into(),
+            command: prompt("new queued work"),
+            created_at_ms: 1,
+            insert_at_front: false,
+        })
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    relay.apply_parked_move_launch(&parked).unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "new-queued-prompt");
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some("source handoff")
+    );
+}
+
+#[test]
+fn parked_move_launch_queues_quota_first_with_handoff_and_replays_once() {
+    use mj_core::worker_launch::{InitialWorkerCommand, ParkedMoveLaunch};
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "retained-prompt".into(),
+            command: prompt("retained queued work"),
+            created_at_ms: 1,
+            insert_at_front: false,
+        })
+        .unwrap();
+    let parked = ParkedMoveLaunch {
+        operation_id: "quota-move".into(),
+        discard_native_session_id: None,
+        prompt_context: Some("source native prior handoff".into()),
+        discard_queued_prompts: false,
+        quota_continuation: Some(InitialWorkerCommand {
+            command_id: "quota-continuation".into(),
+            command: prompt("continue"),
+            optional: false,
+        }),
+    };
+    drop(relay);
+    let relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    relay.apply_parked_move_launch(&parked).unwrap();
+    let claimed = relay.claim_pending_commands_up_to(true, 1).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "quota-continuation");
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some("source native prior handoff")
+    );
+    relay
+        .record_command_completed(
+            "quota-continuation",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "later-queued-prompt".into(),
+            command: prompt("later work"),
+            created_at_ms: 1,
+            insert_at_front: false,
+        })
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    relay.apply_parked_move_launch(&parked).unwrap();
+    let claimed = relay.claim_pending_commands_up_to(true, 1).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "retained-prompt");
+    assert_eq!(claimed[0].hidden_prompt_context, None);
 }

@@ -2134,7 +2134,13 @@ pub(crate) fn accepted_config_for_boot(
     relay: &DurableRelay,
     resume_session: Option<&str>,
 ) -> acp::AcceptedSessionConfig {
-    if config.discard_native_session_id.is_some() && resume_session.is_none() {
+    if config
+        .parked_move
+        .as_ref()
+        .and_then(|parked| parked.discard_native_session_id.as_deref())
+        .is_some()
+        && resume_session.is_none()
+    {
         return Default::default();
     }
     let state = relay.operational_state();
@@ -2146,7 +2152,13 @@ pub(crate) fn select_resume_session(
     relay: &DurableRelay,
 ) -> Option<String> {
     let native_session_id = relay.operational_state().native_session_id;
-    if native_session_id.is_some() && native_session_id == config.discard_native_session_id {
+    if native_session_id.is_some()
+        && native_session_id.as_deref()
+            == config
+                .parked_move
+                .as_ref()
+                .and_then(|parked| parked.discard_native_session_id.as_deref())
+    {
         return None;
     }
     native_session_id.or_else(|| config.native_session_id.clone())

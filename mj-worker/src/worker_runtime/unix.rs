@@ -1843,12 +1843,13 @@ pub async fn run_daemon_owned(
             &config.initial_commands,
         )?
     } else {
-        DurableRelay::open_for_harness(
+        DurableRelay::open_for_harness_with_parked_move(
             &root,
             &config.session_id,
             env!("CARGO_PKG_VERSION"),
             config.harness,
             &config.initial_commands,
+            config.parked_move.as_ref(),
         )?
     };
     if let Some(operation_id) = config.accepted_reload_operation_id.as_deref() {

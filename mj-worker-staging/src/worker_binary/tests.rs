@@ -5621,6 +5621,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        parked_move: None,
         accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
@@ -5797,6 +5798,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        parked_move: None,
         accepted_reload_operation_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,

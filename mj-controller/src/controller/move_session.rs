@@ -2461,6 +2461,9 @@ impl Controller {
             .sessions
             .get_mut(id)
             .context("Move session missing from controller")?;
+        record.state = latest.state;
+        let committed_parked_boot = operation.phase == MovePhase::DestinationStarting
+            && latest.state == SessionState::Running;
         record.resource_allocation = latest.resource_allocation;
         record.additional_mounts = latest.additional_mounts;
         if result.is_err()
@@ -2490,7 +2493,7 @@ impl Controller {
         }
         if let Err(error) = &result
             && operation.in_place
-            && operation.in_place_expected_store_id.is_some()
+            && (operation.in_place_expected_store_id.is_some() || committed_parked_boot)
             && operation.phase != MovePhase::DispatchReleased
             && operation.phase != MovePhase::Failed
         {
@@ -2821,7 +2824,7 @@ impl Controller {
                     && session.state == SessionState::Running
                     && operation.in_place_expected_store_id.is_none()
                 {
-                    return self.finish_parked_in_place_move(admission, &mut operation, None, executor, manager).await;
+                    return self.finish_parked_in_place_move(admission, &mut operation, executor).await;
                 }
                 match self.committed_in_place_failure(&operation, executor) {
                     Ok(Some(failure)) => {
@@ -3445,54 +3448,11 @@ impl Controller {
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         operation: &mut MoveOperation,
-        handoff: Option<String>,
         executor: &(impl CommandExecutor + Sync),
-        manager: &SessionManagerControl,
     ) -> Result<()> {
         let id = operation.selection.session_id.clone();
         self.settle_pending_parked_move_boot(admission, &id, executor)
             .await?;
-        let handoff =
-            if !operation.in_place_harness_restarted && !self.move_native_continuity(operation)? {
-                match handoff {
-                    Some(handoff) => Some(handoff),
-                    None => {
-                        let session = &self.state.sessions[&id];
-                        let previous = operation.recovery_session.as_ref().unwrap_or(session);
-                        let profile = self.config.named_profile(&session.last_profile)?;
-                        let backend = super::backend_locator(
-                            session.target.as_deref().context("Move target missing")?,
-                            session,
-                            &self.config,
-                        )?;
-                        Some(
-                            self.prepare_in_place_handoff(
-                                &id, previous, &backend, profile, false, executor,
-                            )
-                            .await?,
-                        )
-                    }
-                }
-            } else {
-                None
-            };
-        let continue_quota = operation.queue == ResumeQueueDisposition::Start
-            && operation.quota_stop_reason.is_some();
-        if handoff.is_some() || continue_quota {
-            let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
-            let conn = relay
-                .0
-                .as_mut()
-                .context("parked Move worker missing")?
-                .connection_mut();
-            if let Some(handoff) = handoff {
-                conn.client.install_prompt_context(handoff).await?;
-            }
-            if continue_quota {
-                let (command_id, command) = quota_move_continuation_command(operation)?;
-                conn.client.submit(command_id, command).await?;
-            }
-        }
         operation.in_place_harness_restarted = true;
         operation.phase = MovePhase::Completed;
         operation.queue_admission_finished = true;
@@ -3543,6 +3503,29 @@ impl Controller {
                     .await?,
                 )
             };
+            let quota_continuation = if operation.queue == ResumeQueueDisposition::Start
+                && operation.quota_stop_reason.is_some()
+            {
+                let (command_id, command) = quota_move_continuation_command(operation)?;
+                Some(mj_core::worker_launch::InitialWorkerCommand {
+                    command_id,
+                    command,
+                    optional: false,
+                })
+            } else {
+                None
+            };
+            let parked_move = mj_core::worker_launch::ParkedMoveLaunch {
+                operation_id: operation.operation_id.clone(),
+                discard_native_session_id: if native_continuity {
+                    None
+                } else {
+                    previous.native_session_id.clone()
+                },
+                prompt_context: handoff,
+                discard_queued_prompts: operation.queue == ResumeQueueDisposition::Discard,
+                quota_continuation,
+            };
             operation.recovery_session = Some(previous.clone());
             operation.phase = MovePhase::DestinationStarting;
             crate::database::save_move_operation(operation)?;
@@ -3551,25 +3534,13 @@ impl Controller {
             self.state.sessions.insert(id.clone(), previous.clone());
             executor.begin_resumable_work()?;
             let wake = self
-                .unpark_subagent_worker(
-                    admission,
-                    &id,
-                    Some((
-                        &destination,
-                        if native_continuity {
-                            None
-                        } else {
-                            previous.native_session_id.clone()
-                        },
-                    )),
-                    executor,
-                )
+                .unpark_subagent_worker(admission, &id, Some((&destination, parked_move)), executor)
                 .await;
             let held = executor.end_resumable_work("finish parked Move");
             wake?;
             held?;
             return self
-                .finish_parked_in_place_move(admission, operation, handoff, executor, manager)
+                .finish_parked_in_place_move(admission, operation, executor)
                 .await;
         }
         let retained = source_relay.owner();

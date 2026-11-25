@@ -17,6 +17,50 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 }
 
 impl DurableRelay {
+    /// Apply the durable Move prefix before runtime dispatch or control attachment.
+    /// Each journal command tolerates a crash before the final snapshot marker.
+    pub fn apply_parked_move_launch(
+        &mut self,
+        parked: &mj_core::worker_launch::ParkedMoveLaunch,
+    ) -> Result<()> {
+        let marker = format!("parked-move:{}", parked.operation_id);
+        if self.snapshot.handled_commands.contains_key(&marker) {
+            return Ok(());
+        }
+        if parked.discard_queued_prompts {
+            self.submit_command_inner(
+                &format!("parked-move-discard-{}", parked.operation_id),
+                RelayCommand::ClearQueuedPrompts,
+                false,
+            )?
+            .map_err(|error| anyhow!("apply parked Move queue discard: {}", error.message))?;
+        }
+        if let Some(handoff) = &parked.prompt_context {
+            self.install_prompt_context(handoff.clone())?;
+        }
+        if let Some(continuation) = &parked.quota_continuation {
+            self.submit_command_inner(
+                &continuation.command_id,
+                continuation.command.clone(),
+                true,
+            )?
+            .map_err(|error| anyhow!("apply parked Move continuation: {}", error.message))?;
+        }
+        let mut next = self.snapshot.clone();
+        // This receipt is a durable boot marker, not a dispatchable command.
+        next.handled_commands.insert(
+            marker,
+            HandledRelayCommand {
+                accepted_ordinal: next.latest_ordinal,
+                terminal_identity: None,
+                terminal_ordinal: None,
+                outcome: None,
+                failure: None,
+            },
+        );
+        self.commit_snapshot(next)
+    }
+
     fn return_boundary_steer_after_turn_end(&mut self, active_prompt_id: &str) -> Result<()> {
         if self.steering_delivery_mode.uses_acp() {
             return Ok(());
@@ -2112,7 +2156,10 @@ impl DurableRelay {
     /// asked. It goes through admission like an Escape steer, so the journal
     /// and every client see the same steering operation.
     fn submit_automatic_steer(&mut self) -> Result<()> {
-        if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
+        if self.parked_move_boot_pending
+            || self.live_baseline_pending()
+            || self.snapshot.in_place_move_hold.is_some()
+        {
             return Ok(());
         }
 
@@ -2982,7 +3029,10 @@ impl DurableRelay {
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
-        if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
+        if self.parked_move_boot_pending
+            || self.live_baseline_pending()
+            || self.snapshot.in_place_move_hold.is_some()
+        {
             return Ok(None);
         }
         let recovery = self

@@ -166,7 +166,7 @@ pub enum WorkerRunMode {
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discard_native_session_id: Option<String>,
+    pub parked_move: Option<ParkedMoveLaunch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_reload_operation_id: Option<String>,
     /// Chosen from the target locator, never from ambient container detection.
@@ -339,6 +339,20 @@ pub struct WorkerLaunchConfig {
     /// discarded while parsing, so they never reach `Debug` output.
     #[serde(default, skip_serializing)]
     pub observe_policy: Option<serde::de::IgnoredAny>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParkedMoveLaunch {
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard_native_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_context: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discard_queued_prompts: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_continuation: Option<InitialWorkerCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
