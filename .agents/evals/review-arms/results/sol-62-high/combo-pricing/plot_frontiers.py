@@ -107,7 +107,7 @@ def place_numbers(fig, ax, marks, number):
             raise RuntimeError(f"No label space for {option} at {(x, y)}")
 
 
-def render(results, output, *, cost, no_greptile=False, linear_x=False):
+def render(results, output, *, cost, no_greptile=False, linear_x=False, frontier_only=False):
     extras = {} if no_greptile else EXTRAS
     axis, flag = ("cost_per_diff_usd", "cost_frontier") if cost else ("median_latency_s", "frontier")
     series = [(name, color, load_points(results, filename, axis, flag, include_greptile=not no_greptile))
@@ -142,7 +142,7 @@ def render(results, output, *, cost, no_greptile=False, linear_x=False):
         ticks = [40, 50, 60, 80, 100, 120, 150, 200, 250, 300]
         xlabel = "Simulated median review time (seconds, log scale)"
     if linear_x:
-        right = (max(p[0] for p in reference.values()) if cost else
+        right = (max(p[0] for p in reference.values()) if cost and not frontier_only else
                  max(p[0] for _, _, points in series for option, p in points.items() if p[2] or option in extras))
         ax.set_xlim(0, right * 1.08)
         xlabel = ("Estimated API cost per diff (USD)" if cost else
@@ -163,7 +163,7 @@ def render(results, output, *, cost, no_greptile=False, linear_x=False):
     marks = []
     handles = []
     for name, color, points in series:
-        if cost:
+        if cost and not frontier_only:
             other = [(x, y) for o, (x, y, flagged) in points.items() if not flagged and o not in extras]
             ax.scatter(*zip(*other), s=18, color=color, linewidth=0, alpha=.18, zorder=1)
         frontier = sorted((x, y, o) for o, (x, y, flagged) in points.items() if flagged)
@@ -181,7 +181,7 @@ def render(results, output, *, cost, no_greptile=False, linear_x=False):
     if extras:
         handles.append(Line2D([], [], color=MUTED, linestyle="none", marker="D", markerfacecolor=BG,
                               label="Greptile alone"))
-    if cost:
+    if cost and not frontier_only:
         handles.append(Line2D([], [], color=MUTED, linestyle="none", marker=".", alpha=.4,
                               label="Other priced options"))
     ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(-.008, 1.012),
@@ -252,6 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--results", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--no-greptile", action="store_true")
     parser.add_argument("--linear-x", action="store_true")
+    parser.add_argument("--frontier-only", action="store_true", help="Omit the cost chart background cloud")
     args = parser.parse_args()
-    render(args.results, args.output, cost=False, no_greptile=args.no_greptile, linear_x=args.linear_x)
-    render(args.results, args.output, cost=True, no_greptile=args.no_greptile, linear_x=args.linear_x)
+    render(args.results, args.output, cost=False, no_greptile=args.no_greptile, linear_x=args.linear_x, frontier_only=args.frontier_only)
+    render(args.results, args.output, cost=True, no_greptile=args.no_greptile, linear_x=args.linear_x, frontier_only=args.frontier_only)
