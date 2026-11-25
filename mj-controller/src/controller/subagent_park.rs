@@ -443,8 +443,42 @@ impl Controller {
             let launch: mj_core::worker_launch::WorkerLaunchConfig =
                 serde_json::from_slice(&output.stdout).context("read staged parked Move launch")?;
             let aws_profile = launch.environment.get("AWS_PROFILE").map(String::as_str);
-            if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
-                self.start_installed_worker(
+            let active_operation_id = if liveness.status == 0
+                && String::from_utf8_lossy(&liveness.stdout).trim() == "dead"
+            {
+                let target = self.state.sessions[session_id]
+                    .target
+                    .as_deref()
+                    .context("parked Move target disappeared")?;
+                owner.settle_dead_restart(target)?;
+                owner.begin_restart(target, String::new())?;
+                crate::database::advance_worker_restart(
+                    session_id,
+                    owner.operation_id(),
+                    crate::database::WorkerRestartPhase::Swapping,
+                )?;
+                crate::database::record_worker_restart_aws_profile(
+                    session_id,
+                    owner.operation_id(),
+                    aws_profile,
+                )?;
+                start_worker_durably(
+                    &owner,
+                    target,
+                    executor,
+                    &backend,
+                    &worker_root,
+                    &self.config.github,
+                )
+                .context(RESTART_FROM_PARKED.start)
+                .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
+                owner.operation_id().to_owned()
+            } else {
+                intent.operation_id
+            };
+            executor.begin_resumable_work()?;
+            let observed = self
+                .observe_started_worker(
                     session_id,
                     executor,
                     InstalledWorkerRestart {
@@ -459,32 +493,11 @@ impl Controller {
                         messages: &RESTART_FROM_PARKED,
                     },
                 )
-                .await?;
-                crate::database::activate_worker_restart(session_id, owner.operation_id())?;
-            } else {
-                executor.begin_resumable_work()?;
-                let observed = self
-                    .observe_started_worker(
-                        session_id,
-                        executor,
-                        InstalledWorkerRestart {
-                            backend: &backend,
-                            worker_root: &worker_root,
-                            reconnect: &reconnect,
-                            launch: None,
-                            prepared: true,
-                            discard_queued_prompts: None,
-                            staged_aws_profile: Some(aws_profile),
-                            swap_admission: None,
-                            messages: &RESTART_FROM_PARKED,
-                        },
-                    )
-                    .await;
-                let held = executor.end_resumable_work("settle parked Move worker boot");
-                observed?;
-                held?;
-                crate::database::activate_worker_restart(session_id, &intent.operation_id)?;
-            }
+                .await;
+            let held = executor.end_resumable_work("settle parked Move worker boot");
+            observed?;
+            held?;
+            crate::database::activate_worker_restart(session_id, &active_operation_id)?;
             let active = crate::database::load_session_record(session_id)?
                 .context("parked Move boot session disappeared")?;
             self.state.sessions.insert(session_id.to_owned(), active);
@@ -1003,7 +1016,15 @@ pub(in crate::controller) mod tests {
         }
 
         fn begin_resumable_work(&self) -> Result<()> {
-            if self.admission.lock().unwrap().take().is_some() {
+            let held = self.admission.lock().unwrap().take();
+            let yielded = held.is_some();
+            drop(held);
+            assert!(
+                self.gate.active_labels().is_empty(),
+                "resumable observation must yield daemon admission"
+            );
+            self.purposes.lock().unwrap().push("yield admission".into());
+            if yielded {
                 self.observing.notify_one();
             }
             Ok(())
@@ -1011,6 +1032,10 @@ pub(in crate::controller) mod tests {
 
         fn end_resumable_work(&self, label: &'static str) -> Result<()> {
             *self.admission.lock().unwrap() = Some(self.gate.enter(label)?);
+            self.purposes
+                .lock()
+                .unwrap()
+                .push(format!("hold admission: {label}"));
             Ok(())
         }
     }
@@ -1460,6 +1485,27 @@ pub(in crate::controller) mod tests {
                 .filter(|purpose| purpose.as_str() == "start detached Mjolnir worker")
                 .count();
             assert_eq!(starts, usize::from(dead_boot));
+            let events = executor.purposes.lock().unwrap();
+            let yielded = events
+                .iter()
+                .position(|event| event == "yield admission")
+                .expect("readiness must release admission");
+            let held = events
+                .iter()
+                .position(|event| event == "hold admission: settle parked Move worker boot")
+                .expect("completion must reacquire admission");
+            assert!(yielded < held);
+            if dead_boot {
+                let started = events
+                    .iter()
+                    .position(|event| event == "start detached Mjolnir worker")
+                    .unwrap();
+                assert!(
+                    started < yielded,
+                    "only readiness observation yields; worker start holds admission"
+                );
+            }
+            drop(events);
             assert_eq!(
                 controller.state.sessions[LATCH_RELAY_SESSION]
                     .staged_aws_profile
@@ -1483,6 +1529,22 @@ pub(in crate::controller) mod tests {
             !executor.gate.try_close(),
             "Move completion must hold daemon admission"
         );
+        if cross_harness {
+            let events = executor.purposes.lock().unwrap();
+            let yielded = events
+                .iter()
+                .position(|event| event == "yield admission")
+                .expect("handoff generation yields admission");
+            let held = events
+                .iter()
+                .position(|event| event == "hold admission: commit parked Move destination")
+                .expect("destination commit reacquires admission");
+            let started = events
+                .iter()
+                .position(|event| event == "start detached Mjolnir worker")
+                .unwrap();
+            assert!(yielded < held && held < started);
+        }
         let launch = mj_core::worker_launch::WorkerLaunchConfig::read(
             &root.path().join(LATCH_RELAY_SESSION).join("launch.json"),
         )

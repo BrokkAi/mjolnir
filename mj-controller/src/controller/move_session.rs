@@ -3496,12 +3496,14 @@ impl Controller {
             let handoff = if native_continuity {
                 None
             } else {
-                Some(
-                    self.prepare_in_place_handoff(
-                        &id, &previous, &backend, &profile, true, executor,
-                    )
-                    .await?,
-                )
+                executor.begin_resumable_work()?;
+                let prepared = self
+                    .prepare_in_place_handoff(&id, &previous, &backend, &profile, true, executor)
+                    .await;
+                let held = executor.end_resumable_work("commit parked Move destination");
+                let handoff = prepared?;
+                held?;
+                Some(handoff)
             };
             let quota_continuation = if operation.queue == ResumeQueueDisposition::Start
                 && operation.quota_stop_reason.is_some()
