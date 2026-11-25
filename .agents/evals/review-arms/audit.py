@@ -602,18 +602,19 @@ READ_COMMANDS = set("""
     od xxd hexdump strings sha256sum sha1sum md5sum touch ln jq
 """.split())
 GIT_HISTORY = set("fetch pull clone remote ls-remote bundle fsck reflog for-each-ref show-ref".split())
-GIT_REVISIONS = set("diff log show blame rev-list rev-parse cat-file checkout switch grep".split())
+GIT_REVISIONS = set("diff log show blame rev-list rev-parse cat-file checkout switch grep ls-tree diff-tree".split())
 GIT_FLAGS = set("""
     --stat --numstat --shortstat --summary --name-only --name-status --raw --patch
     --no-patch --oneline --no-decorate --decorate --no-color --color --no-ext-diff
     --no-textconv --binary --cached --staged --no-renames --find-renames --find-copies
     --ignore-space-at-eol --ignore-space-change --ignore-all-space --ignore-submodules --submodule
-    --full-index --reverse --word-diff --exit-code --minimal --patience --histogram
+    --full-index --full-tree --reverse --word-diff --exit-code --minimal --patience --histogram
     --first-parent --no-merges --merges --parents --quiet --verify --short --show-toplevel
     --show-prefix --show-object-format --is-inside-work-tree --path-format --absolute-git-dir
     --git-common-dir --git-dir --literal-pathspecs --relative --no-relative --porcelain
     --untracked-files --branch --detach --others --exclude-standard --full-name --stage --error-unmatch
-    -p -s -q -r -R -v -V -M -C -a -b -w -i -m -c -t -e -u -z -l -1
+    --long --object-only --no-commit-id --root
+    -p -s -q -r -R -v -V -M -C -a -b -w -i -m -c -t -e -u -z -l -1 -d
 """.split())
 GIT_VALUE_OPTIONS = set("""
     -n -L -S -G -U --format --pretty --max-count --skip --output --unified --diff-filter
@@ -727,6 +728,11 @@ def git_hits(args, own_workspace, commits, single_commit, cwd=""):
         operands = []
     elif verb == "blame" and not paths and operands:
         paths.append(operands.pop())
+    elif verb == "ls-tree":
+        if not operands:
+            raise InspectionRequired("ls-tree without a tree")
+        paths.extend(operands[1:])
+        operands = operands[:1]
     for path in paths:
         yield from path_hits(path, own_workspace, cwd)
     detached = verb == "checkout" and "--detach" in before
@@ -736,7 +742,7 @@ def git_hits(args, own_workspace, commits, single_commit, cwd=""):
         revision, colon, path = operand.partition(":")
         if colon:
             yield from path_hits(path, own_workspace, cwd)
-        if not colon and verb in {"diff", "log", "show", "grep"} and (
+        if not colon and verb in {"diff", "log", "show", "grep", "diff-tree"} and (
             operand.startswith(("./", "../", "/", "~/"))
             or "/" in operand and not operand.startswith(("origin/", "upstream/", "refs/"))
             or re.search(r"\.[a-zA-Z][a-zA-Z0-9_-]*$", operand)
