@@ -1935,19 +1935,40 @@ async fn reopen_subagent_admission_after_move(
     let id = target.session_id.clone();
     let query_owner = owner.clone();
     let active_hold = connection.operational().in_place_move_hold.clone();
+    let observed_hold = active_hold.clone();
     let live_store_id = connection.operational().store_id.clone();
     let (queue_enabled, move_active, release_orphaned_hold) =
         mj_core::runtime::spawn_blocking(move || {
             query_owner.scope_blocking(|| -> Result<_> {
                 let current_move = crate::database::load_move_operation(&id)?;
                 let release_orphaned_hold = active_hold.as_ref().and_then(|hold| {
-                    let owned_by_active_move = current_move.as_ref().is_some_and(|op| {
-                        op.in_place
-                            && op.operation_id == hold.operation_id
-                            && op.is_active()
-                            && op.phase != mj_core::state::MovePhase::DispatchReleased
+                    let owner = current_move
+                        .as_ref()
+                        .filter(|op| op.in_place && op.operation_id == hold.operation_id);
+                    let owned_by_active_move = owner.is_some_and(|op| {
+                        op.is_active() && op.phase != mj_core::state::MovePhase::DispatchReleased
                     });
-                    (!owned_by_active_move).then(|| hold.operation_id.clone())
+                    // `Completed` and `DispatchReleased` committed with the
+                    // settled session record, so only the release is left. A
+                    // `Failed` or `Cancelled` Move lifts its fence after
+                    // settling the record only for a reload that failed after
+                    // commit; a fence that is merely absent (a lost reply
+                    // cleared nothing it should have) proves nothing for a
+                    // hold whose reload started. A hold no Move record names
+                    // settles nothing.
+                    let record_settled = owner.is_some_and(|op| {
+                        matches!(
+                            op.phase,
+                            mj_core::state::MovePhase::Completed
+                                | mj_core::state::MovePhase::DispatchReleased
+                        ) || (!op.is_active()
+                            && op.in_place_expected_store_id.is_none()
+                            && matches!(
+                                hold.reload_phase,
+                                Some(mj_core::relay::InPlaceReloadPhase::FailedAfterCommit { .. })
+                            ))
+                    });
+                    (!owned_by_active_move).then(|| (hold.operation_id.clone(), record_settled))
                 });
                 let Some(session) = crate::database::load_session_record(&id)? else {
                     return Ok((false, false, release_orphaned_hold));
@@ -1968,25 +1989,49 @@ async fn reopen_subagent_admission_after_move(
         })
         .await
         .context("inspect sub-agent admission ownership")??;
-    if let (Some(orphaned_op_id), Some(store_id)) = (release_orphaned_hold, live_store_id)
+    if let (Some((orphaned_op_id, record_settled)), Some(store_id), Some(hold)) =
+        (release_orphaned_hold, live_store_id, observed_hold)
         && connection.protocol_version() >= mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL
     {
-        tracing::info!(
-            session_id = target.session_id,
-            operation_id = orphaned_op_id,
-            "releasing orphaned in-place Move dispatch hold with no active intent"
-        );
-        if let Err(error) = connection
-            .client
-            .release_in_place_move_dispatch(&orphaned_op_id, &store_id)
-            .await
-        {
+        // Only a hold whose reload never took effect is safe to drop. Once the
+        // worker committed or started a reload, its disk and harness already
+        // belong to the destination, and only the Move record that names the
+        // destination can settle the session record to match. Releasing the
+        // hold here would hand dispatch back to a session whose record still
+        // names the source (split-brain), so it stays held until a Move that
+        // owns the reload settles it.
+        if !record_settled && (hold.harness_restarted || hold.reload_phase.is_some()) {
             tracing::warn!(
                 session_id = target.session_id,
                 operation_id = orphaned_op_id,
-                error = %error,
-                "could not release orphaned in-place Move dispatch hold on reconnect"
+                reload_phase = ?hold.reload_phase,
+                harness_restarted = hold.harness_restarted,
+                "keeping an in-place Move dispatch hold whose reload took effect; no active Move can settle it"
             );
+        } else {
+            tracing::info!(
+                session_id = target.session_id,
+                operation_id = orphaned_op_id,
+                "releasing orphaned in-place Move dispatch hold with no active intent"
+            );
+            // The worker rechecks under its lock that the reload still has not
+            // started, so a reload that begins meanwhile keeps its hold.
+            if let Err(error) = connection
+                .client
+                .release_in_place_move_dispatch_checked(
+                    &orphaned_op_id,
+                    &store_id,
+                    (!record_settled).then_some(false),
+                )
+                .await
+            {
+                tracing::warn!(
+                    session_id = target.session_id,
+                    operation_id = orphaned_op_id,
+                    error = %error,
+                    "could not release orphaned in-place Move dispatch hold on reconnect"
+                );
+            }
         }
     }
     if !queue_enabled || move_active {
