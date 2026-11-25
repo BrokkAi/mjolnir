@@ -404,6 +404,7 @@ mod git_sandbox;
 mod project_tools;
 #[cfg(unix)]
 mod shell_environment;
+#[cfg(unix)]
 mod tool_cache;
 #[cfg(unix)]
 pub use discovery::discover_profile_config;

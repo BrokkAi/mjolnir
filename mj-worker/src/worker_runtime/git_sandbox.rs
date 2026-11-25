@@ -116,10 +116,13 @@ impl<'a> GitAccess<'a> {
         for common_dir in self.common_dirs() {
             // The common directory's `config.worktree` configures the
             // primary working tree.
+            // `modules` holds initialized submodules' hooks and configuration;
+            // a submodule the session works in is granted back inside it.
             read.extend([
                 common_dir.join("hooks"),
                 common_dir.join("config"),
                 common_dir.join("config.worktree"),
+                common_dir.join("modules"),
             ]);
             read.extend(present(common_dir.join("config.lock")));
             if self.clones.contains(common_dir) {
@@ -144,6 +147,35 @@ impl<'a> GitAccess<'a> {
         access
     }
 
+    /// Deny `modules` whole, or, when the session works in a submodule inside
+    /// it, everything around that submodule, so the grant of its own
+    /// directory cannot reach another's hooks or configuration. A submodule
+    /// named with a slash (`libs/foo`) lives in `modules/libs/foo`, so every
+    /// directory on the way to the one in use is walked, siblings included.
+    fn deny_modules(&self, modules: &Path, deny: &mut BTreeSet<PathBuf>) {
+        if !self.own.iter().any(|own| own.starts_with(modules)) {
+            deny.insert(modules.to_owned());
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(modules) else {
+            return;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            let is_symlink = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+            if is_symlink || !self.own.iter().any(|own| own.starts_with(&path)) {
+                deny.insert(path);
+            } else if !self.own.contains(&path) {
+                // On the way to the submodule in use: deny what is around it,
+                // and the configuration this directory may not have yet.
+                for name in ["hooks", "config", "config.lock", "config.worktree"] {
+                    deny.insert(path.join(name));
+                }
+                self.deny_modules(&path, deny);
+            }
+        }
+    }
+
     /// Claude `denyWrite` entries: hooks and configuration everywhere, and
     /// the siblings of a worktree-only session whole (Claude grants the
     /// common directory, so its own children are carved back out).
@@ -153,6 +185,7 @@ impl<'a> GitAccess<'a> {
             for name in ["hooks", "config", "config.lock", "config.worktree"] {
                 deny.insert(common_dir.join(name));
             }
+            self.deny_modules(&common_dir.join("modules"), &mut deny);
             for other in sibling_worktrees(common_dir, &self.own) {
                 if self.clones.contains(common_dir) {
                     for name in ["config.worktree", "commondir", "gitdir"] {
@@ -197,7 +230,9 @@ pub(super) fn resolve_git_sandbox_targets(
         if !root.is_absolute() || !root.is_dir() {
             continue;
         }
-        let Some((dotgit, base)) = root.ancestors().find_map(|ancestor| {
+        // A root that is a symlink works where it leads, so walk up from there.
+        let physical = canonical(root);
+        let Some((dotgit, base)) = physical.ancestors().find_map(|ancestor| {
             let dotgit = ancestor.join(".git");
             std::fs::metadata(&dotgit)
                 .is_ok()
@@ -817,6 +852,7 @@ mod tests {
             git_dir.join("hooks"),
             git_dir.join("config"),
             git_dir.join("config.worktree"),
+            git_dir.join("modules"),
             git_dir.join("worktrees"),
             worktree_dir.join("config.worktree"),
             worktree_dir.join("commondir"),
@@ -867,6 +903,7 @@ mod tests {
                 path(git_dir.join("hooks")),
                 path(git_dir.join("config")),
                 path(git_dir.join("config.worktree")),
+                path(git_dir.join("modules")),
                 path(git_dir.join("worktrees")),
                 path(worktree_dir.join("config.worktree")),
                 path(worktree_dir.join("commondir")),
@@ -880,6 +917,7 @@ mod tests {
                 path(git_dir.join("hooks")),
                 path(git_dir.join("config")),
                 path(git_dir.join("config.worktree")),
+                path(git_dir.join("modules")),
                 path(worktree_dir.join("config.worktree")),
                 path(worktree_dir.join("commondir")),
                 path(worktree_dir.join("gitdir")),
@@ -1057,6 +1095,129 @@ mod tests {
         std::fs::remove_file(&backlink).unwrap();
         fifo(&backlink);
         assert!(resolve(vec![repositories.worktree.clone()]).is_empty());
+    }
+
+    #[test]
+    fn initialized_submodules_stay_read_only_unless_the_session_works_in_one() {
+        let repositories = repositories();
+        let git_dir = repositories.clone.join(".git");
+        for name in ["sub", "other", "libs/a", "libs/b"] {
+            let source = repositories
+                .base
+                .join(format!("{}-source", name.replace('/', "-")));
+            std::fs::create_dir(&source).unwrap();
+            git(&source, &["init", "-q", "-b", "main"]);
+            git(&source, &["config", "user.name", "Sandbox Test"]);
+            git(
+                &source,
+                &["config", "user.email", "sandbox@example.invalid"],
+            );
+            git(&source, &["commit", "-q", "--allow-empty", "-m", "base"]);
+            git(
+                &repositories.clone,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    "-q",
+                    source.to_str().unwrap(),
+                    name,
+                ],
+            );
+        }
+        let modules = git_dir.join("modules");
+        let path = |path: &Path| path.to_str().unwrap().to_owned();
+        let stage = |git_roots: Vec<PathBuf>| {
+            let sandbox = HarnessSandbox {
+                directories: Vec::new(),
+                approved_roots: git_roots.clone(),
+                git_roots,
+            };
+            let mut config = toml::Table::new();
+            configure_codex_permissions(
+                &mut config,
+                Path::new("config.toml"),
+                ExecutionPolicy::ConfiguredApprovals,
+                &sandbox,
+            )
+            .unwrap();
+            let codex = config["permissions"][CODEX_PROFILE]["filesystem"]
+                .as_table()
+                .unwrap()
+                .iter()
+                .map(|(path, access)| (path.clone(), access.as_str().unwrap().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let root = repositories.base.join("worker");
+            let home = claude_home(&root);
+            configure_claude_git_sandbox(
+                &root,
+                "session",
+                &home,
+                ExecutionPolicy::ConfiguredApprovals,
+                &sandbox,
+            )
+            .unwrap();
+            let claude = claude_settings(&home)["sandbox"]["filesystem"]["denyWrite"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.as_str().unwrap().to_owned())
+                .collect::<BTreeSet<_>>();
+            std::fs::remove_dir_all(&root).unwrap();
+            (codex, claude)
+        };
+
+        // The clone's submodules (initialized ones, and any a later `git
+        // submodule add` would create) cannot be reconfigured.
+        let (codex, claude) = stage(vec![repositories.clone.clone()]);
+        assert_eq!(codex[&path(&modules)], "read");
+        assert!(claude.contains(&path(&modules)));
+
+        // A session in one submodule works in its own directory only.
+        let (codex, claude) = stage(vec![
+            repositories.clone.clone(),
+            repositories.clone.join("sub"),
+        ]);
+        assert_eq!(codex[&path(&modules)], "read");
+        assert_eq!(codex[&path(&modules.join("sub"))], "write");
+        assert_eq!(codex[&path(&modules.join("sub/hooks"))], "read");
+        assert_eq!(codex[&path(&modules.join("sub/config"))], "read");
+        assert!(!claude.contains(&path(&modules)));
+        assert!(!claude.contains(&path(&modules.join("sub"))));
+        assert!(claude.contains(&path(&modules.join("other"))));
+        assert!(claude.contains(&path(&modules.join("sub/hooks"))));
+        // A slash-named sibling (`libs/b`) is not hidden behind `libs`.
+        assert!(claude.contains(&path(&modules.join("libs"))));
+
+        let (codex, claude) = stage(vec![
+            repositories.clone.clone(),
+            repositories.clone.join("libs/a"),
+        ]);
+        assert_eq!(codex[&path(&modules.join("libs/a"))], "write");
+        assert!(claude.contains(&path(&modules.join("libs/b"))));
+        assert!(claude.contains(&path(&modules.join("sub"))));
+        assert!(!claude.contains(&path(&modules.join("libs"))));
+        assert!(!claude.contains(&path(&modules.join("libs/a"))));
+        assert!(claude.contains(&path(&modules.join("libs/a/hooks"))));
+    }
+
+    #[test]
+    fn a_root_that_is_a_symlink_is_resolved_where_it_leads() {
+        let repositories = repositories();
+        let alias = repositories.base.join("alias");
+        std::os::unix::fs::symlink(repositories.worktree.join("crates/foo"), &alias).unwrap();
+
+        let targets =
+            resolve_git_sandbox_targets(std::slice::from_ref(&alias), std::slice::from_ref(&alias));
+
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].is_worktree);
+        assert_eq!(
+            targets[0].git_dir,
+            repositories.clone.join(".git/worktrees/linked")
+        );
+        assert_eq!(targets[0].common_dir, repositories.clone.join(".git"));
     }
 
     #[test]
