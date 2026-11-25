@@ -100,7 +100,7 @@ const IMAGE_FALLBACK_BIN_DIR: &str = "/opt/mj-image/bin";
 /// directory. It fails when `mise bin-paths` or a wrapper write fails.
 fn fallback_wrappers_command(bin_dir: &str) -> String {
     format!(
-        r##"mkdir -p '{bin_dir}' && dirs=$(mise bin-paths) && printf '%s\n' "$dirs" | while IFS= read -r dir; do [ -d "$dir" ] || continue; for bin in "$dir"/*; do [ -f "$bin" ] && [ -x "$bin" ] || continue; name=${{bin##*/}}; [ -e '{bin_dir}'"/$name" ] && continue; escaped=$(printf '%s' "$bin" | sed "s/'/'\\\\''/g"); printf "#!/bin/sh\nexec '%s' \"\$@\"\n" "$escaped" > '{bin_dir}'"/$name" && chmod 0755 '{bin_dir}'"/$name" || exit 1; done; done"##
+        r##"rm -rf '{bin_dir}' && mkdir -p '{bin_dir}' && dirs=$(mise bin-paths) && printf '%s\n' "$dirs" | while IFS= read -r dir; do [ -d "$dir" ] || continue; for bin in "$dir"/*; do [ -f "$bin" ] && [ -x "$bin" ] || continue; name=${{bin##*/}}; [ -e '{bin_dir}'"/$name" ] && continue; escaped=$(printf '%s' "$bin" | sed "s/'/'\\\\''/g"); printf "#!/bin/sh\nexec '%s' \"\$@\"\n" "$escaped" > '{bin_dir}'"/$name" && chmod 0755 '{bin_dir}'"/$name" || exit 1; done; done"##
     )
 }
 
@@ -264,10 +264,17 @@ mod tests {
             second.display()
         );
 
+        // Building from an earlier session image leaves its wrappers behind;
+        // they must neither win over the new recipe's tools nor survive it.
+        let bin = root.path().join("out bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        executable(&bin.join("gh"), "#!/bin/sh\necho stale-gh\n");
+        executable(&bin.join("removed"), "#!/bin/sh\necho stale-removed\n");
+
         let output = run_snippet(root.path(), &listing, 0);
         assert!(output.status.success(), "{output:?}");
-        let bin = root.path().join("out bin");
         assert!(!bin.join("data").exists());
+        assert!(!bin.join("removed").exists());
         for name in ["gh", "node"] {
             let mode = std::fs::metadata(bin.join(name))
                 .unwrap()
@@ -326,7 +333,7 @@ mod tests {
         let text = containerfile(&base, "linux/amd64", &mise, &BTreeMap::new()).unwrap();
         assert!(text.contains("PATH=/opt/mise/shims:/opt/mj-image/bin:$PATH\n"));
         let install = text
-            .find("&& mise install && mkdir -p '/opt/mj-image/bin'")
+            .find("&& mise install && rm -rf '/opt/mj-image/bin' && mkdir -p '/opt/mj-image/bin'")
             .unwrap();
         assert!(install < text.find("&& chown -R hel").unwrap());
     }
