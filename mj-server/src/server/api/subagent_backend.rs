@@ -174,6 +174,7 @@ pub trait SubagentBackend: Send + Sync {
         _session_id: String,
         _dry_run: bool,
         _without_checkpoint: bool,
+        _history_only: bool,
     ) -> BoxFuture<'_, Result<Result<mj_core::suspend_consent::SuspendPreflight, String>, ApiFailure>>
     {
         Box::pin(async { Err(ApiError::controller_unavailable().into()) })

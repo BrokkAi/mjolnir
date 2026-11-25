@@ -2247,6 +2247,7 @@ mod tests {
                                 abort_operations: mj_core::suspend_consent::OperationConsent::None,
                                 without_checkpoint: false,
                                 confirm_no_checkpoint: false,
+                                history_only: false,
                             },
                         ))
                         .await?;

@@ -964,6 +964,9 @@ async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskR
 /// Scratch in `$MJ_KEEP_DIR` travels with Move but is not saved when the session is suspended.
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
+    /// Save conversation history and resume into a fresh checkout.
+    #[arg(long, conflicts_with_all = ["without_checkpoint", "fix_blockers"])]
+    history_only: bool,
     /// Clear hidden index flags and move eligible worktrees inside the clone.
     #[arg(long, conflicts_with = "without_checkpoint")]
     fix_blockers: bool,
@@ -2575,7 +2578,7 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     }
     if args.dry_run {
         let preflight = client
-            .suspend_preflight(session, true, args.without_checkpoint)
+            .suspend_preflight(session, true, args.without_checkpoint, args.history_only)
             .await?;
         if args.json {
             return print_json(&preflight);
@@ -2584,7 +2587,9 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         return Ok(());
     }
     if args.without_checkpoint {
-        let preflight = client.suspend_preflight(session, false, true).await?;
+        let preflight = client
+            .suspend_preflight(session, false, true, false)
+            .await?;
         let has_verified = preflight
             .existing_checkpoint
             .as_ref()
@@ -2596,6 +2601,7 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         }
     }
     let consent = mj_core::suspend_consent::SuspendConsent {
+        history_only: args.history_only,
         discard_untracked: if args.discard_untracked {
             mj_core::suspend_consent::UntrackedConsent::Any
         } else {

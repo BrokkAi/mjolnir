@@ -47,6 +47,8 @@ pub struct AbandonedPromptRequest {
 pub struct SuspendPreflightRequest {
     pub dry_run: bool,
     pub without_checkpoint: bool,
+    #[serde(default)]
+    pub history_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

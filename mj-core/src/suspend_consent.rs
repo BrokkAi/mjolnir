@@ -158,9 +158,21 @@ pub struct SuspendConsent {
     pub without_checkpoint: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm_no_checkpoint: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_only: bool,
 }
 
 impl SuspendConsent {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.without_checkpoint && self.history_only {
+            return Err(crate::refusal::Refusal::precondition(
+                "history-only and without-checkpoint suspend are mutually exclusive",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub fn capture_consent(&self) -> CaptureConsent {
         CaptureConsent {
             move_keep: None,
@@ -433,6 +445,7 @@ impl SuspendPreflight {
             abort_operations: self.shown_operation_consent(),
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }
     }
 

@@ -2315,6 +2315,7 @@ pub(super) fn create_managed_worktree(
 
 enum CloneSeedMode<'a> {
     FreshBranch,
+    FreshHead,
     /// Apply the snapshot with `git`, which carries the caller's cancellation.
     LocalSnapshot {
         snapshot: &'a mj_checkpoint::snapshot::WorkspaceSnapshot,
@@ -2329,7 +2330,7 @@ enum CloneSeedMode<'a> {
 impl<'a> CloneSeedMode<'a> {
     fn snapshot_object_format(&self) -> Option<&'a str> {
         match self {
-            Self::FreshBranch => None,
+            Self::FreshBranch | Self::FreshHead => None,
             Self::LocalSnapshot { snapshot, .. } => Some(snapshot.metadata.object_format.as_str()),
             Self::RemoteSnapshot { object_format, .. } => Some(*object_format),
         }
@@ -2337,7 +2338,7 @@ impl<'a> CloneSeedMode<'a> {
 
     fn snapshot_origin_url(&self) -> Option<&'a str> {
         match self {
-            Self::FreshBranch => None,
+            Self::FreshBranch | Self::FreshHead => None,
             Self::LocalSnapshot { snapshot, .. } => snapshot.metadata.origin_url.as_deref(),
             Self::RemoteSnapshot { origin_url, .. } => *origin_url,
         }
@@ -2351,12 +2352,12 @@ impl<'a> CloneSeedMode<'a> {
     )> {
         match self {
             Self::LocalSnapshot { snapshot, git } => Some((snapshot, *git)),
-            Self::FreshBranch | Self::RemoteSnapshot { .. } => None,
+            Self::FreshBranch | Self::FreshHead | Self::RemoteSnapshot { .. } => None,
         }
     }
 
     fn is_fresh_branch(&self) -> bool {
-        matches!(self, Self::FreshBranch)
+        matches!(self, Self::FreshBranch | Self::FreshHead)
     }
 }
 
@@ -2511,10 +2512,14 @@ fn create_managed_clone_with_snapshot(
                             "--no-track",
                             "-C",
                             &checkout.branch,
-                            checkout
-                                .base_commit
-                                .as_deref()
-                                .context("managed clone has no launch commit")?,
+                            if matches!(mode, CloneSeedMode::FreshHead) {
+                                "HEAD"
+                            } else {
+                                checkout
+                                    .base_commit
+                                    .as_deref()
+                                    .context("managed clone has no launch commit")?
+                            },
                         ],
                         "select managed clone starting branch",
                     ),
@@ -3178,6 +3183,17 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
     create
 }
 
+pub(super) fn restore_managed_clone_fresh_head(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<bool> {
+    if managed_worktree_checkout_exists(executor, worktree)? {
+        return Ok(false);
+    }
+    create_managed_clone_with_snapshot(executor, worktree, CloneSeedMode::FreshHead)?;
+    Ok(true)
+}
+
 pub(super) fn restore_managed_worktree(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
@@ -3420,6 +3436,14 @@ pub(super) enum CloneRetirementPrerequisite {
 pub(super) fn clone_retirement_prerequisite_for_checkpoint(
     checkpoint: &mj_core::state::CheckpointMetadata,
 ) -> CloneRetirementPrerequisite {
+    if let Ok(manifest) = mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path)
+        && !manifest.repositories.is_empty()
+        && manifest.repositories.iter().all(|repository| {
+            repository.metadata.review_refs_metadata_only || repository.metadata.plain_directory
+        })
+    {
+        return CloneRetirementPrerequisite::None;
+    }
     match mj_checkpoint::archive::checkpoint_archive_uses_origin_delta(&checkpoint.archive_path) {
         Ok(true) => CloneRetirementPrerequisite::None,
         _ => CloneRetirementPrerequisite::LegacySourceCommit,

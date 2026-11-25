@@ -100,6 +100,7 @@ pub(super) fn start_suspension(
                             abort_operations: consent.abort_operations,
                             without_checkpoint: consent.without_checkpoint,
                             confirm_no_checkpoint: consent.confirm_no_checkpoint,
+                            history_only: consent.history_only,
                         },
                     )
                     .await?;
@@ -1706,7 +1707,7 @@ pub(crate) async fn apply_dashboard_action(
                 let result = async {
                     daemon::connect_or_start()
                         .await?
-                        .suspend_preflight(session_id.clone(), false, false)
+                        .suspend_preflight(session_id.clone(), false, false, false)
                         .await
                 }
                 .await

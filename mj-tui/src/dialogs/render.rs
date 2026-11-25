@@ -43,6 +43,10 @@ pub(crate) fn confirmation_buttons(
             borrowed(&["Cancel", "Retry suspension", "Suspend without checkpoint…"])
         }
         Confirmation::SuspendSession {
+            confirming_history_only: true,
+            ..
+        } => borrowed(&["Back", "Suspend with history only"]),
+        Confirmation::SuspendSession {
             preflight: None, ..
         } => borrowed(&["Cancel"]),
         Confirmation::SuspendSession {
@@ -57,6 +61,7 @@ pub(crate) fn confirmation_buttons(
             if *can_prompt {
                 buttons.push(Cow::Borrowed("Ask session to fix"));
             }
+            buttons.push(Cow::Borrowed("Suspend (history only)…"));
             buttons
         }
         Confirmation::SuspendSession {
@@ -1598,11 +1603,18 @@ pub(crate) fn confirmation_body(
             preflight,
             viewing_all_untracked,
             resolving_blockers,
+            confirming_history_only,
             ..
         } => {
             let mut lines = vec![session_line(session_id, session_name, width)];
+            if *confirming_history_only {
+                lines.push(Line::raw(
+                    "Discard workspace Git changes and save session history only?",
+                ));
+                lines.push(Line::raw("Resuming will start from a fresh checkout with your conversation history intact."));
+            }
             if let Some(preflight) = preflight {
-                if preflight.has_blockers() {
+                if preflight.has_blockers() && !confirming_history_only {
                     lines.push(Line::styled(
                         "Cannot suspend until these blockers are resolved:",
                         Style::default().fg(theme::palette().error),
@@ -1636,7 +1648,7 @@ pub(crate) fn confirmation_body(
                         }
                         lines.push(Line::raw(format!("  Fix: {}", blocker.remedy)));
                     }
-                } else {
+                } else if !confirming_history_only {
                     lines.push(Line::raw(
                         "Save a recovery copy and release the environment.",
                     ));

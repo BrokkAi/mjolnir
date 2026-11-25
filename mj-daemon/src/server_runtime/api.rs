@@ -121,6 +121,7 @@ pub trait ExportRuntime: Send + Sync {
         _session_id: String,
         _dry_run: bool,
         _without_checkpoint: bool,
+        _history_only: bool,
     ) -> BoxFuture<'static, Result<SuspendPreflight, anyhow::Error>> {
         Box::pin(async { Err(anyhow!("controller unavailable")) })
     }
@@ -520,9 +521,17 @@ impl ExportRuntime for RuntimeState {
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> BoxFuture<'static, Result<SuspendPreflight, anyhow::Error>> {
         Box::pin(async move {
-            RuntimeState::suspend_preflight(&self, session_id, dry_run, without_checkpoint).await
+            RuntimeState::suspend_preflight(
+                &self,
+                session_id,
+                dry_run,
+                without_checkpoint,
+                history_only,
+            )
+            .await
         })
     }
 
@@ -5352,13 +5361,14 @@ impl SubagentBackend for ApiBackend {
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> BoxFuture<'_, Result<Result<mj_core::suspend_consent::SuspendPreflight, String>, ApiFailure>>
     {
         Box::pin(async move {
             Ok(self
                 .exports
                 .clone()
-                .suspend_preflight(session_id, dry_run, without_checkpoint)
+                .suspend_preflight(session_id, dry_run, without_checkpoint, history_only)
                 .await
                 .map_err(|error| format!("{error:#}")))
         })

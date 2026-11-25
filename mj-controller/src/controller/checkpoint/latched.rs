@@ -78,6 +78,12 @@ impl Controller {
                     repository.origin_override = origin_override.clone();
                 }
             }
+        } else if export_policy == CheckpointExportPolicy::HistoryOnly {
+            for repository in &mut layout.repositories {
+                if repository.capture != CheckpointRepositoryCapture::PlainDirectory {
+                    repository.capture = CheckpointRepositoryCapture::MetadataOnly;
+                }
+            }
         } else if export_policy == CheckpointExportPolicy::SessionHandoff {
             for repository in &mut layout.repositories {
                 repository.capture = CheckpointRepositoryCapture::MetadataOnly;

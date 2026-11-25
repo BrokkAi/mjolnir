@@ -747,6 +747,7 @@ fn failed_suspension_offers_retry_and_suspend_without_checkpoint() {
             consent: mj_core::suspend_consent::SuspendConsent {
                 without_checkpoint: true,
                 confirm_no_checkpoint: true,
+                history_only: false,
                 ..Default::default()
             },
         }
@@ -948,6 +949,7 @@ fn golden_dashboard_dialogs() {
             preflight: None,
             viewing_all_untracked: false,
             resolving_blockers: false,
+            confirming_history_only: false,
             can_prompt: true,
         }));
         assert_eq!(
@@ -2274,6 +2276,7 @@ fn suspend_safe_fix_enters_pending_state_and_refresh_requires_confirmation() {
         viewing_all_untracked: false,
         can_prompt: true,
         resolving_blockers: false,
+        confirming_history_only: false,
     }));
     let preflight = mj_core::suspend_consent::SuspendPreflight {
         session_id: "session-1".into(),
@@ -2295,7 +2298,8 @@ fn suspend_safe_fix_enters_pending_state_and_refresh_requires_confirmation() {
         }
     );
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: true, preflight: None, .. }))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: true,
+                        confirming_history_only: false, preflight: None, .. }))
     );
     let action = dashboard.apply_suspend_preflight(
         request_id,
@@ -2306,6 +2310,76 @@ fn suspend_safe_fix_enters_pending_state_and_refresh_requires_confirmation() {
     );
     assert_eq!(action, DashboardAction::None);
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: false, preflight: Some(_), .. }))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: false,
+                        confirming_history_only: false, preflight: Some(_), .. }))
+    );
+}
+
+#[test]
+fn suspend_history_only_requires_second_confirmation_and_back_returns_to_blockers() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let confirmation = Confirmation::SuspendSession {
+        session_id: "session-1".into(),
+        request_id: 77,
+        child_warning_titles: vec!["child".into()],
+        preflight: Some(mj_core::suspend_consent::SuspendPreflight {
+            blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                kind: "hidden_tracked_edits".into(),
+                paths: vec!["file".into()],
+                remedy: "Clear flags".into(),
+            }],
+            interrupting: true,
+            ..Default::default()
+        }),
+        viewing_all_untracked: false,
+        can_prompt: true,
+        resolving_blockers: false,
+        confirming_history_only: false,
+    };
+    dashboard.activate_confirmation_button(confirmation.clone(), 0);
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    let index = confirmation_buttons(&confirmation)
+        .iter()
+        .position(|label| label == "Suspend (history only)…")
+        .unwrap();
+    assert_eq!(
+        dashboard.activate_confirmation_button(confirmation, index),
+        DashboardAction::None
+    );
+    let rendered = drawn(&mut dashboard, 100, 28).join(" ");
+    assert!(rendered.contains("Discard workspace Git changes"));
+    assert!(!rendered.contains("Save a recovery copy"));
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation")
+    };
+    assert_eq!(
+        confirmation_buttons(&dialog.confirmation),
+        vec!["Back", "Suspend with history only"]
+    );
+    let confirmation = dialog.confirmation.clone();
+    dashboard.activate_confirmation_button(confirmation, 0);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("blockers")
+    };
+    assert!(
+        confirmation_buttons(&dialog.confirmation)
+            .iter()
+            .any(|label| label == "Suspend (history only)…")
+    );
+    let confirmation = dialog.confirmation.clone();
+    dashboard.activate_confirmation_button(confirmation, index);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation")
+    };
+    let confirmation = dialog.confirmation.clone();
+    assert_eq!(
+        dashboard.activate_confirmation_button(confirmation, 1),
+        DashboardAction::Suspend {
+            session_id: "session-1".into(),
+            consent: mj_core::suspend_consent::SuspendConsent {
+                history_only: true,
+                ..Default::default()
+            },
+        }
     );
 }

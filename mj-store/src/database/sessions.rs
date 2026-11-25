@@ -1290,6 +1290,9 @@ pub fn save_suspension_intent(
 ) -> Result<()> {
     let mut session = session.clone();
     let ready_move = ready_move.cloned();
+    if let Some(consent) = consent {
+        consent.validate()?;
+    }
     let consent_json = consent.map(serde_json::to_string).transpose()?;
     submit_database_write("save suspension intent", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

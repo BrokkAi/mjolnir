@@ -64,7 +64,12 @@ impl RuntimeState {
                 "resolve suspend blockers",
                 mj_controller::recovery_gate::LifecycleOrigin::Person,
             )
-            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+            .map_err(|error| {
+                mj_core::refusal::Refusal::precondition(format!(
+                    "Session is busy: {}",
+                    error.holders.join(", ")
+                ))
+            })?;
         let runtime = Arc::clone(self);
         let response = super::terminal_operations::process_probe(None, move |executor| {
             let _work = work;
@@ -87,6 +92,7 @@ impl RuntimeState {
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
         let runtime = Arc::clone(self);
         super::terminal_operations::process_probe(None, move |executor| {
@@ -94,6 +100,7 @@ impl RuntimeState {
                 &session_id,
                 dry_run,
                 without_checkpoint,
+                history_only,
                 executor,
             )?;
             // Git inventory can take time. Read current work from the same
@@ -194,6 +201,7 @@ impl RuntimeState {
         consent: mj_core::suspend_consent::SuspendConsent,
         control: LifecycleControl,
     ) -> Result<StartedLifecycle> {
+        consent.validate()?;
         self.start_suspend_session_origin(
             session_id,
             consent,
@@ -297,6 +305,7 @@ impl RuntimeState {
                         }
                         if origin == super::lifecycle::LifecycleOrigin::Person
                             && !consent.without_checkpoint
+                            && !consent.history_only
                         {
                             if owns_environment
                                 && record.target.is_some()

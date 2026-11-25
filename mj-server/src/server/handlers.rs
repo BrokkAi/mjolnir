@@ -1387,9 +1387,10 @@ pub(super) async fn ask_suspend_preflight(
     session_id: String,
     dry_run: bool,
     without_checkpoint: bool,
+    history_only: bool,
 ) -> Result<mj_core::suspend_consent::SuspendPreflight, ApiError> {
     viewer_backend(state)?
-        .suspend_preflight(session_id, dry_run, without_checkpoint)
+        .suspend_preflight(session_id, dry_run, without_checkpoint, history_only)
         .await?
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
 }

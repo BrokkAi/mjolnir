@@ -712,6 +712,8 @@ pub enum SessionLifecycleRequest {
         without_checkpoint: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         confirm_no_checkpoint: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        history_only: bool,
     },
     Restart {
         session_id: String,
@@ -2091,10 +2093,12 @@ impl DaemonClient {
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
         let request = SuspendPreflightRequest {
             dry_run,
             without_checkpoint,
+            history_only,
         };
         self.http()
             .await?

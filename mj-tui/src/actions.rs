@@ -2055,6 +2055,7 @@ impl DashboardState {
                         preflight: None,
                         viewing_all_untracked: false,
                         resolving_blockers: false,
+                        confirming_history_only: false,
                         can_prompt: !matches!(
                             session.state,
                             mj_core::state::SessionState::Stopped

@@ -388,7 +388,7 @@ impl Controller {
             cleared_hidden_paths: result.cleared_hidden_paths,
             moved_worktrees: result.moved_worktrees,
             skipped_worktrees: result.skipped_worktrees,
-            preflight: self.suspend_preflight(session_id, false, false, executor)?,
+            preflight: self.suspend_preflight(session_id, false, false, false, executor)?,
         })
     }
 
@@ -397,10 +397,18 @@ impl Controller {
         session_id: &str,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        self.checkpoint_preflight(session_id, dry_run, without_checkpoint, None, executor)
-            .map(|(preflight, _)| preflight)
+        self.checkpoint_preflight(
+            session_id,
+            dry_run,
+            without_checkpoint,
+            history_only,
+            None,
+            executor,
+        )
+        .map(|(preflight, _)| preflight)
     }
 
     pub(super) fn checkpoint_preflight(
@@ -408,6 +416,7 @@ impl Controller {
         session_id: &str,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
         move_keep: Option<&mj_core::session_keep::MoveKeep>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<(
@@ -444,7 +453,7 @@ impl Controller {
             ..Default::default()
         };
 
-        if without_checkpoint {
+        if without_checkpoint || history_only {
             return Ok((preflight, Vec::new()));
         }
 
@@ -721,7 +730,7 @@ impl Controller {
         move_keep: Option<&mj_core::session_keep::MoveKeep>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        if consent.without_checkpoint {
+        if consent.without_checkpoint || consent.history_only {
             return Ok(());
         }
         if !matches!(
@@ -731,7 +740,7 @@ impl Controller {
             return Ok(());
         }
         let (preflight, _) =
-            self.checkpoint_preflight(session_id, false, false, move_keep, executor)?;
+            self.checkpoint_preflight(session_id, false, false, false, move_keep, executor)?;
         if preflight.has_blockers() {
             let summary = preflight
                 .blockers
@@ -954,6 +963,7 @@ impl Controller {
         before_close: Option<BeforeClose>,
         settlement: SuspendSettlement,
     ) -> Result<bool> {
+        consent.validate()?;
         if consent.without_checkpoint {
             return crate::worker_lifecycle::run_admitted(admission, session_id, async {
                 self.verify_existing_checkpoint_for_without_checkpoint(
@@ -990,8 +1000,11 @@ impl Controller {
         if settlement == SuspendSettlement::Suspend {
             self.ensure_suspend_target_running(admission, session_id, executor)?;
         }
-        let export_policy =
-            self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
+        let export_policy = if consent.history_only {
+            CheckpointExportPolicy::HistoryOnly
+        } else {
+            self.explicit_suspend_export_policy_with_executor(session_id, executor)?
+        };
         self.suspend_session_controlled_with_manager(
             admission,
             session_id,
@@ -1151,10 +1164,10 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let is_origin_delta = previous.state == SessionState::Parked || matches!(
+        let is_origin_delta = checkpoint_export_policy != CheckpointExportPolicy::HistoryOnly && (previous.state == SessionState::Parked || matches!(
             checkpoint_export_policy,
             CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
-        );
+        ));
         let user_cancelled = || executor.cancellation_requested() && !executor.shutdown_interrupted();
         // After a person cancels, the stop's records and worker still need
         // their cleanup, but daemon shutdown must still be able to end it.
@@ -1588,7 +1601,8 @@ impl Controller {
         // daemon copy remains whatever the last suspend produced.
         let session_handoff = checkpoint_export_policy == CheckpointExportPolicy::SessionHandoff;
         let preserves_session_checkpoint = session_handoff || move_intent.is_some();
-        let publication = if preserves_session_checkpoint
+        let publication = if checkpoint_export_policy == CheckpointExportPolicy::HistoryOnly
+            || preserves_session_checkpoint
             || matches!(
                 checkpoint_export_policy,
                 CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
@@ -2182,6 +2196,7 @@ impl Controller {
         before_close: Option<BeforeClose>,
         settlement: SuspendSettlement,
     ) -> Result<bool> {
+        consent.validate()?;
         if consent.without_checkpoint {
             return crate::worker_lifecycle::run_admitted(admission, session_id, async {
                 self.verify_existing_checkpoint_for_without_checkpoint(
@@ -2251,7 +2266,9 @@ impl Controller {
         let cleanup = executor.shutdown_only();
         let has_before_close = before_close.is_some();
         let prepare = || {
-            let policy = if has_before_close {
+            let policy = if consent.history_only {
+                Some(CheckpointExportPolicy::HistoryOnly)
+            } else if has_before_close {
                 Some(if cancelled {
                     self.explicit_suspend_export_policy_with_executor(session_id, &cleanup)?
                 } else {
@@ -2265,7 +2282,7 @@ impl Controller {
             ));
             // Parked acceptance is independent of the export policy. A verified
             // legacy close without acceptance may already have sealed its old relay.
-            let resume_origin = policy.is_some()
+            let resume_origin = !consent.history_only && policy.is_some()
                 && (origin_policy && verified.is_none()
                     || self.state.sessions[session_id].target.is_some() && {
                         let attempt = if cancelled {
@@ -2385,6 +2402,7 @@ impl Controller {
                             SourceTargetDisposition::Destroy,
                             match policy {
                                 Some(policy) => policy,
+                                None if consent.history_only => CheckpointExportPolicy::HistoryOnly,
                                 None => self.explicit_suspend_export_policy_with_executor(session_id, executor)?,
                             },
                             consent,

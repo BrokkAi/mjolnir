@@ -7005,6 +7005,24 @@ function confirmSessionSuspension(session, onNotice = () => {}) {
             };
             controls.append(ask);
           }
+          const history = button('Suspend (history only)…', 'secondary');
+          history.onclick = () => {
+            body.replaceChildren(
+              el('p', 'danger', 'Discard workspace Git changes and save session history only?'),
+              el('p', '', 'Resuming will start from a fresh checkout with your conversation history intact.'));
+            if (preflight.interrupting) body.append(el('p', '', 'The current turn will be interrupted.'));
+            const unfinished = preflight.children_not_handed_back?.length || 0;
+            if (unfinished) body.append(el('p', '', `${unfinished} sub-agents have not handed back; suspending stops them.`));
+            const owning = preflight.owning_children_to_suspend || 0;
+            if (owning) body.append(el('p', '', `Suspending also suspends ${owning} children with their own environments.`));
+            const back = button('Back', 'secondary');
+            back.onclick = () => renderPreflight(preflight);
+            const confirm = button('Suspend with history only', 'danger');
+            confirm.onclick = () => finish({ history_only: true });
+            controls.replaceChildren(back, confirm);
+            back.focus();
+          };
+          controls.append(history);
           return;
         }
         body.append(el('p', '', 'Save a recovery copy and release the environment. You can resume this session later.'));

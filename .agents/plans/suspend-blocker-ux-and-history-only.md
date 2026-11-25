@@ -20,7 +20,9 @@ After this change, a user suspending a blocked session sees clean, structured bl
 - [x] Milestone 1: Readable suspend/move blockers and fixed remediation commands across `mj-checkpoint`, `mj-core`, `mj-worker`, `mj-controller`, `mj-tui`, `mj-server` (Web UI), and `mj-cli`, with updated goldens and unit tests.
 - [x] Milestone 2: Safe one-click blocker remediation (`resolve_safe_suspend_blockers`, `mj-worker resolve-suspend-blockers`, controller orchestration, `POST /api/v1/sessions/{id}/suspend-resolve-blockers`, CLI `--fix-blockers`, TUI & Web UI button) and tests.
 - [x] Milestone 3: "Ask session to fix" action in TUI and Web UI suspend blocker dialogs and tests.
-- [ ] Milestone 4: "Suspend with session history only" (`SuspendConsent.history_only`, store migration 159, `CheckpointExportPolicy::HistoryOnly`, `MetadataOnly` capture + `FreshHead`/origin resume, HTTP API, CLI `--history-only`, TUI & Web UI confirmation flow) and integration tests.
+- [x] Milestone 4 persistence foundation: `SuspendConsent.history_only`, default omission, mutually exclusive consent validation at persistence acceptance, breaking schema migration 159, and migration/JSON round-trip regression.
+- [x] Milestone 4 implementation: "Suspend with session history only" (`SuspendConsent.history_only`, store migration 159, `CheckpointExportPolicy::HistoryOnly`, `MetadataOnly` capture + `FreshHead`/origin resume, HTTP API, CLI `--history-only`, TUI & Web UI confirmation flow) and integration tests.
+- [x] Milestone 4 final acceptance: isolated real daemon/worker history-only round trip, focused regression reruns, final checks.
 
 ## Surprises & Discoveries
 
@@ -79,7 +81,17 @@ After this change, a user suspending a blocked session sees clean, structured bl
 
 ## Outcomes & Retrospective
 
-To be completed after Milestone 4 validation and review.
+Milestone 4 now implements persisted history-only consent, the breaking schema fence,
+metadata-only repository capture, clone retirement without the legacy base requirement,
+fresh-HEAD clone restore, network resume metadata, API/CLI wiring and explicit two-step
+TUI/web confirmation. All 63 schema reader tests pass, the new TUI transition and HTTP
+request-shape regressions pass, all 36 TUI and 10 CLI goldens pass after regeneration,
+and all 41 web tests pass. Eight-crate clippy and follow-up checks pass. The real
+daemon/worker round trip passes in isolated instance `m4-history-only`, verifying
+both blocker kinds, the installed archive, conversation restoration, a fresh
+checkout and the notice. The focused Git/archive/fresh-clone integration test
+and history-only preflight test each pass once. No commit or push was made.
+
 
 ## Context and Orientation
 
@@ -407,3 +419,24 @@ changed dialog golden verification 1, web tests 41. Clippy passed across all
 eleven touched crates; the final TUI test edit also passed targeted clippy.
 Detailed commands and logs: implementation worker report m23-validation.md.
 No commit or push; Milestone 4 remains unimplemented.
+
+Milestone 4 foundation note (2026-11-25): Added the persisted consent field and
+O(1) compatibility fence first. Cargo package selectors require the `brokk-`
+prefix (`brokk-mj-store`); the schema test module is `reader_tests`. Validation
+logs are in `.mj/agents/a126b65f10960b4f905148c322b8b60e/`. No commit or push.
+
+Milestone 4 implementation note (2026-11-25): A parked session also selected the
+OriginDelta path through its state, independently of export policy. HistoryOnly
+now excludes that path and its acceptance/recovery markers explicitly. The real
+Git/archive regression must use a nonzero canonical position and matching
+non-genesis frontier digest; the archive verifier caught invalid test fixtures.
+The isolated `origin_delta_suspend.py --case history-only` acceptance case uses
+the existing recorded ACP harness, real mj daemon/worker, hidden index flag,
+external worktree, conversation, archive verification and resume notice.
+
+Milestone 4 final validation (2026-11-25): Completed the real daemon/worker
+history-only lab case and all focused regressions. Metadata-only archive entries
+retain Git payload paths whose contents are empty; acceptance checks the bytes
+rather than requiring absent paths. Exact commands, counts, corrected fixture
+failures and changed files are recorded in
+`.mj/agents/a126b65f10960b4f905148c322b8b60e/m4-validation.md`.

@@ -822,8 +822,16 @@ impl ApiClient {
         session_id: &str,
         dry_run: bool,
         without_checkpoint: bool,
+        history_only: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        let query = Self::suspend_preflight_query(dry_run, without_checkpoint);
+        let mut query = Self::suspend_preflight_query(dry_run, without_checkpoint).to_owned();
+        if history_only {
+            query.push_str(if query.is_empty() {
+                "?history_only=true"
+            } else {
+                "&history_only=true"
+            });
+        }
         let response = self
             .send(
                 self.http
@@ -850,6 +858,7 @@ impl ApiClient {
             "discard_untracked": consent.discard_untracked,
             "abort_operations": consent.abort_operations,
             "without_checkpoint": consent.without_checkpoint,
+            "history_only": consent.history_only,
         });
         if consent.confirm_no_checkpoint {
             payload["confirm_no_checkpoint"] = serde_json::json!(true);

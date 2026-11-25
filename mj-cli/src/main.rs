@@ -1486,6 +1486,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             },
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         },
         skip_keep_paths: args.skip_keep_paths.clone(),
         session_id: args.session.clone(),

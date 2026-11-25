@@ -2175,6 +2175,9 @@ impl Controller {
         let is_history_cutoff_origin_delta =
             super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
                 && super::backend::session_history_cutoff(&previous)?.is_some();
+        let history_only_archive = !archive_manifest.repositories.is_empty()
+            && archive_manifest.repositories.iter().all(|repository|
+                repository.metadata.review_refs_metadata_only || repository.metadata.plain_directory);
         let origin_delta = manifest_uses_origin_delta(archive_manifest);
         if origin_delta && plan != ResumePlan::InPlace {
             let originless = archive_manifest.repositories.iter().any(|repository| {
@@ -2206,6 +2209,7 @@ impl Controller {
             }
         }
         if !origin_delta
+            && !history_only_archive
             && !transferring_workspace
             && plan == ResumePlan::RawToWorkspace
             && let Some(worktree) = previous_managed_worktree.as_ref()
@@ -2318,6 +2322,9 @@ impl Controller {
         let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
         let mut resume_notices = Vec::new();
+        if history_only_archive && !is_attached_checkout {
+            resume_notices.push("Resumed from a history-only checkpoint into a fresh workspace checkout; prior workspace Git changes were not saved.".to_owned());
+        }
         // The raw-to-workspace notice is written where the conversion snapshot
         // is taken, because it reports the branch the container arrives on.
         if let Some(conversion) = conversion
@@ -2607,7 +2614,12 @@ impl Controller {
                     // restore_into_target applies the original legacy archive
                     // directly (preserving archived untracked files & stashes).
                 } else {
-                    recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
+                    recreated_managed_worktree = if history_only_archive
+                        && worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                        super::worktree::restore_managed_clone_fresh_head(executor, worktree)?
+                    } else {
+                        restore_managed_worktree(executor, worktree)?
+                    };
                     if !transferring_workspace
                         && recreated_managed_worktree
                         && plan == ResumePlan::RawToWorkspace

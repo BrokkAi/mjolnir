@@ -9529,6 +9529,7 @@ esac
                         mj_core::suspend_consent::SuspendConsent {
                             without_checkpoint: true,
                             confirm_no_checkpoint: true,
+                            history_only: false,
                             ..Default::default()
                         },
                     ),
@@ -10859,6 +10860,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: true,
             confirm_no_checkpoint: false,
+            history_only: false,
         })
         .await
         .unwrap_err();
@@ -10893,6 +10895,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
                 abort_operations: mj_core::suspend_consent::OperationConsent::None,
                 without_checkpoint: true,
                 confirm_no_checkpoint: false,
+                history_only: false,
             }),
     )
     .await
@@ -11014,6 +11017,7 @@ async fn accepted_suspend_failure_is_published_without_an_observer() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         })
         .await
         .unwrap();
@@ -15461,6 +15465,7 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }),
     )
     .await
@@ -17442,6 +17447,7 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         SuspendPreflightRequest {
             dry_run: false,
             without_checkpoint: true,
+            history_only: false,
         },
     )
     .await
@@ -17451,6 +17457,7 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
+        history_only: false,
         ..Default::default()
     };
     let err = state
@@ -17513,6 +17520,7 @@ async fn terminal_suspend_preflight_runs_during_drain_without_admission() {
             SuspendPreflightRequest {
                 dry_run: false,
                 without_checkpoint: false,
+                history_only: false,
             },
         )
         .await
@@ -17620,6 +17628,7 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
             SuspendPreflightRequest {
                 dry_run: false,
                 without_checkpoint: false,
+                history_only: false,
             },
         )
         .await
@@ -17632,6 +17641,7 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
             SuspendPreflightRequest {
                 dry_run: false,
                 without_checkpoint: false,
+                history_only: false,
             },
         )
         .await

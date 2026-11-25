@@ -4542,6 +4542,7 @@ async fn suspend_forwards_typed_consent_without_publication_409() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }
     );
     request
@@ -4573,6 +4574,7 @@ async fn suspend_forwards_typed_consent_without_publication_409() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }
     );
     request
@@ -10046,4 +10048,53 @@ async fn suspend_resolve_blockers_endpoint_returns_refreshed_preflight() {
     assert_eq!(result.cleared_hidden_paths, vec!["linked/file"]);
     assert_eq!(result.preflight.session_id, "session-1");
     assert!(!result.preflight.has_blockers());
+}
+
+#[tokio::test]
+async fn suspend_history_only_accepts_both_http_shapes_and_refuses_conflicting_modes() {
+    for payload in [
+        r#"{"history_only":true}"#,
+        r#"{"suspend_consent":{"history_only":true}}"#,
+    ] {
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+        let response = mj_core::runtime::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert!(matches!(
+            request.action,
+            ControllerAction::Suspend {
+                history_only: true,
+                without_checkpoint: false,
+                ..
+            }
+        ));
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"without_checkpoint":true,"suspend_consent":{"history_only":true}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

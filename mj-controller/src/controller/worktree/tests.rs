@@ -4265,3 +4265,155 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
         "only on origin\n"
     );
 }
+
+#[test]
+fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_blockers() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    test_git(&origin, &["init", "--bare", "--initial-branch=main"]);
+
+    let source = temp.path().join("source");
+    let clone_out = Command::new("git")
+        .args(["clone"])
+        .arg(&origin)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(clone_out.status.success());
+    test_git(&source, &["config", "user.name", "Test"]);
+    test_git(&source, &["config", "user.email", "test@example.com"]);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    test_git(&source, &["add", "README.md"]);
+    test_git(&source, &["commit", "-m", "initial"]);
+    test_git(&source, &["push", "-u", "origin", "main"]);
+    let base_commit = test_git(&source, &["rev-parse", "HEAD"]);
+
+    let worktree_root = temp.path().join("clones").join("sess-origin-seed");
+    let worktree = ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: source.clone(),
+        source_repository: source.clone(),
+        worktree_root: worktree_root.clone(),
+        branch: "main".into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: Some(base_commit),
+    };
+    create_managed_worktree(
+        &ProcessExecutor,
+        &worktree,
+        None,
+        PrimaryCheckoutRequirement::Any,
+    )
+    .unwrap();
+
+    test_git(
+        &worktree_root,
+        &["update-index", "--skip-worktree", "README.md"],
+    );
+    std::fs::write(worktree_root.join("README.md"), "discard this edit\n").unwrap();
+    let external = temp.path().join("external");
+    test_git(
+        &worktree_root,
+        &["worktree", "add", "--detach", external.to_str().unwrap()],
+    );
+    let origin_url = origin.to_string_lossy().into_owned();
+    let snapshot = mj_checkpoint::archive::collect_git_metadata_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &worktree_root,
+        &mj_checkpoint::archive::GitCollectionSpec {
+            id: "project".into(),
+            relative_destination: PathBuf::from("project"),
+            history: mj_checkpoint::archive::GitHistoryMode::NoBundle,
+            origin_override: Some(origin_url),
+        },
+    )
+    .unwrap();
+    assert!(snapshot.metadata.review_refs_metadata_only);
+    assert!(snapshot.committed_bundle.is_empty());
+    assert!(snapshot.staged_patch.is_empty());
+    assert!(snapshot.unstaged_patch.is_empty());
+    assert!(snapshot.linked_worktrees.is_empty());
+    let archive_path = temp.path().join("history.hel.zip");
+    let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 1,
+        event_frontier_digest: "a".repeat(64),
+        session: mj_core::archive::CanonicalSessionState {
+            execution: mj_core::archive::CanonicalExecutionState::Idle,
+            last_activity_at_ms: Some(1),
+            session_title: None,
+            configuration: Default::default(),
+        },
+        transcript: vec![mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "system:history".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: mj_core::archive::CanonicalTranscriptBody::System {
+                text: "Conversation survives".into(),
+            },
+        }],
+        queued_prompts: Vec::new(),
+        mailbox: Default::default(),
+        native_use_evidence: None,
+    };
+    mj_checkpoint::archive::write_archive_hashed(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: "sess-origin-seed".into(),
+                title: "Origin Seed".into(),
+                harness_kind: mj_core::config::HarnessKind::Codex,
+                profile_id: "codex".into(),
+                native_session_id: "native-1".into(),
+                created_at: "2026-11-21T00:00:00Z".into(),
+                checkpointed_at: "2026-11-21T00:00:00Z".into(),
+                hel_version: env!("CARGO_PKG_VERSION").into(),
+                relay_version: String::new(),
+                adapter_version: String::new(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "local-bare".into(),
+                target_kind: "local-bare".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: "project".into(),
+                primary_repository: "project".into(),
+            },
+            canonical_session: canonical.clone(),
+            native_artifacts: Vec::new(),
+            repositories: vec![snapshot.clone()],
+        },
+    )
+    .unwrap();
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&archive_path).unwrap();
+
+    assert!(
+        verified.manifest.repositories[0]
+            .metadata
+            .review_refs_metadata_only
+    );
+    let archive = mj_checkpoint::archive::read_archive_verified(&archive_path).unwrap();
+    assert_eq!(archive.canonical_session().unwrap(), canonical);
+    // Retiring the owning clone deliberately leaves external checkouts alone.
+    std::fs::remove_dir_all(&worktree_root).unwrap();
+    let mut missing_base = worktree.clone();
+    missing_base.base_commit = Some("0000000000000000000000000000000000000001".into());
+    assert!(restore_managed_clone_fresh_head(&ProcessExecutor, &missing_base).unwrap());
+    mj_checkpoint::archive::restore_git_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &worktree_root,
+        &snapshot,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(worktree_root.join("README.md")).unwrap(),
+        "base\n"
+    );
+    assert!(external.exists());
+}

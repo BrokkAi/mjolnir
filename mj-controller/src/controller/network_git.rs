@@ -747,7 +747,8 @@ pub(super) fn bundle_from_manifest_for_session(
                 .origin_delta
                 .as_deref()
                 .is_some_and(|delta| !delta.history_cutoff && !metadata.origin.is_empty());
-            if !metadata.remote_workspace && !origin_backed_delta {
+            if !metadata.remote_workspace && !origin_backed_delta
+                && !(metadata.review_refs_metadata_only && !metadata.origin.is_empty()) {
                 if metadata.origin_delta.is_some() && metadata.origin.is_empty() {
                     anyhow::bail!(
                         "This raw session has no Git origin remote and can only be resumed on its original target."
