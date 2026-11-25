@@ -6606,3 +6606,138 @@ async fn call_many_reads_real_worker_unix_server_in_order() {
     daemon.abort();
     assert!(daemon.await.unwrap_err().is_cancelled());
 }
+
+#[tokio::test]
+async fn pipeline_drains_replies_while_feeding_more_than_pipe_capacity() {
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let reference = mj_core::attachment::AttachmentRef::new(
+        b"\x89PNG\r\n\x1a\nimage",
+        "image/png".into(),
+        1,
+        1,
+    )
+    .unwrap();
+    let requests = vec![RelayRequest::AttachmentPresent { reference }; 1500];
+    let count = requests.len();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut request_bytes = 0;
+        let mut response_bytes = 0;
+        for _ in 0..count {
+            let mut line = String::new();
+            request_bytes += reader.read_line(&mut line).await.unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let mut response = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                },
+            })
+            .unwrap();
+            response.push(b'\n');
+            response_bytes += response.len();
+            // Match the worker: reply fully before reading its next request.
+            writer.write_all(&response).await.unwrap();
+        }
+        assert!(request_bytes > 64 * 1024);
+        assert!(response_bytes > 64 * 1024);
+    });
+    let replies = tokio::time::timeout(Duration::from_secs(10), client.call_many(requests))
+        .await
+        .expect("pipelined traffic must not deadlock bounded pipes")
+        .unwrap();
+    assert_eq!(replies.len(), count);
+    assert!(replies.into_iter().all(|reply| matches!(
+        reply.unwrap(),
+        RelayResponsePayload::AttachmentPresent { present: true }
+    )));
+    peer.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn pipeline_observation_keeps_its_deadline_before_a_long_attach_slot() {
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.request_timeout = Duration::from_secs(1);
+    let (seen, received) = tokio::sync::oneshot::channel();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, _writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<RelayRequestEnvelope>(&line)
+                .unwrap()
+                .request,
+            RelayRequest::CpuUsage
+        ));
+        seen.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let started = tokio::time::Instant::now();
+    let work = mj_core::runtime::spawn(async move {
+        let result = client
+            .call_many(vec![
+                RelayRequest::CpuUsage,
+                RelayRequest::Attach {
+                    after_ordinal: 0,
+                    after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                    known_state_digest: None,
+                },
+            ])
+            .await;
+        (client, result)
+    });
+    received.await.unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let (client, result) = work.await.unwrap();
+    assert!(format!("{:#}", result.unwrap_err()).contains("cpu_usage timed out after 1 seconds"));
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert!(client.abandoned.is_some());
+    peer.abort();
+    assert!(peer.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn readiness_long_poll_keeps_the_worker_hold_in_its_deadline() {
+    use crate::readiness::NativeSessionProbe;
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.request_timeout = Duration::from_secs(1);
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let request: RelayRequestEnvelope =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(matches!(
+            request.request,
+            RelayRequest::WaitForChange { .. }
+        ));
+        tokio::time::sleep(mj_core::relay::RELAY_CHANGE_WAIT_BOUND).await;
+        let mut frame = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: request.protocol_version,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ChangeObserved {
+                    latest_ordinal: 0,
+                    state_digest: "same".into(),
+                    subagent_queue_changed: false,
+                    guardian_queue_changed: false,
+                },
+            },
+        })
+        .unwrap();
+        frame.push(b'\n');
+        writer.write_all(&frame).await.unwrap();
+    });
+    assert!(
+        client
+            .wait_readiness_change((0, "same".into()), std::future::pending())
+            .await
+            .unwrap()
+    );
+    assert!(client.abandoned.is_none());
+    peer.await.unwrap();
+}

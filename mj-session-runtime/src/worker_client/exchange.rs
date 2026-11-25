@@ -40,18 +40,15 @@ impl RelayClient {
                 self.protocol_version
             );
         }
-        let timeout = requests
-            .iter()
-            .map(|request| match request {
-                RelayRequest::Attach { .. } => RELAY_HISTORY_TIMEOUT,
-                RelayRequest::Status | RelayRequest::HistoryRequests => RELAY_OBSERVATION_TIMEOUT,
-                _ => self.request_timeout,
-            })
-            .max()
-            .unwrap_or(self.request_timeout);
         let mut frames = Vec::new();
         let mut ids = Vec::new();
         for request in requests {
+            let timeout = match &request {
+                RelayRequest::Attach { .. } => RELAY_HISTORY_TIMEOUT,
+                RelayRequest::Status | RelayRequest::HistoryRequests => RELAY_OBSERVATION_TIMEOUT,
+                _ => self.request_timeout,
+            };
+            let operation = request.method_name();
             let request_id = self.request_id();
             let envelope = RelayRequestEnvelope {
                 request_id: request_id.clone(),
@@ -65,15 +62,18 @@ impl RelayClient {
             );
             frames.extend(frame);
             frames.push(b'\n');
-            ids.push(request_id);
+            ids.push((request_id, timeout, operation));
         }
         let session_id = self.session_id.clone();
-        let started = Instant::now();
-        let exchange = async {
-            let input = self
-                .input
-                .as_mut()
-                .expect("connected relay owns proxy stdin");
+        let protocol_version = self.protocol_version;
+        let input = self
+            .input
+            .as_mut()
+            .expect("connected relay owns proxy stdin");
+        let output = &mut self.output;
+        // The sequential worker writes each reply before reading the next
+        // request. Drain concurrently so bounded pipes cannot block both ends.
+        let write_all = async {
             input
                 .write_all(&frames)
                 .await
@@ -82,17 +82,30 @@ impl RelayClient {
                 .flush()
                 .await
                 .map_err(|error| RelayTransportDead::from_io(error, ExchangeKind::Call))?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let read_all = async {
             let mut replies = Vec::new();
-            for id in ids {
-                let line = read_bounded_frame(&mut self.output, ExchangeKind::Call)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::Error::new(RelayTransportDead::during_exchange(
-                            "relay proxy disconnected during pipeline",
-                            ExchangeKind::Call,
-                        ))
-                    })?;
-                let reply = decode_relay_response(&line, &id, self.protocol_version);
+            for (id, timeout, operation) in ids {
+                // Only this slot's wait counts against its budget. An earlier
+                // cold Attach must not consume the next observation's deadline.
+                let started = Instant::now();
+                let response = read_bounded_frame(output, ExchangeKind::Call);
+                tokio::pin!(response);
+                let line = tokio::time::timeout(timeout, async {
+                    tokio::select! {
+                        result = &mut response => result,
+                        () = tokio::time::sleep(RELAY_SLOW_OPERATION_WARNING) => {
+                            tracing::warn!(%session_id, %operation, request_id = %id, "relay pipeline slot is still waiting for its response");
+                            let result = response.await;
+                            tracing::warn!(%session_id, %operation, request_id = %id, elapsed_seconds = started.elapsed().as_secs_f64(), "slow relay pipeline slot finished");
+                            result
+                        }
+                    }
+                }).await.with_context(|| format!("relay pipeline {operation} timed out after {} seconds", timeout.as_secs_f64()))??
+                    .ok_or_else(|| anyhow::Error::new(RelayTransportDead::during_exchange(
+                        format!("relay proxy disconnected during pipeline {operation}"), ExchangeKind::Call)))?;
+                let reply = decode_relay_response(&line, &id, protocol_version);
                 if let Err(error) = &reply
                     && error.downcast_ref::<RelayRejected>().is_none()
                 {
@@ -102,18 +115,7 @@ impl RelayClient {
             }
             Ok(replies)
         };
-        tokio::pin!(exchange);
-        let result = tokio::time::timeout(timeout, async {
-            tokio::select! {
-                result = &mut exchange => result,
-                () = tokio::time::sleep(RELAY_SLOW_OPERATION_WARNING) => {
-                    tracing::warn!(%session_id, "relay pipeline is still waiting for its response");
-                    let result = exchange.await;
-                    tracing::warn!(%session_id, elapsed_seconds = started.elapsed().as_secs_f64(), "slow relay pipeline finished");
-                    result
-                }
-            }
-        }).await.unwrap_or_else(|_| Err(anyhow!("relay pipeline timed out after {} seconds", timeout.as_secs_f64())));
+        let result = tokio::try_join!(write_all, read_all).map(|(_, replies)| replies);
         if let Err(error) = &result {
             self.abandoned = Some(format!(
                 "relay connection abandoned after pipeline failure: {error:#}"

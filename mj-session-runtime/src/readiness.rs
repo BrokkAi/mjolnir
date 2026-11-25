@@ -75,12 +75,13 @@ pub trait NativeSessionProbe {
         Ok((self.native_session_readiness().await?, None))
     }
 
+    /// Returns false when a queue-only wake requires polling for this wait.
     async fn wait_readiness_change(
         &mut self,
         _observed: (u64, String),
         _interrupted: impl std::future::Future<Output = ()>,
-    ) -> Result<()> {
-        Ok(())
+    ) -> Result<bool> {
+        Ok(false)
     }
 }
 
@@ -108,7 +109,7 @@ impl NativeSessionProbe for StandaloneSession {
         &mut self,
         observed: (u64, String),
         interrupted: impl std::future::Future<Output = ()>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.client
             .wait_readiness_change(observed, interrupted)
             .await
@@ -146,17 +147,21 @@ impl NativeSessionProbe for RelayClient {
         &mut self,
         (after_ordinal, digest): (u64, String),
         interrupted: impl std::future::Future<Output = ()>,
-    ) -> Result<()> {
-        self.call_until(interrupted, async |client| {
-            client
-                .call(mj_core::relay::RelayRequest::WaitForChange {
-                    after_ordinal,
-                    state_digest: Some(digest),
-                })
-                .await
-        })
-        .await?;
-        Ok(())
+    ) -> Result<bool> {
+        let change = self
+            .call_until(interrupted, async |client| {
+                client
+                    .wait_for_change(after_ordinal, Some(digest.clone()))
+                    .await
+            })
+            .await?;
+        // Readiness never drains these queues. A queue-only wake would repeat
+        // immediately forever on this connection; fall back to polling once.
+        Ok(!change.is_some_and(|change| {
+            (change.subagent_queue_changed || change.guardian_queue_changed)
+                && change.latest_ordinal == after_ordinal
+                && change.state_digest == digest
+        }))
     }
 }
 
@@ -334,6 +339,7 @@ async fn wait_for_startup(
         .then_some(LegacyStartupDeadline::Unobserved);
     let mut stage = NativeReadinessStage::new(executor, harness, fallback_stage);
     let mut poll_delay = Duration::from_millis(100);
+    let mut change_wait_usable = true;
     loop {
         if executor.cancellation_requested() {
             bail!("operation cancelled while waiting for ACP runtime startup");
@@ -410,9 +416,9 @@ async fn wait_for_startup(
                 NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
             );
         }
-        if let Some(observed) = observed {
+        if change_wait_usable && let Some(observed) = observed {
             let end = deadline.as_ref().and_then(LegacyStartupDeadline::deadline);
-            relay
+            let can_keep_change_wait = relay
                 .wait_readiness_change(observed, async {
                     loop {
                         if executor.cancellation_requested()
@@ -430,8 +436,13 @@ async fn wait_for_startup(
                     }
                 })
                 .await?;
-            continue;
+            if can_keep_change_wait {
+                poll_delay = Duration::from_millis(100);
+                continue;
+            }
+            change_wait_usable = false;
         }
+        let now = tokio::time::Instant::now();
         let next_poll = deadline
             .as_ref()
             .and_then(LegacyStartupDeadline::deadline)
@@ -2380,5 +2391,92 @@ mod tests {
                 peer.await.unwrap();
             }
         }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn readiness_queue_only_wake_disables_change_wait_and_backs_off() {
+        use mj_core::relay::{
+            RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
+            RelayResponsePayload,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let root = tempfile::tempdir().unwrap();
+        let mut state = mj_worker::relay::DurableRelay::open(
+            root.path(),
+            crate::worker_client::test_fixtures::SESSION_ID,
+            "test",
+        )
+        .unwrap()
+        .operational_state();
+        state.harness_preparation = Some(HarnessPreparation::Preparing {
+            step: "prepare".into(),
+            since_ms: 0,
+        });
+        let digest = mj_core::relay::relay_state_digest(&state).unwrap();
+        let (controller, worker) = tokio::io::duplex(65536);
+        let mut client = crate::worker_client::test_fixtures::duplex_relay_client(
+            controller,
+            crate::worker_client::test_fixtures::SESSION_ID,
+        );
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut lines = BufReader::new(reader).lines();
+            let mut polls = Vec::new();
+            let mut waits = 0;
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+                let payload = match request.request {
+                    RelayRequest::Status => {
+                        polls.push(tokio::time::Instant::now());
+                        let mut state = state.clone();
+                        if polls.len() == 5 {
+                            state.execution = RelayExecutionState::Closed;
+                            state.harness_preparation = None;
+                        }
+                        RelayResponsePayload::Status(state)
+                    }
+                    RelayRequest::WaitForChange {
+                        after_ordinal,
+                        state_digest,
+                    } => {
+                        waits += 1;
+                        assert_eq!(after_ordinal, state.latest_ordinal);
+                        assert_eq!(state_digest.as_deref(), Some(digest.as_str()));
+                        RelayResponsePayload::ChangeObserved {
+                            latest_ordinal: state.latest_ordinal,
+                            state_digest: digest.clone(),
+                            subagent_queue_changed: true,
+                            guardian_queue_changed: false,
+                        }
+                    }
+                    request => panic!("unexpected request {request:?}"),
+                };
+                let mut frame = serde_json::to_vec(&RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: request.protocol_version,
+                    body: RelayResponseBody::Ok { payload },
+                })
+                .unwrap();
+                frame.push(b'\n');
+                writer.write_all(&frame).await.unwrap();
+                if polls.len() == 5 {
+                    break;
+                }
+            }
+            assert_eq!(
+                waits, 1,
+                "readiness cannot drain the queue, so stop issuing waits"
+            );
+            let delays: Vec<_> = polls
+                .windows(2)
+                .map(|pair| pair[1].duration_since(pair[0]).as_millis())
+                .collect();
+            assert_eq!(delays, vec![100, 200, 400, 500]);
+        });
+        let executor = CancellableProcessExecutor::new(Arc::default());
+        let error = wait_for_native_session(&mut client, &executor, HarnessKind::Codex)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stopped before starting"));
+        peer.await.unwrap();
     }
 }
