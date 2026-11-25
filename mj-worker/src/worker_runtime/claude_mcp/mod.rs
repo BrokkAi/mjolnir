@@ -39,7 +39,6 @@ fn required(v: &Value, key: &str) -> Result<String> {
     Ok(s.into())
 }
 struct Service {
-    root: PathBuf,
     cwd: PathBuf,
     environment: Mutex<BTreeMap<String, String>>,
     harness: Mutex<HarnessKind>,
@@ -47,10 +46,8 @@ struct Service {
     dispatch: mpsc::Sender<()>,
     cancel: CancellationToken,
     monitors: Mutex<BTreeMap<String, monitor::Monitor>>,
-    jobs: tokio::sync::Mutex<BTreeMap<String, cron::Job>>,
-    cron_io: Arc<tokio::sync::Mutex<()>>,
+    jobs: Mutex<BTreeMap<String, cron::Job>>,
     wakeup: Mutex<Option<(u64, JoinHandle<()>)>>,
-    cron_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 impl Service {
     fn deliver_wake(&self, key: &str, text: String) -> bool {
@@ -78,7 +75,7 @@ impl Service {
             "monitor_list" => Ok(monitor::list(self)),
             "cron_create" => cron::create(self, a).await,
             "cron_list" => Ok(
-                json!({"jobs":self.jobs.lock().await.values().map(|j|j.view()).collect::<Vec<_>>()}),
+                json!({"jobs":self.jobs.lock().unwrap().values().map(|j|j.view()).collect::<Vec<_>>()}),
             ),
             "cron_delete" => cron::delete(self, &required(&a, "id")?).await,
             "schedule_wakeup" => self.schedule(a, Duration::from_secs(60)),
@@ -153,7 +150,6 @@ struct ControllerState {
     dispatch: mpsc::Sender<()>,
     runtime: tokio::runtime::Handle,
     service: Mutex<Option<ClaudeMcpShutdownGuard>>,
-    cron_io: Arc<tokio::sync::Mutex<()>>,
 }
 pub struct ClaudeMcpControllerGuard(pub ClaudeMcpController);
 impl Drop for ClaudeMcpControllerGuard {
@@ -176,7 +172,6 @@ impl ClaudeMcpController {
             dispatch,
             runtime,
             service: Mutex::new(None),
-            cron_io: Arc::new(tokio::sync::Mutex::new(())),
         }))
     }
     pub fn reconcile(
@@ -192,7 +187,7 @@ impl ClaudeMcpController {
         if let Some(guard) = slot.as_ref() {
             guard.update_runtime(harness, environment);
         } else {
-            *slot = Some(start_with_cron_io(
+            *slot = Some(start_service(
                 &self.0.root,
                 self.0.cwd.clone(),
                 environment,
@@ -200,7 +195,6 @@ impl ClaudeMcpController {
                 self.0.relay.clone(),
                 self.0.dispatch.clone(),
                 &self.0.runtime,
-                self.0.cron_io.clone(),
             )?);
         }
         Ok(true)
@@ -222,8 +216,8 @@ impl ClaudeMcpShutdownGuard {
         if let Some((_, task)) = self.service.wakeup.lock().unwrap().take() {
             task.abort();
         }
-        for task in self.service.cron_tasks.lock().unwrap().drain(..) {
-            task.abort();
+        for job in self.service.jobs.lock().unwrap().values() {
+            job.task.abort();
         }
         self.listener.abort();
         if let Err(error) = std::fs::remove_file(&self.path)
@@ -248,7 +242,7 @@ pub fn start_claude_mcp_service(
     dispatch_wake: mpsc::Sender<()>,
     runtime: &tokio::runtime::Handle,
 ) -> Result<ClaudeMcpShutdownGuard> {
-    start_with_cron_io(
+    start_service(
         worker_root,
         cwd,
         environment,
@@ -256,11 +250,10 @@ pub fn start_claude_mcp_service(
         relay,
         dispatch_wake,
         runtime,
-        Arc::new(tokio::sync::Mutex::new(())),
     )
 }
-#[allow(clippy::too_many_arguments)] // Service state plus the worker-owned cross-generation I/O lock.
-fn start_with_cron_io(
+#[allow(clippy::too_many_arguments)] // Service startup parameters.
+fn start_service(
     worker_root: &Path,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
@@ -268,7 +261,6 @@ fn start_with_cron_io(
     relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     runtime: &tokio::runtime::Handle,
-    cron_io: Arc<tokio::sync::Mutex<()>>,
 ) -> Result<ClaudeMcpShutdownGuard> {
     use std::os::unix::fs::PermissionsExt;
     let path = worker_root.join(CLAUDE_MCP_SOCKET);
@@ -283,7 +275,6 @@ fn start_with_cron_io(
     let _entered = runtime.enter();
     let listener = tokio::net::UnixListener::from_std(listener)?;
     let service = Arc::new(Service {
-        root: worker_root.into(),
         cwd,
         environment: Mutex::new(environment),
         harness: Mutex::new(harness),
@@ -291,14 +282,11 @@ fn start_with_cron_io(
         dispatch: dispatch_wake,
         cancel: CancellationToken::new(),
         monitors: Mutex::new(BTreeMap::new()),
-        jobs: tokio::sync::Mutex::new(BTreeMap::new()),
-        cron_io,
+        jobs: Mutex::new(BTreeMap::new()),
         wakeup: Mutex::new(None),
-        cron_tasks: Mutex::new(Vec::new()),
     });
     let s = service.clone();
     let task=runtime.spawn(async move {
-        if let Err(error)=cron::reload(&s).await {tracing::error!(%error,"reload durable cron jobs failed");}
         let mut clients=tokio::task::JoinSet::new();
         loop { tokio::select! {
             _=s.cancel.cancelled()=>break,
@@ -407,7 +395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claude_mcp_socket_timers_persistence_and_monitor_pipes() {
+    async fn claude_mcp_socket_timers_session_cron_and_monitor_pipes() {
         let root = tempfile::tempdir().unwrap();
         let relay = Arc::new(RelayCell::new(
             crate::relay::DurableRelay::open(root.path(), "test-session", "test").unwrap(),
@@ -427,10 +415,10 @@ mod tests {
         };
         let guard = start();
         let path = root.path().join(CLAUDE_MCP_SOCKET);
-        let job = rpc(
+        let _job = rpc(
             &path,
             "cron_create",
-            json!({"cron":"0 0 29 2 *","prompt":"leap","durable":true}),
+            json!({"cron":"0 0 29 2 *","prompt":"leap"}),
         )
         .await;
         let (ordinal, digest) = {
@@ -488,19 +476,11 @@ mod tests {
         .unwrap();
         drop(guard);
         let guard = start();
-        for _ in 0..100 {
-            if !rpc(&path, "cron_list", json!({})).await["jobs"]
+        assert!(
+            rpc(&path, "cron_list", json!({})).await["jobs"]
                 .as_array()
                 .unwrap()
                 .is_empty()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            rpc(&path, "cron_list", json!({})).await["jobs"][0]["id"],
-            job["id"]
         );
         let m = rpc(
             &path,

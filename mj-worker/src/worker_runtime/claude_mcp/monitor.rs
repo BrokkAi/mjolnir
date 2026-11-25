@@ -197,25 +197,32 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
             Vec::new()
         };
         s.monitors.lock().unwrap().remove(&task_id);
-        if !stopped && !cancel.is_cancelled() {
-            s.deliver_wake(
-                &task_id,
-                format!(
-                    "[mj-claude monitor {task_id}] {}{}",
-                    if timed_out {
-                        "timed out".into()
-                    } else {
-                        format!("exited: {status:?}")
-                    },
-                    if status.as_ref().is_ok_and(|v| v.success()) {
-                        String::new()
-                    } else {
-                        format!("\n{}", String::from_utf8_lossy(&tail))
-                    }
-                ),
-            );
-        }
         let _ = done_tx.send(true);
+        if !stopped && !cancel.is_cancelled() {
+            let message = format!(
+                "[mj-claude monitor {task_id}] {}{}",
+                if timed_out {
+                    "timed out".into()
+                } else {
+                    format!("exited: {status:?}")
+                },
+                if status.as_ref().is_ok_and(|v| v.success()) {
+                    String::new()
+                } else {
+                    format!("\n{}", String::from_utf8_lossy(&tail))
+                }
+            );
+            loop {
+                if s.deliver_wake(&task_id, message.clone()) {
+                    break;
+                }
+                tokio::select! {
+                    _ = s.cancel.cancelled() => break,
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+            }
+        }
     });
     Ok(view)
 }

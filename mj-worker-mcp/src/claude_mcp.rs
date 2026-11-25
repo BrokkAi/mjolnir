@@ -113,12 +113,11 @@ fn definition(name: &str) -> Value {
         ),
         "monitor_list" => ("List active monitors.", json!({}), vec![]),
         "cron_create" => (
-            "Schedule a local-time prompt; recurring non-durable jobs expire after seven days.",
+            "Schedule a local-time prompt; recurring jobs expire after seven days.",
             json!({
                 "cron":{"type":"string","description":"Five local-time fields: minute hour day-of-month month day-of-week."},
                 "prompt":{"type":"string","description":"Prompt to deliver when the job fires."},
-                "recurring":{"type":"boolean","default":true,"description":"Repeat after firing; false creates a one-shot job."},
-                "durable":{"type":"boolean","default":false,"description":"Persist this job across worker restarts."}
+                "recurring":{"type":"boolean","default":true,"description":"Repeat after firing; false creates a one-shot job."}
             }),
             vec!["cron", "prompt"],
         ),
