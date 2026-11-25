@@ -340,8 +340,13 @@ fn resolve_dotgit(
         let backlink = read_pointer(&git_dir.join("gitdir"))
             .ok()
             .and_then(|text| std::fs::canonicalize(git_dir.join(text.trim())).ok());
+        // The backlink must name this workspace's own `.git` file. A symlink
+        // there would borrow the proof of the checkout it leads to.
+        let own_gitfile = canonical(base).join(".git");
         ensure!(
-            administrative && backlink.is_some() && backlink == std::fs::canonicalize(dotgit).ok(),
+            administrative
+                && !std::fs::symlink_metadata(dotgit)?.file_type().is_symlink()
+                && backlink.as_ref() == Some(&own_gitfile),
             "{} points outside the workspace at a Git directory that does not belong to it",
             dotgit.display()
         );
@@ -1311,6 +1316,14 @@ mod tests {
         std::fs::create_dir_all(&linked).unwrap();
         std::os::unix::fs::symlink(repositories.clone.join(".git"), linked.join(".git")).unwrap();
         assert!(resolve(&linked).is_empty());
+
+        // A `.git` symlink to another checkout's gitfile does not borrow its
+        // backlink.
+        let borrowed = workspace.join("linked-gitfile");
+        std::fs::create_dir_all(&borrowed).unwrap();
+        std::os::unix::fs::symlink(repositories.worktree.join(".git"), borrowed.join(".git"))
+            .unwrap();
+        assert!(resolve(&borrowed).is_empty());
 
         // A real external worktree proves ownership both ways and is
         // accepted; so is one whose directory moved when its repository is
