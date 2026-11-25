@@ -219,7 +219,7 @@ impl Controller {
             }
             stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                 .context("stop the sub-agent's worker")?;
-            self.pull_parked_codex_login(session_id, session, &backend, executor)
+            self.harvest_parked_login(session_id, session, &backend, executor)
                 .await;
             let mut record = session.clone();
             record.state = if failure.is_some() {
@@ -249,29 +249,24 @@ impl Controller {
         .await
     }
 
-    /// Pull a refreshed Codex login from a session's staged home back into the
-    /// canonical profile store keyed by `session.last_profile`.
-    ///
-    /// Returns `Ok(true)` when a newer login was installed, `Ok(false)` when
-    /// no update applied (non-Codex, symlinked/shared login, missing file,
-    /// already up to date, or staged `ownership.json` belongs to another
-    /// profile), and `Err` when reading or installing fails.
-    pub(in crate::controller) async fn pull_staged_codex_login(
+    /// Adopt a copied native login after its writer has stopped. Shared links
+    /// and push-only exports are excluded by the core login descriptor.
+    pub(in crate::controller) async fn harvest_stopped_login(
         &self,
         session_id: &str,
         session: &mj_core::state::SessionRecord,
         backend: &targets::TargetLocator,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<bool> {
-        use mj_core::config::HarnessKind;
         #[derive(serde::Deserialize)]
         struct StagedOwnershipProfile {
             profile_id: String,
         }
 
-        if session.harness_kind != HarnessKind::Codex {
+        let kind = session.harness_kind;
+        let Some(relative_login) = mj_core::credentials::copied_login_relative_path(kind) else {
             return Ok(false);
-        }
+        };
         let Some(profile) = self.config.profiles.get(&session.last_profile) else {
             return Ok(false);
         };
@@ -280,17 +275,15 @@ impl Controller {
         }
         let launch = self
             .current_worker_launch_config(session_id, backend)
-            .context("resolve launch config to pull staged Codex login")?;
+            .context("resolve launch config to pull staged native login")?;
         let worker_root = crate::targets::worker_root(backend, session_id)?;
         let canonical_marker = profile.authentication_marker();
         let expected_profile = session.last_profile.clone();
         let bytes = match backend {
             targets::TargetLocator::LocalBare { .. } => {
                 let ownership_path = std::path::PathBuf::from(&worker_root).join("ownership.json");
-                let staged_path = mj_core::config::harness_authentication_marker(
-                    HarnessKind::Codex,
-                    &launch.harness_home,
-                );
+                let staged_path =
+                    mj_core::config::harness_authentication_marker(kind, &launch.harness_home);
                 if staged_path == canonical_marker {
                     return Ok(false);
                 }
@@ -310,7 +303,7 @@ impl Controller {
                                     tracing::warn!(
                                         expected_profile = %expected,
                                         staged_profile = %ownership.profile_id,
-                                        "skipping staged Codex login pull because ownership.json names another profile"
+                                        "skipping staged native login pull because ownership.json names another profile"
                                     );
                                     return Ok(None);
                                 }
@@ -322,28 +315,10 @@ impl Controller {
                                 });
                             }
                         }
-                        let metadata = match std::fs::symlink_metadata(&staged_path) {
-                            Ok(metadata) => metadata,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                return Ok(None);
-                            }
-                            Err(error) => {
-                                return Err(error).with_context(|| {
-                                    format!("inspect staged Codex login {}", staged_path.display())
-                                });
-                            }
-                        };
-                        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                            return Ok(None);
-                        }
-                        std::fs::read(&staged_path)
-                            .with_context(|| {
-                                format!("read staged Codex login {}", staged_path.display())
-                            })
-                            .map(Some)
+                        mj_core::credentials::read_harvestable_copied_login(kind, &launch.harness_home)
                     })
                     .await
-                    .context("staged Codex login read task failed")??;
+                    .context("staged native login read task failed")??;
                 match maybe_bytes {
                     Some(bytes) => bytes,
                     None => return Ok(false),
@@ -355,7 +330,7 @@ impl Controller {
                 let staged_path = format!(
                     "{}/{}",
                     launch.harness_home.to_string_lossy().trim_end_matches('/'),
-                    HarnessKind::Codex.credential_file_name()
+                    relative_login.to_string_lossy()
                 );
                 let command = targets::locator_command(
                     targets::SshTrafficClass::Control,
@@ -363,25 +338,27 @@ impl Controller {
                     vec![
                         "sh".into(),
                         "-c".into(),
-                        "set -e; if [ -e \"$1\" ] || [ -L \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
-                        "mj-pull-codex-login".into(),
+                        "set -e; if [ -e \"$1\" ] || [ -L \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$3\" ] && [ ! -L \"$4\" ] && [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
+                        "mj-pull-native-login".into(),
                         ownership_path,
-                        staged_path,
+                        staged_path.clone(),
+                        launch.harness_home.to_string_lossy().into_owned(),
+                        std::path::Path::new(&staged_path).parent().context("staged login parent")?.to_string_lossy().into_owned(),
                     ],
                 )
-                .purpose("read staged Codex login");
+                .purpose("read staged native login");
                 let output = executor
                     .execute(&command)
-                    .context("execute staged Codex login read")?;
+                    .context("execute staged native login read")?;
                 if output.status != 0 {
                     anyhow::bail!(
-                        "read staged Codex login from target exited with status {}: {}",
+                        "read staged native login from target exited with status {}: {}",
                         output.status,
                         String::from_utf8_lossy(&output.stderr).trim()
                     );
                 }
                 let Some(sep) = output.stdout.iter().position(|&byte| byte == 0) else {
-                    anyhow::bail!("unexpected staged Codex login probe output without separator");
+                    anyhow::bail!("unexpected staged native login probe output without separator");
                 };
                 let ownership_bytes = &output.stdout[..sep];
                 let auth_bytes = &output.stdout[sep + 1..];
@@ -393,7 +370,7 @@ impl Controller {
                             session_id,
                             expected_profile = %expected_profile,
                             staged_profile = %ownership.profile_id,
-                            "skipping staged Codex login pull because ownership.json names another profile"
+                            "skipping staged native login pull because ownership.json names another profile"
                         );
                         return Ok(false);
                     }
@@ -404,30 +381,19 @@ impl Controller {
                 auth_bytes.to_vec()
             }
         };
-        let install = mj_core::credentials::install_credentials_if_newer(
-            HarnessKind::Codex,
-            &canonical_marker,
-            &bytes,
-        )
-        .await
-        .context("install staged Codex login into canonical store")?;
-        if install.installed {
-            tracing::info!(
-                session_id,
-                profile = %session.last_profile,
-                "pulled refreshed Codex login from staged home"
-            );
+        if !mj_core::credentials::harvestable_login_bytes(kind, &bytes)? {
+            return Ok(false);
         }
-        Ok(install.installed)
+        crate::worker_client::adopt_copied_login(profile, &bytes).await
     }
 
-    /// Pull a refreshed Codex login from a stopped sub-agent's staged home back
+    /// Pull a refreshed native login from a stopped sub-agent's staged home back
     /// into the canonical profile store before `Parked` is published (#1633).
     ///
     /// Keyed by `session.last_profile`, which is the profile the stopped home
     /// was staged for. Failures are logged rather than aborting `Parked`
     /// publication because the worker is already stopped.
-    async fn pull_parked_codex_login(
+    async fn harvest_parked_login(
         &self,
         session_id: &str,
         session: &mj_core::state::SessionRecord,
@@ -435,14 +401,14 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) {
         if let Err(error) = self
-            .pull_staged_codex_login(session_id, session, backend, executor)
+            .harvest_stopped_login(session_id, session, backend, executor)
             .await
         {
             tracing::warn!(
                 session_id,
                 profile = %session.last_profile,
                 error = format!("{error:#}"),
-                "could not pull parked Codex login"
+                "could not pull parked native login"
             );
         }
     }
@@ -1743,7 +1709,7 @@ mod tests {
         )
         .unwrap();
 
-        let controller = Controller {
+        let mut controller = Controller {
             config,
             state: crate::database::load_state().unwrap(),
         };
@@ -1806,6 +1772,35 @@ mod tests {
             stale_b,
             "unrelated profile's canonical store must not be touched"
         );
+        // The same stopped-home ownership path also harvests nested non-Codex grants.
+        controller.config.profiles.get_mut("codex-a").unwrap().kind =
+            mj_core::config::HarnessKind::Kimi;
+        let mut stopped = child.clone();
+        stopped.harness_kind = mj_core::config::HarnessKind::Kimi;
+        controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap()
+            .harness_kind = mj_core::config::HarnessKind::Kimi;
+        let canonical = canonical_a.join("credentials/kimi-code.json");
+        let staged = launch.harness_home.join("credentials/kimi-code.json");
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(
+            &canonical,
+            b"{\"expires_at\":100,\"refresh_token\":\"old\"}",
+        )
+        .unwrap();
+        let refreshed = b"{\"expires_at\":200,\"refresh_token\":\"new\"}";
+        std::fs::write(&staged, refreshed).unwrap();
+        assert!(
+            controller
+                .harvest_stopped_login(LATCH_RELAY_SESSION, &stopped, &backend, &executor)
+                .await
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(canonical).unwrap(), refreshed);
         let _targets = refresher.await.unwrap();
         shutdown.shutdown().await.unwrap();
     }

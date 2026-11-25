@@ -444,6 +444,53 @@ pub fn serve_latch_relay() {
                     ),
                 },
             }
+        } else if matches!(
+            &request.request,
+            mj_core::relay::RelayRequest::ReadRetiredLogins { .. }
+                | mj_core::relay::RelayRequest::AckRetiredLogin { .. }
+        ) {
+            let worker_root = std::fs::read_to_string(Path::new(&root).join("staged-worker-root"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from(&root));
+            let payload = match &request.request {
+                mj_core::relay::RelayRequest::ReadRetiredLogins { after } => {
+                    let deferred = relay.in_place_move_hold_active()
+                        || crate::worker_runtime::reload_commit::retired_logins_deferred(
+                            &worker_root,
+                        )
+                        .unwrap();
+                    let (logins, has_more) = if deferred {
+                        (Vec::new(), false)
+                    } else {
+                        crate::worker_runtime::reload_commit::read_retired_logins_page(
+                            &worker_root,
+                            after.as_deref(),
+                            mj_core::credentials::RETIRED_LOGIN_PAGE_RAW_BYTES,
+                        )
+                        .unwrap()
+                    };
+                    mj_core::relay::RelayResponsePayload::RetiredLogins {
+                        logins,
+                        has_more,
+                        deferred,
+                    }
+                }
+                mj_core::relay::RelayRequest::AckRetiredLogin { id, fingerprint } => {
+                    crate::worker_runtime::reload_commit::ack_retired_login(
+                        &worker_root,
+                        id,
+                        fingerprint,
+                    )
+                    .unwrap();
+                    mj_core::relay::RelayResponsePayload::RetiredLoginAcknowledged
+                }
+                _ => unreachable!(),
+            };
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id.clone(),
+                protocol_version: request.protocol_version,
+                body: mj_core::relay::RelayResponseBody::Ok { payload },
+            }
         } else if let mj_core::relay::RelayRequest::RestartHarnessInPlace {
             candidate_id,
             operation_id,

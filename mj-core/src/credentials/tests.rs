@@ -1326,3 +1326,23 @@ async fn a_rejected_login_is_judged_against_the_login_the_renewer_writes() {
 
     assert_eq!(decision.await.unwrap(), Some(false));
 }
+
+#[test]
+fn copied_login_with_a_non_directory_parent_is_absent() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("credentials"),
+        "malformed credential directory",
+    )
+    .unwrap();
+    assert!(
+        read_copied_login(HarnessKind::Kimi, root.path())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        read_copied_login(HarnessKind::Kimi, &root.path().join("credentials"))
+            .unwrap()
+            .is_none()
+    );
+}
