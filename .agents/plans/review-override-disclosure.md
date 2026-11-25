@@ -14,7 +14,8 @@ Review override notices currently fill the conversation with declined findings, 
 - [x] Validate the changed surfaces, Rust formatting and Clippy for all three affected crates.
 - [x] Committed the implementation and received the first review.
 - [x] Validated all four review fixes with the focused goldens, producer-to-reader test and affected-crate Clippy.
-- [ ] Commit the review fixes, obtain a clean review and push to origin/master.
+- [x] Committed the first review fixes; second review completed.
+- [ ] Commit and review the long-paragraph fix, then push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -57,7 +58,7 @@ Verified without regeneration: `TZ=UTC mbx test -p brokk-mj-client -p brokk-mj-c
 
 ## Interfaces and Dependencies
 
-Use a shared serializable `TranscriptDisclosure` with `summary: Vec<String>` and `body: Vec<String>`, returned by `transcript_disclosures(role, lines)` in `mj-client/src/transcript.rs`. Browser entries carry this same description. Reuse the existing TUI identity and row tracking mechanisms, renamed to describe disclosures rather than mailbox-only events. Use existing ratatui rendering and native HTML details/summary; no new dependencies.
+Build browser disclosures before ordinary line clipping so expansion retains long stored review paragraphs. Use a shared serializable `TranscriptDisclosure` with `summary: Vec<String>` and `body: Vec<String>`, returned by `transcript_disclosures(role, lines)` in `mj-client/src/transcript.rs`. Browser entries carry this same description. Reuse the existing TUI identity and row tracking mechanisms, renamed to describe disclosures rather than mailbox-only events. Use existing ratatui rendering and native HTML details/summary; no new dependencies.
 
 Plan created after inspecting the existing mailbox presentation path; no implementation changes yet.
 
@@ -68,3 +69,7 @@ Updated 2026-11-25 00:29Z: all local validation passed; ready for the required c
 Updated 2026-11-25 00:33Z: implemented all four first-review findings. Expanded web summaries now wrap; notices indent multiline findings and reasons; truncated lists disclose their omission marker; daemon test literals use the generalized field. Extended the producer-to-reader integration test and the existing goldens.
 
 Updated 2026-11-25 00:35Z: the client and TUI goldens and the existing override integration test each report one passing test, without regeneration; the browser conversation golden reports one passed. Clippy passed for client, review host and daemon with all targets, including the previously missed daemon test fixtures. Ready for another committed review.
+
+Updated 2026-11-25 00:40Z: second review found clipping of long expanded browser paragraphs; disclosures now use the full source before browser line clipping. Extended the shared browser golden and touch test with a paragraph over 4 KiB and verified its final marker. Declined reconstruction of historically ambiguous unindented notice fields: the stored text has no boundary information that distinguishes quoted labels, so recovering the original structure would require guessing. New writes have unambiguous indentation; original text remains available on expansion and in Raw mode.
+
+Updated 2026-11-25 00:42Z: the long-notice client golden and client Clippy pass. Fixed an observed browser-golden race: scrolling a mailbox title to the top invoked an unmocked history endpoint, so captures alternated between loading and 404 text. The fixture now supplies and awaits the empty history page before scrolling. The final browser golden passed three consecutive runs without regeneration.

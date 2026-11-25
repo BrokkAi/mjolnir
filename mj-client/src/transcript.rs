@@ -220,16 +220,6 @@ fn browser_transcript_collapsed(
         .into_iter()
         .map(|entry| browser_entry(&entry))
         .collect::<Vec<_>>();
-    for entry in &mut entries {
-        entry.disclosures = transcript_disclosures(
-            if entry.role == "system" {
-                ChatRole::System
-            } else {
-                ChatRole::Agent
-            },
-            entry.lines.iter().map(String::as_str),
-        );
-    }
     entries.retain(|entry| !entry.lines.is_empty());
     // A collapse can remove an entry a viewer already received even when
     // older, unrelated entries remain in the window. Move the reset
@@ -823,6 +813,8 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
     } else {
         entry.text.lines().map(str::to_owned).collect()
     };
+    // Expanded notices retain the stored text, including long review paragraphs.
+    let disclosures = transcript_disclosures(entry.role, source.iter().map(String::as_str));
     BrowserTranscriptEntry {
         command_id: entry.source.0.as_ref().and_then(|item| {
             item.stable_id
@@ -850,7 +842,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         label,
         recorded_at_ms: entry.recorded_at_ms,
         tool_ended_at_ms: entry.tool_ended_at_ms,
-        disclosures: Vec::new(),
+        disclosures,
         generated: entry.role == ChatRole::User && !entry.is_user_authored(),
         lines: source
             .into_iter()
@@ -1494,7 +1486,15 @@ mod tests {
             ChatRole::System,
             include_str!("../tests/fixtures/review-override-notice.txt"),
         );
-        let browser = browser_transcript(&[entry, notice], 3, 0, None);
+        let long_notice = ChatEntry::plain(
+            4,
+            ChatRole::System,
+            format!(
+                "Before-push review override requested by the agent. The agent declined to fix these findings:\n- Finding: [P2] Keep long review context\n  Reason: This finding is outside scope.\nOverridden synthesis (review long-review):\n{}END_OF_LONG_REVIEW\nRepositories:\n/workspace/mjolnir: abc123..def456",
+                "Review detail. ".repeat(400),
+            ),
+        );
+        let browser = browser_transcript(&[entry, notice, long_notice], 4, 0, None);
         mj_core::golden::assert_golden(
             env!("CARGO_MANIFEST_DIR"),
             "mailbox-browser-transcript",

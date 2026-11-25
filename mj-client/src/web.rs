@@ -50,8 +50,8 @@ pub struct BrowserTranscriptEntry {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
     pub lines: Vec<String>,
-    /// Collapsed summaries and expanded bodies, interpreted from `lines` by
-    /// the same presentation rules the terminal uses.
+    /// Collapsed summaries and complete expanded bodies, interpreted before
+    /// line clipping by the same presentation rules the terminal uses.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disclosures: Vec<crate::transcript::TranscriptDisclosure>,
     /// The glyph the terminal draws for this role, so both surfaces read alike

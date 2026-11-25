@@ -463,6 +463,13 @@ test('golden_viewer_conversation', async ({ context, browser }) => {
   const mailboxPage = await touchContext.newPage();
   await mailboxPage.clock.install({ time: new Date('2030-06-15T15:00:00Z') });
   const mailboxState = await mockViewerApi(mailboxPage);
+  // Title taps scroll to the top. Resolve the empty earlier-history page
+  // first so golden capture cannot race a pending history request.
+  await mailboxPage.route(`**/api/v1/sessions/${SESSION_ID}/history*`, route =>
+    route.fulfill({ json: { items: [], before: null } }),
+  );
+  await mailboxPage.locator('#earlier-messages').click();
+  await expect(mailboxPage.locator('#earlier-messages')).toBeHidden();
   // Consume the shared Rust projection's exact browser response, so both
   // surfaces exercise the same real delivery text and event boundaries.
   mailboxState.conversation = JSON.parse(fs.readFileSync(
@@ -547,6 +554,13 @@ test('golden_viewer_conversation', async ({ context, browser }) => {
   await mailboxPage.keyboard.press('Enter');
   await expect(override).not.toHaveAttribute('open', '');
   await captureMailbox('keyboard restores only the declined finding list');
+  const longOverride = mailboxPage.locator('#conversation-feed [data-entry-id="4"] .transcript-disclosure');
+  await longOverride.locator('summary').tap();
+  await expect(longOverride.locator('.entry-body')).toContainText('END_OF_LONG_REVIEW');
+  expect(await longOverride.locator('.entry-body').textContent()).toBe(
+    mailboxState.conversation.entries[2].disclosures[0].body.join('\n'),
+  );
+  await captureMailbox('expanded override retains the end of a long review paragraph');
   await touchContext.close();
 
   const longPage = await context.newPage();
