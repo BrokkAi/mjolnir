@@ -39,6 +39,11 @@ struct PreparedPair {
     cutoff_ms: i64,
 }
 
+struct ClassificationTarget {
+    id: String,
+    clear_ordinal: u64,
+}
+
 type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Result<GithubItemVerdict>> + Send + 'a>>;
 
 #[derive(Clone)]
@@ -557,6 +562,17 @@ async fn classify_recorded_items(
     })
     .await?;
     let now = mj_core::clock::epoch_millis();
+    let mut boundaries = BTreeMap::new();
+    for session in sessions.iter().filter(|session| !session.no_github_events) {
+        let id = session.id.clone();
+        let boundary =
+            blocking_db(move || database::load_github_classification_frontier(&id)).await?;
+        if let Some(boundary) = boundary {
+            boundaries.insert(session.id.clone(), boundary);
+        } else {
+            tracing::debug!(session_id = %session.id, "deferring GitHub classification until the session projection catches up after /clear");
+        }
+    }
     let mut pending = Vec::new();
     for item in items {
         if stop.is_cancelled() {
@@ -578,6 +594,9 @@ async fn classify_recorded_items(
                 || timestamp_precedes(&item.created_at, &session.created_at)
                 || classified.contains(&session.id)
             {
+                continue;
+            }
+            if !boundaries.contains_key(&session.id) {
                 continue;
             }
             let failure = failures.get(&(item.number, session.id.clone()));
@@ -619,6 +638,7 @@ async fn classify_recorded_items(
             return Ok(());
         }
         api.control.check_enabled()?;
+        let boundary = boundaries[&session_id];
         // One pass over the session's stored transcript feeds every item of
         // the session; no transcript text is held beyond a row at a time.
         let digest = session_digest_for_evidence(session_id.clone())
@@ -653,7 +673,16 @@ async fn classify_recorded_items(
                 Ok(None) => Some(Ok(None)),
                 Err(error) => Some(Err(error)),
             };
-            slots.push((index, item, session, attempts, evidence));
+            slots.push((
+                index,
+                item,
+                ClassificationTarget {
+                    id: session.id,
+                    clear_ordinal: boundary,
+                },
+                attempts,
+                evidence,
+            ));
         }
         // Dropping this future must also stop the blocking scan and release its snapshot.
         let scan_stop = stop.child_token();
@@ -683,7 +712,7 @@ async fn classify_recorded_items(
         let classifier = classifier.clone(); let control = api.control.clone();
         async move {
             if stop.is_cancelled() { return Ok(()); }
-            let number = item.number; let session_id = session.id.clone();
+            let number = item.number; let session_id = session.id.clone(); let clear_ordinal = session.clear_ordinal;
             match async {
                 let evidence = evidence?;
                 classify_for_session(owner, repo, item, session, evidence, classifier, control).await
@@ -693,7 +722,7 @@ async fn classify_recorded_items(
                 Err(error) => {
                     tracing::warn!(%owner, %repo, number, %session_id, attempt=attempts.saturating_add(1), %error, "GitHub classification failed; retrying with backoff");
                     let owner = owner.to_owned(); let repo = repo.to_owned();
-                    blocking_db(move || database::record_github_classification_failure(owner, repo, number, session_id)).await
+                    blocking_db(move || database::record_github_classification_failure(owner, repo, number, session_id, clear_ordinal)).await
                 }
             }
         }
@@ -818,7 +847,7 @@ async fn classify_for_session(
     owner: &str,
     repo: &str,
     item: database::GithubSeenItem,
-    session: SessionRecord,
+    session: ClassificationTarget,
     evidence: Option<GithubItemEvidence>,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
@@ -860,6 +889,7 @@ async fn classify_for_session(
         repo: repo.to_owned(),
         number: item.number,
         session_id: session.id,
+        clear_ordinal: session.clear_ordinal,
         kind: item.kind,
         title: item.title,
         url: item.url,
@@ -2107,6 +2137,7 @@ mod tests {
             repo: "repo".into(),
             number,
             session_id: "creator".into(),
+            clear_ordinal: 0,
             kind: "pull_request".into(),
             title: "synthetic PR".into(),
             url: "https://github.com/acme/repo/pull/1".into(),
@@ -3591,6 +3622,243 @@ mod tests {
         );
     }
 
+    struct ClearingClassifier {
+        clear_next: AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    impl GithubClassifier for ClearingClassifier {
+        fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let interested = evidence.session.conversation.contains("OLD INTEREST")
+                    || (evidence.session.conversation.contains("NEW INTEREST")
+                        && evidence.item.title.contains("new"));
+                if evidence.session.conversation.contains("NEW INTEREST") {
+                    assert!(
+                        !serde_json::to_string(&evidence.session.history)?.contains("OLD INTEREST")
+                    );
+                }
+                if self.clear_next.swap(false, Ordering::SeqCst) {
+                    blocking_db(|| {
+                        use mj_core::relay::{
+                            RelayCommandKind, RelayCommandOutcome, RelayEvent, RelayObservation,
+                        };
+                        let current = database::load_materialized_session("cleared")?.unwrap();
+                        let mut event = RelayEvent {
+                            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+                            ordinal: current.applied_event_ordinal + 1,
+                            previous_digest: current.applied_event_digest.clone(),
+                            digest: String::new(),
+                            recorded_at_ms: mj_core::clock::epoch_millis(),
+                            command_id: Some("clear".into()),
+                            observation: RelayObservation::CommandCompleted {
+                                command_id: "clear".into(),
+                                command: Some(RelayCommandKind::ClearContext),
+                                barrier_command_id: None,
+                                outcome: RelayCommandOutcome::ContextCleared {
+                                    native_session_id: "fresh".into(),
+                                    memory: None,
+                                },
+                            },
+                        };
+                        event.digest = mj_core::relay::relay_event_digest(&event)?;
+                        let mutation =
+                            mj_transcript::projection::project_relay_event(&current, &event)?
+                                .mutation;
+                        database::apply_projection_page("cleared", move |page| {
+                            page.apply(
+                                event.ordinal,
+                                &event.previous_digest,
+                                &event.digest,
+                                &mutation,
+                            )
+                        })?;
+                        Ok(())
+                    })
+                    .await?;
+                    bail!("old classifier failed after clear");
+                }
+                Ok(GithubItemVerdict { interested })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_fences_classification_and_skips_old_pending_items_without_starving_new_ones() {
+        if !run_isolated_child(
+            "clear_fences_classification_and_skips_old_pending_items_without_starving_new_ones",
+        ) {
+            return;
+        }
+        let _writer = database::install_isolated_test_writer();
+        let now = Utc::now();
+        let at = |seconds| (now + chrono::Duration::seconds(seconds)).to_rfc3339();
+        let mut session = database::test_session("cleared", "project");
+        session.created_at = at(-120);
+        database::save_session(&session).unwrap();
+        let set_interest = |id: &str, text: &str, position| {
+            let mut materialized = database::load_materialized_session(id).unwrap().unwrap();
+            materialized.applied_event_ordinal = position;
+            materialized.applied_event_digest = format!("{position:064x}");
+            materialized
+                .transcript
+                .push(Arc::new(mj_core::state::TranscriptItem {
+                    stable_id: format!("user:interest-{position}"),
+                    position,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: now.timestamp_millis(),
+                    last_changed_at_ms: now.timestamp_millis(),
+                    body: mj_core::state::TranscriptBody::User {
+                        content: vec![serde_json::json!({"type":"text","text":text})],
+                    },
+                }));
+            database::save_materialized_session(&materialized).unwrap();
+        };
+        set_interest("cleared", "OLD INTEREST", 1);
+        let record_items =
+            |numbers: std::ops::RangeInclusive<u64>, created: String, title: &str| {
+                database::record_github_page(
+                    "acme".into(),
+                    "repo".into(),
+                    numbers
+                        .map(|number| {
+                            parse_github_item(&github_item(
+                                number,
+                                number,
+                                title,
+                                created.clone(),
+                                true,
+                            ))
+                            .unwrap()
+                        })
+                        .collect(),
+                    database::GithubFeedProgress::Main(created),
+                )
+                .unwrap();
+            };
+        record_items(1..=2, at(60), "old item");
+        database::record_github_classification_failure(
+            "acme".into(),
+            "repo".into(),
+            2,
+            "cleared".into(),
+            0,
+        )
+        .unwrap();
+        database::seed_github_retry_due("acme", "repo", 2, "cleared").unwrap();
+        let classifier = Arc::new(ClearingClassifier {
+            clear_next: AtomicBool::new(true),
+            calls: AtomicUsize::new(0),
+        });
+        let api = GithubApi::new("http://127.0.0.1:1", None).unwrap();
+        classify_recorded_items(
+            "acme",
+            "repo",
+            std::slice::from_ref(&session),
+            classifier.clone(),
+            &at(-120),
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(classifier.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            database::load_github_watches("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(database::pending_mailbox_events(100).unwrap().is_empty());
+        assert!(
+            database::load_github_classification_failures("acme", "repo")
+                .unwrap()
+                .is_empty()
+        );
+
+        // Generation fencing also rejects an old verdict for an item whose
+        // timestamp is later than the clear (clock skew cannot bypass it).
+        let mut stale = watch_classification(100, &at(60));
+        stale.session_id = "cleared".into();
+        assert!(!database::commit_github_item_classification(stale, None).unwrap());
+
+        // Later classifications use the new conversation's interests.
+        set_interest("cleared", "NEW INTEREST", 3);
+        let fresh = 4;
+        let cleared = database::load_materialized_session("cleared")
+            .unwrap()
+            .unwrap();
+        let clear_at_ms = cleared
+            .transcript
+            .iter()
+            .find(|item| {
+                item.stable_id
+                    .starts_with(mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
+            })
+            .unwrap()
+            .created_at_ms;
+        let clear_second = DateTime::from_timestamp_millis(clear_at_ms)
+            .unwrap()
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        // A PR opened after the clear can carry the same whole-second timestamp.
+        record_items(fresh..=fresh, clear_second.clone(), "new item");
+        // First-seen items remain eligible when GitHub's clock is behind too.
+        record_items(fresh + 1..=fresh + 1, at(-60), "new item");
+        classify_recorded_items(
+            "acme",
+            "repo",
+            std::slice::from_ref(&session),
+            classifier.clone(),
+            &at(-120),
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let calls_before_rebuild = classifier.calls.load(Ordering::SeqCst);
+        let watches = database::load_github_watches("acme", "repo").unwrap();
+        assert_eq!(
+            watches.iter().map(|watch| watch.number).collect::<Vec<_>>(),
+            [fresh as i64, fresh as i64 + 1]
+        );
+        let mail = database::pending_mailbox_events(100).unwrap();
+        assert_eq!(mail.len(), 2);
+        assert!(
+            mail.iter()
+                .any(|entry| entry.event_key.contains(&format!("#{fresh}:interest:")))
+        );
+
+        // Rebuilding one session must not prevent another from receiving mail.
+        database::save_materialized_session(&mj_core::state::MaterializedSession::empty("cleared"))
+            .unwrap();
+        let mut healthy = database::test_session("healthy", "project");
+        healthy.created_at = at(90);
+        database::save_session(&healthy).unwrap();
+        set_interest("healthy", "NEW INTEREST", 1);
+        record_items(fresh + 2..=fresh + 2, at(120), "new item");
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &[session, healthy],
+            classifier.clone(),
+            &at(-120),
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            classifier.calls.load(Ordering::SeqCst),
+            calls_before_rebuild + 1
+        );
+        assert!(
+            database::pending_mailbox_events(100)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.target_session_id == "healthy")
+        );
+    }
+
     // Hard-won: review 7fb8c222b: queued creator watches bypassed the enablement recheck.
     #[tokio::test]
     async fn prepared_creator_watch_rechecks_enablement_before_commit() {
@@ -3612,7 +3880,10 @@ mod tests {
             "acme",
             "repo",
             item,
-            session,
+            ClassificationTarget {
+                id: session.id,
+                clear_ordinal: 0,
+            },
             None,
             fake_classifier(),
             PollControl::new(|| false),

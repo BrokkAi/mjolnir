@@ -7381,3 +7381,98 @@ fn new_session_like_waits_for_the_git_identity_check() {
         Some(DashboardAction::CreateSession { .. })
     ));
 }
+
+#[test]
+fn borrowed_subagent_move_keeps_target_and_skips_target_edits() {
+    for orchestrator in [false, true] {
+        let mut session = running_session();
+        session.target_template_id = "localhost".into();
+        session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
+            straightforward: None,
+            subtle: None,
+        });
+        session.additional_mounts = vec![AdditionalMount {
+            source: PathBuf::from("/shared"),
+            destination: PathBuf::from("/shared"),
+            access: MountAccess::Ro,
+        }];
+        session.resource_allocation = Some(SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        });
+        let mounts = session.additional_mounts.clone();
+        let resources = session.resource_allocation.clone();
+        let mut dashboard = dashboard_with_session(session.clone());
+        *dashboard.config = standard_local_targets_config();
+        dashboard
+            .config
+            .subagents
+            .primary
+            .push(mj_core::config::SubagentChoice {
+                model: "claude-sonnet".into(),
+                effort: None,
+            });
+        dashboard.config.subagents.straightforward = dashboard.config.subagents.primary.clone();
+        dashboard.state.subagents.insert(
+            session.id.clone(),
+            mj_core::subagent::SubagentMetadata {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                child_session_id: session.id.clone(),
+                parent_session_id: "parent".into(),
+                task_name: "Inspect parser".into(),
+                profile_id: session.last_profile.clone(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: "request-1".into(),
+                created_at: session.created_at.clone(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+                orchestrator,
+            },
+        );
+        dashboard.config.disabled_targets = dashboard.config.targets.keys().cloned().collect();
+        assert!(dashboard.offered_target_indices().is_empty());
+        dashboard
+            .state
+            .environment_owners
+            .insert(session.id.clone(), "parent".into());
+        dashboard.focus_sessions();
+        assert_eq!(dashboard.begin_move(), DashboardAction::None);
+        assert_eq!(
+            nth_key(&dashboard.config.targets, resume_wizard(&dashboard).target),
+            "localhost"
+        );
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        let DashboardAction::MoveSession {
+            target_template_id,
+            additional_mounts,
+            resource_allocation,
+            clear_resource_allocation,
+            subagents,
+            oracle,
+            ..
+        } = action
+        else {
+            panic!("subagent Move prepares directly from Profile");
+        };
+        assert_eq!(target_template_id, "localhost");
+        assert_eq!(additional_mounts, mounts);
+        assert_eq!(resource_allocation, resources);
+        assert!(!clear_resource_allocation);
+        dashboard.take_subagent_discovery();
+        let wizard = resume_wizard(&dashboard);
+        assert!(!wizard.subagents.orchestrators_available());
+        assert_eq!(wizard.step, WizardStep::Review);
+        assert!(wizard.target_step_skipped);
+        assert_eq!(wizard.subagent_choice_applies(&dashboard), orchestrator);
+        if !orchestrator {
+            assert!(subagents.is_none());
+            assert!(oracle.is_none());
+        }
+        press_back(&mut dashboard);
+        assert_eq!(resume_wizard(&dashboard).step, WizardStep::Profile);
+    }
+}

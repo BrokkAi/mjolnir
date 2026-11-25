@@ -363,6 +363,24 @@ pub(crate) async fn deliver_mailbox_event(
     let Some(record) = state.session_record(session_id) else {
         return Ok(pending("the daemon has no record of the session"));
     };
+    if matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::SessionMessage { .. }
+            | mj_core::mailbox::MailboxEventBody::ParentMessage { .. }
+    ) {
+        let target_id = session_id.to_owned();
+        let moving = mj_core::runtime::spawn_blocking(move || {
+            Ok::<_, anyhow::Error>(
+                mj_controller::database::load_move_operation(&target_id)?
+                    .is_some_and(|operation| operation.is_active()),
+            )
+        })
+        .await
+        .context("move status check task failed")??;
+        if moving {
+            return Ok(pending("the session is moving"));
+        }
+    }
     let (record, wake) = if record.state == mj_core::state::SessionState::Parked {
         if !unpark_parked {
             return Ok(pending("the session is parked"));
@@ -401,23 +419,7 @@ pub(crate) async fn deliver_mailbox_event(
             record.state
         )));
     }
-    if matches!(
-        event.body,
-        mj_core::mailbox::MailboxEventBody::SessionMessage { .. }
-    ) {
-        let target_id = session_id.to_owned();
-        let moving = mj_core::runtime::spawn_blocking(move || {
-            Ok::<_, anyhow::Error>(
-                mj_controller::database::load_move_operation(&target_id)?
-                    .is_some_and(|operation| operation.is_active()),
-            )
-        })
-        .await
-        .context("move status check task failed")??;
-        if moving {
-            return Ok(pending("the session is moving"));
-        }
-    }
+
     let Some(handle) = sessions.find_session(session_id.to_owned()).await? else {
         return Ok(pending("the session manager does not hold the session"));
     };

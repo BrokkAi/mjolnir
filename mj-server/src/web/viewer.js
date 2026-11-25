@@ -3431,6 +3431,7 @@ function targetOracleConfigured(draft) {
 }
 
 function orchestratorsChoiceApplies(draft) {
+  if (draft?.sessionId && isSubagentSession(sessionById(draft.sessionId))) return false;
   return snapshot?.orchestrators_configured === true
     && shownDelegation(draft, draft.subagents).mode === 'mjolnir';
 }
@@ -5684,12 +5685,12 @@ function freshMoveDraft(session) {
     workspaceId: session.workspace_id || selectedWorkspaceId(),
     sessionId: session.id,
     profileId: recovery?.destination_profile_id || session.profile_id || snapshot.profiles[0]?.id || '',
-    targetId: (queueLocked && recoveryTarget) || compatible.includes(recoveryTarget)
+    targetId: isSubagentSession(session) ? session.target_id || '' : (queueLocked && recoveryTarget) || compatible.includes(recoveryTarget)
       ? recoveryTarget
       : compatible.includes(session.target_id) ? session.target_id : compatible[0] || '',
-    clearResourceAllocation: recovery?.clear_resource_allocation === true,
-    destinationAdditionalMounts: recovery ? (recovery.destination_additional_mounts || []) : null,
-    destinationResourceAllocation: recovery ? (recovery.destination_resource_allocation ?? null) : null,
+    clearResourceAllocation: !isSubagentSession(session) && recovery?.clear_resource_allocation === true,
+    destinationAdditionalMounts: !isSubagentSession(session) && recovery ? (recovery.destination_additional_mounts || []) : null,
+    destinationResourceAllocation: !isSubagentSession(session) && recovery ? (recovery.destination_resource_allocation ?? null) : null,
     queueLocked,
     preparation: null,
     preparing: false,
@@ -5714,7 +5715,13 @@ function freshMoveDraft(session) {
 
 /// The delegation policy a Move prepare request carries: null keeps the
 /// session's own.
+function moveDelegationApplies(draft) {
+  const session = sessionById(draft.sessionId);
+  return !isSubagentSession(session) || session.subagent_orchestrator === true;
+}
+
 function moveSubagentChange(draft) {
+  if (!moveDelegationApplies(draft)) return null;
   // A stored Native that the destination shows as None is untouched.
   const shown = shownDelegation(draft, draft.subagents);
   return JSON.stringify(shown) === JSON.stringify(shownDelegation(draft, draft.storedSubagents)) ? null : shown;
@@ -5836,7 +5843,8 @@ function moveAvailabilityError(draft) {
   if (availabilityMissing(snapshot.profiles.find(profile => profile.id === draft.profileId))) {
     return 'Choose an available profile before moving.';
   }
-  if (!targetLaunchable(draft.targetId)) {
+  const session = sessionById(draft.sessionId);
+  if (isSubagentSession(session) ? !draft.targetId : !targetLaunchable(draft.targetId)) {
     return 'Choose an available target before moving.';
   }
   return '';
@@ -5859,6 +5867,10 @@ function renderMoveForm() {
   const recoveryTarget = session.move_recovery?.destination_target_template_id;
   if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
   const draft = moveDraft;
+  if (isSubagentSession(session)) {
+    draft.targetId = session.target_id || '';
+    draft.clearResourceAllocation = false;
+  }
   const preparation = draft.preparation;
   const availabilityError = moveAvailabilityError(draft);
   moveProgress.textContent = preparation ? 'Review the destination and confirm the interruption.' : 'Choose a compatible destination. The source is not changed during preparation.';
@@ -5897,29 +5909,35 @@ function renderMoveForm() {
         input.disabled = true;
       }
     }
-    moveStep.append(targetPicker);
+    if (isSubagentSession(session)) {
+      moveStep.append(el('p', 'dim', `Target: ${session.target_id} (sub-agents move in place on their current target)`));
+    } else {
+      moveStep.append(targetPicker);
+    }
 
-    renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
+    if (moveDelegationApplies(draft)) renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
       draft.preparation = null;
     });
-    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
-    const clearResources = el('label', 'field-inline');
-    const clearResourcesInput = document.createElement('input');
-    clearResourcesInput.type = 'checkbox';
-    clearResourcesInput.checked = draft.clearResourceAllocation;
-    clearResourcesInput.disabled = draft.queueLocked;
-    clearResourcesInput.onchange = () => {
-      draft.clearResourceAllocation = clearResourcesInput.checked;
-      draft.filesReviewed = false;
-      draft.workspaceSelection.acknowledge_large_transfer = false;
-      draft.preparation = null;
-    };
-    clearResources.append(clearResourcesInput, el('span', '', 'Clear inherited resource sizing and use destination defaults'));
-    moveStep.append(clearResources);
-    if (draft.queueLocked) {
-      moveStep.append(el('p', 'dim', 'The destination and resource settings are locked to the existing destination because queue admission already began.'));
+    if (!isSubagentSession(session)) {
+      moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
+      const clearResources = el('label', 'field-inline');
+      const clearResourcesInput = document.createElement('input');
+      clearResourcesInput.type = 'checkbox';
+      clearResourcesInput.checked = draft.clearResourceAllocation;
+      clearResourcesInput.disabled = draft.queueLocked;
+      clearResourcesInput.onchange = () => {
+        draft.clearResourceAllocation = clearResourcesInput.checked;
+        draft.filesReviewed = false;
+        draft.workspaceSelection.acknowledge_large_transfer = false;
+        draft.preparation = null;
+      };
+      clearResources.append(clearResourcesInput, el('span', '', 'Clear inherited resource sizing and use destination defaults'));
+      moveStep.append(clearResources);
+      if (draft.queueLocked) {
+        moveStep.append(el('p', 'dim', 'The destination and resource settings are locked to the existing destination because queue admission already began.'));
+      }
+      moveStep.append(el('p', 'dim', 'Use this only when intentionally removing the current container or host sizing. Attached directories stay fixed to this workspace in the web viewer.'));
     }
-    moveStep.append(el('p', 'dim', 'Use this only when intentionally removing the current container or host sizing. Attached directories stay fixed to this workspace in the web viewer.'));
     moveNextButton.textContent = 'Prepare move';
   } else {
     const target = snapshot.targets.find(item => item.id === (preparation.selection.target_template_id || session.target_id));
@@ -6007,7 +6025,7 @@ function renderMoveForm() {
   }
   if (availabilityError) moveStep.append(el('p', 'move-warning', availabilityError));
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy || Boolean(availabilityError) || (!preparation && !!subagentSelectionError(draft))
+  moveNextButton.disabled = busy || Boolean(availabilityError) || (!preparation && moveDelegationApplies(draft) && !!subagentSelectionError(draft))
     || (preparation?.active === true && !draft.acknowledge)
     || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
@@ -6017,7 +6035,7 @@ function renderMoveForm() {
 async function prepareMove() {
   const draft = moveDraft;
   if (!draft || draft.preparing) return;
-  const error = moveAvailabilityError(draft) || subagentSelectionError(draft);
+  const error = moveAvailabilityError(draft) || (moveDelegationApplies(draft) && subagentSelectionError(draft));
   if (error) {
     moveError.textContent = error;
     return;
@@ -6038,12 +6056,12 @@ async function prepareMove() {
         profile_id: draft.profileId || null,
         target_template_id: draft.targetId || null,
         // A bare target has fixed host resources, so inherited sizing must go.
-        clear_resource_allocation: draft.clearResourceAllocation || targetIsBare(draft.targetId),
+        clear_resource_allocation: !isSubagentSession(sessionById(draft.sessionId)) && (draft.clearResourceAllocation || targetIsBare(draft.targetId)),
         additional_mounts: draft.destinationAdditionalMounts,
         resource_allocation: draft.destinationResourceAllocation,
         subagents: moveSubagentChange(draft),
-        oracle: draft.oracle === draft.storedOracle ? null : draft.oracle,
-        oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
+        oracle: !moveDelegationApplies(draft) || draft.oracle === draft.storedOracle ? null : draft.oracle,
+        oracle_choice: !moveDelegationApplies(draft) || JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
       }),
     });
     if (draft.preparation.container_upgrade) {

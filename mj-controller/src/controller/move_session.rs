@@ -1704,10 +1704,12 @@ impl Controller {
             .sessions
             .get(&selection.session_id)
             .context("unknown session")?;
-        ensure!(
-            !self.state.subagents.contains_key(&source.id),
-            "sub-agent sessions cannot move independently of their parent"
-        );
+        let is_subagent = self.state.subagents.contains_key(&source.id);
+        let subagent_record = if is_subagent {
+            crate::database::load_subagent(&source.id)?
+        } else {
+            None
+        };
         let previous = crate::database::load_move_operation(&source.id)?;
         // The sealed selection owns retry defaults. Reconstructing them from
         // the source can change the destination or lose an explicit policy.
@@ -1777,7 +1779,8 @@ impl Controller {
             matches!(
                 source.state,
                 SessionState::Running | SessionState::Disconnected
-            ) || retry,
+            ) || (is_subagent && source.state == SessionState::Parked)
+                || retry,
             "only active sessions can move; run `mj resume` (or POST /api/v1/sessions/{}/resume) for a stopped or lost session",
             source.id
         );
@@ -1847,6 +1850,38 @@ impl Controller {
             .get(&target_id)
             .is_some_and(mj_core::config::TargetTemplate::is_yolo);
         let profile = self.config.named_profile(&profile_id)?;
+        ensure!(
+            !subagent_record
+                .as_ref()
+                .is_some_and(|record| record.reviewer_launch.is_some())
+                || profile.kind == source.harness_kind,
+            mj_core::refusal::Refusal::precondition(
+                "reviewer sessions cannot move to a different harness"
+            )
+        );
+        let non_orchestrator = is_subagent
+            && !subagent_record
+                .as_ref()
+                .is_some_and(|record| record.orchestrator);
+        if non_orchestrator {
+            ensure!(
+                selection
+                    .subagents
+                    .as_ref()
+                    .is_none_or(|value| value == &source.subagents.clone().unwrap_or_default())
+                    && selection.oracle.is_none_or(|value| value == source.oracle)
+                    && selection
+                        .oracle_choice
+                        .as_ref()
+                        .is_none_or(|value| Some(value) == source.oracle_choice.as_deref()),
+                mj_core::refusal::Refusal::precondition(
+                    "sub-agent sessions cannot change delegation or oracle settings"
+                )
+            );
+            selection.subagents = None;
+            selection.oracle = None;
+            selection.oracle_choice = None;
+        }
         let requested_oracle = selection.oracle.unwrap_or(source.oracle);
         let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
         if requested_oracle
@@ -1868,19 +1903,20 @@ impl Controller {
         // change its eligible models, but a YOLO destination reads a different
         // set of choices and must be checked.
         let source_yolo = source.is_yolo_target(&self.config);
-        if profile.kind != source.harness_kind
-            || policy != source.subagents.clone().unwrap_or_default()
-            || yolo_target != source_yolo
-            || previous.as_ref().is_some_and(|operation| {
-                operation.holds_source_environment()
-                    && operation.selection.subagents != selection.subagents
-            })
+        if !non_orchestrator
+            && (profile.kind != source.harness_kind
+                || policy != source.subagents.clone().unwrap_or_default()
+                || yolo_target != source_yolo
+                || previous.as_ref().is_some_and(|operation| {
+                    operation.holds_source_environment()
+                        && operation.selection.subagents != selection.subagents
+                }))
         {
             super::profile_config::validate_session_subagent_policy(
                 catalog,
                 &self.config,
                 &profile_id,
-                &policy,
+                &policy.for_launch(profile.kind, subagent_record.as_ref()),
                 &target_id,
             )
             .await?;
@@ -1908,9 +1944,20 @@ impl Controller {
             &self.state,
             &self.config.targets,
             target,
-            self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
         )?;
+        ensure!(
+            !is_subagent || (in_place && target_id == source.target_template_id),
+            mj_core::refusal::Refusal::precondition(format!(
+                "sub-agent sessions can only move in place on their current target: {}",
+                if target_id != source.target_template_id {
+                    "target changed"
+                } else {
+                    move_environment_obstacle(source, &selection, &self.config.targets)
+                        .unwrap_or("environment unavailable")
+                }
+            ))
+        );
         // The resolved selection is what every later reader decides from --
         // the sealed Move, capacity admission inside execution and the
         // destination record -- so it is never put back to the unresolved
@@ -1933,8 +1980,7 @@ impl Controller {
                 source,
                 &selection,
                 &self.config.targets,
-                self.state.subagents.contains_key(&source.id),
-            ),
+                ),
             "move environment decision at preparation"
         );
         let mounts = move_requested_mounts(source, &selection);
@@ -2024,8 +2070,12 @@ impl Controller {
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
-        let destination_has_parent_role =
-            parent_tools_enabled(&move_subagent_policy(source, &selection), profile.kind);
+        let destination_has_parent_role = move_destination_has_parent_role(
+            source,
+            &selection,
+            profile.kind,
+            subagent_record.as_ref(),
+        );
         if in_place
             && !destination_has_parent_role
             && let Some(error) = roleless_move_children_error(&self.state, &source.id)
@@ -2411,13 +2461,19 @@ impl Controller {
             .sessions
             .get_mut(id)
             .context("Move session missing from controller")?;
+        record.state = latest.state;
+        let committed_parked_boot = operation.phase == MovePhase::DestinationStarting
+            && latest.state == SessionState::Running;
         record.resource_allocation = latest.resource_allocation;
         record.additional_mounts = latest.additional_mounts;
         if result.is_err()
             && ((!operation.in_place
                 && (executor.shutdown_interrupted() || !crate::upgrade::gate().is_open()))
                 || (operation.in_place
-                    && operation.phase == MovePhase::Capturing
+                    && matches!(
+                        operation.phase,
+                        MovePhase::Capturing | MovePhase::DestinationStarting
+                    )
                     && (executor.shutdown_interrupted() || !crate::upgrade::gate().is_open())))
         {
             // Handoff cancellation is not user cancellation. Leave the durable
@@ -2437,7 +2493,7 @@ impl Controller {
         }
         if let Err(error) = &result
             && operation.in_place
-            && operation.in_place_expected_store_id.is_some()
+            && (operation.in_place_expected_store_id.is_some() || committed_parked_boot)
             && operation.phase != MovePhase::DispatchReleased
             && operation.phase != MovePhase::Failed
         {
@@ -2759,6 +2815,17 @@ impl Controller {
             // idempotent release handler rather than cross-target
             // `admit_move_queue`.
             if operation.in_place {
+                let session = self.state.sessions[&id].clone();
+                if session.state == SessionState::Parked {
+                    ensure!(!operation.cancellation_requested, "Move cancelled");
+                    return self.execute_move(admission, &mut operation, None, executor, manager, MoveSourceRelay::default()).await;
+                }
+                if operation.phase == MovePhase::DestinationStarting
+                    && session.state == SessionState::Running
+                    && operation.in_place_expected_store_id.is_none()
+                {
+                    return self.finish_parked_in_place_move(admission, &mut operation, executor).await;
+                }
                 match self.committed_in_place_failure(&operation, executor) {
                     Ok(Some(failure)) => {
                         let message = failure.message.clone();
@@ -3336,6 +3403,64 @@ impl Controller {
 
     /// `source_relay` is the source connection the Move confirmed against,
     /// held until the checkpoint that seals the source takes it over.
+    async fn prepare_in_place_handoff(
+        &self,
+        id: &str,
+        previous_session: &mj_core::state::SessionRecord,
+        source_backend: &crate::targets::TargetLocator,
+        dest_profile: &mj_core::config::HarnessProfile,
+        include_native_prior: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<String> {
+        let materialized = crate::database::load_materialized_session(id)?
+            .context("cross-harness in-place Move session projection is missing")?;
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized_owned(materialized)?;
+        let canonical = std::sync::Arc::new(canonical);
+        let native_prior = if include_native_prior {
+            super::resume::native_prior_from_target_while_cancellable(
+                id,
+                source_backend,
+                previous_session.harness_kind,
+                previous_session.native_session_id.as_deref(),
+                &canonical,
+                executor,
+            )
+            .await?
+        } else {
+            None
+        };
+        let context_bytes = crate::handoff::profile_handoff_bytes(Some(dest_profile));
+        super::resume::utility_handoff_while_cancellable(
+            id,
+            &self.config,
+            &canonical,
+            native_prior.as_ref(),
+            context_bytes,
+            executor,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .context("prepare cross-harness in-place handoff")
+    }
+
+    async fn finish_parked_in_place_move(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        operation: &mut MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let id = operation.selection.session_id.clone();
+        self.settle_pending_parked_move_boot(admission, &id, executor)
+            .await?;
+        operation.in_place_harness_restarted = true;
+        operation.phase = MovePhase::Completed;
+        operation.queue_admission_finished = true;
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
+        Ok(())
+    }
+
     pub async fn execute_move(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
@@ -3345,6 +3470,81 @@ impl Controller {
         manager: &SessionManagerControl,
         mut source_relay: MoveSourceRelay,
     ) -> Result<()> {
+        let id = operation.selection.session_id.clone();
+        if operation.in_place && self.state.sessions[&id].state == SessionState::Parked {
+            ensure!(!operation.cancellation_requested, "Move cancelled");
+            let previous = self.state.sessions[&id].clone();
+            let native_continuity = self.move_native_continuity(operation)?;
+            let profile = self
+                .config
+                .named_profile(
+                    operation
+                        .selection
+                        .profile_id
+                        .as_deref()
+                        .unwrap_or(&operation.source_profile_id),
+                )?
+                .clone();
+            let backend = super::backend_locator(
+                previous
+                    .target
+                    .as_deref()
+                    .context("parked Move target missing")?,
+                &previous,
+                &self.config,
+            )?;
+            let handoff = if native_continuity {
+                None
+            } else {
+                executor.begin_resumable_work()?;
+                let prepared = self
+                    .prepare_in_place_handoff(&id, &previous, &backend, &profile, true, executor)
+                    .await;
+                let held = executor.end_resumable_work("commit parked Move destination");
+                let handoff = prepared?;
+                held?;
+                Some(handoff)
+            };
+            let quota_continuation = if operation.queue == ResumeQueueDisposition::Start
+                && operation.quota_stop_reason.is_some()
+            {
+                let (command_id, command) = quota_move_continuation_command(operation)?;
+                Some(mj_core::worker_launch::InitialWorkerCommand {
+                    command_id,
+                    command,
+                    optional: false,
+                })
+            } else {
+                None
+            };
+            let parked_move = mj_core::worker_launch::ParkedMoveLaunch {
+                operation_id: operation.operation_id.clone(),
+                discard_native_session_id: if native_continuity {
+                    None
+                } else {
+                    previous.native_session_id.clone()
+                },
+                prompt_context: handoff,
+                discard_queued_prompts: operation.queue == ResumeQueueDisposition::Discard,
+                quota_continuation,
+            };
+            operation.recovery_session = Some(previous.clone());
+            operation.phase = MovePhase::DestinationStarting;
+            crate::database::save_move_operation(operation)?;
+            self.apply_in_place_destination(operation)?;
+            let destination = self.state.sessions[&id].clone();
+            self.state.sessions.insert(id.clone(), previous.clone());
+            executor.begin_resumable_work()?;
+            let wake = self
+                .unpark_subagent_worker(admission, &id, Some((&destination, parked_move)), executor)
+                .await;
+            let held = executor.end_resumable_work("finish parked Move");
+            wake?;
+            held?;
+            return self
+                .finish_parked_in_place_move(admission, operation, executor)
+                .await;
+        }
         let retained = source_relay.owner();
         let admission_id = operation.selection.session_id.clone();
         crate::worker_lifecycle::run_with_owner(admission, &admission_id, "execute move", executor, retained, async {
@@ -3447,21 +3647,10 @@ impl Controller {
                     .unwrap_or_else(|| operation.source_profile_id.clone());
                 let dest_profile = self.config.named_profile(&dest_profile_id)?.clone();
                 let source_has_request_queue = self.source_has_request_queue(&id);
-                let destination_subagents = operation
-                    .selection
-                    .subagents
-                    .clone()
-                    .or_else(|| self.state.sessions.get(&id).and_then(|s| s.subagents.clone()))
-                    .unwrap_or_default();
-                let subagent = if self.state.subagents.contains_key(&id) {
-                    crate::database::load_subagent(&id)?
-                } else {
-                    None
-                };
-                let destination_has_parent_role = destination_subagents
-                    .for_launch(dest_profile.kind, subagent.as_ref())
-                    .parent_role()
-                    .is_some();
+                let subagent = crate::database::load_subagent(&id)?;
+                let destination_has_parent_role = move_destination_has_parent_role(
+                    &self.state.sessions[&id], &operation.selection, dest_profile.kind, subagent.as_ref()
+                );
 
                 let mut closed_subagent_admission = false;
                 if !operation.in_place_harness_restarted {
@@ -3521,7 +3710,7 @@ impl Controller {
                                 .accepted_preparation
                                 .as_ref()
                                 .is_none_or(|accepted| accepted.stops_subagents);
-                        if stop_confirmed
+                        if stop_confirmed && stopping_children
                             && let Err(error) = executor.stop_borrowed_workers_before_quiesce().await
                         {
                             if closed_subagent_admission {
@@ -3774,49 +3963,9 @@ impl Controller {
                         let source_backend =
                             super::backend_locator(source_locator, &previous_session, &self.config)?;
                         let source_worker_root = crate::targets::worker_root(&source_backend, &id)?;
-                        let source_harness_kind = self
-                            .config
-                            .named_profile(&operation.source_profile_id)
-                            .map(|profile| profile.kind)
-                            .unwrap_or(previous_session.harness_kind);
                         let native_continuity = self.move_native_continuity(operation)?;
                         let utility_handoff = if !native_continuity {
-                            let materialized = crate::database::load_materialized_session(&id)?
-                                .context(
-                                    "cross-harness in-place Move session projection is missing",
-                                )?;
-                            let canonical = mj_transcript::projection::canonical_session_from_materialized_owned(
-                                materialized,
-                            )?;
-                            let canonical = std::sync::Arc::new(canonical);
-                            let native_prior = if !had_prior_expected_store_id {
-                                super::resume::native_prior_from_target_while_cancellable(
-                                    &id,
-                                    &source_backend,
-                                    source_harness_kind,
-                                    previous_session.native_session_id.as_deref(),
-                                    &canonical,
-                                    executor,
-                                )
-                                .await?
-                            } else {
-                                None
-                            };
-                            let context_bytes =
-                                crate::handoff::profile_handoff_bytes(Some(&dest_profile));
-                            Some(
-                                super::resume::utility_handoff_while_cancellable(
-                                    &id,
-                                    &self.config,
-                                    &canonical,
-                                    native_prior.as_ref(),
-                                    context_bytes,
-                                    executor,
-                                    tokio_util::sync::CancellationToken::new(),
-                                )
-                                .await
-                                .context("prepare cross-harness in-place handoff")?,
-                            )
+                            Some(self.prepare_in_place_handoff(&id, &previous_session, &source_backend, &dest_profile, !had_prior_expected_store_id, executor).await?)
                         } else {
                             None
                         };
@@ -3849,11 +3998,11 @@ impl Controller {
                             // this wait. Yield admission meanwhile; the hold, the
                             // expected store and the worker's reload phase let the
                             // next daemon resume an interrupted wait.
-                            if mj_core::credentials::copied_login_relative_path(source_harness_kind).is_some() {
+                            if mj_core::credentials::copied_login_relative_path(previous_session.harness_kind).is_some() {
                                 crate::database::record_pending_retired_login(&id, &mj_core::credentials::PendingRetiredLogin {
                                     operation_id: operation.operation_id.clone(),
                                     source_profile_id: operation.source_profile_id.clone(),
-                                    harness_kind: source_harness_kind,
+                                    harness_kind: previous_session.harness_kind,
                                     store_id: expected_store_id.clone(),
                                 })?;
                             }
@@ -3954,29 +4103,7 @@ impl Controller {
                         }
                         ResumeQueueDisposition::Start => {
                             if operation.quota_stop_reason.is_some() {
-                                use mj_core::state::QuotaMoveContinuation;
-                                let continuation = operation
-                                    .quota_continuation
-                                    .context("quota Move has no saved continuation action")?;
-                                let cmd_id = operation
-                                    .in_place_continuation_command_id
-                                    .clone()
-                                    .unwrap_or_else(|| {
-                                        mj_core::continuation::GeneratedPrompt::QuotaRetry
-                                            .command_id(&operation.operation_id)
-                                    });
-                                let cmd = match continuation {
-                                    QuotaMoveContinuation::ResumeGoal => {
-                                        mj_core::relay::RelayCommand::GoalControl {
-                                            action: mj_core::goal::GoalControlAction::Resume,
-                                        }
-                                    }
-                                    QuotaMoveContinuation::Prompt => {
-                                        mj_core::relay::RelayCommand::Prompt {
-                                            prompt: mj_core::continuation::prompt_blocks(),
-                                        }
-                                    }
-                                };
+                                let (cmd_id, cmd) = quota_move_continuation_command(operation)?;
                                 conn.client
                                     .submit_front(
                                         &operation.operation_id,
@@ -5337,7 +5464,7 @@ fn move_subagent_policy(
 /// reads its delegation policy at launch, so a policy change alone still needs
 /// the restart a Move performs.
 fn move_changes_nothing(source: &mj_core::state::SessionRecord, selection: &MoveSelection) -> bool {
-    source.state == SessionState::Running
+    matches!(source.state, SessionState::Running | SessionState::Parked)
         && move_environment_change(source, selection, false).is_none()
         && move_keeps_profile_and_policy(source, selection)
 }
@@ -5357,11 +5484,41 @@ fn move_keeps_profile_and_policy(
             .is_none_or(|choice| Some(choice) == source.oracle_choice.as_deref())
 }
 
-pub(crate) fn parent_tools_enabled(
-    policy: &mj_core::subagent::SubagentPolicy,
+fn quota_move_continuation_command(
+    operation: &MoveOperation,
+) -> Result<(String, mj_core::relay::RelayCommand)> {
+    let continuation = operation
+        .quota_continuation
+        .context("quota Move has no saved continuation action")?;
+    let command_id = operation
+        .in_place_continuation_command_id
+        .clone()
+        .unwrap_or_else(|| {
+            mj_core::continuation::GeneratedPrompt::QuotaRetry.command_id(&operation.operation_id)
+        });
+    let command = match continuation {
+        mj_core::state::QuotaMoveContinuation::ResumeGoal => {
+            mj_core::relay::RelayCommand::GoalControl {
+                action: mj_core::goal::GoalControlAction::Resume,
+            }
+        }
+        mj_core::state::QuotaMoveContinuation::Prompt => mj_core::relay::RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    };
+    Ok((command_id, command))
+}
+
+fn move_destination_has_parent_role(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
     harness: mj_core::config::HarnessKind,
+    subagent: Option<&mj_core::subagent::SubagentRecord>,
 ) -> bool {
-    policy.for_launch(harness, None).parent_role().is_some()
+    move_subagent_policy(source, selection)
+        .for_launch(harness, subagent)
+        .parent_role()
+        .is_some()
 }
 
 pub(in crate::controller) fn move_children(
@@ -5452,7 +5609,6 @@ pub fn move_in_place_for_record(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
-    is_subagent: bool,
     previous: Option<&MoveOperation>,
 ) -> Result<bool> {
     // A Move that began admitting queued work has already carried out its
@@ -5464,10 +5620,10 @@ pub fn move_in_place_for_record(
     }) {
         return Ok(operation.in_place);
     }
-    let obstacle = move_environment_obstacle(source, selection, targets, is_subagent);
+    let obstacle = move_environment_obstacle(source, selection, targets);
     if matches!(
         source.state,
-        SessionState::Running | SessionState::Disconnected
+        SessionState::Running | SessionState::Disconnected | SessionState::Parked
     ) {
         return Ok(obstacle.is_none());
     }
@@ -5489,11 +5645,8 @@ fn move_environment_obstacle(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
-    is_subagent: bool,
 ) -> Option<&'static str> {
-    if is_subagent {
-        Some("a sub-agent never owns its environment")
-    } else if source.target.is_none() {
+    if source.target.is_none() {
         Some("the session has no environment")
     } else {
         move_environment_change_for(source, selection, targets)
@@ -5618,7 +5771,6 @@ fn resolve_move_size_for_environment(
     state: &mj_core::state::State,
     targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
     target: &mj_core::config::TargetTemplate,
-    is_subagent: bool,
     previous: Option<&MoveOperation>,
 ) -> Result<(bool, bool)> {
     let sealed = previous.is_some_and(MoveOperation::holds_retry_state);
@@ -5636,7 +5788,7 @@ fn resolve_move_size_for_environment(
     let mut sized_by_destination_default = !sealed
         && (selection.clear_resource_allocation || comparable)
         && resolve_move_destination_size(source, selection, state, target);
-    let mut in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
+    let mut in_place = move_in_place_for_record(source, selection, targets, previous)?;
     // A Move that provisions needs a size to create the container with. It
     // takes the inherited one, else the destination's default. Sizing it can
     // also settle the decision: a container whose environment the resolution
@@ -5644,7 +5796,7 @@ fn resolve_move_size_for_environment(
     if !in_place && !sealed && selection.resource_allocation.is_none() {
         sized_by_destination_default |=
             resolve_move_destination_size(source, selection, state, target);
-        in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
+        in_place = move_in_place_for_record(source, selection, targets, previous)?;
     }
     Ok((in_place, sized_by_destination_default))
 }

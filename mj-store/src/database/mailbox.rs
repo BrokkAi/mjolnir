@@ -42,7 +42,8 @@ fn mailbox_delivery_state_with(
 }
 
 /// The receipt survives projection rebuilds. Cleanup and its completion
-/// frontier commit together, so historical replay cannot discard newer mail.
+/// frontier commit together, so historical replay cannot discard newer mail
+/// or GitHub subscriptions.
 pub(super) fn clear_mailbox_with(
     connection: &Connection,
     session_id: &str,
@@ -55,6 +56,7 @@ pub(super) fn clear_mailbox_with(
         params![session_id, ordinal],
     )?;
     if changed > 0 {
+        github_watch::clear_github_subscriptions_with(connection, session_id)?;
         connection.execute(
             "UPDATE mailbox_outbox SET accepted_at=?2, failure=?3
              WHERE target_session_id=?1 AND accepted_at IS NULL",
@@ -868,6 +870,123 @@ mod tests {
         watch(6, Some("creator"));
         assert_eq!(creator_of(5), Some(None));
         assert_eq!(creator_of(6), None);
+    }
+
+    #[test]
+    fn clear_github_subscriptions_commits_with_projection_and_replay_preserves_newer_interest() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mj.sqlite3");
+        for id in ["cleared", "other"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        // Creator alone, shared creator, shared follower, last follower,
+        // and a follower of another session's item.
+        for (number, creator) in [
+            (1, Some("cleared")),
+            (2, Some("cleared")),
+            (3, None),
+            (4, None),
+            (5, Some("other")),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO github_watch_items(owner, repo, number, creator_session_id, kind,
+                         title, url, created_at, timeline_at, review_comments_at, processed_at)
+                     VALUES ('acme', 'repo', ?1, ?2, 'pull_request', 't', 'u', 'c', 'c', 'c', 'c')",
+                    params![number, creator],
+                )
+                .unwrap();
+            for session in ["cleared", "other"] {
+                if session == "other" && matches!(number, 1 | 4) {
+                    continue;
+                }
+                connection
+                    .execute(
+                        "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
+                             kind, title, url, created_at, interested, created)
+                         VALUES ('acme', 'repo', ?1, ?2, 'pull_request', 't', 'u', 'c', ?3, ?4)",
+                        params![
+                            number,
+                            session,
+                            creator != Some(session),
+                            creator == Some(session)
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        let subscriptions = || -> Vec<(i64, String)> {
+            connection
+                .prepare(
+                    "SELECT number, session_id FROM github_watch_classifications
+                     WHERE interested=1 OR created=1 ORDER BY number, session_id",
+                )
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let watches = || -> Vec<(i64, Option<String>)> {
+            connection
+                .prepare(
+                    "SELECT number, creator_session_id FROM github_watch_items ORDER BY number",
+                )
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let before = (subscriptions(), watches());
+        assert!(complete_clear(&path, true).is_err());
+        assert_eq!((subscriptions(), watches()), before);
+        complete_clear(&path, false).unwrap();
+        assert_eq!(
+            subscriptions(),
+            vec![
+                (2, "other".into()),
+                (3, "other".into()),
+                (5, "other".into())
+            ]
+        );
+        assert_eq!(
+            watches(),
+            vec![(2, None), (3, None), (5, Some("other".into()))]
+        );
+        // Retained receipts keep the next poll from classifying these items again.
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM github_watch_classifications WHERE session_id='cleared'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            5
+        );
+        connection
+            .execute(
+                "UPDATE github_watch_classifications SET interested=1
+                 WHERE session_id='cleared' AND number=5",
+                [],
+            )
+            .unwrap();
+        let newer = subscriptions();
+        save_materialized_session_to(&path, &MaterializedSession::empty("cleared")).unwrap();
+        complete_clear(&path, false).unwrap();
+        assert_eq!(
+            subscriptions(),
+            newer,
+            "replay must preserve newer interest"
+        );
+        complete_clear(&path, false).unwrap();
+        assert!(
+            !subscriptions()
+                .iter()
+                .any(|(_, session)| session == "cleared")
+        );
     }
 
     #[test]

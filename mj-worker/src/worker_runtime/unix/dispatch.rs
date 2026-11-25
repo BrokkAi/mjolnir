@@ -1508,12 +1508,14 @@ pub(crate) fn record_runtime_event_with_facts(
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-session-open");
+            relay.begin_pending_parked_move()?;
             relay.record_observation(RelayObservation::SessionOpened {
                 native_session_id,
                 resumed,
                 native_continuity_lost,
                 replaced_unused_native_session_id,
             })?;
+            relay.complete_pending_parked_move()?;
         }
         RuntimeEvent::SessionConfigured { config_options } => {
             relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
@@ -2129,14 +2131,39 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
 /// the journal recorded last, if there is one: the launch configuration can
 /// still name a thread this session already replaced. ACP decides how to open
 /// that identity using `DurableRelay::native_session_history` as evidence.
+pub(crate) fn accepted_config_for_boot(
+    config: &WorkerLaunchConfig,
+    relay: &DurableRelay,
+    resume_session: Option<&str>,
+) -> acp::AcceptedSessionConfig {
+    if config
+        .parked_move
+        .as_ref()
+        .and_then(|parked| parked.discard_native_session_id.as_deref())
+        .is_some()
+        && resume_session.is_none()
+    {
+        return Default::default();
+    }
+    let state = relay.operational_state();
+    acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+}
+
 pub(crate) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
 ) -> Option<String> {
-    relay
-        .operational_state()
-        .native_session_id
-        .or_else(|| config.native_session_id.clone())
+    let native_session_id = relay.operational_state().native_session_id;
+    if native_session_id.is_some()
+        && native_session_id.as_deref()
+            == config
+                .parked_move
+                .as_ref()
+                .and_then(|parked| parked.discard_native_session_id.as_deref())
+    {
+        return None;
+    }
+    native_session_id.or_else(|| config.native_session_id.clone())
 }
 
 /// A native identity that arrived with the launch configuration was created

@@ -3807,28 +3807,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
 /// deleted last because the follower tests read them.
 fn gone_session_rows_sql(gone: &str) -> String {
     let id = format!("{gone}.session_id");
-    let other_live_follower = format!(
-        "EXISTS (SELECT 1 FROM github_watch_classifications c
-                     JOIN sessions s ON s.session_id = c.session_id
-                     WHERE c.owner = github_watch_items.owner
-                       AND c.repo = github_watch_items.repo
-                       AND c.number = github_watch_items.number
-                       AND c.interested = 1 AND c.created = 0
-                       AND c.session_id <> {id}
-                       AND s.state <> 'destroyed-with-data-loss')"
-    );
+    let watches = github_watch::detach_github_watches_sql(&id).join("\n");
     format!(
         "DELETE FROM mailbox_outbox WHERE target_session_id = {id};
-             DELETE FROM github_watch_items
-                 WHERE (creator_session_id = {id}
-                        OR (creator_session_id IS NULL
-                            AND EXISTS (SELECT 1 FROM github_watch_classifications f
-                                        WHERE f.owner = github_watch_items.owner
-                                          AND f.repo = github_watch_items.repo
-                                          AND f.number = github_watch_items.number
-                                          AND f.session_id = {id})))
-                   AND NOT {other_live_follower};
-             UPDATE github_watch_items SET creator_session_id = NULL WHERE creator_session_id = {id};
+             {watches}
              DELETE FROM github_watch_classifications WHERE session_id = {id};
              DELETE FROM github_watch_classification_failures WHERE session_id = {id};"
     )
