@@ -102,7 +102,12 @@ def prompt_with_rubric(rubric, capture, task, brief=None, reads=None):
 # .git/info/attributes in the planning clone.
 PATCH_FLAGS = ("--no-ext-diff", "--ignore-submodules=none", "--full-index", "--no-color", "--no-textconv",
                "--no-relative", "-U3", "-M")
-PLANNING_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+# GIT_ATTR_NOSYSTEM drops /etc/gitattributes. Git reads one user attributes file,
+# $XDG_CONFIG_HOME/git/attributes, or ~/.config/git/attributes only when XDG_CONFIG_HOME is unset
+# (checked against git 2.53); /dev/null as XDG_CONFIG_HOME leaves no file to read. The pinned
+# session image has neither file.
+PLANNING_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_ATTR_NOSYSTEM": "1", "XDG_CONFIG_HOME": "/dev/null"}
 
 
 def pathspecs(paths, excludes=()):
@@ -120,11 +125,11 @@ def record_excludes(records):
     """
     below = {}
     for index, paths in enumerate(records):
-        for path in paths:
-            while "/" in path:
-                parent = path.rsplit("/", 1)[0]
-                below.setdefault(parent, []).append((index, path))
-                path = parent
+        for leaf in paths:
+            parent = leaf
+            while "/" in parent:
+                parent = parent.rsplit("/", 1)[0]
+                below.setdefault(parent, []).append((index, leaf))
     result = []
     for index, paths in enumerate(records):
         found = [path for own in paths for owner, path in below.get(own, ()) if owner != index]

@@ -1058,6 +1058,7 @@ if not (attempt / "recover").exists():
         write("rn2/inner.txt", moved2)
         write("rn2/gone.txt", b"gone\n")
         write("blob.dat", b"text in the base\n")
+        write("mv3", b"".join(b"third moved line %03d\n" % n for n in range(12)))
         git("add", "-A")
         git("commit", "-q", "-m", "base")
         base = git("rev-parse", "HEAD").decode().strip()
@@ -1073,6 +1074,12 @@ if not (attempt / "recover").exists():
         (repo / "foo").mkdir()
         write("foo/inner.txt", b"inner\n")
         write("bar", b"a directory that becomes a file\n")
+        # A move into a nested path of its own name, beside an added file in that directory.
+        git("mv", "mv3", "mv3.tmp")
+        (repo / "mv3").mkdir()
+        (repo / "mv3/sub").mkdir()
+        git("mv", "mv3.tmp", "mv3/sub/kept.txt")
+        write("mv3/sub/new.txt", b"new\n")
         git("rm", "-q", "rn1", "rn2/inner.txt", "rn2/gone.txt")
         (repo / "rn1").mkdir()
         write("rn1/inner.txt", moved)
@@ -1090,8 +1097,14 @@ if not (attempt / "recover").exists():
         # different abbreviation length, context and color. The reads must print the planned bytes.
         host_config = self.root / "host.gitconfig"
         host_config.write_text("[diff]\n\tnoprefix = true\n\tcontext = 0\n")
+        # The host's own attributes files, which --attr-source does not replace.
+        for home in (self.root / "xdg/git", self.root / "home/.config/git"):
+            home.mkdir(parents=True)
+            (home / "attributes").write_text("big.txt -diff\nwide.txt binary\n")
         with (unittest.mock.patch.object(pilot.driver, "REPO", str(repo)),
-              unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)})):
+              unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config),
+                                                    "XDG_CONFIG_HOME": str(self.root / "xdg"),
+                                                    "HOME": str(self.root / "home")})):
             capture = pilot_review.capture({"base_commit": base, "intro_commit": head})
             reads = pilot_review.plan_reads(pilot_review.file_diffs(*capture[:2]))
         reader = self.root / "reader"
@@ -1118,6 +1131,8 @@ if not (attempt / "recover").exists():
         # A move into or out of a directory of its own name keeps its other path.
         self.assertIn(("rn1/other.txt",), excludes)
         self.assertIn(("rn2/gone.txt",), excludes)
+        self.assertIn(("mv3/sub/new.txt",), excludes)  # the leaf, not its directory `mv3/sub`
+        self.assertTrue(any(b"rename from mv3\nrename to mv3/sub/kept.txt" in out for out in outputs))
         self.assertTrue(any(b"rename from rn1\nrename to rn1/inner.txt" in out for out in outputs))
         self.assertTrue(any(b"rename from rn2/inner.txt\nrename to rn2\n" in out for out in outputs))
         self.assertIn(b"Binary files", full.split(b"diff --git a/blob.dat")[1])
