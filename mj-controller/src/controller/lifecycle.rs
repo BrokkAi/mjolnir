@@ -1372,21 +1372,6 @@ impl Controller {
                             });
                         }
                         if let Some(relay) = held_relay.as_mut()
-                            && relay.connection_mut().protocol_version()
-                                < mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL
-                        {
-                            ensure!(exclusivity == LatchExclusivity::HoldThroughClose,
-                                "the worker must be upgraded before this automatic checkpoint can save pending prompt context");
-                            held_relay.take().unwrap().release();
-                            let manager = manager.context("the older worker cannot be upgraded before suspend without a session manager")?;
-                            self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
-                                .await
-                                .context("upgrade the worker before stopping it for checkpoint")?;
-                            let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
-                            let lease = handle.lease_connection(admission).await?;
-                            held_relay = Some(ControllerRelayLease::Managed { handle, lease: Some(lease) });
-                        }
-                        if let Some(relay) = held_relay.as_mut()
                             && relay.sync_snapshot().await?.operational.execution == RelayExecutionState::Running
                         {
                             relay.submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
