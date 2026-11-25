@@ -6336,3 +6336,408 @@ for line in sys.stdin:
             .all(|(pid, _)| *pid == local_entries[0].0)
     );
 }
+
+#[tokio::test]
+async fn pipeline_reads_preserve_rejections_and_reuse_sequential_legacy_stream() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.protocol_version = 1;
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        // Do not answer until both requests arrive: stop-and-wait deadlocks.
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            requests.push(serde_json::from_str::<RelayRequestEnvelope>(&line).unwrap());
+        }
+        for (i, request) in requests.into_iter().enumerate() {
+            let body = if i == 0 {
+                RelayResponseBody::Error {
+                    error: mj_core::relay::relay_protocol_error(
+                        RelayErrorCode::Internal,
+                        "one read failed",
+                        false,
+                        None,
+                    ),
+                }
+            } else {
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                }
+            };
+            let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: 1,
+                body,
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            writer.write_all(&bytes).await.unwrap();
+        }
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: 1,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::AttachmentPresent { present: false },
+            },
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.unwrap();
+    });
+    let mut replies = client
+        .call_many(vec![RelayRequest::Status, RelayRequest::Status])
+        .await
+        .unwrap()
+        .into_iter();
+    assert!(
+        replies
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .downcast_ref::<RelayRejected>()
+            .is_some()
+    );
+    assert!(matches!(
+        replies.next().unwrap().unwrap(),
+        RelayResponsePayload::AttachmentPresent { present: true }
+    ));
+    assert!(client.abandoned.is_none());
+    client.call(RelayRequest::Status).await.unwrap();
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn pipeline_refuses_writes_before_wire_and_abandons_on_eof() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let next_request = client.next_request;
+    assert!(
+        client
+            .call_many(vec![
+                RelayRequest::Status,
+                RelayRequest::Acknowledge {
+                    through_ordinal: 1,
+                    through_digest: "a".repeat(64),
+                }
+            ])
+            .await
+            .is_err()
+    );
+    assert_eq!(client.next_request, next_request);
+    assert!(client.abandoned.is_none());
+    client.protocol_version = 1;
+    assert!(
+        client
+            .call_many(vec![RelayRequest::CpuUsage])
+            .await
+            .is_err()
+    );
+    assert_eq!(client.next_request, next_request);
+    assert!(client.abandoned.is_none());
+    drop(worker);
+    assert!(client.call_many(vec![RelayRequest::Status]).await.is_err());
+    assert!(client.abandoned.is_some());
+    assert!(client.call_many(vec![RelayRequest::Status]).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pipeline_abandons_on_shared_deadline_or_crossed_response() {
+    for crossed in [false, true] {
+        let (controller, worker) = tokio::io::duplex(65536);
+        let mut client = duplex_relay_client(controller, SESSION_ID);
+        client.request_timeout = Duration::from_secs(1);
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            if crossed {
+                let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                    request_id: "wrong".into(),
+                    protocol_version: request.protocol_version,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::AttachmentPresent { present: true },
+                    },
+                })
+                .unwrap();
+                bytes.push(b'\n');
+                writer.write_all(&bytes).await.unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let error = client
+            .call_many(vec![RelayRequest::Status, RelayRequest::Status])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(if crossed { "mismatch" } else { "timed out" }));
+        assert!(client.abandoned.is_some());
+        assert!(client.call(RelayRequest::Status).await.is_err());
+        peer.abort();
+        assert!(peer.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn submit_pipelines_deduplicated_image_and_file_presence_before_submit() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let image = mj_core::attachment::AttachmentRef::new(
+        b"\x89PNG\r\n\x1a\nimage",
+        "image/png".into(),
+        1,
+        1,
+    )
+    .unwrap();
+    let file =
+        mj_core::attachment::FileAttachmentRef::new(b"file", "a.txt", "text/plain".into()).unwrap();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            requests.push(serde_json::from_str::<RelayRequestEnvelope>(&line).unwrap());
+        }
+        assert!(matches!(
+            requests[0].request,
+            RelayRequest::AttachmentPresent { .. }
+        ));
+        assert!(matches!(
+            requests[1].request,
+            RelayRequest::FileAttachmentPresent { .. }
+        ));
+        for request in requests {
+            let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                },
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            writer.write_all(&bytes).await.unwrap();
+        }
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(request.request, RelayRequest::Submit { .. }));
+        // The submission's application reply is irrelevant to presence ordering.
+        drop(writer);
+    });
+    assert!(
+        client
+            .submit(
+                "images",
+                RelayCommand::Prompt {
+                    prompt: vec![
+                        image.content_block(),
+                        file.content_block(),
+                        image.content_block(),
+                        file.content_block()
+                    ]
+                }
+            )
+            .await
+            .is_err()
+    );
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn call_many_reads_real_worker_unix_server_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(root.path(), SESSION_ID, "test").unwrap();
+    durable
+        .record_observation(RelayObservation::Closed)
+        .unwrap();
+    drop(durable);
+    let config: mj_core::worker_launch::WorkerLaunchConfig =
+        serde_json::from_value(serde_json::json!({
+            "session_id": SESSION_ID, "harness": "codex", "harness_home": root.path(),
+            "bridge_command": "/usr/bin/false", "bridge_args": [], "environment": {},
+            "cwd": root.path(), "execution_policy": true
+        }))
+        .unwrap();
+    let daemon = mj_core::runtime::spawn(mj_worker::worker_runtime::run_daemon(
+        root.path().to_owned(),
+        config,
+    ));
+    let stream = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match tokio::net::UnixStream::connect(root.path().join("control.sock")).await {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    assert!(!daemon.is_finished(), "real worker exited before accepting");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let (controller, _unused) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let (reader, writer) = stream.into_split();
+    client.input = Some(Box::new(writer));
+    client.output = BufReader::new(Box::new(reader));
+    let mut replies = client
+        .call_many(vec![RelayRequest::Status, RelayRequest::HistoryRequests])
+        .await
+        .unwrap()
+        .into_iter();
+    assert!(
+        matches!(replies.next().unwrap().unwrap(), RelayResponsePayload::Status(state) if state.execution == mj_core::relay::RelayExecutionState::Closed)
+    );
+    assert!(
+        matches!(replies.next().unwrap().unwrap(), RelayResponsePayload::HistoryRequests { requests } if requests.is_empty())
+    );
+    client.status().await.unwrap();
+    drop(client);
+    daemon.abort();
+    assert!(daemon.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn pipeline_drains_replies_while_feeding_more_than_pipe_capacity() {
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let reference = mj_core::attachment::AttachmentRef::new(
+        b"\x89PNG\r\n\x1a\nimage",
+        "image/png".into(),
+        1,
+        1,
+    )
+    .unwrap();
+    let requests = vec![RelayRequest::AttachmentPresent { reference }; 1500];
+    let count = requests.len();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut request_bytes = 0;
+        let mut response_bytes = 0;
+        for _ in 0..count {
+            let mut line = String::new();
+            request_bytes += reader.read_line(&mut line).await.unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let mut response = serde_json::to_vec(&RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentPresent { present: true },
+                },
+            })
+            .unwrap();
+            response.push(b'\n');
+            response_bytes += response.len();
+            // Match the worker: reply fully before reading its next request.
+            writer.write_all(&response).await.unwrap();
+        }
+        assert!(request_bytes > 64 * 1024);
+        assert!(response_bytes > 64 * 1024);
+    });
+    let replies = tokio::time::timeout(Duration::from_secs(10), client.call_many(requests))
+        .await
+        .expect("pipelined traffic must not deadlock bounded pipes")
+        .unwrap();
+    assert_eq!(replies.len(), count);
+    assert!(replies.into_iter().all(|reply| matches!(
+        reply.unwrap(),
+        RelayResponsePayload::AttachmentPresent { present: true }
+    )));
+    peer.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn pipeline_observation_keeps_its_deadline_before_a_long_attach_slot() {
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.request_timeout = Duration::from_secs(1);
+    let (seen, received) = tokio::sync::oneshot::channel();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, _writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<RelayRequestEnvelope>(&line)
+                .unwrap()
+                .request,
+            RelayRequest::CpuUsage
+        ));
+        seen.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let started = tokio::time::Instant::now();
+    let work = mj_core::runtime::spawn(async move {
+        let result = client
+            .call_many(vec![
+                RelayRequest::CpuUsage,
+                RelayRequest::Attach {
+                    after_ordinal: 0,
+                    after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                    known_state_digest: None,
+                },
+            ])
+            .await;
+        (client, result)
+    });
+    received.await.unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let (client, result) = work.await.unwrap();
+    assert!(format!("{:#}", result.unwrap_err()).contains("cpu_usage timed out after 1 seconds"));
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert!(client.abandoned.is_some());
+    peer.abort();
+    assert!(peer.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn readiness_long_poll_keeps_the_worker_hold_in_its_deadline() {
+    use crate::readiness::NativeSessionProbe;
+    let (controller, worker) = tokio::io::duplex(4096);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    client.request_timeout = Duration::from_secs(1);
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let request: RelayRequestEnvelope =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(matches!(
+            request.request,
+            RelayRequest::WaitForChange { .. }
+        ));
+        tokio::time::sleep(mj_core::relay::RELAY_CHANGE_WAIT_BOUND).await;
+        let mut frame = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: request.request_id,
+            protocol_version: request.protocol_version,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ChangeObserved {
+                    latest_ordinal: 0,
+                    state_digest: "same".into(),
+                    subagent_queue_changed: false,
+                    guardian_queue_changed: false,
+                },
+            },
+        })
+        .unwrap();
+        frame.push(b'\n');
+        writer.write_all(&frame).await.unwrap();
+    });
+    assert!(
+        client
+            .wait_readiness_change((0, "same".into()), std::future::pending())
+            .await
+            .unwrap()
+    );
+    assert!(client.abandoned.is_none());
+    peer.await.unwrap();
+}

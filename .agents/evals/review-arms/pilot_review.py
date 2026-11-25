@@ -11,8 +11,7 @@ import driver
 TEMPLATE = """## Task
 Review the code changes made since the last review and provide prioritized findings.
 
-For each repository, inspect the captured tree-to-tree diff using the command below.
-Inspect the code with git and read-only commands. Do not build, run tests, or modify files.
+For each repository, inspect the changes between its baseline tree and captured tree with git and read-only tools of your choice (pass `--no-ext-diff --ignore-submodules=none` when calling `git diff`, and inspect files or subsets rather than dumping a large diff in one command). Do not build, run tests, or modify files.
 {repositories}{brief}
 
 Per-file diffstat for the captured changes ({changed_lines} changed lines):
@@ -40,8 +39,8 @@ def bound(text, limit, label):
 
 
 def native_prompt(base_tree, head_tree, changed_lines, table, task, brief=None):
-    repositories = (f"Repository root: .\nRun this exact command: "
-                    f"`git -C . diff --no-ext-diff --ignore-submodules=none {base_tree} {head_tree}`")
+    repositories = (f"Repository root: .\nBaseline tree: {base_tree}\n"
+                    f"Captured tree: {head_tree}")
     relations = f"\n\n## Relations computed from the repository\n\n{driver.BRIEF_NOTE}\n\n{brief.strip()}" if brief else ""
     changed_files = (
         f'<changed_files source="git diff --numstat of the captured trees" trust="deterministic" changed_lines="{changed_lines}">\n'

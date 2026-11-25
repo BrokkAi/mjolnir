@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::ensure;
 
 /// How long a request may wait before it counts as slow. A change wait is a
 /// long poll: the worker holds it for up to `RELAY_CHANGE_WAIT_BOUND` (the
@@ -12,6 +13,117 @@ fn slow_operation_warning_after(request: &RelayRequest) -> Duration {
 }
 
 impl RelayClient {
+    /// Pipeline independent observations over the existing ordered wire format.
+    /// A framed rejection belongs to its slot; transport or framing failure
+    /// invalidates the entire connection, including all outstanding replies.
+    pub async fn call_many(
+        &mut self,
+        requests: Vec<RelayRequest>,
+    ) -> Result<Vec<Result<RelayResponsePayload>>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(reason) = &self.abandoned {
+            bail!("{reason}");
+        }
+        for request in &requests {
+            ensure!(
+                is_pipelineable_read(request),
+                "relay {} is not a pipelineable read",
+                request.method_name()
+            );
+            ensure!(
+                request.supported_at(self.protocol_version),
+                "relay {} requires protocol {} (worker speaks {})",
+                request.method_name(),
+                request.minimum_protocol(),
+                self.protocol_version
+            );
+        }
+        let mut frames = Vec::new();
+        let mut ids = Vec::new();
+        for request in requests {
+            let timeout = match &request {
+                RelayRequest::Attach { .. } => RELAY_HISTORY_TIMEOUT,
+                RelayRequest::Status | RelayRequest::HistoryRequests => RELAY_OBSERVATION_TIMEOUT,
+                _ => self.request_timeout,
+            };
+            let operation = request.method_name();
+            let request_id = self.request_id();
+            let envelope = RelayRequestEnvelope {
+                request_id: request_id.clone(),
+                protocol_version: self.protocol_version,
+                request,
+            };
+            let frame = serde_json::to_vec(&envelope)?;
+            ensure!(
+                frame.len() <= MAX_FRAME_BYTES,
+                "relay pipeline request frame is too large"
+            );
+            frames.extend(frame);
+            frames.push(b'\n');
+            ids.push((request_id, timeout, operation));
+        }
+        let session_id = self.session_id.clone();
+        let protocol_version = self.protocol_version;
+        let input = self
+            .input
+            .as_mut()
+            .expect("connected relay owns proxy stdin");
+        let output = &mut self.output;
+        // The sequential worker writes each reply before reading the next
+        // request. Drain concurrently so bounded pipes cannot block both ends.
+        let write_all = async {
+            input
+                .write_all(&frames)
+                .await
+                .map_err(|error| RelayTransportDead::from_io(error, ExchangeKind::Call))?;
+            input
+                .flush()
+                .await
+                .map_err(|error| RelayTransportDead::from_io(error, ExchangeKind::Call))?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let read_all = async {
+            let mut replies = Vec::new();
+            for (id, timeout, operation) in ids {
+                // Only this slot's wait counts against its budget. An earlier
+                // cold Attach must not consume the next observation's deadline.
+                let started = Instant::now();
+                let response = read_bounded_frame(output, ExchangeKind::Call);
+                tokio::pin!(response);
+                let line = tokio::time::timeout(timeout, async {
+                    tokio::select! {
+                        result = &mut response => result,
+                        () = tokio::time::sleep(RELAY_SLOW_OPERATION_WARNING) => {
+                            tracing::warn!(%session_id, %operation, request_id = %id, "relay pipeline slot is still waiting for its response");
+                            let result = response.await;
+                            tracing::warn!(%session_id, %operation, request_id = %id, elapsed_seconds = started.elapsed().as_secs_f64(), "slow relay pipeline slot finished");
+                            result
+                        }
+                    }
+                }).await.with_context(|| format!("relay pipeline {operation} timed out after {} seconds", timeout.as_secs_f64()))??
+                    .ok_or_else(|| anyhow::Error::new(RelayTransportDead::during_exchange(
+                        format!("relay proxy disconnected during pipeline {operation}"), ExchangeKind::Call)))?;
+                let reply = decode_relay_response(&line, &id, protocol_version);
+                if let Err(error) = &reply
+                    && error.downcast_ref::<RelayRejected>().is_none()
+                {
+                    return Err(anyhow!("invalid relay pipeline response: {error:#}"));
+                }
+                replies.push(reply);
+            }
+            Ok(replies)
+        };
+        let result = tokio::try_join!(write_all, read_all).map(|(_, replies)| replies);
+        if let Err(error) = &result {
+            self.abandoned = Some(format!(
+                "relay connection abandoned after pipeline failure: {error:#}"
+            ));
+        }
+        result
+    }
+
     pub async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
         // Memory RPCs include filesystem work and worker-side queueing. Neither
         // has a measured deadline. An in-place reload is answered only after
@@ -279,4 +391,23 @@ impl RelayClient {
         self.next_request = self.next_request.wrapping_add(1);
         id
     }
+}
+
+fn is_pipelineable_read(request: &RelayRequest) -> bool {
+    matches!(
+        request,
+        RelayRequest::Status
+            | RelayRequest::Attach { .. }
+            | RelayRequest::HistoryRequests
+            | RelayRequest::GuardianRequests
+            | RelayRequest::CpuUsage
+            | RelayRequest::CredentialState
+            | RelayRequest::SkillsState
+            | RelayRequest::GithubTokenState
+            | RelayRequest::SlopcopLoginState
+            | RelayRequest::AwsCredentialsScope
+            | RelayRequest::AwsCredentialsState
+            | RelayRequest::AttachmentPresent { .. }
+            | RelayRequest::FileAttachmentPresent { .. }
+    )
 }

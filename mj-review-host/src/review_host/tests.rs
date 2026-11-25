@@ -1067,9 +1067,10 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
                 .starts_with(mj_core::subagent::READ_ONLY_TASK_SCOPE)
         );
         assert!(children[0].2.contains("## The change"));
-        assert!(children[0].2.contains(
-            "git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new"
-        ));
+        assert!(children[0].2.contains("Baseline tree: base"));
+        assert!(children[0].2.contains("Captured tree: new"));
+        assert!(children[0].2.contains("Per-file diffstat"));
+        assert!(!children[0].2.contains("Run this exact command"));
         assert!(!children[0].2.contains("Do not edit files or push"));
     }
     let view = host.view(&session).unwrap();
@@ -1973,7 +1974,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(
         children[0]
             .2
-            .contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new")
+            .contains("Baseline tree: base\nCaptured tree: new")
     );
     assert!(children[0].2.contains("1 file changed, 1 insertion(+)"));
     assert!(!children[0].2.contains("+one"));

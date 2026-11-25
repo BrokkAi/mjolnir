@@ -1350,27 +1350,49 @@ fn bundle_config_round_trip_removes_http_userinfo_and_keeps_ssh_user() {
     assert_eq!(Config::load_from(&path).unwrap().bundles, config.bundles);
 }
 
-// Hard-won: fd9e9238c: an older accepted repository value blocked config load after upgrade.
 #[test]
-fn bundle_keeps_loading_legacy_repository_values() {
+fn bundle_repository_sources_must_be_network_urls_or_github_shorthand() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     sample_config().save_to(&path).unwrap();
-    let previous_config = fs::read_to_string(&path).unwrap();
+    let original_config = fs::read_to_string(&path).unwrap();
 
     for source in [
         "./repo",
         "~/repo",
         "owner@host/repo",
         "file:mirror/repo",
-        "git@github.com:owner/repo",
         "BrokkAi/hel+fork",
+        "owner/repo?ref=main",
     ] {
-        fs::write(&path, previous_config.replace("BrokkAi/hel", source)).unwrap();
-        let config = Config::load_from(&path).unwrap_or_else(|error| panic!("{source}: {error:#}"));
-        let repository = &config.bundles["hel"].repositories[0];
-        assert_eq!(repository.github.as_deref(), Some(source));
+        let mut config = sample_config();
+        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
+        assert!(
+            config.validate().is_err(),
+            "Config::validate accepted {source:?}"
+        );
+
+        fs::write(&path, original_config.replace("BrokkAi/hel", source)).unwrap();
+        assert!(
+            Config::load_from(&path).is_err(),
+            "Config::load_from accepted {source:?}"
+        );
+    }
+
+    for source in [
+        "git@github.com:owner/repo",
+        "git@gitlab.example:o/r",
+        "https://github.com/BrokkAi/hel",
+        "BrokkAi/hel",
+    ] {
+        let mut config = sample_config();
+        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
         config.save_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+        assert_eq!(loaded.bundles, config.bundles);
+        loaded.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path).unwrap(), loaded);
     }
 }
 
