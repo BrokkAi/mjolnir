@@ -137,14 +137,21 @@ historical frontier and retain the original per-configuration sample caps.
 
 ### Single-model review performance versus cost
 
-![Single-model yield versus workflow cost, including historical Claude and partial DSF estimates](review-single-model-cost.png)
+![Current single-model results and historical estimates on one cost-versus-yield chart](review-single-model-cost.png)
 
-Both panels now price **single reviews**: current costs per review and historical
-costs per initial-head review. Separate study panels retain their own Terra
-6.1/high = 100 baselines and cost-sorted keys. Filled markers are current
-measurements; hollow markers are historical or partial-cohort DSF results.
-An asterisk identifies the three historical yields that require estimation.
-The series count different source outcomes:
+The single scatter plot combines **current results and historical estimates**
+using **cost per single review**. Yield is normalized to Terra 6.1/high = 100
+within each source study. Filled markers are current measurements; hollow
+markers are historical or partial-cohort DSF results. An asterisk identifies
+three estimated historical yields.
+
+The **combined point-estimate frontier** minimizes cost and maximizes the
+plotted yield index across non-Greptile points. It is descriptive: historical
+and current outcomes use different corpora, grading and normalization baselines.
+Its models and both Greptile solo references are **labeled directly by name**;
+the other nine points use numbers with a lookup key. The frontier is calculated
+from the plotted values, rather than a hardcoded list. These series count
+different source outcomes:
 
 - **Current study:** the single-reviewer rows of [pareto.csv](pareto.csv), from
   the blinded Opus `verify9` round. Yield averages one reviewer's confirmed
