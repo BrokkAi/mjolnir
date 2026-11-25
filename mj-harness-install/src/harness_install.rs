@@ -199,6 +199,11 @@ pub async fn locate(
         // DSH has no managed installation: its launch script resolves a
         // compatible target `dsh-acp` or fetches the pinned package through
         // npx.
+        _ if harness == HarnessKind::Dsh && built_in => {
+            let (command, args) =
+                mj_core::harness_runtime::fallback_launch(harness, execution_policy);
+            Ok(Located::unchosen(Path::new(&command), &args))
+        }
         _ if harness == HarnessKind::Dsh => Ok(Located::unchosen(command, args)),
         HarnessRuntimePolicy::Managed => {
             resolve_with_environment(harness, execution_policy, environment)
@@ -648,7 +653,7 @@ async fn resolve_at_async(
     environment: &BTreeMap<String, String>,
 ) -> Result<ManagedHarness> {
     let mut environment = environment.clone();
-    let managed_node = if harness_uses_node_runtime(harness) {
+    let mut managed_node = if harness_uses_node_runtime(harness) {
         ensure_node_runtime(&mut environment).await?
     } else {
         None
@@ -656,21 +661,10 @@ async fn resolve_at_async(
     let selected = pin(harness);
     let install = managed_harness_install_dir(root, harness);
     if !complete_install(&install, harness, selected)?
-        && let Some(baked_root) = baked_harness_store_root(&environment)
+        && let Some(baked) =
+            try_baked_harness(harness, execution_policy, &environment, &mut managed_node)?
     {
-        let baked = mj_core::harness_runtime::baked_harness_install_dir(&baked_root, harness);
-        if complete_install(&baked, harness, selected)? {
-            return build_managed_harness(
-                &baked,
-                harness,
-                execution_policy,
-                &environment,
-                managed_node,
-                None,
-                None,
-                None,
-            );
-        }
+        return Ok(baked);
     }
     let harness_root = root.join(harness.id());
     std::fs::create_dir_all(&harness_root)
@@ -681,6 +675,12 @@ async fn resolve_at_async(
 
     let install = managed_harness_install_dir(root, harness);
     if !complete_install(&install, harness, selected)? {
+        if let Some(baked) =
+            try_baked_harness(harness, execution_policy, &environment, &mut managed_node)?
+        {
+            drop(install_lock);
+            return Ok(baked);
+        }
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
             let _lease = match lease.try_lock() {
@@ -714,6 +714,32 @@ async fn resolve_at_async(
         Some(root.to_path_buf()),
         Some(lease),
     )
+}
+
+fn try_baked_harness(
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+    managed_node: &mut Option<ManagedNodeRuntime>,
+) -> Result<Option<ManagedHarness>> {
+    let Some(root) = baked_harness_store_root(environment) else {
+        return Ok(None);
+    };
+    let baked = mj_core::harness_runtime::baked_harness_install_dir(&root, harness);
+    if !complete_install(&baked, harness, pin(harness))? {
+        return Ok(None);
+    }
+    build_managed_harness(
+        &baked,
+        harness,
+        execution_policy,
+        environment,
+        managed_node.take(),
+        None,
+        None,
+        None,
+    )
+    .map(Some)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1571,7 +1597,7 @@ async fn ensure_node_runtime_with_minimum(
             }));
         }
     }
-    install_managed_node(&root, environment, &metadata)
+    install_managed_node(&root, environment, &metadata, minimum_version)
         .await
         .map(Some)
 }
@@ -1585,7 +1611,7 @@ async fn ensure_node_runtime_from_metadata(
     if system_node_is_compatible(environment, NODE_MINIMUM_VERSION).await {
         return Ok(None);
     }
-    install_managed_node(root, environment, metadata)
+    install_managed_node(root, environment, metadata, NODE_MINIMUM_VERSION)
         .await
         .map(Some)
 }
@@ -1594,6 +1620,7 @@ async fn install_managed_node(
     root: &Path,
     environment: &mut BTreeMap<String, String>,
     metadata: &serde_json::Value,
+    minimum_version: &str,
 ) -> Result<ManagedNodeRuntime> {
     anyhow::ensure!(
         metadata["version"] == NODE_VERSION,
@@ -1617,6 +1644,17 @@ async fn install_managed_node(
 
     let cached = managed_node_health(&install, environment).await?;
     if cached != ManagedNodeHealth::Usable {
+        if let Some(baked) = baked_node_dir(environment, metadata)?
+            && baked_node_is_usable(&baked, minimum_version, metadata)?
+        {
+            drop(install_lock);
+            prepend_path(environment, &baked.join("bin"))?;
+            return Ok(ManagedNodeRuntime {
+                path: baked,
+                lease_path: None,
+                _lease: None,
+            });
+        }
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
             let _lease = match lease.try_lock() {
@@ -2379,6 +2417,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_dsh_launch_upgrades_under_ambient_and_managed_policies() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let policy = ExecutionPolicy::ConfiguredApprovals;
+        let legacy = vec![
+            "-c".into(),
+            mj_core::harness_runtime::legacy_dsh_acp_launch_script(),
+        ];
+        let current = mj_core::harness_runtime::fallback_launch(HarnessKind::Dsh, policy);
+        for runtime_policy in [HarnessRuntimePolicy::Ambient, HarnessRuntimePolicy::Managed] {
+            for args in [&legacy, &current.1] {
+                let located = runtime
+                    .block_on(locate(
+                        runtime_policy,
+                        HarnessKind::Dsh,
+                        policy,
+                        Path::new("sh"),
+                        args,
+                        &BTreeMap::new(),
+                    ))
+                    .unwrap();
+                assert_eq!(located.command, Path::new(&current.0));
+                assert_eq!(located.args, current.1);
+                assert!(located.managed.is_none());
+            }
+            let custom = vec!["-c".into(), "exec custom-dsh".into()];
+            let located = runtime
+                .block_on(locate(
+                    runtime_policy,
+                    HarnessKind::Dsh,
+                    policy,
+                    Path::new("sh"),
+                    &custom,
+                    &BTreeMap::new(),
+                ))
+                .unwrap();
+            assert_eq!(located.args, custom);
+        }
+    }
+
+    #[tokio::test]
+    async fn collected_writable_harness_uses_baked_after_waiting_for_installer_lock() {
+        use std::future::Future as _;
+        use std::task::Poll;
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let baked = root.path().join("baked");
+        let kind = HarnessKind::OpenCode;
+        let selected = pin(kind);
+        for parent in [&cache, &baked.join("harnesses")] {
+            complete_fake(
+                &parent.join(kind.id()),
+                kind,
+                selected.install_id,
+                selected.entrypoint,
+            );
+        }
+        let install = managed_harness_install_dir(&cache, kind);
+        let lock = open_lock(&cache.join(kind.id()).join(INSTALL_LOCK_FILE)).unwrap();
+        lock.lock().unwrap();
+        let lock = FileLock::new(lock);
+        let environment = BTreeMap::from([(
+            "MJ_TEST_BAKED_HARNESS_ROOT".into(),
+            baked.display().to_string(),
+        )]);
+        let mut resolving = Box::pin(resolve_at_async(
+            &cache,
+            kind,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        ));
+        // With no Node preparation on this path, the first pending poll is the
+        // held installer lock, after the complete writable cache was checked.
+        std::future::poll_fn(|cx| {
+            assert!(resolving.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        std::fs::remove_dir_all(&install).unwrap();
+        drop(lock);
+        let managed = resolving.await.unwrap();
+        assert_eq!(
+            managed.entrypoint,
+            mj_core::harness_runtime::baked_harness_install_dir(&baked, kind)
+                .join(selected.entrypoint)
+        );
+        assert!(managed.lease_path.is_none());
+        assert!(managed.cache_root.is_none());
+        assert!(!install.exists());
+    }
+
+    #[test]
     fn baked_harnesses_preserve_writable_cache_and_launch_overrides() {
         let root = tempfile::tempdir().unwrap();
         let cache = root.path().join("cache");
@@ -2665,6 +2794,30 @@ exit "$MJ_NPM_STATUS"
         assert!(fallback.lease_path().is_none());
         assert!(!cached.join("bin").exists());
         assert!(!cached.join(LEASE_FILE).exists());
+        runtime.block_on(async {
+            use std::future::Future as _;
+            use std::task::Poll;
+            let lock = open_lock(&cached_root.join(INSTALL_LOCK_FILE)).unwrap();
+            lock.lock().unwrap();
+            let lock = FileLock::new(lock);
+            let mut installing = Box::pin(install_managed_node(
+                &cached_root,
+                &mut environment,
+                &metadata,
+                NODE_MINIMUM_VERSION,
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(installing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            std::fs::remove_dir_all(&cached).unwrap();
+            drop(lock);
+            let node = installing.await.unwrap();
+            assert_eq!(node.path(), baked);
+            assert!(node.lease_path().is_none());
+            assert!(!cached.exists());
+        });
         assert!(!baked_node_is_usable(&baked, "99.0.0", &metadata).unwrap());
         let mut missing_interpreter = metadata.clone();
         missing_interpreter["platforms"][current_node_platform()]["interpreter"] = root
@@ -3910,7 +4063,13 @@ ln -s '{dispatcher}' "$cli"
         drop(runtime);
 
         let first_path = environment["PATH"].clone();
-        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        let runtime = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap();
         assert_eq!(runtime.path(), install);
         assert_eq!(environment["PATH"], first_path);
         assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
@@ -3974,7 +4133,12 @@ ln -s '{dispatcher}' "$cli"
             let token = tokio_util::sync::CancellationToken::new();
             let install = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
-                install_managed_node(&root, &mut cancelled_environment, &metadata),
+                install_managed_node(
+                    &root,
+                    &mut cancelled_environment,
+                    &metadata,
+                    NODE_MINIMUM_VERSION,
+                ),
             );
             tokio::pin!(install);
             loop {
@@ -4000,7 +4164,13 @@ ln -s '{dispatcher}' "$cli"
         assert!(staged(&root).is_empty(), "staging outlived the install");
         assert!(!root.join(&folder).exists(), "cancelled install published");
 
-        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        let runtime = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap();
         assert!(runtime.path().join("bin/node").is_file());
     }
 
@@ -4027,7 +4197,7 @@ ln -s '{dispatcher}' "$cli"
             let token = tokio_util::sync::CancellationToken::new();
             let call = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
-                install_managed_node(&root, &mut environment, &metadata),
+                install_managed_node(&root, &mut environment, &metadata, NODE_MINIMUM_VERSION),
             );
             tokio::pin!(call);
             let mut waited = 0;
@@ -4107,7 +4277,13 @@ ln -s '{dispatcher}' "$cli"
         }
         open_lock(&install.join(LEASE_FILE)).unwrap();
 
-        let runtime = run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap();
+        let runtime = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap();
 
         assert_eq!(runtime.path(), install);
         let output =
@@ -4126,8 +4302,13 @@ ln -s '{dispatcher}' "$cli"
             serde_json::Value::String("0".repeat(64));
         let root = temp.path().join("node");
 
-        let error =
-            run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap_err();
+        let error = run_async(install_managed_node(
+            &root,
+            &mut environment,
+            &metadata,
+            NODE_MINIMUM_VERSION,
+        ))
+        .unwrap_err();
 
         assert!(error.to_string().contains("checksum mismatch"), "{error:#}");
         assert!(
@@ -4158,7 +4339,13 @@ ln -s '{dispatcher}' "$cli"
                 std::thread::spawn(move || {
                     let mut environment = environment;
                     barrier.wait();
-                    run_async(install_managed_node(&root, &mut environment, &metadata)).unwrap()
+                    run_async(install_managed_node(
+                        &root,
+                        &mut environment,
+                        &metadata,
+                        NODE_MINIMUM_VERSION,
+                    ))
+                    .unwrap()
                 })
             })
             .collect::<Vec<_>>();
