@@ -270,7 +270,7 @@ pub struct DurableRelay {
     /// journal: every bridge start records its own `AgentInitialized`.
     session_setup: bool,
     checkpoint_only: bool,
-    parked_move_boot_pending: bool,
+    pending_parked_move: Option<mj_core::worker_launch::ParkedMoveLaunch>,
     /// Active in-place harness restart operation ID serialized with the hold.
     in_place_harness_restart_in_flight: Option<String>,
     /// Live reviewer leases share this owner's atomic checkpoint decision.
@@ -689,7 +689,7 @@ impl DurableRelay {
         )
     }
 
-    /// A parked Move prefix must precede even journal-side queue promotion.
+    /// Defer queue promotion until the destination session commits its Move prefix.
     pub fn open_for_harness_with_parked_move(
         root: impl Into<PathBuf>,
         session_id: impl Into<String>,
@@ -1050,7 +1050,13 @@ impl DurableRelay {
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
             session_setup: false,
             checkpoint_only,
-            parked_move_boot_pending: parked_move.is_some(),
+            pending_parked_move: parked_move
+                .filter(|parked| {
+                    !snapshot
+                        .handled_commands
+                        .contains_key(&format!("parked-move:{}", parked.operation_id))
+                })
+                .cloned(),
             reviewer_admissions: BTreeMap::new(),
             next_reviewer_admission: 0,
             steering_supported: None,
@@ -1302,10 +1308,6 @@ impl DurableRelay {
         relay.seed_initial_commands()?;
         relay.recover_nonterminal_commands()?;
         relay.ensure_initial_commands_succeeded()?;
-        if let Some(parked) = parked_move {
-            relay.apply_parked_move_launch(parked)?;
-        }
-        relay.parked_move_boot_pending = false;
         relay.promote_next_queued_command()?;
         if !checkpoint_only {
             // No locator task survives a worker process. Record the final

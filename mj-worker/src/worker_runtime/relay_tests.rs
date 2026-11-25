@@ -10956,6 +10956,24 @@ fn parked_move_launch_discards_old_queue_and_replays_without_discarding_new_work
         Some(&parked),
     )
     .unwrap();
+    let before = relay.latest_ordinal();
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert_eq!(relay.latest_ordinal(), before);
+    assert_eq!(relay.operational_state().queued_prompts.len(), 1);
+    let stored: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert!(stored.pending_prompt_context.is_none());
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.complete_pending_parked_move().unwrap();
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     relay
         .record_observation(RelayObservation::CommandQueued {
@@ -10998,6 +11016,9 @@ fn parked_move_launch_queues_quota_first_with_handoff_and_replays_once() {
             insert_at_front: false,
         })
         .unwrap();
+    relay
+        .install_prompt_context("pre-existing context".into())
+        .unwrap();
     let parked = ParkedMoveLaunch {
         operation_id: "quota-move".into(),
         discard_native_session_id: None,
@@ -11019,6 +11040,18 @@ fn parked_move_launch_queues_quota_first_with_handoff_and_replays_once() {
         Some(&parked),
     )
     .unwrap();
+    assert_eq!(
+        relay.operational_state().queued_prompts[0].command_id,
+        "retained-prompt"
+    );
+    let stored: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.pending_prompt_context.as_ref().unwrap().text,
+        "pre-existing context"
+    );
     drop(relay);
     let mut relay = DurableRelay::open_for_harness_with_parked_move(
         root.path(),
@@ -11029,13 +11062,41 @@ fn parked_move_launch_queues_quota_first_with_handoff_and_replays_once() {
         Some(&parked),
     )
     .unwrap();
-    relay.apply_parked_move_launch(&parked).unwrap();
+    assert!(
+        relay
+            .claim_pending_commands_up_to(true, 1)
+            .unwrap()
+            .is_empty()
+    );
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.complete_pending_parked_move().unwrap();
+    relay.complete_pending_parked_move().unwrap();
+    let stored: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        stored
+            .handled_commands
+            .contains_key("parked-move:quota-move")
+    );
+    assert_eq!(
+        stored.pending_prompt_context.as_ref().unwrap().text,
+        "pre-existing context\n\nsource native prior handoff"
+    );
     let claimed = relay.claim_pending_commands_up_to(true, 1).unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].command_id, "quota-continuation");
     assert_eq!(
         claimed[0].hidden_prompt_context.as_deref(),
-        Some("source native prior handoff")
+        Some("pre-existing context\n\nsource native prior handoff")
     );
     relay
         .record_command_completed(
@@ -11071,4 +11132,318 @@ fn parked_move_launch_queues_quota_first_with_handoff_and_replays_once() {
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].command_id, "retained-prompt");
     assert_eq!(claimed[0].hidden_prompt_context, None);
+}
+
+#[test]
+fn parked_move_launch_waits_for_session_started_runtime_event() {
+    use mj_core::worker_launch::ParkedMoveLaunch;
+    let root = tempfile::tempdir().unwrap();
+    let mut source = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    source
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "source-queued-prompt".into(),
+            command: prompt("source queued input"),
+            created_at_ms: 1,
+            insert_at_front: false,
+        })
+        .unwrap();
+    let frontier = (source.latest_ordinal(), source.latest_digest().to_owned());
+    drop(source);
+    let parked = ParkedMoveLaunch {
+        operation_id: "destination-ready".into(),
+        discard_native_session_id: None,
+        prompt_context: Some("destination handoff".into()),
+        discard_queued_prompts: true,
+        quota_continuation: None,
+    };
+    let mut boot = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    assert_eq!(
+        (boot.latest_ordinal(), boot.latest_digest().to_owned()),
+        frontier
+    );
+    assert!(boot.claim_pending_commands(true).unwrap().is_empty());
+    let relay = Arc::new(RelayCell::new(boot));
+    unix::record_runtime_event(
+        &relay,
+        &mut BTreeMap::new(),
+        RuntimeEvent::SessionStarted {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            execution_mode: None,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        },
+    )
+    .unwrap();
+    let mut ready = relay.lock().unwrap();
+    assert!(ready.operational_state().queued_prompts.is_empty());
+    assert!(ready.claim_pending_commands(true).unwrap().is_empty());
+    let stored: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        stored
+            .handled_commands
+            .contains_key("parked-move:destination-ready")
+    );
+    assert_eq!(
+        stored.pending_prompt_context.unwrap().text,
+        "destination handoff"
+    );
+}
+
+#[test]
+fn parked_move_launch_context_and_marker_survive_snapshot_failure_atomically() {
+    use mj_core::worker_launch::ParkedMoveLaunch;
+    let root = tempfile::tempdir().unwrap();
+    let mut source = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    source
+        .install_prompt_context("earlier context".into())
+        .unwrap();
+    drop(source);
+    let parked = ParkedMoveLaunch {
+        operation_id: "atomic-context".into(),
+        discard_native_session_id: None,
+        prompt_context: Some("new handoff".into()),
+        discard_queued_prompts: false,
+        quota_continuation: None,
+    };
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    relay.begin_pending_parked_move().unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let path = root.path().join(mj_core::relay::RELAY_STATE_FILE);
+    let backup = root.path().join("snapshot-before-context.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(relay.complete_pending_parked_move().is_err());
+    let before: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&std::fs::read(&backup).unwrap()).unwrap();
+    assert!(
+        !before
+            .handled_commands
+            .contains_key("parked-move:atomic-context")
+    );
+    assert_eq!(
+        before.pending_prompt_context.unwrap().text,
+        "earlier context"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    relay.complete_pending_parked_move().unwrap();
+    let after: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        after
+            .handled_commands
+            .contains_key("parked-move:atomic-context")
+    );
+    assert_eq!(
+        after.pending_prompt_context.unwrap().text,
+        "earlier context\n\nnew handoff"
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    relay.complete_pending_parked_move().unwrap();
+    let replayed: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        replayed.pending_prompt_context.unwrap().text,
+        "earlier context\n\nnew handoff"
+    );
+}
+
+#[test]
+fn parked_move_launch_failed_prefix_retains_destination_ownership_and_recovers() {
+    use mj_core::worker_launch::{InitialWorkerCommand, ParkedMoveLaunch};
+    let root = tempfile::tempdir().unwrap();
+    let mut source = DurableRelay::open(root.path(), SESSION_ID, "1.0.0").unwrap();
+    source
+        .record_observation(RelayObservation::CommandQueued {
+            command_id: "source-queued-input".into(),
+            command: prompt("source queued input"),
+            created_at_ms: 1,
+            insert_at_front: false,
+        })
+        .unwrap();
+    source
+        .install_prompt_context("source context".into())
+        .unwrap();
+    drop(source);
+    let parked = ParkedMoveLaunch {
+        operation_id: "failed-prefix".into(),
+        discard_native_session_id: None,
+        prompt_context: Some("destination handoff".into()),
+        discard_queued_prompts: true,
+        quota_continuation: Some(InitialWorkerCommand {
+            command_id: "recover-quota-prompt".into(),
+            command: prompt("continue"),
+            optional: false,
+        }),
+    };
+    let mut relay = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    relay.begin_pending_parked_move().unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "destination-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let path = root.path().join(mj_core::relay::RELAY_STATE_FILE);
+    let backup = root.path().join("snapshot-before-prefix.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(relay.complete_pending_parked_move().is_err());
+    let before: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&std::fs::read(&backup).unwrap()).unwrap();
+    assert!(
+        before
+            .handled_commands
+            .contains_key("parked-move-started:failed-prefix")
+    );
+    assert!(
+        !before
+            .handled_commands
+            .contains_key("parked-move:failed-prefix")
+    );
+    assert_eq!(
+        before.pending_prompt_context.unwrap().text,
+        "source context"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    drop(relay);
+    let mut destination = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    assert!(destination.claim_pending_commands(true).unwrap().is_empty());
+    destination.complete_pending_parked_move().unwrap();
+    let completed: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        completed
+            .handled_commands
+            .contains_key("parked-move-started:failed-prefix")
+    );
+    assert!(
+        completed
+            .handled_commands
+            .contains_key("parked-move:failed-prefix")
+    );
+    assert_eq!(
+        completed.pending_prompt_context.unwrap().text,
+        "source context\n\ndestination handoff"
+    );
+    drop(destination);
+    let mut destination = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    destination.complete_pending_parked_move().unwrap();
+    let claimed = destination.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "recover-quota-prompt");
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some("source context\n\ndestination handoff")
+    );
+}
+
+#[test]
+fn parked_move_launch_started_receipt_failure_prevents_destination_identity() {
+    use mj_core::worker_launch::ParkedMoveLaunch;
+    let root = tempfile::tempdir().unwrap();
+    let parked = ParkedMoveLaunch {
+        operation_id: "failed-start-receipt".into(),
+        discard_native_session_id: None,
+        prompt_context: None,
+        discard_queued_prompts: false,
+        quota_continuation: None,
+    };
+    let boot = DurableRelay::open_for_harness_with_parked_move(
+        root.path(),
+        SESSION_ID,
+        "1.0.0",
+        mj_core::config::HarnessKind::Codex,
+        &[],
+        Some(&parked),
+    )
+    .unwrap();
+    let frontier = boot.latest_ordinal();
+    let relay = Arc::new(RelayCell::new(boot));
+    let path = root.path().join(mj_core::relay::RELAY_STATE_FILE);
+    let backup = root.path().join("snapshot-before-start.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(
+        unix::record_runtime_event(
+            &relay,
+            &mut BTreeMap::new(),
+            RuntimeEvent::SessionStarted {
+                native_session_id: "must-not-be-recorded".into(),
+                resumed: false,
+                execution_mode: None,
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+            }
+        )
+        .is_err()
+    );
+    let boot = relay.lock().unwrap();
+    assert_eq!(boot.latest_ordinal(), frontier);
+    assert_eq!(boot.operational_state().native_session_id, None);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
 }

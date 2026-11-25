@@ -1508,12 +1508,14 @@ pub(crate) fn record_runtime_event_with_facts(
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-session-open");
+            relay.begin_pending_parked_move()?;
             relay.record_observation(RelayObservation::SessionOpened {
                 native_session_id,
                 resumed,
                 native_continuity_lost,
                 replaced_unused_native_session_id,
             })?;
+            relay.complete_pending_parked_move()?;
         }
         RuntimeEvent::SessionConfigured { config_options } => {
             relay.record_observation(RelayObservation::SessionConfigured { config_options })?;

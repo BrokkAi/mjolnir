@@ -432,21 +432,18 @@ impl Controller {
                 .next()
                 .context("reconnect plan is empty")?;
             let liveness = probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
+            let command = targets::locator_command(
+                mj_core::targets::SshTrafficClass::Control,
+                &backend,
+                vec!["cat".into(), format!("{worker_root}/launch.json")],
+            )
+            .purpose("read parked Move worker launch config");
+            let output = executor.execute(&command)?;
+            let output = targets::checked_command_output(&command, output)?;
+            let launch: mj_core::worker_launch::WorkerLaunchConfig =
+                serde_json::from_slice(&output.stdout).context("read staged parked Move launch")?;
+            let aws_profile = launch.environment.get("AWS_PROFILE").map(String::as_str);
             if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
-                // A dead intent may be retired by start_installed_worker. Its
-                // already-staged launch owns the destination's AWS profile pin.
-                let command = targets::locator_command(
-                    mj_core::targets::SshTrafficClass::Control,
-                    &backend,
-                    vec!["cat".into(), format!("{worker_root}/launch.json")],
-                )
-                .purpose("read parked Move worker launch config");
-                let output = executor.execute(&command)?;
-                let output = targets::checked_command_output(&command, output)?;
-                let launch: mj_core::worker_launch::WorkerLaunchConfig =
-                    serde_json::from_slice(&output.stdout)
-                        .context("read staged parked Move launch")?;
-                let aws_profile = launch.environment.get("AWS_PROFILE").map(String::as_str);
                 self.start_installed_worker(
                     session_id,
                     executor,
@@ -477,7 +474,7 @@ impl Controller {
                             launch: None,
                             prepared: true,
                             discard_queued_prompts: None,
-                            staged_aws_profile: None,
+                            staged_aws_profile: Some(aws_profile),
                             swap_admission: None,
                             messages: &RESTART_FROM_PARKED,
                         },
@@ -644,6 +641,22 @@ impl Controller {
                 // The working-directory failure is written before the relay
                 // opens. If the marker is already present while the worker is
                 // still exiting, it is safe to settle without waiting for death.
+                if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead"
+                    && let Some((_, parked)) = move_destination.as_ref()
+                {
+                    let marker = format!("parked-move:{}", parked.operation_id);
+                    let started = format!("parked-move-started:{}", parked.operation_id);
+                    match super::lifecycle::origin_delta::read_wire::<mj_core::relay::RelaySnapshot>(
+                        &backend, session_id, &worker_root, mj_core::relay::RELAY_STATE_FILE, executor,
+                    ) {
+                        Ok(snapshot) if snapshot.as_ref().is_none_or(|snapshot| !snapshot.handled_commands.contains_key(&marker) && !snapshot.handled_commands.contains_key(&started)) => {}
+                        Ok(_) => return Err(error),
+                        Err(probe_error) => {
+                            tracing::warn!(session_id, error = format!("{probe_error:#}"), "could not prove the failed parked Move boot left its journal uncommitted");
+                            return Err(error);
+                        }
+                    }
+                }
                 let command = super::worker_binary::worker_exit_record_command(&backend, &worker_root);
                 let exited = executor.execute(&command)
                     .and_then(|output| mj_core::targets::checked_command_output(&command, output))
@@ -849,10 +862,19 @@ pub(in crate::controller) mod tests {
     struct WakeTarget {
         cancelled: AtomicBool,
         dead_before_start: AtomicBool,
+        failed_boot_journal: Option<(std::path::PathBuf, FailedBootMarker)>,
         purposes: Mutex<Vec<String>>,
         admission: Mutex<Option<crate::upgrade::Work>>,
         gate: Arc<crate::upgrade::Gate>,
         observing: tokio::sync::Notify,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FailedBootMarker {
+        Absent,
+        Started,
+        Present,
+        Unreadable,
     }
 
     impl WakeTarget {
@@ -860,6 +882,7 @@ pub(in crate::controller) mod tests {
             Self {
                 cancelled: AtomicBool::new(false),
                 dead_before_start: AtomicBool::new(false),
+                failed_boot_journal: None,
                 purposes: Mutex::new(Vec::new()),
                 admission: Mutex::new(None),
                 gate: Arc::new(crate::upgrade::Gate::default()),
@@ -903,6 +926,39 @@ pub(in crate::controller) mod tests {
                 return crate::targets::ProcessExecutor.execute(command);
             }
             if command.purpose == "start detached Mjolnir worker" {
+                if let Some((path, marker)) = &self.failed_boot_journal {
+                    let mut snapshot =
+                        mj_core::relay::RelaySnapshot::new(LATCH_RELAY_SESSION.into());
+                    if matches!(
+                        marker,
+                        FailedBootMarker::Present | FailedBootMarker::Started
+                    ) {
+                        let receipt = if matches!(marker, FailedBootMarker::Started) {
+                            "parked-move-started:failed-boot-move"
+                        } else {
+                            "parked-move:failed-boot-move"
+                        };
+                        snapshot.handled_commands.insert(
+                            receipt.into(),
+                            mj_core::relay::HandledRelayCommand {
+                                accepted_ordinal: 0,
+                                terminal_identity: None,
+                                terminal_ordinal: None,
+                                outcome: None,
+                                failure: None,
+                            },
+                        );
+                    }
+                    let bytes = if matches!(marker, FailedBootMarker::Unreadable) {
+                        b"unreadable".to_vec()
+                    } else {
+                        serde_json::to_vec(&snapshot)?
+                    };
+                    std::fs::write(path, bytes)?;
+                    return Err(anyhow::anyhow!(
+                        "simulated destination harness startup failure"
+                    ));
+                }
                 self.dead_before_start.store(false, Ordering::SeqCst);
                 assert!(!self.gate.try_close(), "launch must hold admission");
                 assert_eq!(
@@ -1284,6 +1340,12 @@ pub(in crate::controller) mod tests {
             .get_mut(LATCH_RELAY_SESSION)
             .unwrap()
             .native_session_id = Some("old-codex-thread".into());
+        controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap()
+            .staged_aws_profile = Some("source-aws".into());
         crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
         let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
         controller.config.profiles.insert(
@@ -1497,6 +1559,119 @@ pub(in crate::controller) mod tests {
         assert_eq!(active.last_profile, "destination");
         assert_eq!(active.target, previous.target);
         assert_eq!(active.state, SessionState::Running);
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_without_journal_marker_rolls_back_source() {
+        if !isolated("failed_parked_move_without_journal_marker_rolls_back_source") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Absent).await;
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_with_journal_marker_keeps_destination() {
+        if !isolated("failed_parked_move_with_journal_marker_keeps_destination") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Present).await;
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_with_started_marker_keeps_destination() {
+        if !isolated("failed_parked_move_with_started_marker_keeps_destination") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Started).await;
+    }
+
+    #[tokio::test]
+    async fn failed_parked_move_with_unreadable_journal_keeps_destination() {
+        if !isolated("failed_parked_move_with_unreadable_journal_keeps_destination") {
+            return;
+        }
+        failed_parked_boot_case(FailedBootMarker::Unreadable).await;
+    }
+
+    async fn failed_parked_boot_case(marker: FailedBootMarker) {
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = waking_controller(root.path(), 0);
+        let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        controller.config.profiles.insert(
+            "destination".into(),
+            controller.config.profiles["codex"].clone(),
+        );
+        let mut destination = previous.clone();
+        destination.last_profile = "destination".into();
+        let parked = mj_core::worker_launch::ParkedMoveLaunch {
+            operation_id: "failed-boot-move".into(),
+            discard_native_session_id: None,
+            prompt_context: None,
+            discard_queued_prompts: false,
+            quota_continuation: None,
+        };
+        let mut executor = WakeTarget::new();
+        executor.dead_before_start.store(true, Ordering::SeqCst);
+        executor.failed_boot_journal = Some((
+            root.path()
+                .join(LATCH_RELAY_SESSION)
+                .join(mj_core::relay::RELAY_STATE_FILE),
+            marker,
+        ));
+        let error = controller
+            .unpark_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                Some((&destination, parked)),
+                &executor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("simulated destination harness startup failure"),
+            "{error:#}"
+        );
+        let active = crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        let rolled_back = matches!(marker, FailedBootMarker::Absent);
+        assert_eq!(
+            active.state,
+            if rolled_back {
+                SessionState::Parked
+            } else {
+                SessionState::Running
+            }
+        );
+        assert_eq!(
+            active.last_profile,
+            if rolled_back {
+                &previous.last_profile
+            } else {
+                &destination.last_profile
+            }
+            .as_str()
+        );
+        assert_eq!(
+            crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                .unwrap()
+                .is_some(),
+            !rolled_back
+        );
+        let mut operation =
+            super::super::move_session::test_fixtures::source_recovery_operation(&previous);
+        operation.operation_id = "failed-boot-move".into();
+        operation.in_place = true;
+        operation.phase = mj_core::state::MovePhase::DestinationStarting;
+        let outcome = controller
+            .finish_move_result(&mut operation, Err(error), &executor)
+            .unwrap();
+        assert_eq!(
+            outcome.outcome,
+            if rolled_back { "failed" } else { "interrupted" },
+            "{outcome:?}"
+        );
     }
 
     #[test]
