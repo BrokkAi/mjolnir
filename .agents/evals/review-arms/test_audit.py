@@ -157,6 +157,48 @@ def test_protected_command_access_voids(tmp_path, command, hit):
     assert {item["kind"] for item in result["hits"]} == {hit}
 
 
+@pytest.mark.parametrize("command", [
+    f"git ls-tree --abbrev {PIN}",
+    f"git ls-tree --abbrev=8 {PIN}",
+    f"git ls-tree -r --name-only {PIN}",
+    f"git ls-tree -r --name-only {PIN} src/lib.rs",
+    f"git ls-tree -r --name-only {PIN} -- src/lib.rs",
+    f"git diff-tree --no-commit-id --name-only -r {PIN} {PIN}",
+])
+def test_pinned_tree_reads_pass(tmp_path, command):
+    result = audit_call(tmp_path, {"title": command, "kind": "execute"})
+    assert result["passed"], result["hits"]
+
+
+@pytest.mark.parametrize(("command", "hit"), [
+    (f"git diff-tree --abbrev {OTHER} {PIN}", "git-revision-outside-pin"),
+    (f"git ls-tree {OTHER}", "git-revision-outside-pin"),
+    (f"git ls-tree {PIN} /home/jonathan/secret", "outside-workspace"),
+    (f"git diff-tree --no-commit-id --name-only -r {PIN} {OTHER}", "git-revision-outside-pin"),
+])
+def test_unpinned_or_escaping_tree_reads_fail(tmp_path, command, hit):
+    result = audit_call(tmp_path, {"title": command, "kind": "execute"})
+    assert not result["passed"]
+    assert {item["kind"] for item in result["hits"]} == {hit}
+
+
+@pytest.mark.parametrize("single_commit", [False, True])
+def test_one_operand_diff_tree_is_outside_the_pin(tmp_path, single_commit):
+    result = audit_call(
+        tmp_path,
+        {"title": f"git diff-tree --no-commit-id --name-only -r {PIN}", "kind": "execute"},
+        single_commit=single_commit,
+    )
+    assert not result["passed"]
+    assert {item["kind"] for item in result["hits"]} == {"git-revision-outside-pin"}
+
+
+def test_diff_tree_without_trees_needs_inspection(tmp_path):
+    result = audit_call(tmp_path, {"title": "git diff-tree --no-commit-id --name-only -r", "kind": "execute"})
+    assert not result["passed"]
+    assert {item["kind"] for item in result["hits"]} == {"needs-inspection"}
+
+
 @pytest.mark.parametrize(("call", "hit"), [
     ({"title": "mcp__mj_memory__search_sessions", "rawInput": {"query": "source"}}, "memory-or-sessions"),
     ({"title": "WebSearch", "rawInput": {"query": "source"}}, "github-or-web"),

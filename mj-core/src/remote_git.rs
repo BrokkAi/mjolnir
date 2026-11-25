@@ -236,33 +236,6 @@ pub fn project_source(source: &str, shorthand: Shorthand) -> Result<std::borrow:
     network_url(source, true)
 }
 
-/// Keep loading all sources accepted by the previous config validator.
-pub(crate) fn validate_configured_project_source(source: &str) -> Result<()> {
-    match project_source(source, Shorthand::Allowed) {
-        Ok(_) => Ok(()),
-        Err(_) if was_configured_github_source(source) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-// Validation at checkout still rejects unusable sources.
-fn was_configured_github_source(source: &str) -> bool {
-    let source = source.trim();
-    if source.is_empty() || source.starts_with('-') || source.chars().any(char::is_whitespace) {
-        return false;
-    }
-    if parse_github_remote(source, Shorthand::Allowed).is_some() {
-        return true;
-    }
-    let repository_path = source
-        .strip_prefix("https://github.com/")
-        .or_else(|| source.strip_prefix("git@github.com:"))
-        .or_else(|| source.strip_prefix("ssh://git@github.com/"))
-        .unwrap_or(source);
-    let mut parts = repository_path.trim_end_matches(".git").split('/');
-    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(repository), None) if !owner.is_empty() && !repository.is_empty())
-}
-
 /// The SSH login in an accepted Git URL. An empty login uses SSH configuration.
 pub fn ssh_login(source: &str) -> Option<String> {
     if source.contains("://") {

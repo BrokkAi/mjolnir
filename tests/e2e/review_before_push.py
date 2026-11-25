@@ -396,14 +396,20 @@ effort = {json.dumps(args.effort)}
                 brief = handback[1].strip()
                 anchors = re.findall(r"[\w./-]+\.\w+:\d+", brief)
                 assert anchors, f"writer handback lacks file:line items: {brief}"
-                commands = re.findall(r"Run this exact command: `([^`]+)`", writer["initial_prompt"])
-                assert commands, writer["initial_prompt"]
+                ranges = re.findall(
+                    r"Repository root: .+\nBaseline tree: .+\nCaptured tree: \S+",
+                    writer["initial_prompt"],
+                )
+                assert ranges, writer["initial_prompt"]
                 matched = []
                 for reviewer in reviewers:
                     prompt = reviewer["initial_prompt"]
                     # The captured tree range identifies the round even when a
                     # finding causes another writer/reviewer pair to be launched.
-                    if re.findall(r"Run this exact command: `([^`]+)`", prompt) != commands:
+                    if re.findall(
+                        r"Repository root: .+\nBaseline tree: .+\nCaptured tree: \S+",
+                        prompt,
+                    ) != ranges:
                         continue
                     heading = "## Relations computed from the repository"
                     assert heading in prompt, prompt
@@ -415,7 +421,7 @@ effort = {json.dumps(args.effort)}
                     checked_reviewers.add(reviewer_id)
                     matched.append(reviewer_id)
                     (root / f"reviewer-{reviewer_id}-prompt.txt").write_text(prompt)
-                assert matched, f"no reviewer received writer {writer_id}'s brief for {commands}"
+                assert matched, f"no reviewer received writer {writer_id}'s brief for {ranges}"
                 (root / f"writer-{writer_id}-handback.txt").write_text(brief)
                 writer_usage = next(row for row in usage["sessions"] if row["session_id"] == writer_id)
                 assert writer_usage["parent_session_id"] == session, writer_usage

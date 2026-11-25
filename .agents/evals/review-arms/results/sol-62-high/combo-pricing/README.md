@@ -65,20 +65,21 @@ tie difference between the maps and the frontier is expected.
 
 These versions remove Greptile's solo reference marks and key rows. The same
 386 measured non-Greptile setups, findings, frontier flags and budget winners
-remain. All three x-axes are linear and start at zero. The combined map keeps
-its logarithmic cost y-axis and shows Low+ findings (all confirmed impact
+remain. The cost and latency plots show only frontier points, with no
+background cloud. All three x-axes are linear and start at zero. The combined
+map keeps its logarithmic cost y-axis and shows Low+ findings (all confirmed impact
 levels). Its time range includes every score-changing threshold, ending with
 the 135.3-second threshold plus display padding; beyond that, additional time
 cannot improve any cost budget's result.
 
 ```bash
-bash "$W" plot_frontiers.py . --no-greptile --linear-x
+bash "$W" plot_frontiers.py . --no-greptile --linear-x --frontier-only
 bash "$W" export_low_plus_html.py --no-greptile --linear-x
 ```
 
-SVG counterparts accompany the three PNGs. Validation checked all 1,224
-frontier/background mark coordinates against the source CSVs, 6,083 combined
-map pixels against brute-force budget lookup, and 2,475 interactive hover
+SVG counterparts accompany the three PNGs. Validation checked all 119
+frontier mark coordinates against the source CSVs (53 cost and 66 latency),
+6,083 combined map pixels against brute-force budget lookup, and 2,475 interactive hover
 positions plus click-pin/Escape behavior. The logarithmic default export was
 also checked after adding the optional linear transform. These are chart
 variants; no new reviews or judgments were run.

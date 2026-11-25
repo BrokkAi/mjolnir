@@ -1013,7 +1013,7 @@ if not (attempt / "recover").exists():
         rubric = (checkout / "mj-core/assets/instructions/review_rubric.md").read_bytes()
         self.assertEqual(pilot_review.RUBRIC_PATH.read_bytes(), rubric)
         expected = literal.format(
-            repositories="Repository root: .\nRun this exact command: `git -C . diff --no-ext-diff --ignore-submodules=none tree-a tree-b`",
+            repositories="Repository root: .\nBaseline tree: tree-a\nCaptured tree: tree-b",
             brief="\n\n## Relations computed from the repository\n\nThese are relations computed from the repository at this commit, not findings. They may be incomplete.\n\nBrief.",
             declined="",
             *[2, '<changed_files source="git diff --numstat of the captured trees" trust="deterministic" changed_lines="2">\nTable\n</changed_files>',

@@ -115,7 +115,7 @@ pub fn user_messages_packet(messages: &[UserMessage], current_task: &str) -> Str
     bound_review_section(&rendered, USER_MESSAGES_LIMIT, "middle user messages")
 }
 
-/// Each repository's root and the exact command that prints its captured change.
+/// Each repository's root and the captured baseline and head trees.
 fn repositories_section(job: &ReviewJob) -> String {
     job
         .repositories
@@ -141,10 +141,8 @@ fn repositories_section(job: &ReviewJob) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff --ignore-submodules=none {} {}`{merged}{unattributed}",
-                shell_quote(&root),
-                repository.baseline_tree,
-                repository.capture_tree
+                "Repository root: {root}\nBaseline tree: {}\nCaptured tree: {}{merged}{unattributed}",
+                repository.baseline_tree, repository.capture_tree
             )
         })
         .collect::<Vec<_>>()
@@ -164,8 +162,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
     format!(
         "## Task\n\
          Review the code changes made since the last review and provide prioritized findings.\n\n\
-         For each repository, inspect the captured tree-to-tree diff using the command below.\n\
-         Inspect the code with git and read-only commands. Do not build, run tests, or modify files.\n\
+         For each repository, inspect the changes between its baseline tree and captured tree with git and read-only tools of your choice (pass `--no-ext-diff --ignore-submodules=none` when calling `git diff`, and inspect files or subsets rather than dumping a large diff in one command). Do not build, run tests, or modify files.\n\
          {repositories}{brief}\n\n\
          Per-file diffstat for the captured changes ({} changed lines):\n\
          {}\n\n\
@@ -181,13 +178,16 @@ pub fn review_prompt(job: &ReviewJob) -> String {
 pub use mj_core::session_instructions::BRIEF_WRITER_INSTRUCTIONS;
 
 /// The prompt of the session that writes the relation brief. It sees the same
-/// diff commands and the same user request as the reviewers, and no findings.
+/// repository trees, the same diffstat, and the same user request as the
+/// reviewers, and no findings.
 #[must_use]
 pub fn brief_writer_prompt(job: &ReviewJob) -> String {
     format!(
-        "{}\n\n## The change\n\nRead each repository's captured change with its exact command:\n\n{}\n\n<user_task>\n{}\n</user_task>",
+        "{}\n\n## The change\n\nInspect each repository's changes between its baseline tree and captured tree with git and read-only tools of your choice (pass `--no-ext-diff --ignore-submodules=none` when calling `git diff`, and inspect files or subsets rather than dumping a large diff in one command).\n\n{}\n\nPer-file diffstat for the captured changes ({} changed lines):\n{}\n\n<user_task>\n{}\n</user_task>",
         mj_core::subagent::READ_ONLY_TASK_SCOPE,
         repositories_section(job),
+        job.changed_lines,
+        changed_files_section(job),
         bound_review_section(&job.task, USER_MESSAGES_LIMIT, "task"),
     )
 }
@@ -242,12 +242,15 @@ mod tests {
     }
 
     #[test]
-    fn review_prompt_contains_tree_ids_and_diff_command_without_standing_rubric() {
+    fn review_prompt_contains_tree_ids_without_an_exact_diff_command() {
         let prompt = review_prompt(&job());
         assert!(prompt.starts_with("## Task"));
-        assert!(prompt.contains("Inspect the code with git and read-only commands. Do not build, run tests, or modify files."));
+        assert!(prompt.contains("Do not build, run tests, or modify files."));
         assert!(!prompt.contains("You are acting as a reviewer for a proposed code change"));
-        assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none baseline123 capture456"));
+        assert!(!prompt.contains("Run this exact command"));
+        assert!(prompt.contains(
+            "Repository root: /workspace/app\nBaseline tree: baseline123\nCaptured tree: capture456"
+        ));
         assert!(prompt.contains("Repository: /workspace/app -- 1 file changed"));
         assert!(prompt.contains("Keep the public API stable"));
         assert!(prompt.contains("Fix the retry behavior"));
@@ -259,24 +262,36 @@ mod tests {
         merged.repositories[0].merged_in = vec!["upstream1".into(), "upstream2".into()];
         let prompt = review_prompt(&merged);
         assert!(prompt.contains(
-            "diff --no-ext-diff --ignore-submodules=none baseline123 capture456`\nThe base already includes the changes of other history merged, pulled or switched to (upstream1, upstream2)"
+            "Captured tree: capture456\nThe base already includes the changes of other history merged, pulled or switched to (upstream1, upstream2)"
         ));
 
         let mut unattributed = job();
         unattributed.repositories[0].unattributed = Some("the reflog is gone".into());
         let prompt = review_prompt(&unattributed);
         assert!(prompt.contains(
-            "capture456`\nThe review could not tell the reviewed commits from other history here (the reflog is gone)"
+            "Captured tree: capture456\nThe review could not tell the reviewed commits from other history here (the reflog is gone)"
         ));
         assert!(prompt.contains("confirm with `git -C /workspace/app log`"));
     }
 
     #[test]
-    fn diff_command_quotes_a_root_with_spaces() {
+    fn brief_writer_prompt_names_trees_and_diffstat_without_an_exact_command() {
+        let prompt = brief_writer_prompt(&job());
+        assert!(prompt.contains("Baseline tree: baseline123"));
+        assert!(prompt.contains("Captured tree: capture456"));
+        assert!(prompt.contains("Per-file diffstat for the captured changes (2 changed lines):"));
+        assert!(prompt.contains("Repository: /workspace/app -- 1 file changed"));
+        assert!(!prompt.contains("Run this exact command"));
+    }
+
+    #[test]
+    fn unattributed_root_with_spaces_and_a_quote_is_shell_quoted() {
         let mut job = job();
         job.repositories[0].root = PathBuf::from("/work space/it's");
+        job.repositories[0].unattributed = Some("the reflog is gone".into());
         let prompt = review_prompt(&job);
-        assert!(prompt.contains(r"git -C '/work space/it'\''s' diff --no-ext-diff"));
+        assert!(prompt.contains(r"confirm with `git -C '/work space/it'\''s' log`"));
+        assert!(!prompt.contains("Run this exact command"));
     }
 
     #[test]
