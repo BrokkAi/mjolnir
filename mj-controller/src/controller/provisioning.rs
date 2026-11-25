@@ -2174,6 +2174,10 @@ impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
         self.inner.cancellation_requested()
     }
 
+    fn shutdown_interrupted(&self) -> bool {
+        self.inner.shutdown_interrupted()
+    }
+
     fn stage_started(&self, stage: ProvisionStage) {
         self.inner.stage_started(stage);
     }

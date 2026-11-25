@@ -163,7 +163,8 @@ impl RuntimeState {
             LifecycleKind::UpgradeContainer,
             super::lifecycle::LifecycleStart { phase, ..super::lifecycle::LifecycleStart::request(request_key, None, None) },
             Some(acceptance),
-            move |state, session_id, cancelled, session_admission| async move {
+            move |state, session_id, control, session_admission| async move {
+ let cancelled = control.cancelled.clone();
                 if let Some(settings) = &settings {
                     state.validate_container_settings_size(&session_id, settings.resource_allocation.as_ref()).await?;
                 }
@@ -174,7 +175,7 @@ impl RuntimeState {
                         if let Some(intent) = existing { return Ok(intent); }
                         let operation_id = new_command_id("container-upgrade")?;
                         let controller = Controller::load()?;
-                        let executor = CancellableProcessExecutor::new(cancelled.clone());
+                        let executor = control.executor();
                         if let Some(settings) = settings {
                             let plan = controller.plan_container_settings_replacement(&session_id, &operation_id, &settings, &executor)?
                                 .context("container settings or preservation preflight changed; review settings again")?;

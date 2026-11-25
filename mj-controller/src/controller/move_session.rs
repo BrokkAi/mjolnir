@@ -1355,14 +1355,7 @@ impl Controller {
                     session_id,
                     "stop retained Move source worker before retry",
                 )
-                .and_then(|plan| {
-                    plan.execute(
-                        &crate::targets::CancellableProcessExecutor::with_timeout(
-                            std::time::Duration::from_secs(15),
-                        ),
-                        &super::ControlWorker,
-                    )
-                })
+                .and_then(|plan| plan.execute(&executor.shutdown_only(), &super::ControlWorker))
                 .context("stop retained worker before retry")?;
                 // Clear any OriginDelta quiescence wire files left by the
                 // abandoned Move so a later Suspend on the resumed source
@@ -2838,7 +2831,9 @@ impl Controller {
                 return self.admit_move_queue(&mut operation, executor).await;
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
-                let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
+                // A person's cancel must not cut the source's cleanup short,
+                // but daemon shutdown still does.
+                let cleanup = executor.shutdown_only();
                 // An in-place Move writes `recovery_session` only after its
                 // relay reported Closed, so the seal is a durable fact of the
                 // Move. Asking the sealed relay again cannot change it and

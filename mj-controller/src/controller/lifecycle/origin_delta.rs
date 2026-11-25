@@ -575,20 +575,15 @@ impl OriginDeltaSuspend {
         Ok(())
     }
 
+    /// Wait for the original worker to finish the accepted stop. After a
+    /// person cancels, the wait still has to read and write the stop's
+    /// records, so it runs on the shutdown-only view: only daemon shutdown
+    /// interrupts those commands.
     pub(super) async fn wait_for_stop(
         &self,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        self.wait_for_stop_with_uncancelled(executor, &ProcessExecutor)
-            .await
-            .context(LifecycleFailureReason::SuspendPending)
-    }
-
-    pub(super) async fn wait_for_stop_with_uncancelled(
-        &self,
-        executor: &(impl CommandExecutor + Sync),
-        uncancelled: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
+        let cleanup = executor.shutdown_only();
         executor.begin_resumable_work()?;
         let outcome = async {
             let initial_cancelled =
@@ -599,7 +594,7 @@ impl OriginDeltaSuspend {
                     &self.session_id,
                     &self.root,
                     wire::REQUEST,
-                    uncancelled,
+                    &cleanup,
                 )?
             } else {
                 read_wire::<SuspendRequest>(
@@ -613,7 +608,7 @@ impl OriginDeltaSuspend {
             .context("worker did not record the suspend request")?
             .worker;
             let mut cancellation_recorded = if initial_cancelled {
-                self.restart_reason(uncancelled)?.is_some()
+                self.restart_reason(&cleanup)?.is_some()
             } else {
                 self.restart_reason(executor)?.is_some()
             };
@@ -624,18 +619,18 @@ impl OriginDeltaSuspend {
                     "suspend process wait was handed off"
                 );
                 if executor.cancellation_requested() && !cancellation_recorded {
-                    self.record_restart(&anyhow::anyhow!("suspend was cancelled"), uncancelled)?;
+                    self.record_restart(&anyhow::anyhow!("suspend was cancelled"), &cleanup)?;
                     cancellation_recorded = true;
                 }
-                let use_uncancelled = cancellation_recorded || executor.cancellation_requested();
+                let after_cancellation = cancellation_recorded || executor.cancellation_requested();
                 // A receipt can precede the worker's last cleanup tasks.
-                let poll_executor_alive = if use_uncancelled {
+                let poll_executor_alive = if after_cancellation {
                     worker_identity_is_alive(
                         &self.backend,
                         &self.session_id,
                         &self.root,
                         worker,
-                        uncancelled,
+                        &cleanup,
                         false,
                     )?
                 } else {
@@ -656,13 +651,13 @@ impl OriginDeltaSuspend {
                 } else {
                     "Waiting for the session's processes to stop".to_owned()
                 };
-                let progress = if use_uncancelled {
+                let progress = if after_cancellation {
                     read_wire::<wire::SuspendProgress>(
                         &self.backend,
                         &self.session_id,
                         &self.root,
                         wire::PROGRESS,
-                        uncancelled,
+                        &cleanup,
                     )?
                 } else {
                     read_wire::<wire::SuspendProgress>(
@@ -692,8 +687,10 @@ impl OriginDeltaSuspend {
             }
         }
         .await;
-        executor.end_resumable_work("record suspend quiescence outcome")?;
-        outcome
+        executor
+            .end_resumable_work("record suspend quiescence outcome")
+            .and(outcome)
+            .context(LifecycleFailureReason::SuspendPending)
     }
 
     pub(super) fn live_worker_mode(

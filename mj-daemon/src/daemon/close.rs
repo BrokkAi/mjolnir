@@ -279,7 +279,7 @@ impl RuntimeState {
                                 )
                             {
                                 let executor = DaemonStageReportingExecutor::new(
-                                    CancellableProcessExecutor::new(control.cancelled.clone()),
+                                    control.executor(),
                                     state.clone(),
                                     session_id.clone(),
                                 );
@@ -291,14 +291,20 @@ impl RuntimeState {
                                 );
                                 executor.end_resumable_work("accept managed clone suspend")?;
                                 inventory?;
+                                // The record is written whole or not at all, so a
+                                // person's cancel must not cut it short; shutdown
+                                // still does, and the next daemon recovers it.
                                 mj_core::runtime::off_async_worker(|| {
-                                    controller.record_origin_delta_suspend_acceptance(&session_id)
+                                    controller.record_origin_delta_suspend_acceptance(
+                                        &session_id,
+                                        &executor.shutdown_only(),
+                                    )
                                 })?;
                             }
                         } else if consent.without_checkpoint && !consent.confirm_no_checkpoint {
                             let sid = session_id.clone();
                             let executor = DaemonStageReportingExecutor::new(
-                                CancellableProcessExecutor::new(control.cancelled.clone()),
+                                control.executor(),
                                 state.clone(),
                                 session_id.clone(),
                             );
@@ -351,7 +357,7 @@ impl RuntimeState {
                         };
                         if !children.is_empty() {
                             let executor = DaemonStageReportingExecutor::new(
-                                CancellableProcessExecutor::new(control.cancelled.clone()),
+                                control.executor(),
                                 state.clone(),
                                 session_id.clone(),
                             );
@@ -893,15 +899,11 @@ impl RuntimeState {
         consent: mj_core::suspend_consent::SuspendConsent,
         accepted_record: Option<SessionRecord>,
     ) -> Result<DaemonLifecycleResult> {
-        let cancelled = control.cancelled.clone();
         let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon close task")??;
-        let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled),
-            self.clone(),
-            session_id.clone(),
-        );
+        let executor =
+            DaemonStageReportingExecutor::new(control.executor(), self.clone(), session_id.clone());
         let result = self
             .suspend_with_loaded_controller(
                 session_admission,
@@ -1069,10 +1071,10 @@ impl RuntimeState {
             .start_automatic_lifecycle(
                 session_id.clone(),
                 LifecycleKind::Cleanup,
-                |state, session_id, cancelled, _session_admission| async move {
+                |state, session_id, control, _session_admission| async move {
                     let mut controller = Controller::load()?;
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
+                        control.executor(),
                         state,
                         session_id.clone(),
                     );

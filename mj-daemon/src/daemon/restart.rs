@@ -52,7 +52,8 @@ impl RuntimeState {
                 LifecycleKind::Restart,
                 super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
                 Some(acceptance),
-                move |state, session_id, cancelled, session_admission| async move {
+                move |state, session_id, control, session_admission| async move {
+                    let cancelled = control.cancelled.clone();
                     let _workspace_admission = _workspace_admission;
                     state
                         .restart_admitted_with_acceptance(
@@ -141,7 +142,8 @@ impl RuntimeState {
                         deferrable_admission: None,
                         holds_through_drain: false,
                     },
-                    move |state, session_id, cancelled, session_admission| async move {
+                    move |state, session_id, control, session_admission| async move {
+                        let cancelled = control.cancelled.clone();
                         // A recovered intent keeps the rules it was started with,
                         // including an automatic one's refusal to interrupt work.
                         state

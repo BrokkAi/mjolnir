@@ -702,7 +702,11 @@ impl Controller {
         Ok(())
     }
 
-    pub fn record_origin_delta_suspend_acceptance(&self, session_id: &str) -> Result<()> {
+    pub fn record_origin_delta_suspend_acceptance(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
         let parked = self
             .state
             .sessions
@@ -712,12 +716,11 @@ impl Controller {
             == SessionState::Parked;
         if parked
             || matches!(
-                self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)?,
+                self.explicit_suspend_export_policy_with_executor(session_id, executor)?,
                 CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
             )
         {
-            OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?
-                .accept(&ProcessExecutor, parked)?;
+            OriginDeltaSuspend::load(self, session_id, executor)?.accept(executor, parked)?;
         }
         Ok(())
     }
@@ -811,7 +814,10 @@ impl Controller {
                     // The current suspend can settle cancellation once it can
                     // read the target's records. Keep target recovery resumable.
                     mj_core::runtime::off_async_worker(|| {
-                        targets::ensure_recovery_target_running(&ProcessExecutor, Some(&plan))
+                        targets::ensure_recovery_target_running(
+                            &executor.shutdown_only(),
+                            Some(&plan),
+                        )
                     })
                     .with_context(|| {
                         format!("recover suspend target after interrupted probe: {error:#}")
@@ -1064,13 +1070,16 @@ impl Controller {
             CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
         );
         let user_cancelled = || executor.cancellation_requested() && !executor.shutdown_interrupted();
+        // After a person cancels, the stop's records and worker still need
+        // their cleanup, but daemon shutdown must still be able to end it.
+        let cleanup = executor.shutdown_only();
         let yield_origin_delta_preflight = move_intent.is_some() && is_origin_delta;
         if yield_origin_delta_preflight {
             executor.begin_resumable_work()?;
         }
         let load_origin_delta = || {
-            if executor.cancellation_requested() && !executor.shutdown_interrupted() {
-                OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)
+            if user_cancelled() {
+                OriginDeltaSuspend::load(self, session_id, &cleanup)
             } else {
                 OriginDeltaSuspend::load(self, session_id, executor)
             }
@@ -1169,9 +1178,9 @@ impl Controller {
             if !user_cancelled() {
                 attempt.restart_reason(executor)
             } else if owning_suspend {
-                Self::record_suspend_cancellation(attempt, &ProcessExecutor).map(Some)
+                Self::record_suspend_cancellation(attempt, &cleanup).map(Some)
             } else {
-                attempt.restart_reason(&ProcessExecutor)
+                attempt.restart_reason(&cleanup)
             }
         };
         let mut restart = None;
@@ -1306,7 +1315,7 @@ impl Controller {
                 restart = restart_reason(attempt)?;
             }
             let receipt = if user_cancelled() {
-                attempt.receipt(&ProcessExecutor)
+                attempt.receipt(&cleanup)
             } else {
                 attempt.receipt(executor)
             };
@@ -1331,7 +1340,7 @@ impl Controller {
                 && !attempt.request_recorded() && !attempt.already_quiescent()
             {
                 let mode = if user_cancelled() {
-                    attempt.live_worker_mode(&ProcessExecutor)
+                    attempt.live_worker_mode(&cleanup)
                 } else {
                     attempt.live_worker_mode(executor)
                 };
@@ -1349,7 +1358,7 @@ impl Controller {
                 let capture_manager = if attempt.already_quiescent() { None } else { manager };
                 let relay = if user_cancelled() {
                     executor.begin_resumable_work()?;
-                    let result = attempt.start_worker(self, admission, session_id, &ProcessExecutor,
+                    let result = attempt.start_worker(self, admission, session_id, &cleanup,
                         capture_manager, run_mode, observe_original).await;
                     executor.end_resumable_work("observe suspend seal after cancellation")?;
                     result
@@ -1860,9 +1869,9 @@ impl Controller {
         if executor.shutdown_interrupted() {
             return error;
         }
+        let cleanup = executor.shutdown_only();
         if attempt.already_quiescent() {
             let parked = (|| -> Result<()> {
-                let cleanup = super::failed_launch_cleanup_executor();
                 let (backend, root) = self.worker_placement(session_id)?;
                 super::worker_binary::stop_worker(
                     &crate::worker_lifecycle::require(session_id)?,
@@ -1890,7 +1899,7 @@ impl Controller {
         let recovered = async {
             let cancelled = executor.cancellation_requested() && !executor.shutdown_interrupted();
             if cancelled {
-                attempt.record_restart(&error, &ProcessExecutor)?;
+                attempt.record_restart(&error, &cleanup)?;
             } else {
                 attempt.record_restart(&error, executor)?;
             }
@@ -1904,7 +1913,7 @@ impl Controller {
                         self,
                         admission,
                         session_id,
-                        &ProcessExecutor,
+                        &cleanup,
                         manager,
                         WorkerRunMode::Harness,
                         false,
@@ -1935,19 +1944,25 @@ impl Controller {
             record.last_checkpoint_error = Some(format!("{error:#}"));
             record.updated_at = now();
             self.persist_session_state(session_id)?;
-            let cleanup = if cancelled {
-                attempt.clear_after_restart(&ProcessExecutor)
+            let cleared = if cancelled {
+                attempt.clear_after_restart(&cleanup)
             } else {
                 attempt.clear_after_restart(executor)
             };
-            if let Err(cleanup) = cleanup {
-                tracing::warn!(session_id, %cleanup, "could not clear worker suspend records");
+            if let Err(failure) = cleared {
+                // A shutdown that stopped this cleanup leaves the records for
+                // the next daemon; it is not a failure to warn about.
+                if executor.shutdown_interrupted() {
+                    return Err(failure);
+                }
+                tracing::warn!(session_id, %failure, "could not clear worker suspend records");
             }
             anyhow::Ok(())
         }
         .await;
         match recovered {
             Ok(()) => error,
+            Err(_) if executor.shutdown_interrupted() => error,
             Err(restart) => error.context(format!("restart the retained session: {restart:#}")),
         }
     }
@@ -2100,11 +2115,12 @@ impl Controller {
             self.ensure_suspend_target_running(admission, session_id, executor)?;
         }
         let cancelled = executor.cancellation_requested() && !executor.shutdown_interrupted();
+        let cleanup = executor.shutdown_only();
         let has_before_close = before_close.is_some();
         let prepare = || {
             let policy = if has_before_close {
                 Some(if cancelled {
-                    self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)?
+                    self.explicit_suspend_export_policy_with_executor(session_id, &cleanup)?
                 } else {
                     self.explicit_suspend_export_policy_with_executor(session_id, executor)?
                 })
@@ -2120,7 +2136,7 @@ impl Controller {
                 && (origin_policy && verified.is_none()
                     || self.state.sessions[session_id].target.is_some() && {
                         let attempt = if cancelled {
-                            OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?
+                            OriginDeltaSuspend::load(self, session_id, &cleanup)?
                         } else {
                             OriginDeltaSuspend::load(self, session_id, executor)?
                         };
@@ -2726,7 +2742,7 @@ impl Controller {
                     self.destroy_after_verified_checkpoint(
                         session_id,
                         verified,
-                        &ProcessExecutor,
+                        &executor.shutdown_only(),
                         SuspendSettlement::Suspend,
                     )
                 } else {

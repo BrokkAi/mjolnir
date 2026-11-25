@@ -4488,6 +4488,10 @@ esac
 
     impl CommandExecutor for InterruptedProbe {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            // Once cancelled, every command must run on the shutdown-only view.
+            if command.is_shutdown_only() {
+                return ProcessExecutor.execute(command);
+            }
             if command.purpose == "check for Mjolnir session container"
                 && self.cancellation != ProbeCancellation::AtReadmission
             {
@@ -4508,7 +4512,7 @@ esac
             command: &CommandSpec,
             input: &mut (dyn std::io::Read + Send),
         ) -> Result<CommandOutput> {
-            assert!(!self.cancellation_requested());
+            assert!(command.is_shutdown_only() || !self.cancellation_requested());
             ProcessExecutor.execute_with_stdin_without_deadline(command, input)
         }
 
@@ -6712,7 +6716,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
 
 #[cfg(unix)]
 #[tokio::test]
-async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local_target() {
+async fn wait_for_stop_runs_shutdown_only_commands_after_cancellation_on_non_local_target() {
     use mj_core::worker_suspend::{
         self as wire, SuspendProgress, SuspendReceipt, SuspendRequest, WorkerIdentity,
     };
@@ -6722,48 +6726,17 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
         atomic::{AtomicUsize, Ordering},
     };
 
-    struct CancelledExecutor;
-
-    impl CommandExecutor for CancelledExecutor {
-        fn execute(
-            &self,
-            _command: &mj_core::targets::CommandSpec,
-        ) -> Result<mj_core::targets::CommandOutput> {
-            anyhow::bail!("cancelled executor must not run target commands")
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            _input: &mut (dyn std::io::Read + Send),
-        ) -> Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn cancellation_requested(&self) -> bool {
-            true
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            true
-        }
-
-        fn pause_deadline(&self) -> targets::DeadlinePause {
-            targets::DeadlinePause::none()
-        }
-    }
-
+    /// A target whose supervisor was cancelled by a person: it refuses every
+    /// command except those marked shutdown-only.
     #[derive(Clone, Default)]
     struct UncancelledTargetFake {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         alive_polls: Arc<AtomicUsize>,
+        cancelled: bool,
+        /// Daemon shutdown, which `shutdown_after_first_poll` starts once the
+        /// first liveness poll has been answered.
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        shutdown_after_first_poll: bool,
     }
 
     impl CommandExecutor for UncancelledTargetFake {
@@ -6778,10 +6751,19 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             &self,
             command: &mj_core::targets::CommandSpec,
         ) -> Result<mj_core::targets::CommandOutput> {
+            if self.cancelled && !command.is_shutdown_only() {
+                anyhow::bail!("cancelled executor must not run target commands");
+            }
+            if self.shutdown.load(Ordering::SeqCst) {
+                anyhow::bail!("interrupted by daemon shutdown");
+            }
             let joined = command.args.join(" ");
             if joined.contains("identity-alive") {
                 // Alive on first poll, dead on second poll.
                 let poll = self.alive_polls.fetch_add(1, Ordering::SeqCst);
+                if self.shutdown_after_first_poll {
+                    self.shutdown.store(true, Ordering::SeqCst);
+                }
                 return Ok(mj_core::targets::CommandOutput {
                     status: 0,
                     stdout: if poll == 0 {
@@ -6836,8 +6818,16 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             self.execute_without_deadline(command)
         }
 
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
-            false
+            self.cancelled
+        }
+
+        fn shutdown_interrupted(&self) -> bool {
+            self.shutdown.load(Ordering::SeqCst)
         }
 
         fn pause_deadline(&self) -> targets::DeadlinePause {
@@ -6893,6 +6883,10 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let op = "origin-delta-suspend-cancel-1".to_owned();
     let target_fake = UncancelledTargetFake::default();
+    let cancelled_fake = UncancelledTargetFake {
+        cancelled: true,
+        ..target_fake.clone()
+    };
     {
         let mut files = target_fake.files.lock().unwrap();
         files.insert(wire::ACCEPTED.to_owned(), serde_json::to_vec(&op).unwrap());
@@ -6929,10 +6923,7 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
 
     let attempt =
         origin_delta::OriginDeltaSuspend::load(&controller, session_id, &target_fake).unwrap();
-    attempt
-        .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
-        .await
-        .unwrap();
+    attempt.wait_for_stop(&cancelled_fake).await.unwrap();
     assert!(
         attempt
             .receipt(&target_fake)
@@ -6945,6 +6936,45 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
     assert_eq!(
         attempt.restart_reason(&target_fake).unwrap().as_deref(),
         Some("suspend was cancelled")
+    );
+
+    // Shutdown arriving after the person's cancel interrupts the wait at its
+    // next command, leaving the accepted request for the next daemon.
+    let interrupted_fake = UncancelledTargetFake {
+        files: Arc::new(Mutex::new(target_fake.files.lock().unwrap().clone())),
+        alive_polls: Arc::default(),
+        cancelled: true,
+        shutdown: Arc::default(),
+        shutdown_after_first_poll: true,
+    };
+    let interrupted = origin_delta::OriginDeltaSuspend::load(
+        &controller,
+        session_id,
+        &UncancelledTargetFake {
+            cancelled: false,
+            shutdown_after_first_poll: false,
+            ..interrupted_fake.clone()
+        },
+    )
+    .unwrap();
+    let error = interrupted
+        .wait_for_stop(&interrupted_fake)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("interrupted by daemon shutdown"),
+        "{error:#}"
+    );
+    assert_eq!(
+        error.downcast_ref::<LifecycleFailureReason>(),
+        Some(&LifecycleFailureReason::SuspendPending)
+    );
+    assert!(
+        interrupted_fake
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(wire::REQUEST)
     );
 }
 

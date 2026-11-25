@@ -261,6 +261,11 @@ pub struct CommandSpec {
     /// This is executor-local behavior and is not part of serialized plans.
     #[serde(skip)]
     preserve_children_on_cancel: bool,
+    /// Run for the supervisor's daemon shutdown only: a person's cancellation
+    /// and the operation deadline do not stop it (see [`ShutdownOnly`]).
+    /// Executor-local behavior, not part of serialized plans.
+    #[serde(skip)]
+    shutdown_only: bool,
     /// The SSH destination this command opens a connection to, when it does.
     /// Tagged commands retry a server refusal before authentication rather
     /// than reporting it as a command failure.
@@ -324,6 +329,7 @@ impl CommandSpec {
             creates_target: false,
             detaches: false,
             preserve_children_on_cancel: false,
+            shutdown_only: false,
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
@@ -557,6 +563,19 @@ impl CommandSpec {
     pub fn preserve_children_on_cancel(mut self) -> Self {
         self.preserve_children_on_cancel = true;
         self
+    }
+
+    /// Stop this command only for daemon shutdown. Prefer
+    /// [`CommandExecutor::shutdown_only`]; this is for code that rewrites a
+    /// command it received from one.
+    pub fn shutdown_only(mut self) -> Self {
+        self.shutdown_only = true;
+        self
+    }
+
+    /// Whether only daemon shutdown may stop this command.
+    pub fn is_shutdown_only(&self) -> bool {
+        self.shutdown_only
     }
 
     /// Feed private file content through the shared concurrent pipe handler.
@@ -1141,6 +1160,15 @@ pub trait CommandExecutor {
     /// wrappers forward to their owner; executors with per-command deadlines
     /// or no deadline return an empty guard. Cancellation remains active.
     fn pause_deadline(&self) -> DeadlinePause;
+
+    /// A view whose commands stop only for daemon shutdown, for cleanup that
+    /// must complete after a person cancels the operation.
+    fn shutdown_only(&self) -> ShutdownOnly<'_, Self>
+    where
+        Self: Sized,
+    {
+        ShutdownOnly::new(self)
+    }
 }
 
 /// Forward SSH admission stages through the command's owner while the process
@@ -1314,6 +1342,135 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
     ) -> Result<CommandOutput> {
         self.executor
             .execute_with_stdin_without_deadline(command, input)
+    }
+}
+
+/// A view of an executor whose commands stop only when the daemon shuts the
+/// supervising operation down, never for a person's cancellation or the
+/// operation's deadline. Cleanup that must finish after a person cancels an
+/// operation runs on this, so a later daemon handoff still interrupts it.
+///
+/// It is the same executor, not a replacement: stage reporting, admission
+/// callbacks and SSH ownership of the supervisor stay in effect, because each
+/// command is only marked ([`CommandSpec::is_shutdown_only`]) and the leaf
+/// executor that runs it applies the narrower cancellation. An executor with
+/// no cancellation of its own runs such a command as usual.
+pub struct ShutdownOnly<'a, E: ?Sized> {
+    executor: &'a E,
+}
+
+impl<'a, E: CommandExecutor + ?Sized> ShutdownOnly<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self { executor }
+    }
+
+    fn marked(command: &CommandSpec) -> CommandSpec {
+        let mut command = command.clone();
+        command.shutdown_only = true;
+        command
+    }
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for ShutdownOnly<'_, E> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute(&Self::marked(command))
+    }
+
+    fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_to_file(&Self::marked(command), output)
+    }
+
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_cleanup(&Self::marked(command))
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_cleanup_with_timeout(&Self::marked(command), timeout)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin(&Self::marked(command), input)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor
+            .execute_without_deadline(&Self::marked(command))
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(&Self::marked(command), input)
+    }
+
+    // The view stops for shutdown only, so a person's cancellation and the
+    // operation deadline must not read as a reason to stop here either.
+    fn cancellation_requested(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.executor.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.executor.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.executor.notify_notice(notice);
+    }
+
+    fn stop_borrowed_workers_before_quiesce(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        self.executor.stop_borrowed_workers_before_quiesce()
+    }
+
+    fn reserve_move_destination(&self) {
+        self.executor.reserve_move_destination();
+    }
+
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.executor.begin_resumable_work()
+    }
+
+    fn yield_admission_if_resumable(&self) -> bool {
+        self.executor.yield_admission_if_resumable()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        self.executor.end_resumable_work(label)
     }
 }
 
@@ -1994,6 +2151,12 @@ fn stream_command_with_stdin(
 pub struct CancellableProcessExecutor {
     cancelled: Arc<AtomicBool>,
     token: Option<tokio_util::sync::CancellationToken>,
+    /// Cancelled when the daemon is stopping the supervising operation. A
+    /// person's cancellation and the deadline never set it.
+    shutdown: Option<tokio_util::sync::CancellationToken>,
+    /// This executor runs [`ShutdownOnly`] commands, so it stops only for
+    /// `shutdown`.
+    shutdown_only: bool,
     #[cfg(unix)]
     foreground_terminal: bool,
     deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>,
@@ -2098,6 +2261,9 @@ impl CancellableProcessExecutor {
         abort_stdin: Option<&(dyn Fn() + Sync)>,
         observer: Option<CommandOutputObserver>,
     ) -> Result<CommandOutput> {
+        if let Some(twin) = self.shutdown_only_twin(command) {
+            return twin.execute_with_stdin_inner(command, input, abort_stdin, observer);
+        }
         self.describe_cancellation(
             command,
             crate::runtime::off_async_worker(|| {
@@ -2141,6 +2307,8 @@ impl CancellableProcessExecutor {
         Self {
             cancelled,
             token: None,
+            shutdown: None,
+            shutdown_only: false,
             #[cfg(unix)]
             foreground_terminal: false,
             deadline: None,
@@ -2161,10 +2329,47 @@ impl CancellableProcessExecutor {
         self
     }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.token
+    /// Name the token the supervising operation cancels when the daemon stops
+    /// it. [`ShutdownOnly`] commands stop for this token alone.
+    pub fn with_shutdown_cancellation(
+        mut self,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.shutdown = Some(token);
+        self
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown
             .as_ref()
             .is_some_and(|token| token.is_cancelled())
+    }
+
+    /// This executor as it runs a [`ShutdownOnly`] command: ignoring a
+    /// person's cancellation and the operation deadline, sharing everything
+    /// else, SSH ownership included. `None` when it already is that.
+    fn shutdown_only_twin(&self, command: &CommandSpec) -> Option<Self> {
+        (command.shutdown_only && !self.shutdown_only).then(|| Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            token: None,
+            shutdown_only: true,
+            deadline: None,
+            ..self.clone()
+        })
+    }
+
+    /// The executor a cleanup of `command` bounds with its own deadline.
+    fn cleanup_executor(&self, command: &CommandSpec) -> Self {
+        self.shutdown_only_twin(command)
+            .unwrap_or_else(|| self.clone())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.shutdown_requested()
+            || self
+                .token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
             || self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
@@ -2174,9 +2379,11 @@ impl CancellableProcessExecutor {
 
     /// Whether the supervisor, not the deadline, has asked to stop.
     pub fn is_cancelled_without_deadline(&self) -> bool {
-        self.token
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
+        self.shutdown_requested()
+            || self
+                .token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
             || self.cancelled.load(Ordering::Acquire)
     }
 
@@ -2184,6 +2391,8 @@ impl CancellableProcessExecutor {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             token: None,
+            shutdown: None,
+            shutdown_only: false,
             #[cfg(unix)]
             foreground_terminal: false,
             deadline: Some(ProcessDeadline::new(timeout)),
@@ -2199,6 +2408,7 @@ impl CancellableProcessExecutor {
 
     fn cancellation_message(&self, purpose: &str) -> String {
         if !self.cancelled.load(Ordering::Acquire)
+            && !self.shutdown_requested()
             && !self
                 .token
                 .as_ref()
@@ -2536,6 +2746,9 @@ impl CancellableProcessExecutor {
         output: &std::fs::File,
     ) -> Result<CommandOutput> {
         use std::io::{Seek, SeekFrom};
+        if let Some(twin) = self.shutdown_only_twin(command) {
+            return twin.execute_to_file(command, output);
+        }
         ensure!(
             !command.keep_stdin_open && command.sensitive_stdin.is_none(),
             "file-output commands cannot carry buffered or retained stdin"
@@ -2723,7 +2936,7 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.clone()
+        self.cleanup_executor(command)
             .with_deadline(Duration::from_secs(15))
             .execute(command)
     }
@@ -2733,11 +2946,17 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         timeout: Duration,
     ) -> Result<CommandOutput> {
-        self.clone().with_deadline(timeout).execute(command)
+        self.cleanup_executor(command)
+            .with_deadline(timeout)
+            .execute(command)
     }
 
     fn cancellation_requested(&self) -> bool {
         self.is_cancelled()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.shutdown_requested()
     }
 
     fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -2761,6 +2980,9 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if let Some(twin) = self.shutdown_only_twin(command) {
+            return twin.execute(command);
+        }
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
             self.describe_cancellation(
@@ -5469,6 +5691,93 @@ exit 0
             !published.exists(),
             "child must be killed before seeing EOF on stdin read error"
         );
+    }
+
+    /// After a person cancels an operation, its cleanup runs on the
+    /// shutdown-only view: the person's cancel and an expired operation
+    /// deadline no longer stop it, but daemon shutdown still does, in every
+    /// way a command can run (captured, to a file, streamed stdin larger than
+    /// a pipe buffer, without a deadline).
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_only_view_survives_a_person_cancel_and_stops_for_shutdown() {
+        use tokio_util::sync::CancellationToken;
+
+        let supervised = |token: &CancellationToken| {
+            CancellableProcessExecutor::new(Arc::new(AtomicBool::new(true)))
+                .with_shutdown_cancellation(token.clone())
+                .with_deadline(Duration::ZERO)
+        };
+        let quick = CommandSpec::new("sh", ["-c", "printf ok"]);
+
+        // The person's cancel and the spent deadline stop the plain executor.
+        let token = CancellationToken::new();
+        let executor = supervised(&token);
+        executor.execute(&quick).unwrap_err();
+
+        // The view still runs every kind of command to completion.
+        let view = ShutdownOnly::new(&executor);
+        assert!(!view.cancellation_requested());
+        assert_eq!(view.execute(&quick).unwrap().stdout, b"ok");
+        assert_eq!(view.execute_without_deadline(&quick).unwrap().stdout, b"ok");
+        assert_eq!(view.execute_cleanup(&quick).unwrap().stdout, b"ok");
+        let mut file = tempfile::tempfile().unwrap();
+        view.execute_to_file(&quick, &file).unwrap();
+        std::io::Seek::rewind(&mut file).unwrap();
+        let mut written = String::new();
+        Read::read_to_string(&mut file, &mut written).unwrap();
+        assert_eq!(written, "ok");
+        let archive = vec![7u8; 300 * 1024];
+        let counted = view
+            .execute_with_stdin(
+                &CommandSpec::new("sh", ["-c", "wc -c"]),
+                &mut std::io::Cursor::new(archive.clone()),
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&counted.stdout).trim(), "307200");
+
+        // Shutdown arrives while a command is stalled; each path ends
+        // promptly instead of waiting out the 30 s child.
+        let stalled = CommandSpec::new("sh", ["-c", "sleep 30"]);
+        let shut_down_soon = |token: &CancellationToken| {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                token.cancel();
+            })
+        };
+        let started = Instant::now();
+        let token = CancellationToken::new();
+        let executor = supervised(&token);
+        let view = ShutdownOnly::new(&executor);
+        let canceller = shut_down_soon(&token);
+        let error = view.execute(&stalled).unwrap_err();
+        canceller.join().unwrap();
+        assert!(view.cancellation_requested());
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{error:#}"
+        );
+
+        for run in 0..3 {
+            let token = CancellationToken::new();
+            let executor = supervised(&token);
+            let view = ShutdownOnly::new(&executor);
+            let canceller = shut_down_soon(&token);
+            let result = match run {
+                0 => view.execute_without_deadline(&stalled),
+                1 => view.execute_to_file(&stalled, &tempfile::tempfile().unwrap()),
+                // The child never reads, so the writer blocks on a full pipe.
+                _ => view.execute_with_stdin(&stalled, &mut std::io::Cursor::new(archive.clone())),
+            };
+            canceller.join().unwrap();
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("operation cancelled"),
+                "path {run}: {error:#}"
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(20));
     }
 
     #[cfg(unix)]

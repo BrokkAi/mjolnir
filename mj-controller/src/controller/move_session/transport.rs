@@ -22,7 +22,7 @@ use anyhow::{Context, Result, ensure};
 use mj_core::hex::lower_hex;
 use mj_core::subprocess::run_with_input;
 use mj_core::targets::{
-    self, CommandExecutor, CommandSpec, ProcessExecutor, SshTarget, SshTrafficClass, SshWalk,
+    self, CommandExecutor, CommandSpec, ShutdownOnly, SshTarget, SshTrafficClass, SshWalk,
     TargetLocator,
 };
 use sha2::{Digest, Sha256};
@@ -381,7 +381,7 @@ where
             destination_path,
             sha256,
             cfg,
-            &ProcessStreamPipe,
+            &ProcessStreamPipe::new(executor),
         )?
     } else {
         transfer_daemon_stream(
@@ -544,7 +544,19 @@ pub trait StreamPipe: Send + Sync {
 /// Spawns both source and destination processes, drains stderr/stdout
 /// concurrently to avoid >64 KiB pipe deadlocks, hashes bytes on the fly, and
 /// never buffers the full archive in memory or writes to daemon disk.
-pub struct ProcessStreamPipe;
+///
+/// Its SSH session leases run on the supervising `executor`'s shutdown-only
+/// view, so a daemon handoff interrupts a stalled lease while a person's
+/// cancellation, which the pipe itself does not observe, does not.
+pub struct ProcessStreamPipe<'a> {
+    executor: &'a (dyn CommandExecutor + Sync),
+}
+
+impl<'a> ProcessStreamPipe<'a> {
+    pub fn new(executor: &'a (dyn CommandExecutor + Sync)) -> Self {
+        Self { executor }
+    }
+}
 
 fn build_std_command(spec: &CommandSpec) -> Command {
     let mut cmd = Command::new(&spec.program);
@@ -564,7 +576,7 @@ fn build_std_command(spec: &CommandSpec) -> Command {
     cmd
 }
 
-impl StreamPipe for ProcessStreamPipe {
+impl StreamPipe for ProcessStreamPipe<'_> {
     fn pipe(
         &self,
         source: &CommandSpec,
@@ -586,12 +598,11 @@ impl StreamPipe for ProcessStreamPipe {
         // Lease any managed SSH sessions without stdout markers (stdout carries
         // raw archive or framed Move stream bytes) and keep both lease guards
         // alive until after both child processes have been reaped.
+        let leases = ShutdownOnly::new(self.executor);
         let mut src_walk = SshWalk::default();
-        let src_session =
-            source.open_ssh_session_without_marker(&ProcessExecutor, &mut src_walk)?;
+        let src_session = source.open_ssh_session_without_marker(&leases, &mut src_walk)?;
         let mut dst_walk = SshWalk::default();
-        let dst_session =
-            destination.open_ssh_session_without_marker(&ProcessExecutor, &mut dst_walk)?;
+        let dst_session = destination.open_ssh_session_without_marker(&leases, &mut dst_walk)?;
 
         let mut src_cmd = build_std_command(src_session.command());
         src_cmd
@@ -726,7 +737,7 @@ fn transfer_daemon_stream(
     destination: &TargetLocator,
     destination_path: &Path,
     expected_sha256: &str,
-    _executor: &(impl CommandExecutor + Sync),
+    executor: &(impl CommandExecutor + Sync),
 ) -> Result<()> {
     transfer_daemon_stream_with_pipe(
         source,
@@ -734,7 +745,7 @@ fn transfer_daemon_stream(
         destination,
         destination_path,
         expected_sha256,
-        &ProcessStreamPipe,
+        &ProcessStreamPipe::new(executor),
     )
 }
 
@@ -1883,7 +1894,7 @@ mod tests {
             destination: &CommandSpec,
             expected_sha256: Option<&str>,
         ) -> Result<()> {
-            ProcessStreamPipe.pipe(
+            ProcessStreamPipe::new(&ProcessExecutor).pipe(
                 &Self::unwrap_ssh(source),
                 &Self::unwrap_ssh(destination),
                 expected_sha256,
@@ -2048,7 +2059,7 @@ mod tests {
         );
         let dest_spec = CommandSpec::new("bash", ["-c", "exit 1"]);
 
-        let err = ProcessStreamPipe
+        let err = ProcessStreamPipe::new(&ProcessExecutor)
             .pipe(&source_spec, &dest_spec, Some(&"0".repeat(64)))
             .expect_err("early destination exit must return Err without hanging");
         assert!(
@@ -2299,7 +2310,7 @@ fi
             ],
         );
 
-        ProcessStreamPipe
+        ProcessStreamPipe::new(&ProcessExecutor)
             .pipe(&src_spec, &dst_spec, None)
             .expect("pipe with env and cwd");
         let written = fs::read_to_string(&dst_file).expect("read env-out");

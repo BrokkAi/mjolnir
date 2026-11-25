@@ -903,7 +903,8 @@ impl RuntimeState {
             session_id,
             LifecycleKind::Create,
             start,
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
+                let cancelled = control.cancelled.clone();
                 state
                     .run_admitted_create(
                         session_id,
@@ -933,7 +934,8 @@ impl RuntimeState {
             LifecycleKind::Create,
             super::lifecycle::LifecycleStart::request(request_key, None, Some(control.clone())),
             Some(acceptance),
-            move |state, session_id, cancelled, _session_admission| async move {
+            move |state, session_id, control, _session_admission| async move {
+ let cancelled = control.cancelled.clone();
                 let capacity = state
                     .admit_container_launch(
                         &record.target_template_id,
