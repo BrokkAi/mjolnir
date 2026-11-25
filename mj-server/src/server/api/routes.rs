@@ -183,6 +183,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/suspend", post(suspend))
         .route(
+            "/sessions/{session_id}/suspend-resolve-blockers",
+            post(resolve_suspend_blockers),
+        )
+        .route(
             "/sessions/{session_id}/suspend-preflight",
             get(suspend_preflight),
         )

@@ -1552,6 +1552,7 @@ impl DashboardState {
             request_id: current_request_id,
             child_warning_titles,
             preflight: slot @ None,
+            resolving_blockers,
             ..
         } = &mut dialog.confirmation
         else {
@@ -1560,7 +1561,7 @@ impl DashboardState {
         if *session_id != preflight.session_id || *current_request_id != request_id {
             return DashboardAction::None;
         }
-        if !preflight.has_blockers() && !preflight.has_warnings() {
+        if !*resolving_blockers && !preflight.has_blockers() && !preflight.has_warnings() {
             self.cancel_modal();
             return DashboardAction::Suspend {
                 session_id: preflight.session_id,
@@ -1586,6 +1587,7 @@ impl DashboardState {
                     .to_owned()
             })
             .collect();
+        *resolving_blockers = false;
         *slot = Some(preflight);
         dialog.refresh_form();
         DashboardAction::None

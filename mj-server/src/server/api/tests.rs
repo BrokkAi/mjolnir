@@ -1538,6 +1538,31 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn resolve_suspend_blockers(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse, String>,
+            ApiFailure,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(Ok(
+                mj_core::suspend_consent::ResolveSuspendBlockersResponse {
+                    cleared_hidden_paths: vec!["linked/file".into()],
+                    moved_worktrees: vec![],
+                    skipped_worktrees: vec![],
+                    preflight: mj_core::suspend_consent::SuspendPreflight {
+                        session_id,
+                        ..Default::default()
+                    },
+                },
+            ))
+        })
+    }
+
     fn native_agent_history(
         &self,
         _owner: String,
@@ -4517,6 +4542,7 @@ async fn suspend_forwards_typed_consent_without_publication_409() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }
     );
     request
@@ -4548,6 +4574,7 @@ async fn suspend_forwards_typed_consent_without_publication_409() {
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         }
     );
     request
@@ -10000,4 +10027,74 @@ async fn native_agent_history_full_page_preserves_the_browser_contract_and_curso
             Some((12, "tool:edit".into())),
         ]
     );
+}
+
+#[tokio::test]
+async fn suspend_resolve_blockers_endpoint_returns_refreshed_preflight() {
+    let (app, _actions, _snapshot, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::post(
+                "/api/v1/sessions/session-1/suspend-resolve-blockers",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: mj_core::suspend_consent::ResolveSuspendBlockersResponse =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(result.cleared_hidden_paths, vec!["linked/file"]);
+    assert_eq!(result.preflight.session_id, "session-1");
+    assert!(!result.preflight.has_blockers());
+}
+
+#[tokio::test]
+async fn suspend_history_only_accepts_both_http_shapes_and_refuses_conflicting_modes() {
+    for payload in [
+        r#"{"history_only":true}"#,
+        r#"{"suspend_consent":{"history_only":true}}"#,
+    ] {
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+        let response = mj_core::runtime::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert!(matches!(
+            request.action,
+            ControllerAction::Suspend {
+                history_only: true,
+                without_checkpoint: false,
+                ..
+            }
+        ));
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"without_checkpoint":true,"suspend_consent":{"history_only":true}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

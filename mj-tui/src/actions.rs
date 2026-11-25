@@ -2054,6 +2054,13 @@ impl DashboardState {
                         child_warning_titles: Vec::new(),
                         preflight: None,
                         viewing_all_untracked: false,
+                        resolving_blockers: false,
+                        confirming_history_only: false,
+                        can_prompt: !matches!(
+                            session.state,
+                            mj_core::state::SessionState::Stopped
+                                | mj_core::state::SessionState::Lost
+                        ),
                     })
                     .naming_session(crate::render::session_name(session)),
                 );

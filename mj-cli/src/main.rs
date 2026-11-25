@@ -1486,6 +1486,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             },
             without_checkpoint: false,
             confirm_no_checkpoint: false,
+            history_only: false,
         },
         skip_keep_paths: args.skip_keep_paths.clone(),
         session_id: args.session.clone(),
@@ -2026,7 +2027,11 @@ fn format_move_dry_run(
         if preflight.has_blockers() {
             let _ = writeln!(out, "Blockers:");
             for blocker in &preflight.blockers {
-                let _ = writeln!(out, "  - {}", blocker.remedy);
+                let _ = writeln!(out, "  {}", blocker.title());
+                for path in &blocker.paths {
+                    let _ = writeln!(out, "    - {path}");
+                }
+                let _ = writeln!(out, "    fix: {}", blocker.remedy);
             }
         }
     }
@@ -3104,7 +3109,7 @@ mod tests {
             blockers: vec![mj_core::suspend_consent::SuspendBlocker {
                 kind: "unrepresented_git_state".into(),
                 paths: vec!["/workspace/outside".into()],
-                remedy: "unrepresented worktree /workspace/outside; push or copy out anything wanted, then run `git --git-dir /workspace/clone --work-tree /workspace/clone worktree remove --force /workspace/outside` or move it inside the clone before suspending".into(),
+                remedy: "unrepresented worktree /workspace/outside; push or copy out anything wanted, then run `git -C /workspace/clone worktree remove --force /workspace/outside` or move it inside the clone before suspending".into(),
             }],
             keep_dir_entries: vec![mj_core::suspend_consent::KeepDirEntry {
                 checkout: Default::default(),
@@ -3133,6 +3138,13 @@ mod tests {
             queued_commands_need_choice(2),
             "2 queued commands require an explicit --queue discard|start with --yes"
         );
+    }
+
+    #[test]
+    fn suspend_fix_blockers_conflicts_with_dry_run() {
+        let error =
+            Cli::try_parse_from(["mj", "suspend", "--fix-blockers", "--dry-run"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// F-16: `--session`, `--json`, and other flags had no description in

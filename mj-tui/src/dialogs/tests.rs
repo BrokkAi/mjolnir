@@ -747,6 +747,7 @@ fn failed_suspension_offers_retry_and_suspend_without_checkpoint() {
             consent: mj_core::suspend_consent::SuspendConsent {
                 without_checkpoint: true,
                 confirm_no_checkpoint: true,
+                history_only: false,
                 ..Default::default()
             },
         }
@@ -916,6 +917,18 @@ fn golden_dashboard_dialogs() {
                 ..Default::default()
             },
         ),
+        (
+            "suspend dialog with blockers",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                    kind: "hidden_tracked_edits".into(),
+                    paths: (1..=7).map(|i| format!("linked/file-{i}.txt")).collect(),
+                    remedy: "Clear index flags in the linked checkout before suspending.".into(),
+                }],
+                ..Default::default()
+            },
+        ),
         // Hard-won: #1679: backend-only warnings showed Continue anyway without a reason.
         (
             "suspend dialog with backend-only warnings",
@@ -935,6 +948,9 @@ fn golden_dashboard_dialogs() {
             child_warning_titles: Vec::new(),
             preflight: None,
             viewing_all_untracked: false,
+            resolving_blockers: false,
+            confirming_history_only: false,
+            can_prompt: true,
         }));
         assert_eq!(
             dashboard.apply_suspend_preflight(request_id, preflight),
@@ -942,6 +958,36 @@ fn golden_dashboard_dialogs() {
         );
         let lines = drawn(&mut dashboard, 100, 28);
         append_dialog_render(&mut output, label, 100, 28, &lines);
+        if label == "suspend dialog with blockers" {
+            dashboard.handle_key(key(KeyCode::Char('v')));
+            let lines = drawn(&mut dashboard, 100, 28);
+            append_dialog_render(&mut output, "suspend blockers expanded", 100, 28, &lines);
+            let Mode::Confirm(dialog) = &dashboard.mode else {
+                panic!("confirmation")
+            };
+            let confirmation = dialog.confirmation.clone();
+            let history = confirmation_buttons(&confirmation)
+                .iter()
+                .position(|label| label == "Suspend (history only)…")
+                .unwrap();
+            dashboard.activate_confirmation_button(confirmation, history);
+            append_dialog_render(
+                &mut output,
+                "history-only external worktree warning",
+                100,
+                28,
+                &drawn(&mut dashboard, 100, 28),
+            );
+            let Mode::Confirm(dialog) = &dashboard.mode else {
+                panic!("confirmation")
+            };
+            let confirmation = dialog.confirmation.clone();
+            dashboard.activate_confirmation_button(confirmation, 0);
+            let prompt = dashboard.handle_key(key(KeyCode::Char('a')));
+            assert!(
+                matches!(prompt, DashboardAction::PromptSession { ref text, .. } if text.contains("linked/file-7.txt") && text.contains("Clear index flags"))
+            );
+        }
     }
 
     let mut targets = dashboard_with_session(running_session());
@@ -2237,4 +2283,124 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
     assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
+}
+
+#[test]
+fn suspend_safe_fix_enters_pending_state_and_refresh_requires_confirmation() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = 77;
+    dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+        session_id: "session-1".into(),
+        request_id,
+        child_warning_titles: Vec::new(),
+        preflight: None,
+        viewing_all_untracked: false,
+        can_prompt: true,
+        resolving_blockers: false,
+        confirming_history_only: false,
+    }));
+    let preflight = mj_core::suspend_consent::SuspendPreflight {
+        session_id: "session-1".into(),
+        blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+            kind: "hidden_tracked_edits".into(),
+            paths: vec!["file".into()],
+            remedy: "Clear flags.".into(),
+        }],
+        ..Default::default()
+    };
+    dashboard.apply_suspend_preflight(request_id, preflight);
+    let _ = drawn(&mut dashboard, 100, 28);
+    let action = dashboard.handle_key(key(KeyCode::Char('f')));
+    assert_eq!(
+        action,
+        DashboardAction::ResolveSuspendBlockers {
+            session_id: "session-1".into(),
+            request_id
+        }
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: true,
+                        confirming_history_only: false, preflight: None, .. }))
+    );
+    let action = dashboard.apply_suspend_preflight(
+        request_id,
+        mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-1".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(action, DashboardAction::None);
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::SuspendSession { resolving_blockers: false,
+                        confirming_history_only: false, preflight: Some(_), .. }))
+    );
+}
+
+#[test]
+fn suspend_history_only_requires_second_confirmation_and_back_returns_to_blockers() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let confirmation = Confirmation::SuspendSession {
+        session_id: "session-1".into(),
+        request_id: 77,
+        child_warning_titles: vec!["child".into()],
+        preflight: Some(mj_core::suspend_consent::SuspendPreflight {
+            blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                kind: "hidden_tracked_edits".into(),
+                paths: vec!["file".into()],
+                remedy: "Clear flags".into(),
+            }],
+            interrupting: true,
+            ..Default::default()
+        }),
+        viewing_all_untracked: false,
+        can_prompt: true,
+        resolving_blockers: false,
+        confirming_history_only: false,
+    };
+    dashboard.activate_confirmation_button(confirmation.clone(), 0);
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    let index = confirmation_buttons(&confirmation)
+        .iter()
+        .position(|label| label == "Suspend (history only)…")
+        .unwrap();
+    assert_eq!(
+        dashboard.activate_confirmation_button(confirmation, index),
+        DashboardAction::None
+    );
+    let rendered = drawn(&mut dashboard, 100, 28).join(" ");
+    assert!(rendered.contains("Discard workspace Git changes"));
+    assert!(!rendered.contains("Save a recovery copy"));
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation")
+    };
+    assert_eq!(
+        confirmation_buttons(&dialog.confirmation),
+        vec!["Back", "Suspend with history only"]
+    );
+    let confirmation = dialog.confirmation.clone();
+    dashboard.activate_confirmation_button(confirmation, 0);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("blockers")
+    };
+    assert!(
+        confirmation_buttons(&dialog.confirmation)
+            .iter()
+            .any(|label| label == "Suspend (history only)…")
+    );
+    let confirmation = dialog.confirmation.clone();
+    dashboard.activate_confirmation_button(confirmation, index);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation")
+    };
+    let confirmation = dialog.confirmation.clone();
+    assert_eq!(
+        dashboard.activate_confirmation_button(confirmation, 1),
+        DashboardAction::Suspend {
+            session_id: "session-1".into(),
+            consent: mj_core::suspend_consent::SuspendConsent {
+                history_only: true,
+                ..Default::default()
+            },
+        }
+    );
 }

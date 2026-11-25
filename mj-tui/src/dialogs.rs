@@ -362,6 +362,9 @@ pub(crate) enum Confirmation {
         child_warning_titles: Vec<String>,
         preflight: Option<mj_core::suspend_consent::SuspendPreflight>,
         viewing_all_untracked: bool,
+        can_prompt: bool,
+        resolving_blockers: bool,
+        confirming_history_only: bool,
     },
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
@@ -1843,8 +1846,99 @@ impl DashboardState {
                     consent: mj_core::suspend_consent::SuspendConsent {
                         without_checkpoint: true,
                         confirm_no_checkpoint: true,
+                        history_only: false,
                         ..Default::default()
                     },
+                }
+            }
+            (
+                Confirmation::SuspendSession {
+                    confirming_history_only: true,
+                    session_id,
+                    ..
+                },
+                1,
+            ) => {
+                self.cancel_modal();
+                DashboardAction::Suspend {
+                    session_id,
+                    consent: mj_core::suspend_consent::SuspendConsent {
+                        history_only: true,
+                        ..Default::default()
+                    },
+                }
+            }
+            (
+                mut confirmation @ Confirmation::SuspendSession {
+                    confirming_history_only: true,
+                    ..
+                },
+                0,
+            ) => {
+                if let Confirmation::SuspendSession {
+                    confirming_history_only,
+                    ..
+                } = &mut confirmation
+                {
+                    *confirming_history_only = false;
+                }
+                self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+                DashboardAction::None
+            }
+            (
+                Confirmation::SuspendSession {
+                    session_id,
+                    request_id,
+                    preflight: Some(preflight),
+                    can_prompt,
+                    child_warning_titles,
+                    ..
+                },
+                index,
+            ) if preflight.has_blockers() && index != 0 => {
+                let fixing = preflight.has_auto_fixable_blockers() && index == 1;
+                if fixing {
+                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+                        session_id: session_id.clone(),
+                        request_id,
+                        child_warning_titles,
+                        preflight: None,
+                        viewing_all_untracked: false,
+                        can_prompt,
+                        resolving_blockers: true,
+                        confirming_history_only: false,
+                    }));
+                    DashboardAction::ResolveSuspendBlockers {
+                        session_id,
+                        request_id,
+                    }
+                } else if can_prompt
+                    && index
+                        == if preflight.has_auto_fixable_blockers() {
+                            2
+                        } else {
+                            1
+                        }
+                {
+                    self.cancel_modal();
+                    DashboardAction::PromptSession {
+                        session_id,
+                        text: mj_core::suspend_consent::format_blocker_cleanup_prompt(
+                            &preflight.blockers,
+                        ),
+                    }
+                } else {
+                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+                        session_id,
+                        request_id,
+                        preflight: Some(preflight),
+                        can_prompt,
+                        child_warning_titles,
+                        viewing_all_untracked: false,
+                        resolving_blockers: false,
+                        confirming_history_only: true,
+                    }));
+                    DashboardAction::None
                 }
             }
             (
