@@ -3,6 +3,53 @@
 use super::*;
 use mj_core::mailbox::{LifecycleRecipient, MailboxEvent, MailboxEventBody};
 
+/// Detach a session without removing watches that other live followers need.
+/// The caller supplies a SQL expression (`?1` or a trigger's session ID).
+pub(super) fn detach_github_watches_sql(id: &str) -> [String; 2] {
+    let other_live_follower = format!(
+        "EXISTS (SELECT 1 FROM github_watch_classifications c
+                     JOIN sessions s ON s.session_id = c.session_id
+                     WHERE c.owner = github_watch_items.owner
+                       AND c.repo = github_watch_items.repo
+                       AND c.number = github_watch_items.number
+                       AND c.interested = 1 AND c.created = 0
+                       AND c.session_id <> {id}
+                       AND s.state <> 'destroyed-with-data-loss')"
+    );
+    [
+        format!(
+            "DELETE FROM github_watch_items
+                 WHERE (creator_session_id = {id}
+                        OR (creator_session_id IS NULL
+                            AND EXISTS (SELECT 1 FROM github_watch_classifications f
+                                        WHERE f.owner = github_watch_items.owner
+                                          AND f.repo = github_watch_items.repo
+                                          AND f.number = github_watch_items.number
+                                          AND f.session_id = {id})))
+                   AND NOT {other_live_follower};"
+        ),
+        format!(
+            "UPDATE github_watch_items SET creator_session_id = NULL WHERE creator_session_id = {id};"
+        ),
+    ]
+}
+
+pub(super) fn clear_github_subscriptions_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<()> {
+    for sql in detach_github_watches_sql("?1") {
+        connection.execute(&sql, [session_id])?;
+    }
+    // Keep classification receipts so the next poll cannot rediscover the
+    // old conversation's items and immediately subscribe the session again.
+    connection.execute(
+        "UPDATE github_watch_classifications SET interested=0, created=0 WHERE session_id=?1",
+        [session_id],
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubRepoCursor {
     pub updated_at: String,
