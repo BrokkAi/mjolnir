@@ -620,12 +620,15 @@ impl ProjectMemoryIdentity {
     /// The exact identity used before accepted project snapshots were stored.
     /// Discovery and worker launch share this calculation so raw directories
     /// cannot borrow memory from an unrelated configured project.
+    ///
+    /// `checkout` is the one `State` resolved for `session`: a sub-agent's own
+    /// record names no checkout, because it works in its owner's.
     pub fn for_legacy_session(
         session: &crate::state::SessionRecord,
+        checkout: &crate::state::Checkout<'_>,
         bundle: Option<&crate::config::ProjectBundle>,
         parent_worktree: Option<&crate::state::ManagedWorktree>,
     ) -> Result<Self> {
-        let checkout = session.checkout();
         let worktree = match checkout.effective() {
             crate::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
             _ => parent_worktree,
@@ -655,7 +658,7 @@ impl ProjectMemoryIdentity {
         let repository = match session.target.as_deref() {
             Some(crate::state::TargetLocator::LocalBare { .. }) => {
                 RepositoryMemoryIdentity::Local {
-                    canonical_root: std::fs::canonicalize(project)
+                    canonical_root: std::fs::canonicalize(&project)
                         .unwrap_or_else(|_| project.to_path_buf()),
                 }
             }

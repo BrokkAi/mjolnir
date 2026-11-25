@@ -214,6 +214,11 @@ fn storage_unavailable(message: impl Into<String>) -> mj_core::refusal::Refusal 
     mj_core::refusal::Refusal::precondition(message).with_code("container-storage-not-preserved")
 }
 
+/// `referenced_environment` names the variables whose values the session
+/// delivers through `launch.json` from a secret reference. A container created
+/// before that may still carry a copy in its environment; the replacement
+/// sheds it rather than preserving a stale secret in the engine's metadata.
+#[allow(clippy::too_many_arguments)]
 pub fn inspect_retained_container(
     locator: &TargetLocator,
     session_id: &str,
@@ -221,6 +226,7 @@ pub fn inspect_retained_container(
     operation_id: &str,
     workspace: &Path,
     worker_root: &Path,
+    referenced_environment: &std::collections::BTreeSet<String>,
     executor: &impl CommandExecutor,
 ) -> Result<RetainedContainer> {
     let (host, name) = host_and_name(locator)?;
@@ -282,7 +288,17 @@ pub fn inspect_retained_container(
             "storage-preserving upgrades do not support this container's device, privilege, port, or namespace overrides; the existing container is unchanged"
         )
     );
-    for assignment in &record.config.env {
+    let environment = record
+        .config
+        .env
+        .into_iter()
+        .filter(|assignment| {
+            assignment
+                .split_once('=')
+                .is_none_or(|(name, _)| !referenced_environment.contains(name))
+        })
+        .collect::<Vec<_>>();
+    for assignment in &environment {
         validate_retained_environment(assignment)?;
     }
     ensure!(
@@ -447,7 +463,7 @@ pub fn inspect_retained_container(
         operation_id: operation_id.into(),
         mounts,
         user: record.config.user,
-        environment: record.config.env,
+        environment,
         working_directory: record.config.working_dir,
         memory: record.host_config.memory,
         nano_cpus: record.host_config.nano_cpus,
@@ -1696,6 +1712,7 @@ mod tests {
             "operation-fixture",
             Path::new("/workspace/session-fixture"),
             Path::new("/var/lib/hel/workers/session-fixture"),
+            &Default::default(),
             &RetainedInspectionExecutor {
                 inspection: retained_inspection(security_opt),
             },
@@ -1711,6 +1728,33 @@ mod tests {
         };
         let retained = inspect_fixture(&locator, &["label=disable"]).unwrap();
         assert_eq!(retained.name, "container-name");
+    }
+
+    #[test]
+    fn upgrade_sheds_environment_the_session_now_delivers_from_a_secret_reference() {
+        let locator = TargetLocator::LocalPodman {
+            container_id: "container-name".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let mut inspection: serde_json::Value =
+            serde_json::from_str(&retained_inspection(&[])).unwrap();
+        inspection[0]["Config"]["Env"] =
+            serde_json::json!(["API_KEY=sk-secret-value", "MODE=fast", "PATH=/usr/bin"]);
+        let retained = inspect_retained_container(
+            &locator,
+            "session-fixture",
+            "example/image:new",
+            "operation-fixture",
+            Path::new("/workspace/session-fixture"),
+            Path::new("/var/lib/hel/workers/session-fixture"),
+            &std::collections::BTreeSet::from(["API_KEY".to_owned()]),
+            &RetainedInspectionExecutor {
+                inspection: inspection.to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(retained.environment, ["MODE=fast", "PATH=/usr/bin"]);
     }
 
     #[test]
@@ -1901,6 +1945,7 @@ mod tests {
             "unsupported",
             Path::new(&workspace),
             Path::new(&root),
+            &Default::default(),
             &ProcessExecutor,
         )
         .unwrap_err();
@@ -1981,6 +2026,7 @@ mod tests {
             "test-operation",
             Path::new(&workspace),
             Path::new(&root),
+            &Default::default(),
             &ProcessExecutor,
         )
         .unwrap();
@@ -2022,6 +2068,7 @@ mod tests {
             "observation",
             Path::new(&workspace),
             Path::new(&root),
+            &Default::default(),
             &ProcessExecutor,
         )
         .unwrap();
@@ -2052,6 +2099,7 @@ mod tests {
                 "unsupported",
                 Path::new("/layer-only-workspace"),
                 Path::new(&root),
+                &Default::default(),
                 &ProcessExecutor
             )
             .is_err()
@@ -2319,6 +2367,7 @@ mod tests {
                 "op1",
                 Path::new("/workspace/session-fixture"),
                 Path::new("/var/lib/hel/workers/session-fixture"),
+                &Default::default(),
                 &engine,
             )
             .unwrap();

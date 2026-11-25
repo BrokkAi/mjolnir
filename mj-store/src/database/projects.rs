@@ -8,7 +8,12 @@ use mj_core::repository::ProjectBundleSnapshot;
 pub struct ProjectDiscoveryChange {
     pub sequence: i64,
     pub session_id: String,
-    pub directory: PathBuf,
+    /// The path the session record stores. Absent for a managed checkout,
+    /// whose path derives from its descriptor.
+    pub directory: Option<PathBuf>,
+    /// The managed checkout recorded with the change, which still names the
+    /// source project when the session is gone before discovery runs.
+    pub managed_worktree: Option<mj_core::state::ManagedWorktree>,
     pub target_id: String,
 }
 
@@ -166,7 +171,7 @@ fn store_catalog_project_at(
     // Capture the old accepted definition before rebinding its context. Active
     // workers retain their own replica and repository IDs across this update.
     tx.execute(
-        "UPDATE sessions SET project_json=?2 WHERE project_json IS NULL AND project_directory IS NULL
+        "UPDATE sessions SET project_json=?2 WHERE project_json IS NULL AND project_directory IS NULL AND managed_worktree IS NULL
         AND session_id IN (SELECT session_id FROM session_contexts WHERE bundle_id=?1)",
         params![bundle_id, snapshot],
     )?;
@@ -204,7 +209,7 @@ fn retire_changed_project(tx: &Transaction<'_>, id: &str, new_key: &str) -> Resu
         retired = format!("{base}-{suffix}");
     }
     tx.execute("INSERT INTO project_catalog(bundle_id,project_key,snapshot_json,hidden) VALUES(?1,?2,?3,1)",params![retired,format!("retiring:{retired}"),snapshot])?;
-    tx.execute("UPDATE sessions SET project_json=?2 WHERE project_json IS NULL AND project_directory IS NULL AND session_id IN (SELECT session_id FROM session_contexts WHERE bundle_id=?1)",params![id,snapshot])?;
+    tx.execute("UPDATE sessions SET project_json=?2 WHERE project_json IS NULL AND project_directory IS NULL AND managed_worktree IS NULL AND session_id IN (SELECT session_id FROM session_contexts WHERE bundle_id=?1)",params![id,snapshot])?;
     tx.execute("INSERT OR IGNORE INTO project_session_aliases(session_id,bundle_id) SELECT session_id,bundle_id FROM session_contexts WHERE bundle_id=?1",[id])?;
     tx.execute(
         "UPDATE session_contexts SET bundle_id=?2 WHERE bundle_id=?1",
@@ -298,7 +303,7 @@ pub fn finish_project_seed(harness: &str, home: &Path) -> Result<()> {
 
 pub fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChange>> {
     let connection = open_reader(&database_path())?;
-    let mut statement=connection.prepare("SELECT sequence,session_id,directory,target_template_id
+    let mut statement=connection.prepare("SELECT sequence,session_id,directory,managed_worktree,target_template_id
         FROM project_discovery_changes WHERE sequence>(SELECT sequence FROM project_discovery_progress WHERE singleton=1)
         OR (?1 AND sequence IN (SELECT sequence FROM project_discovery_failures)) ORDER BY sequence LIMIT CASE WHEN ?1 THEN -1 ELSE 128 END")?;
     statement
@@ -306,16 +311,24 @@ pub fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChan
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?
         .map(|row| {
-            let (sequence, session_id, directory, target_id) = row?;
+            let (sequence, session_id, directory, managed_worktree, target_id) = row?;
+            let managed_worktree = managed_worktree
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .with_context(|| {
+                    format!("read the managed checkout queued for discovery of {session_id}")
+                })?;
             Ok(ProjectDiscoveryChange {
                 sequence,
                 session_id,
-                directory: blob_to_path(&directory),
+                directory: directory.as_deref().map(blob_to_path),
+                managed_worktree,
                 target_id,
             })
         })

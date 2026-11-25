@@ -397,7 +397,7 @@ pub fn session_problem_in(
     let paths = mj_core::targets::storage::session_storage_paths(
         session.target.as_ref()?,
         &session.id,
-        checkout.project_directory(),
+        checkout.project_directory().as_deref(),
     );
     storage
         .iter()

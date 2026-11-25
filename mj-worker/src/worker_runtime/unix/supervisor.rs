@@ -355,6 +355,7 @@ where
     };
     // The leader can exit on TERM while a descendant ignores it.
     terminate_process_group(pid, libc::SIGKILL);
+    wait_for_bridge_group_exit(pid).await?;
     if let Some(error) = forwarding_error {
         return Err(error);
     }
@@ -365,6 +366,46 @@ where
         bail!("supervised ACP bridge exited with {status}");
     }
     Ok(())
+}
+
+// SIGKILL delivery is asynchronous. Only a vanished group acknowledges that
+// the retired bridge can no longer write into its staged home.
+async fn wait_for_bridge_group_exit(pid: i32) -> Result<()> {
+    // Leave room inside ACP's existing five-second supervisor wait. The leader
+    // already had its two-second TERM grace; this wait covers remaining KILLs.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        loop {
+            // SAFETY: the negative pid selects only the bridge group we own.
+            // Its leader was already awaited; only adopted descendants remain.
+            // Never reap unrelated children or steal another Tokio wait owner.
+            let reaped = unsafe { libc::waitpid(-pid, std::ptr::null_mut(), libc::WNOHANG) };
+            if reaped > 0 {
+                continue;
+            }
+            if reaped < 0 {
+                let error = std::io::Error::last_os_error();
+                if !matches!(error.raw_os_error(), Some(libc::ECHILD | libc::EINTR)) {
+                    return Err(error).context("reap retired ACP bridge descendants");
+                }
+            }
+            break;
+        }
+        // SAFETY: signal zero probes existence without changing the owned group.
+        if unsafe { libc::kill(-pid, 0) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            if !matches!(error.raw_os_error(), Some(libc::EPERM | libc::EINTR)) {
+                return Err(error).context("probe retired ACP bridge process group");
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("ACP bridge process group {pid} did not terminate");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 /// Make this process lead its own session, so session teardown can stop

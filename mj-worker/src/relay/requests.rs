@@ -383,6 +383,8 @@ impl DurableRelay {
             | RelayRequest::SlopcopLoginState
             | RelayRequest::InstallSlopcopLogin { .. }
             | RelayRequest::RemoveSlopcopLogin
+            | RelayRequest::ReadRetiredLogins { .. }
+            | RelayRequest::AckRetiredLogin { .. }
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }
             | RelayRequest::SkillsState

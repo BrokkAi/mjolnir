@@ -207,7 +207,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 )
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
-                    (mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL - u32::from(race == "old-worker"))
+                    (mj_core::relay::RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL - u32::from(race == "old-worker"))
                         .to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
@@ -296,7 +296,8 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         if race == "old-worker" {
             let refusal = request.unwrap_err();
             assert!(
-                format!("{refusal:#}").contains("worker predates in-place restarts"),
+                format!("{refusal:#}")
+                    .contains("worker predates credential-preserving in-place Move"),
                 "{refusal:#}"
             );
             let durable = mj_controller::database::load_move_operation(LATCH_RELAY_SESSION)
@@ -809,7 +810,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                 )
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
-                    mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL.to_string(),
+                    mj_core::relay::RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL.to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
                 .isolated_store(directory.path())
@@ -1463,6 +1464,12 @@ fn in_place_move_preserves_source_profile_files_when_worker_refuses_restart() {
                 "clearing the store fence re-admits credential sync after a pre-commit refusal"
             );
 
+            assert!(
+                mj_controller::database::pending_retired_logins(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .is_empty(),
+                "pre-commit refusal must clear retired-login authority"
+            );
             // A typed pre-commit refusal remains unambiguous on retry: no
             // candidate overlay has touched the live source home.
             let live_store_id = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0")
@@ -1531,9 +1538,9 @@ fn in_place_move_preserves_source_profile_files_when_worker_refuses_restart() {
 }
 
 #[test]
-fn in_place_move_harvests_fresher_codex_login_before_staging_destination() {
+fn in_place_move_preserves_fresher_codex_login_when_destination_is_promoted() {
     if !isolate_in_place_move_dispatch_test(
-        "in_place_move_harvests_fresher_codex_login_before_staging_destination",
+        "in_place_move_preserves_fresher_codex_login_when_destination_is_promoted",
     ) {
         return;
     }
@@ -1624,11 +1631,17 @@ fn in_place_move_harvests_fresher_codex_login_before_staging_destination() {
             channels.shutdown.shutdown().await.unwrap();
         });
     assert_eq!(operation.phase, MovePhase::Completed);
+    assert!(
+        mj_controller::database::pending_retired_logins(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_empty(),
+        "successful adoption and acknowledgement must clear durable authority"
+    );
     let canonical_source: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.source_home.join("auth.json")).unwrap()).unwrap();
     assert_eq!(
         canonical_source["tokens"]["access_token"], "fresh-source-access",
-        "source's fresher staged Codex login must be harvested before destination overwrites it"
+        "retired source login must reach the source canonical store"
     );
     let staged_dest: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.worker_root.join("profile/auth.json")).unwrap())
@@ -1645,7 +1658,7 @@ fn isolate_in_place_move_dispatch_test(name: &str) -> bool {
         .env("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS", "1")
         .env(
             LATCH_RELAY_MAX_PROTOCOL,
-            mj_core::relay::RELAY_STAGED_IN_PLACE_RELOAD_PROTOCOL.to_string(),
+            mj_core::relay::RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL.to_string(),
         )
         .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
         .isolated_store(directory.path())

@@ -136,12 +136,9 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let session_owns_managed_checkout = self
-            .state
-            .checkout(session_id)?
-            .managed_worktree()
-            .is_some();
-        session.validate_configuration(&self.config)?;
+        let checkout = self.state.checkout(session_id)?;
+        let session_owns_managed_checkout = checkout.managed_worktree().is_some();
+        session.validate_configuration_in(&checkout, &self.config)?;
         if let Some(target) = session.target.as_ref() {
             crate::worker_lifecycle::require(session_id)?.verify_target(target)?;
         }

@@ -859,7 +859,7 @@ impl Controller {
             .get(session_id)
             .expect("session retained after managed worktree preparation")
             .clone();
-        let project_directory = self.state.checkout(session_id)?.project_directory().map(Path::to_path_buf);
+        let project_directory = self.state.checkout(session_id)?.project_directory().map(std::borrow::Cow::into_owned);
         // Keep planning, preflight, creation, and locator discovery in one
         // result so the caller's failure disposition applies to every error.
         let result = (|| {
@@ -1032,26 +1032,12 @@ impl Controller {
                     return Err(error);
                 }
             };
-            // Values that must stay off the command line: the GitHub token,
-            // and, for a sandbox whose engine runs under `sudo`, every
-            // environment value that came from a reference.
-            let mut secrets = match template {
-                TargetTemplate::SshNitro { container, .. } => {
-                    super::backend::container_environment(
-                        container,
-                        ContainerOverrides::for_session(&session),
-                        true,
-                    )
-                    .secrets
-                }
-                _ => Vec::new(),
-            };
-            if let Some(token) = container_github_token {
-                secrets.retain(|(name, _)| name != "GH_TOKEN");
-                secrets.push(("GH_TOKEN".to_owned(), token.to_owned()));
-            }
-            if !secrets.is_empty()
-                && let Err(error) = provision.provide_target_environment_secrets(&target, &secrets)
+            // The GitHub token must stay off the command line. Secret-sourced
+            // target environment values are not passed to the engine at all:
+            // they reach the worker through `launch.json`.
+            if let Some(token) = container_github_token
+                && let Err(error) =
+                    provision.provide_target_environment_secret(&target, "GH_TOKEN", token)
             {
                 if let Some(cache) = &prepared_cache {
                     let _ = cache.cleanup(executor);

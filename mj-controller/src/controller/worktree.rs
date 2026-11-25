@@ -193,7 +193,7 @@ impl Controller {
                             )
                         })?,
                 )?,
-                directory,
+                &*directory,
             ),
             mj_core::state::Checkout::ManagedWorkspace => {
                 return Ok(session.project_source(&self.config));
@@ -389,11 +389,12 @@ impl Controller {
         {
             return Ok(None);
         }
-        let relative_directory = inspection
-            .source_project_directory
-            .strip_prefix(&inspection.source_repository)
-            .context("raw project directory is outside its repository")?
-            .to_path_buf();
+        ensure!(
+            inspection
+                .source_project_directory
+                .starts_with(&inspection.source_repository),
+            "raw project directory is outside its repository"
+        );
         let worktree_root = target_path::join(
             &inspection.source_repository,
             &Path::new(".mj").join("clones").join(session_id),
@@ -453,7 +454,9 @@ impl Controller {
         };
         ensure_managed_worktree_available(executor, &managed)?;
         let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.project_directory = Some(target_path::join(&worktree_root, &relative_directory));
+        // The checkout path derives from the descriptor; the source directory
+        // the record held while planning is no longer needed.
+        record.project_directory = None;
         record.managed_worktree = Some(Box::new(managed.clone()));
         record.updated_at = now();
         self.persist_session_state(session_id)?;
@@ -974,7 +977,7 @@ pub(super) fn apply_workspace_to_raw(
     record: &mut SessionRecord,
     conversion: &WorkspaceToRawConversion,
 ) {
-    record.project_directory = Some(conversion.worktree.worktree_root.clone());
+    record.project_directory = None;
     record.managed_worktree = Some(Box::new(conversion.worktree.clone()));
 }
 
@@ -1082,7 +1085,7 @@ pub(super) fn plan_raw_to_workspace_from_origin_delta(
     let checkout = session
         .checkout()
         .project_directory()
-        .map(Path::to_path_buf)
+        .map(std::borrow::Cow::into_owned)
         .unwrap_or_else(|| metadata.relative_destination.clone());
     Ok(RawToWorkspaceConversion {
         checkout,
@@ -1140,7 +1143,7 @@ pub(super) fn plan_raw_to_workspace(
             }
             mj_core::state::Checkout::Attached { .. }
             | mj_core::state::Checkout::Borrowed { .. } => {
-                inspect_raw_project(executor, &ManagedWorktreeTarget::Local, project_directory)?
+                inspect_raw_project(executor, &ManagedWorktreeTarget::Local, &project_directory)?
                     .source_repository
             }
             mj_core::state::Checkout::ManagedWorkspace => {
@@ -1208,7 +1211,7 @@ pub(super) fn plan_raw_to_workspace_with_checkout(
         }
         mj_core::state::Checkout::Attached { .. } | mj_core::state::Checkout::Borrowed { .. } => {
             let inspection =
-                inspect_raw_project(executor, &ManagedWorktreeTarget::Local, project_directory)?;
+                inspect_raw_project(executor, &ManagedWorktreeTarget::Local, &project_directory)?;
             ensure!(
                 inspection.source_project_directory == inspection.source_repository,
                 "{} is a subdirectory of its checkout; only a whole checkout can move into a target",
@@ -2880,32 +2883,21 @@ pub(super) fn restore_managed_clone_origin_delta(
 }
 
 /// Upgrade a legacy linked-worktree record to a fresh independent managed clone
-/// under `<source_repository>/.mj/clones/<session_id>`, preserving any relative
-/// subdirectory in `project_directory`.
+/// under `<source_repository>/.mj/clones/<session_id>`. The project's
+/// subdirectory follows from the descriptor, so the record stores no path.
 pub(super) fn upgrade_legacy_worktree_to_clone(
     worktree: &ManagedWorktree,
     session_id: &str,
-    project_directory: Option<&Path>,
-) -> (ManagedWorktree, Option<PathBuf>) {
+) -> ManagedWorktree {
     let clone_root = target_path::join(
         &worktree.source_repository,
         &Path::new(".mj").join("clones").join(session_id),
     );
-    let upgraded = ManagedWorktree {
-        worktree_root: clone_root.clone(),
+    ManagedWorktree {
+        worktree_root: clone_root,
         kind: ManagedCheckoutKind::Clone,
         ..worktree.clone()
-    };
-    let upgraded_project_directory = project_directory.map(|dir| {
-        if let Ok(relative) = dir.strip_prefix(&worktree.worktree_root)
-            && !relative.as_os_str().is_empty()
-        {
-            target_path::join(&clone_root, relative)
-        } else {
-            clone_root
-        }
-    });
-    (upgraded, upgraded_project_directory)
+    }
 }
 
 /// Resume a legacy `ManagedCheckoutKind::Worktree` archive into a fresh

@@ -258,7 +258,7 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
 
 #[test]
 fn in_place_protocol_gate_and_deferred_notice_contract() {
-    assert!(ensure_worker_supports_in_place_move("s1", 91, false).is_ok());
+    assert!(ensure_worker_supports_in_place_move("s1", 93, false).is_ok());
     let manual = ensure_worker_supports_in_place_move("s1", 90, false)
         .unwrap_err()
         .to_string();
@@ -1734,7 +1734,16 @@ mod staged_in_place_tests {
                             "invalid canonical settings: staging must be skipped",
                         )
                         .unwrap();
-                        let channels = start_source_relay_manager(&relay_root);
+                        // A restart that already committed under an older worker
+                        // must settle forward without sending a new reload.
+                        let channels = crate::session_manager::spawn_session_manager().unwrap();
+                        let mut legacy =
+                            latch_relay_target(&relay_root, None, ReleaseSupport::Supported, false);
+                        legacy
+                            .spec
+                            .env
+                            .insert(LATCH_RELAY_MAX_PROTOCOL.into(), "92".into());
+                        channels.targets.send(vec![legacy]).unwrap();
                         let outcome = fixture
                             .controller
                             .recover_move_managed_controlled(
@@ -2317,4 +2326,114 @@ mod direct_peer_route {
         assert!(!drop_credentials_removed_by_transfer(&mut no_peer, 1, None));
         assert_eq!(no_peer.len(), 1);
     }
+}
+
+#[test]
+fn move_session_sealed_continuity_survives_config_changes_and_absent_native_identity() {
+    let state_a = sample_target("source");
+    let state_b = sample_target("destination");
+    let mut op = MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
+        transfer_route: Some(TransferRoute::SameHost),
+        consent: Default::default(),
+        skip_keep_paths: vec![PathBuf::from("cache/big.bin")],
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
+        source_checkpoint_only: false,
+        in_place: false,
+        operation_id: "op-cross-1".to_owned(),
+        selection: MoveSelection {
+            consent: Default::default(),
+            skip_keep_paths: vec![PathBuf::from("cache/big.bin")],
+            clear_resource_allocation: false,
+            session_id: "s1".to_owned(),
+            profile_id: Some("p2".to_owned()),
+            target_template_id: Some("podman".to_owned()),
+            additional_mounts: None,
+            resource_allocation: None,
+            subagents: None,
+            oracle: None,
+            oracle_choice: None,
+        },
+        source_profile_id: "p1".to_owned(),
+        source_target_template_id: "local".to_owned(),
+        source_target: Some(state_a),
+        source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: Some(state_b),
+        destination_native_session_id: None,
+        destination_store_id: Some("store-dest".to_owned()),
+        configuration_fingerprint: String::new(),
+        checkpoint: None,
+        recovery_session: None,
+        queue: ResumeQueueDisposition::Discard,
+        phase: MovePhase::DestinationStarting,
+        queue_admission_started: false,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: "2026-11-21T00:00:00Z".to_owned(),
+        updated_at: "2026-11-21T00:00:00Z".to_owned(),
+        error: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert(
+        "p1".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            dir.path().join("p1"),
+        ),
+    );
+    config.profiles.insert(
+        "p2".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            dir.path().join("p2"),
+        ),
+    );
+    let mut session = sample_session_record(SessionState::Running, sample_target("source"));
+    session.id = "s1".into();
+    session.last_profile = "p1".into();
+    session.native_session_id = None;
+    let mut controller = crate::controller::Controller {
+        config,
+        state: Default::default(),
+    };
+    controller.state.sessions.insert("s1".into(), session);
+    op.accepted_preparation = Some(Box::new(serde_json::from_value(serde_json::json!({
+        "selection":op.selection, "source_profile_id":"p1", "source_target_template_id":"local",
+        "cross_harness":false, "active":false, "queued_commands":[], "fingerprint":"sealed", "operation_id":"sealed",
+    })).unwrap()));
+    assert!(controller.move_native_continuity(&op).unwrap());
+    controller.apply_in_place_destination(&op).unwrap();
+    assert!(controller.state.sessions["s1"].native_session_id.is_none());
+    controller
+        .state
+        .sessions
+        .get_mut("s1")
+        .unwrap()
+        .native_session_id = Some("thread".into());
+    controller.apply_in_place_destination(&op).unwrap();
+    assert_eq!(
+        controller.state.sessions["s1"].native_session_id.as_deref(),
+        Some("thread")
+    );
+    op.accepted_preparation.as_mut().unwrap().cross_harness = true;
+    controller.apply_in_place_destination(&op).unwrap();
+    assert!(controller.state.sessions["s1"].native_session_id.is_none());
+    op.accepted_preparation = None;
+    assert!(!controller.move_native_continuity(&op).unwrap());
 }

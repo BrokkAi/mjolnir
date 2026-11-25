@@ -432,9 +432,10 @@ pub struct ReviewerLaunchConfig {
     pub harness: HarnessKind,
     pub bridge_command: PathBuf,
     pub bridge_args: Vec<String>,
-    /// Harness environment without its home variable: the worker fills that in
-    /// from the staged reviewer directory it owns.
-    #[serde(default)]
+    /// Read only, for records written before the launch took the profile's
+    /// environment from the live profile. It is never written again: the
+    /// values were resolved secrets that the record outlived.
+    #[serde(default, skip_serializing)]
     pub environment: std::collections::BTreeMap<String, String>,
     /// Variables the worker removes from the reviewer's environment after it
     /// adds the target's login environment; see

@@ -299,11 +299,12 @@ fn github_token_is_inherited_only_by_managed_containers() {
     );
 }
 
-/// `sudo` logs every command line it runs to the host's journal, and a
-/// sandbox's engine runs under `sudo`. A value that came from a reference must
-/// reach the engine through the ssh command's environment, never its argv.
+/// A value that came from a reference must not reach the engine at all: the
+/// engine records `--env` in the container's configuration, and `sudo` (a
+/// sandbox's engine runs under it) logs every command line. Referenced values
+/// reach the worker through `launch.json` instead.
 #[test]
-fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
+fn a_container_launch_gives_the_engine_only_literal_environment_entries() {
     use mj_core::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
     let resolver = SecretResolver::fixed(
         BTreeMap::new(),
@@ -365,7 +366,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     else {
         panic!("the Nitro target and accepted bundle should enable the remote");
     };
-    let mut plan = targets::provision_plan_named(
+    let plan = targets::provision_plan_named(
         &target,
         session_id,
         &bundle,
@@ -378,9 +379,10 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         },
     )
     .unwrap();
-    let secrets = container_environment(&container, ContainerOverrides::default(), true).secrets;
-    plan.provide_target_environment_secrets(&target, &secrets)
-        .unwrap();
+    assert_eq!(
+        container_environment(&container, ContainerOverrides::default()),
+        ["--env", "MODE=fast"]
+    );
     let run = plan
         .commands
         .iter()
@@ -388,8 +390,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
         .unwrap();
     let line = run.args.last().unwrap();
     assert!(!line.contains("sk-secret-value"), "{line}");
-    assert!(line.contains("--preserve-env=API_KEY"), "{line}");
-    assert!(line.contains("'--env' 'API_KEY'"), "{line}");
+    assert!(!line.contains("API_KEY"), "{line}");
     assert!(line.contains("'--env' 'MODE=fast'"), "{line}");
     assert!(
         line.contains("'--mbx-remote' 's3://test-build-cache/mbx'"),
@@ -404,7 +405,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     assert_eq!(line.matches("'--mbx-namespace=").count(), 2, "{line}");
     assert!(!line.contains("MBX_REMOTE_"), "{line}");
     assert!(!run.env.keys().any(|name| name.starts_with("MBX_REMOTE_")));
-    assert_eq!(run.sensitive_stdin(), Some(&b"sk-secret-value\n"[..]));
+    assert_eq!(run.sensitive_stdin(), None);
 }
 
 fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {
