@@ -26,9 +26,8 @@ async fn acquire_suspend_blocker_lease(
     session_id: &str,
     record: Option<&SessionRecord>,
     admission: mj_controller::recovery_gate::ForegroundAdmission,
-    leases: &mut Vec<mj_controller::controller::IdleWorkspaceLease>,
     parent: bool,
-) -> Result<()> {
+) -> Result<Option<mj_controller::controller::IdleWorkspaceLease>> {
     match record {
         Some(record) if record.target.is_some() && record.state == SessionState::Running => {
             let handle = runtime
@@ -47,37 +46,35 @@ async fn acquire_suspend_blocker_lease(
                 })?;
             let session_admission =
                 mj_controller::recovery_gate::SessionAdmission::Foreground(admission);
-            leases.push(
-                mj_controller::controller::IdleWorkspaceLease::acquire(
-                    &session_admission,
-                    &handle,
-                    record.harness_kind,
-                )
-                .await
-                .map_err(|error| {
-                    if parent {
-                        mj_core::refusal::Refusal::precondition(format!("{error:#}"))
-                    } else {
-                        mj_core::refusal::Refusal::precondition(format!(
-                            "Cannot fix suspend blockers while sub-agent {} ({session_id}) is running: {error:#}",
-                            record.title
-                        ))
-                    }
-                })?,
-            );
-            Ok(())
+            let lease = mj_controller::controller::IdleWorkspaceLease::acquire(
+                &session_admission,
+                &handle,
+                record.harness_kind,
+            )
+            .await
+            .map_err(|error| {
+                if parent {
+                    mj_core::refusal::Refusal::precondition(format!("{error:#}"))
+                } else {
+                    mj_core::refusal::Refusal::precondition(format!(
+                        "Cannot fix suspend blockers while sub-agent {} ({session_id}) is running: {error:#}",
+                        record.title
+                    ))
+                }
+            })?;
+            Ok(Some(lease))
         }
         Some(record) if record.state == SessionState::Parked => {
             drop(admission);
-            Ok(())
+            Ok(None)
         }
         Some(record) if !parent && !record.state.is_active() => {
             drop(admission);
-            Ok(())
+            Ok(None)
         }
         None if !parent => {
             drop(admission);
-            Ok(())
+            Ok(None)
         }
         Some(record) if parent => {
             drop(admission);
@@ -95,16 +92,9 @@ async fn acquire_suspend_blocker_lease(
             ))
             .into())
         }
-        None if parent => {
-            drop(admission);
-            Err(mj_core::refusal::Refusal::precondition("unknown session").into())
-        }
         None => {
             drop(admission);
-            Err(mj_core::refusal::Refusal::precondition(format!(
-                "Cannot fix suspend blockers while sub-agent {session_id} is missing."
-            ))
-            .into())
+            Err(mj_core::refusal::Refusal::precondition("unknown session").into())
         }
     }
 }
@@ -178,86 +168,87 @@ impl RuntimeState {
                         error.holders.join(", ")
                     ))
                 })?;
+            // Serialize against concurrent borrower sub-agent registration on
+            // this workspace owner so no new borrower can start while we scan
+            // borrowers and mutate the checkout.
+            let borrower_gate = runtime.borrower_registration_gate(&session_id);
+            let _borrower_write_guard = borrower_gate.try_write().map_err(|_| {
+                mj_core::refusal::Refusal::precondition(
+                    "Cannot fix suspend blockers while a sub-agent is starting on this workspace.",
+                )
+            })?;
             // Foreground admissions stay alive across remediation so a borrower
             // cannot unpark or start a turn underneath the checkout edit.
             let mut admissions = vec![admission];
             let mut leases = Vec::new();
             let parent_record = runtime.session_record(&session_id);
-            if let Err(error) = acquire_suspend_blocker_lease(
-                &runtime,
-                &session_id,
-                parent_record.as_ref(),
-                admissions[0].clone(),
-                &mut leases,
-                true,
-            )
-            .await
-            {
+            let borrower_ids = {
+                let owner = runtime.owner();
+                let mut ids = owner.controller().state.active_borrowers(&session_id);
+                drop(owner);
+                ids.sort();
+                ids.retain(|id| id != &session_id);
+                ids
+            };
+            let mut batch = vec![(session_id.clone(), parent_record, admissions[0].clone(), true)];
+            for borrower_id in borrower_ids {
+                let borrower_admission = match runtime.session_gate.try_enter_foreground(
+                    &borrower_id,
+                    "resolve suspend blockers",
+                    mj_controller::recovery_gate::LifecycleOrigin::Person,
+                ) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        let record = runtime.session_record(&borrower_id);
+                        let label = record
+                            .as_ref()
+                            .map(|record| record.title.as_str())
+                            .unwrap_or(borrower_id.as_str());
+                        return Err(mj_core::refusal::Refusal::precondition(format!(
+                            "Cannot fix suspend blockers while sub-agent {label} ({borrower_id}) is busy: {}",
+                            error.holders.join(", ")
+                        ))
+                        .into());
+                    }
+                };
+                // Read borrower state only after holding its foreground admission
+                // so concurrent lifecycle transitions cannot race with the check.
+                let record = runtime.session_record(&borrower_id);
+                admissions.push(borrower_admission.clone());
+                batch.push((borrower_id, record, borrower_admission, false));
+            }
+            // Acquire the parent and all active borrower idle barriers
+            // concurrently so slow control connections do not multiply wait time.
+            let results = futures::future::join_all(batch.into_iter().map(
+                |(target_id, record, target_admission, is_parent)| {
+                    let runtime = Arc::clone(&runtime);
+                    async move {
+                        acquire_suspend_blocker_lease(
+                            &runtime,
+                            &target_id,
+                            record.as_ref(),
+                            target_admission,
+                            is_parent,
+                        )
+                        .await
+                    }
+                },
+            ))
+            .await;
+            let mut first_error = None;
+            for result in results {
+                match result {
+                    Ok(Some(lease)) => leases.push(lease),
+                    Ok(None) => {}
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            if let Some(error) = first_error {
                 release_idle_workspace_leases(leases).await.context(
                     "could not release worker idle barriers after refusing suspend-blocker remediation",
                 )?;
                 return Err(error);
-            }
-            // A borrower that is still finishing a turn can register a new
-            // descendant before its own lease is held. Walk borrowers in
-            // sorted id order until the set stops growing.
-            let mut held = std::collections::BTreeSet::from([session_id.clone()]);
-            loop {
-                let pending = {
-                    let owner = runtime.owner();
-                    let mut ids = owner.controller().state.active_borrowers(&session_id);
-                    drop(owner);
-                    ids.sort();
-                    ids.retain(|id| !held.contains(id));
-                    ids
-                };
-                if pending.is_empty() {
-                    break;
-                }
-                for borrower_id in pending {
-                    let borrower_admission = match runtime.session_gate.try_enter_foreground(
-                        &borrower_id,
-                        "resolve suspend blockers",
-                        mj_controller::recovery_gate::LifecycleOrigin::Person,
-                    ) {
-                        Ok(admission) => admission,
-                        Err(error) => {
-                            release_idle_workspace_leases(leases).await.context(
-                                "could not release worker idle barriers after refusing suspend-blocker remediation",
-                            )?;
-                            let record = runtime.session_record(&borrower_id);
-                            let label = record
-                                .as_ref()
-                                .map(|record| record.title.as_str())
-                                .unwrap_or(borrower_id.as_str());
-                            return Err(mj_core::refusal::Refusal::precondition(format!(
-                                "Cannot fix suspend blockers while sub-agent {label} ({borrower_id}) is busy: {}",
-                                error.holders.join(", ")
-                            ))
-                            .into());
-                        }
-                    };
-                    // Read borrower state only after holding its foreground admission
-                    // so concurrent lifecycle transitions cannot race with the check.
-                    let record = runtime.session_record(&borrower_id);
-                    if let Err(error) = acquire_suspend_blocker_lease(
-                        &runtime,
-                        &borrower_id,
-                        record.as_ref(),
-                        borrower_admission.clone(),
-                        &mut leases,
-                        false,
-                    )
-                    .await
-                    {
-                        release_idle_workspace_leases(leases).await.context(
-                            "could not release worker idle barriers after refusing suspend-blocker remediation",
-                        )?;
-                        return Err(error);
-                    }
-                    admissions.push(borrower_admission);
-                    held.insert(borrower_id);
-                }
             }
             let probe_session_id = session_id.clone();
             // Bound the remediation probe to 60s (matching ForceDestroy's
