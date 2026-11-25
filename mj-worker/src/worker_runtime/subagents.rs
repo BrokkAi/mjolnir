@@ -638,7 +638,7 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_profile(root, "", home, role, policy, true, false, false)
+    configure_codex_mcp_profile(root, "", home, role, policy, true, false, false, false)
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the worker startup policy and owned MCP options.
@@ -651,6 +651,7 @@ fn configure_codex_mcp_profile(
     subtle_subagents: bool,
     review_tools: bool,
     managed_subagent: bool,
+    claude_mcp: bool,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
@@ -672,7 +673,7 @@ fn configure_codex_mcp_profile(
         policy,
         subtle_subagents,
         review_tools,
-        true,
+        claude_mcp,
     )?;
     let changed =
         (managed_subagent && disable_codex_subagent_features(&mut config, &path)?) || changed;
@@ -861,6 +862,10 @@ pub(super) fn configure_codex_profile(
         subtle_subagents,
         review_tools,
         managed_subagent,
+        !mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(
+            mj_core::config::HarnessKind::Codex,
+        )
+        .is_empty(),
     )
 }
 
@@ -2669,6 +2674,7 @@ enabled = false
                             true,
                             false,
                             true,
+                            false,
                         )
                         .unwrap()
                     };
@@ -2772,6 +2778,7 @@ enabled = false
                         true,
                         false,
                         false,
+                        false
                     )
                     .unwrap()
                 );
@@ -2787,6 +2794,7 @@ enabled = false
                 true,
                 false,
                 false,
+                false
             )
             .unwrap()
         );
@@ -2856,6 +2864,7 @@ enabled = false
                     true,
                     false,
                     false,
+                    false
                 )
                 .unwrap()
             );
@@ -3695,6 +3704,7 @@ mod review_gate_tests {
                         true,
                         tools,
                         false,
+                        false,
                     )
                     .unwrap();
                     let servers = codex_servers(&home);
@@ -3803,6 +3813,7 @@ mod review_gate_tests {
             true,
             true,
             false,
+            false,
         )
         .unwrap();
         let servers = codex_servers(&home);
@@ -3836,6 +3847,7 @@ mod review_gate_tests {
             Some(SubagentMcpRole::Parent),
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             true,
+            false,
             false,
             false,
         )
@@ -3877,6 +3889,7 @@ mod review_gate_tests {
             true,
             true,
             false,
+            false,
         )
         .unwrap();
         configure_codex_mcp_profile(
@@ -3887,6 +3900,7 @@ mod review_gate_tests {
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             true,
             true,
+            false,
             false,
         )
         .unwrap();

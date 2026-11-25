@@ -58,6 +58,7 @@ impl Schedule {
                 (false, false) => dom || dow,
             };
             if self.fields[3].contains(&date.month()) && day {
+                let mut best: Option<DateTime<Local>> = None;
                 for hour in 0..24 {
                     if !self.fields[1].contains(&hour) {
                         continue;
@@ -74,10 +75,15 @@ impl Schedule {
                             }
                             chrono::LocalResult::None => None,
                         };
-                        if let Some(time) = candidate {
-                            return Some(time);
+                        if let Some(time) = candidate
+                            && best.is_none_or(|b| time < b)
+                        {
+                            best = Some(time);
                         }
                     }
+                }
+                if let Some(time) = best {
+                    return Some(time);
                 }
             }
             date = date.succ_opt()?;

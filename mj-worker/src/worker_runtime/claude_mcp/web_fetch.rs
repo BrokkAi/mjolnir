@@ -59,6 +59,20 @@ fn find_closing_tag(rest: &str, hidden: &str) -> Option<usize> {
     None
 }
 
+fn find_tag_end(rest: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, &byte) in rest.as_bytes().iter().enumerate().skip(1) {
+        match quote {
+            Some(q) if byte == q => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b'>' => return Some(i),
+            None => {}
+        }
+    }
+    rest.find('>')
+}
+
 fn convert(html: &str, markdown: bool) -> String {
     let mut out = String::new();
     let mut rest = html;
@@ -76,7 +90,7 @@ fn convert(html: &str, markdown: bool) -> String {
             continue;
         }
         if rest.starts_with('<') {
-            let Some(end) = rest.find('>') else {
+            let Some(end) = find_tag_end(rest) else {
                 break;
             };
             let tag = &rest[1..end];
@@ -258,7 +272,7 @@ mod tests {
                 let mut req = vec![0; 4096];
                 use tokio::io::AsyncReadExt;
                 assert!(stream.read(&mut req).await.unwrap() > 0);
-                let body = "<html><script src='ignored' /><h1>hé😀</h1><p><a data-href='https://wrong.example' href='https://example.com'>link &amp; more</a><code>x</code></p><script>bad; if (a < b) { console.log(1); }</script><p>after</p></html>";
+                let body = "<html><script src='ignored' /><h1>hé😀</h1><p><a data-href='https://wrong.example' href='https://example.com'>link &amp; more</a><code>x</code></p><script>bad; if (a < b) { console.log(1); }</script><p>after</p><a title=\"a > b\" href=\"/docs\">Docs</a></html>";
                 let reply = if n == 0 {
                     format!(
                         "HTTP/1.1 302 Found\r\nLocation: http://{addr}/final\r\nContent-Length: 0\r\n\r\n"
@@ -288,6 +302,8 @@ mod tests {
         assert!(!content.contains("bad"));
         assert!(!content.contains("console.log"));
         assert!(content.contains("after"));
+        assert!(content.contains("[Docs](/docs)"));
+        assert!(!content.contains("b\" href="));
         server.await.unwrap();
         assert!(fetch(json!({"url":"file:///etc/passwd"})).await.is_err());
     }

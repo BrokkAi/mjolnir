@@ -121,10 +121,19 @@ impl Service {
                 tokio::select! {
                     _ = service.cancel.cancelled() => {},
                     _ = tokio::time::sleep(duration) => {
-                        let mut slot = service.wakeup.lock().unwrap();
-                        if slot.as_ref().is_some_and(|(current, _)| *current == generation) {
-                            slot.take();
-                            service.deliver_wake("wakeup", format!("[mj-claude wakeup ({reason})]\n{prompt}"));
+                        loop {
+                            {
+                                let mut slot = service.wakeup.lock().unwrap();
+                                if !slot.as_ref().is_some_and(|(current, _)| *current == generation) { break; }
+                                if service.deliver_wake("wakeup", format!("[mj-claude wakeup ({reason})]\n{prompt}")) {
+                                    slot.take();
+                                    break;
+                                }
+                            }
+                            tokio::select! {
+                                _ = service.cancel.cancelled() => break,
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                            }
                         }
                     }
                 }
