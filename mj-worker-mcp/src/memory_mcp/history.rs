@@ -220,7 +220,7 @@ Indexed snapshots can lag live sessions and may omit timestamps or older tool ou
 session_id accepts a session ID, a unique prefix, a native session UUID, or \"self\" for the calling session (a sub-agent gets its parent session ID and report_dir instead). \
 Forward: start=max(0, i-2), limit=6 expands a search_history hit; follow next (start, offset) to continue inside a long message. \
 Backward: tail=true reads the last page in chronological order; before=i reads the page ending before message i, and earlier.before gives the next such cursor. \
-Drop tail and before when following next after a cut final message. tail and before cannot be combined with start or offset. \
+Drop tail and before (and pass limit=1) when following next after a cut backward message. tail and before cannot be combined with start or offset. \
 role=\"user\" gives an outline of prompts (sub-agent reports can arrive as user messages); \"assistant\"; \"dialogue\" gives user and assistant turns without tool summaries; \"tool\" gives compact tool summaries, including peer send_message calls. \
 max_message_chars=N skims: it shows at most N characters of each message, pages on whole messages, and 0 means no cap. \
 Indexed snapshots can lag live sessions and may omit timestamps or older tool output. Cite session ID and message indices.",

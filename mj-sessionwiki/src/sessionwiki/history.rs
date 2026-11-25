@@ -747,9 +747,10 @@ fn backward_page(
     let mut selected = vec![value];
     let mut first_pos = last_pos;
     match part.next_offset {
-        // An oversized final message is read on from where it was cut.
+        // An oversized backward message is continued with `limit: 1` so
+        // following `next` after `before` never spills into already-read messages.
         Some(next_offset) if cap.is_none() => {
-            next = Some(json!({"start": last.i, "offset": next_offset}));
+            next = Some(json!({"start": last.i, "offset": next_offset, "limit": 1}));
         }
         _ => {
             for pos in (0..last_pos).rev() {
@@ -1118,18 +1119,25 @@ mod tests {
         let (_directory, connection) = super::super::tags::testing::isolated_index();
         super::super::tags::testing::index_row(&connection, "big", "mjolnir");
         let long = "é🙂".repeat(50);
-        add_roled(&connection, "big", &[("user", "ask"), ("assistant", &long)]);
-        let page = read(&connection, "big", None, true, None, 0, 0, 10, None, 20);
+        add_roled(
+            &connection,
+            "big",
+            &[("user", "ask"), ("assistant", &long), ("user", "later")],
+        );
+        // Oversized message selected by `before` emits `limit: 1` so continuing
+        // it finishes message 1 without revisiting message 2.
+        let page = read(&connection, "big", None, false, Some(2), 0, 0, 10, None, 20);
         assert_eq!(indices(&page), [1]);
         assert_eq!(page["messages"][0]["text_chars"], 100);
-        assert_eq!(page["next"], json!({"start": 1, "offset": 10}));
+        assert_eq!(page["next"], json!({"start": 1, "offset": 10, "limit": 1}));
         assert_eq!(page["earlier"], json!({"before": 1}));
-        // The forward cursor continues where the tail page stopped.
-        let more = read(&connection, "big", None, false, None, 1, 10, 10, None, 20);
+        let more = read(&connection, "big", None, false, None, 1, 10, 1000, None, 1);
+        assert_eq!(indices(&more), [1]);
         assert_eq!(more["messages"][0]["offset"], 10);
+        assert_eq!(more["messages"][0]["truncated"], false);
         assert_eq!(
             more["messages"][0]["text"],
-            long.chars().skip(10).take(10).collect::<String>()
+            long.chars().skip(10).collect::<String>()
         );
     }
 
