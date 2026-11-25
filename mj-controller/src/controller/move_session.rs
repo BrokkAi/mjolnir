@@ -1947,11 +1947,15 @@ impl Controller {
             previous.as_ref(),
         )?;
         ensure!(
-            !is_subagent || in_place,
+            !is_subagent || (in_place && target_id == source.target_template_id),
             mj_core::refusal::Refusal::precondition(format!(
                 "sub-agent sessions can only move in place on their current target: {}",
-                move_environment_obstacle(source, &selection, &self.config.targets)
-                    .unwrap_or("environment unavailable")
+                if target_id != source.target_template_id {
+                    "target changed"
+                } else {
+                    move_environment_obstacle(source, &selection, &self.config.targets)
+                        .unwrap_or("environment unavailable")
+                }
             ))
         );
         // The resolved selection is what every later reader decides from --
@@ -2817,19 +2821,7 @@ impl Controller {
                     && session.state == SessionState::Running
                     && operation.in_place_expected_store_id.is_none()
                 {
-                    if !operation.in_place_harness_restarted && !self.move_native_continuity(&operation)? {
-                        let previous = operation.recovery_session.as_ref().unwrap_or(&session);
-                        let profile = self.config.named_profile(&session.last_profile)?;
-                        let backend = super::backend_locator(session.target.as_deref().context("Move target missing")?, &session, &self.config)?;
-                        let handoff = self.prepare_in_place_handoff(&id, previous, &backend, profile, false, executor).await?;
-                        let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
-                        relay.0.as_mut().context("Move worker missing")?.connection_mut().client.install_prompt_context(handoff).await?;
-                    }
-                    operation.in_place_harness_restarted = true;
-                    operation.phase = MovePhase::Completed;
-                    operation.queue_admission_finished = true;
-                    crate::database::save_move_operation(&operation)?;
-                    return Ok(());
+                    return self.finish_parked_in_place_move(admission, &mut operation, None, executor, manager).await;
                 }
                 match self.committed_in_place_failure(&operation, executor) {
                     Ok(Some(failure)) => {
@@ -3449,6 +3441,66 @@ impl Controller {
         .context("prepare cross-harness in-place handoff")
     }
 
+    async fn finish_parked_in_place_move(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        operation: &mut MoveOperation,
+        handoff: Option<String>,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<()> {
+        let id = operation.selection.session_id.clone();
+        self.settle_pending_parked_move_boot(admission, &id, executor)
+            .await?;
+        let handoff =
+            if !operation.in_place_harness_restarted && !self.move_native_continuity(operation)? {
+                match handoff {
+                    Some(handoff) => Some(handoff),
+                    None => {
+                        let session = &self.state.sessions[&id];
+                        let previous = operation.recovery_session.as_ref().unwrap_or(session);
+                        let profile = self.config.named_profile(&session.last_profile)?;
+                        let backend = super::backend_locator(
+                            session.target.as_deref().context("Move target missing")?,
+                            session,
+                            &self.config,
+                        )?;
+                        Some(
+                            self.prepare_in_place_handoff(
+                                &id, previous, &backend, profile, false, executor,
+                            )
+                            .await?,
+                        )
+                    }
+                }
+            } else {
+                None
+            };
+        let continue_quota = operation.queue == ResumeQueueDisposition::Start
+            && operation.quota_stop_reason.is_some();
+        if handoff.is_some() || continue_quota {
+            let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+            let conn = relay
+                .0
+                .as_mut()
+                .context("parked Move worker missing")?
+                .connection_mut();
+            if let Some(handoff) = handoff {
+                conn.client.install_prompt_context(handoff).await?;
+            }
+            if continue_quota {
+                let (command_id, command) = quota_move_continuation_command(operation)?;
+                conn.client.submit(command_id, command).await?;
+            }
+        }
+        operation.in_place_harness_restarted = true;
+        operation.phase = MovePhase::Completed;
+        operation.queue_admission_finished = true;
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
+        Ok(())
+    }
+
     pub async fn execute_move(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
@@ -3498,36 +3550,27 @@ impl Controller {
             let destination = self.state.sessions[&id].clone();
             self.state.sessions.insert(id.clone(), previous.clone());
             executor.begin_resumable_work()?;
-            self.unpark_subagent_worker(
-                admission,
-                &id,
-                Some((
-                    &destination,
-                    if native_continuity {
-                        None
-                    } else {
-                        previous.native_session_id.clone()
-                    },
-                )),
-                executor,
-            )
-            .await?;
-            if let Some(handoff) = handoff {
-                let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
-                relay
-                    .0
-                    .as_mut()
-                    .context("parked Move worker missing")?
-                    .connection_mut()
-                    .client
-                    .install_prompt_context(handoff)
-                    .await?;
-            }
-            operation.in_place_harness_restarted = true;
-            operation.phase = MovePhase::Completed;
-            operation.queue_admission_finished = true;
-            crate::database::save_move_operation(operation)?;
-            return Ok(());
+            let wake = self
+                .unpark_subagent_worker(
+                    admission,
+                    &id,
+                    Some((
+                        &destination,
+                        if native_continuity {
+                            None
+                        } else {
+                            previous.native_session_id.clone()
+                        },
+                    )),
+                    executor,
+                )
+                .await;
+            let held = executor.end_resumable_work("finish parked Move");
+            wake?;
+            held?;
+            return self
+                .finish_parked_in_place_move(admission, operation, handoff, executor, manager)
+                .await;
         }
         let retained = source_relay.owner();
         let admission_id = operation.selection.session_id.clone();
@@ -4087,29 +4130,7 @@ impl Controller {
                         }
                         ResumeQueueDisposition::Start => {
                             if operation.quota_stop_reason.is_some() {
-                                use mj_core::state::QuotaMoveContinuation;
-                                let continuation = operation
-                                    .quota_continuation
-                                    .context("quota Move has no saved continuation action")?;
-                                let cmd_id = operation
-                                    .in_place_continuation_command_id
-                                    .clone()
-                                    .unwrap_or_else(|| {
-                                        mj_core::continuation::GeneratedPrompt::QuotaRetry
-                                            .command_id(&operation.operation_id)
-                                    });
-                                let cmd = match continuation {
-                                    QuotaMoveContinuation::ResumeGoal => {
-                                        mj_core::relay::RelayCommand::GoalControl {
-                                            action: mj_core::goal::GoalControlAction::Resume,
-                                        }
-                                    }
-                                    QuotaMoveContinuation::Prompt => {
-                                        mj_core::relay::RelayCommand::Prompt {
-                                            prompt: mj_core::continuation::prompt_blocks(),
-                                        }
-                                    }
-                                };
+                                let (cmd_id, cmd) = quota_move_continuation_command(operation)?;
                                 conn.client
                                     .submit_front(
                                         &operation.operation_id,
@@ -5488,6 +5509,31 @@ fn move_keeps_profile_and_policy(
             .oracle_choice
             .as_ref()
             .is_none_or(|choice| Some(choice) == source.oracle_choice.as_deref())
+}
+
+fn quota_move_continuation_command(
+    operation: &MoveOperation,
+) -> Result<(String, mj_core::relay::RelayCommand)> {
+    let continuation = operation
+        .quota_continuation
+        .context("quota Move has no saved continuation action")?;
+    let command_id = operation
+        .in_place_continuation_command_id
+        .clone()
+        .unwrap_or_else(|| {
+            mj_core::continuation::GeneratedPrompt::QuotaRetry.command_id(&operation.operation_id)
+        });
+    let command = match continuation {
+        mj_core::state::QuotaMoveContinuation::ResumeGoal => {
+            mj_core::relay::RelayCommand::GoalControl {
+                action: mj_core::goal::GoalControlAction::Resume,
+            }
+        }
+        mj_core::state::QuotaMoveContinuation::Prompt => mj_core::relay::RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    };
+    Ok((command_id, command))
 }
 
 fn move_destination_has_parent_role(

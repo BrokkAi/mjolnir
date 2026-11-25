@@ -413,6 +413,89 @@ impl Controller {
         }
     }
 
+    /// Finish a durable parked Move boot before admitting destination work.
+    pub(super) async fn settle_pending_parked_move_boot(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let Some(intent) = crate::database::load_worker_restart(session_id)? else {
+            return Ok(());
+        };
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
+            let owner = crate::worker_lifecycle::require(session_id)?;
+            let (backend, worker_root) = self.worker_placement(session_id)?;
+            let reconnect = targets::reconnect_plan(&backend, session_id)?
+                .commands
+                .into_iter()
+                .next()
+                .context("reconnect plan is empty")?;
+            let liveness = probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
+            if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
+                // A dead intent may be retired by start_installed_worker. Its
+                // already-staged launch owns the destination's AWS profile pin.
+                let command = targets::locator_command(
+                    mj_core::targets::SshTrafficClass::Control,
+                    &backend,
+                    vec!["cat".into(), format!("{worker_root}/launch.json")],
+                )
+                .purpose("read parked Move worker launch config");
+                let output = executor.execute(&command)?;
+                let output = targets::checked_command_output(&command, output)?;
+                let launch: mj_core::worker_launch::WorkerLaunchConfig =
+                    serde_json::from_slice(&output.stdout)
+                        .context("read staged parked Move launch")?;
+                let aws_profile = launch.environment.get("AWS_PROFILE").map(String::as_str);
+                self.start_installed_worker(
+                    session_id,
+                    executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &worker_root,
+                        reconnect: &reconnect,
+                        launch: None,
+                        prepared: true,
+                        discard_queued_prompts: None,
+                        staged_aws_profile: Some(aws_profile),
+                        swap_admission: None,
+                        messages: &RESTART_FROM_PARKED,
+                    },
+                )
+                .await?;
+                crate::database::activate_worker_restart(session_id, owner.operation_id())?;
+            } else {
+                executor.begin_resumable_work()?;
+                let observed = self
+                    .observe_started_worker(
+                        session_id,
+                        executor,
+                        InstalledWorkerRestart {
+                            backend: &backend,
+                            worker_root: &worker_root,
+                            reconnect: &reconnect,
+                            launch: None,
+                            prepared: true,
+                            discard_queued_prompts: None,
+                            staged_aws_profile: None,
+                            swap_admission: None,
+                            messages: &RESTART_FROM_PARKED,
+                        },
+                    )
+                    .await;
+                let held = executor.end_resumable_work("settle parked Move worker boot");
+                observed?;
+                held?;
+                crate::database::activate_worker_restart(session_id, &intent.operation_id)?;
+            }
+            let active = crate::database::load_session_record(session_id)?
+                .context("parked Move boot session disappeared")?;
+            self.state.sessions.insert(session_id.to_owned(), active);
+            Ok(())
+        })
+        .await
+    }
+
     /// Accept a durable wake, launch the worker, and observe native readiness.
     /// Preparation and readiness hold no daemon admission. Once the wake is
     /// accepted, a proved dead worker settles with its failure; uncertain
@@ -611,7 +694,7 @@ impl Controller {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(in crate::controller) mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -762,6 +845,7 @@ mod tests {
     /// are real. A detached launch must already have its active record and intent.
     struct WakeTarget {
         cancelled: AtomicBool,
+        dead_before_start: AtomicBool,
         purposes: Mutex<Vec<String>>,
         admission: Mutex<Option<crate::upgrade::Work>>,
         gate: Arc<crate::upgrade::Gate>,
@@ -772,6 +856,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 cancelled: AtomicBool::new(false),
+                dead_before_start: AtomicBool::new(false),
                 purposes: Mutex::new(Vec::new()),
                 admission: Mutex::new(None),
                 gate: Arc::new(crate::upgrade::Gate::default()),
@@ -810,10 +895,12 @@ mod tests {
                 command.purpose.as_str(),
                 "install local worker launch configuration"
                     | "replace stale Mjolnir worker launch config"
+                    | "read parked Move worker launch config"
             ) {
                 return crate::targets::ProcessExecutor.execute(command);
             }
             if command.purpose == "start detached Mjolnir worker" {
+                self.dead_before_start.store(false, Ordering::SeqCst);
                 assert!(!self.gate.try_close(), "launch must hold admission");
                 assert_eq!(
                     crate::database::load_session_state(LATCH_RELAY_SESSION)?,
@@ -837,7 +924,11 @@ mod tests {
                 )
                 .into_bytes()
             } else if command.purpose == "probe Mjolnir worker daemon liveness" {
-                b"alive\n".to_vec()
+                if self.dead_before_start.load(Ordering::SeqCst) {
+                    b"dead\n".to_vec()
+                } else {
+                    b"alive\n".to_vec()
+                }
             } else {
                 Vec::new()
             };
@@ -1082,7 +1173,7 @@ mod tests {
         if !isolated("parked_move_starts_destination_in_the_existing_environment") {
             return;
         }
-        parked_move_case(false).await;
+        parked_move_case(ParkedMoveCase::SameHarness).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1090,10 +1181,29 @@ mod tests {
         if !isolated("subagent_move_parked_cross_harness_and_boot_recovery") {
             return;
         }
-        parked_move_case(true).await;
+        parked_move_case(ParkedMoveCase::CrossHarness).await;
     }
 
-    async fn parked_move_case(cross_harness: bool) {
+    pub(in crate::controller) enum ParkedMoveCase {
+        SameHarness,
+        CrossHarness,
+        DeadBoot,
+        LiveBoot,
+        Quota,
+        RecoveredQuota,
+    }
+
+    pub(in crate::controller) async fn parked_move_case(case: ParkedMoveCase) {
+        let cross_harness = matches!(case, ParkedMoveCase::CrossHarness);
+        let pending_boot = matches!(
+            case,
+            ParkedMoveCase::DeadBoot | ParkedMoveCase::LiveBoot | ParkedMoveCase::RecoveredQuota
+        );
+        let dead_boot = matches!(
+            case,
+            ParkedMoveCase::DeadBoot | ParkedMoveCase::RecoveredQuota
+        );
+        let quota = matches!(case, ParkedMoveCase::Quota | ParkedMoveCase::RecoveredQuota);
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
         let mut controller = waking_controller(root.path(), 0);
@@ -1188,6 +1298,64 @@ mod tests {
         let mut operation =
             super::super::move_session::test_fixtures::source_recovery_operation(&previous);
         operation.in_place = true;
+        let executor = WakeTarget::new();
+        if quota {
+            operation.queue = mj_core::state::ResumeQueueDisposition::Start;
+            operation.quota_stop_reason = Some("quota exhausted".into());
+            operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+            operation.in_place_continuation_command_id = Some("saved-quota-continuation".into());
+        }
+        if pending_boot {
+            let mut destination = previous.clone();
+            destination.last_profile = "destination".into();
+            let mut staged = Controller {
+                config: controller.config.clone(),
+                state: controller.state.clone(),
+            };
+            staged
+                .state
+                .sessions
+                .insert(LATCH_RELAY_SESSION.into(), destination.clone());
+            let (backend, _) = staged.worker_placement(LATCH_RELAY_SESSION).unwrap();
+            let mut launch = staged
+                .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+                .unwrap();
+            launch
+                .environment
+                .insert("AWS_PROFILE".into(), "destination-aws".into());
+            launch
+                .write(&root.path().join(LATCH_RELAY_SESSION).join("launch.json"))
+                .unwrap();
+            let owner = crate::controller::test_support::worker_test_permit(
+                LATCH_RELAY_SESSION,
+                "interrupted parked Move boot",
+            )
+            .unwrap()
+            .unwrap();
+            owner
+                .scope_blocking(|| {
+                    crate::database::begin_subagent_unpark(
+                        LATCH_RELAY_SESSION,
+                        &crate::database::WorkerRestartIntent {
+                            operation_id: owner.operation_id().into(),
+                            target: *previous.target.clone().unwrap(),
+                            desired_build: String::new(),
+                        },
+                        Some(&destination),
+                        Some(Some("destination-aws")),
+                    )
+                })
+                .unwrap();
+            drop(owner);
+            controller.state = crate::database::load_state().unwrap();
+            operation.phase = mj_core::state::MovePhase::DestinationStarting;
+            operation.recovery_session = Some(previous.clone());
+            crate::database::save_move_operation(&operation).unwrap();
+            executor
+                .dead_before_start
+                .store(dead_boot, Ordering::SeqCst);
+            executor.end_resumable_work("recover parked Move").unwrap();
+        }
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let targets = channels.targets.clone();
         let target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
@@ -1207,17 +1375,53 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
-        controller
-            .execute_move(
-                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
-                &mut operation,
-                None,
-                &WakeTarget::new(),
-                &channels.control,
-                super::super::move_session::MoveSourceRelay::default(),
-            )
-            .await
-            .unwrap();
+        if pending_boot {
+            let outcome = controller
+                .recover_move_managed_controlled(
+                    &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                    operation.clone(),
+                    &executor,
+                    &channels.control,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+            assert!(
+                crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .is_none()
+            );
+            let starts = executor
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|purpose| purpose.as_str() == "start detached Mjolnir worker")
+                .count();
+            assert_eq!(starts, usize::from(dead_boot));
+            assert_eq!(
+                controller.state.sessions[LATCH_RELAY_SESSION]
+                    .staged_aws_profile
+                    .as_deref(),
+                Some("destination-aws")
+            );
+        } else {
+            controller
+                .execute_move(
+                    &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                    &mut operation,
+                    None,
+                    &executor,
+                    &channels.control,
+                    super::super::move_session::MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            !executor.gate.try_close(),
+            "Move completion must hold daemon admission"
+        );
         attach.await.unwrap();
         let launch = mj_core::worker_launch::WorkerLaunchConfig::read(
             &root.path().join(LATCH_RELAY_SESSION).join("launch.json"),
@@ -1245,6 +1449,35 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+        }
+        if quota {
+            let handle = channels
+                .control
+                .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+                .await
+                .unwrap();
+            handle.sync_now().await.unwrap();
+            let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+                &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                snapshot
+                    .handled_commands
+                    .contains_key("saved-quota-continuation")
+            );
+            let dispatch = &snapshot.dispatches["saved-quota-continuation"];
+            assert_eq!(
+                dispatch.command,
+                RelayCommand::Prompt {
+                    prompt: mj_core::continuation::prompt_blocks()
+                }
+            );
+            assert!(!matches!(
+                dispatch.state,
+                mj_core::relay::RelayDispatchState::Rejected
+                    | mj_core::relay::RelayDispatchState::Interrupted
+            ));
         }
         channels.shutdown.shutdown().await.unwrap();
         assert_eq!(

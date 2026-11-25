@@ -613,6 +613,27 @@ fn preparing_cross_harness_move_without_utility_profiles_succeeds() {
             assert!(error.to_string().contains(obstacle), "{error:#}");
         }
 
+        controller.config.targets.insert(
+            "local-bare-yolo".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let mut alias_selection = preparation.selection.clone();
+        alias_selection.target_template_id = Some("local-bare-yolo".into());
+        let error = controller
+            .prepare_move_session_controlled(
+                &catalog,
+                alias_selection,
+                &crate::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "sub-agent sessions can only move in place on their current target: target changed"
+            ),
+            "{error:#}"
+        );
+
         let mut reviewer = relation.clone();
         reviewer.reviewer_launch = Some(
             controller
@@ -2787,4 +2808,67 @@ fn move_session_sealed_continuity_survives_config_changes_and_absent_native_iden
     assert!(controller.state.sessions["s1"].native_session_id.is_none());
     op.accepted_preparation = None;
     assert!(!controller.move_native_continuity(&op).unwrap());
+}
+
+#[cfg(unix)]
+async fn recovered_parked_move_case(
+    name: &str,
+    case: crate::controller::subagent_park::tests::ParkedMoveCase,
+) {
+    const MARKER: &str = "MJ_TEST_REVIEW_PARKED_MOVE";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker-source");
+        std::fs::write(&worker, mj_core::worker_build::worker_build_stamp()).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), name),
+        )
+        .env(MARKER, "1")
+        .env("MJ_WORKER_BINARY", worker)
+        .env("MJ_INSTANCE", "review-parked-move")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    crate::controller::subagent_park::tests::parked_move_case(case).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_parked_move_starts_pending_dead_boot_before_completion() {
+    recovered_parked_move_case(
+        "recovered_parked_move_starts_pending_dead_boot_before_completion",
+        crate::controller::subagent_park::tests::ParkedMoveCase::DeadBoot,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_parked_move_observes_pending_live_boot_without_restarting() {
+    recovered_parked_move_case(
+        "recovered_parked_move_observes_pending_live_boot_without_restarting",
+        crate::controller::subagent_park::tests::ParkedMoveCase::LiveBoot,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parked_move_submits_saved_quota_continuation_before_completion() {
+    recovered_parked_move_case(
+        "parked_move_submits_saved_quota_continuation_before_completion",
+        crate::controller::subagent_park::tests::ParkedMoveCase::Quota,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_parked_move_submits_saved_quota_continuation_before_completion() {
+    recovered_parked_move_case(
+        "recovered_parked_move_submits_saved_quota_continuation_before_completion",
+        crate::controller::subagent_park::tests::ParkedMoveCase::RecoveredQuota,
+    )
+    .await;
 }
