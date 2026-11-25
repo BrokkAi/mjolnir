@@ -5659,6 +5659,73 @@ async fn adoption_wait_reports_blockers_without_a_deadline_and_is_cancellable() 
     }
 }
 
+// Hard-won: #1673: a remote harness reload answered after the 15 s relay deadline was abandoned although the worker went on to commit it.
+#[tokio::test(start_paused = true)]
+async fn in_place_reload_waits_for_the_worker_past_the_control_deadline() {
+    let (controller, worker) = tokio::io::duplex(65536);
+    let mut client = duplex_relay_client(controller, SESSION_ID);
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let released = release.clone();
+    let requested = Arc::new(tokio::sync::Notify::new());
+    let request_seen = requested.clone();
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let envelope: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            envelope.request,
+            RelayRequest::RestartHarnessInPlace { .. }
+        ));
+        request_seen.notify_one();
+        let _permit = released.acquire().await.unwrap();
+        let mut bytes = serde_json::to_vec(&RelayResponseEnvelope {
+            request_id: envelope.request_id,
+            protocol_version: envelope.protocol_version,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::HarnessRestartedInPlace,
+            },
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.unwrap();
+    });
+    let launch: mj_core::worker_launch::WorkerLaunchConfig =
+        serde_json::from_value(serde_json::json!({
+            "session_id": SESSION_ID,
+            "harness": "claude",
+            "bridge_command": "/usr/bin/false",
+            "bridge_args": [],
+            "environment": {},
+            "cwd": "workspace",
+            "execution_policy": true,
+        }))
+        .unwrap();
+    let work = mj_core::runtime::spawn(async move {
+        let result = client
+            .restart_harness_in_place(
+                "move-1",
+                "store-1",
+                Box::new(launch),
+                Some("candidate-1".into()),
+            )
+            .await;
+        (client, result)
+    });
+    requested.notified().await;
+    tokio::time::advance(RELAY_RPC_TIMEOUT * 4).await;
+    assert!(
+        !work.is_finished(),
+        "the control deadline must not cover the reload"
+    );
+    release.add_permits(1);
+    let (client, result) = work.await.unwrap();
+    result.unwrap();
+    assert!(client.abandoned.is_none());
+    peer.await.unwrap();
+}
+
 // Hard-won: #1625: cancelling RelayClient::connect waited for detach grace on a detached thread and leaked sleep proxies on process exit.
 #[cfg(unix)]
 #[tokio::test]

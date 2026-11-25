@@ -561,6 +561,14 @@ pub fn serve_latch_relay() {
                                         std::fs::remove_file(lost).unwrap();
                                         std::process::exit(0);
                                     }
+                                    // The reply is still coming when the controller leaves.
+                                    let stalled =
+                                        Path::new(&root).join("stall-in-place-restart-reply");
+                                    if stalled.exists() {
+                                        std::fs::remove_file(stalled).unwrap();
+                                        std::thread::sleep(std::time::Duration::from_secs(3));
+                                        std::process::exit(0);
+                                    }
                                     mj_core::relay::RelayResponseBody::Ok { payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace }
                                 }
                                 Err(error) => mj_core::relay::relay_error(
@@ -1460,6 +1468,46 @@ pub fn seed_source_relay(worker_root: &Path) -> PathBuf {
     .unwrap();
     drop(seed);
     source_relay
+}
+
+/// Leave `operation_id`'s dispatch hold on the source relay, with its reload
+/// started when `reload_started`: what a worker holds after a Move's reply was
+/// lost.
+pub fn seed_in_place_hold(source_relay: &Path, operation_id: &str, reload_started: bool) {
+    let mut relay =
+        crate::relay::DurableRelay::open(source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    let store = relay.operational_state().store_id.unwrap();
+    let held = relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "seed-hold".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: mj_core::relay::RelayRequest::HoldInPlaceMoveDispatch {
+            operation_id: operation_id.into(),
+            expected_store_id: store.clone(),
+        },
+    });
+    assert!(matches!(
+        held.body,
+        mj_core::relay::RelayResponseBody::Ok { .. }
+    ));
+    if reload_started {
+        relay
+            .admit_in_place_harness_restart(operation_id, &store)
+            .unwrap();
+        relay
+            .mark_in_place_harness_restarted(operation_id, &store)
+            .unwrap();
+    }
+}
+
+/// Leave `operation_id`'s hold with its reload failed after commit.
+pub fn seed_failed_after_commit_hold(source_relay: &Path, operation_id: &str) {
+    seed_in_place_hold(source_relay, operation_id, false);
+    let mut relay =
+        crate::relay::DurableRelay::open(source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    let store = relay.operational_state().store_id.unwrap();
+    relay
+        .mark_in_place_harness_failed_after_commit(operation_id, &store, "startup failed".into())
+        .unwrap();
 }
 
 /// Keep a stand-in harness's real responder registration alive across relay requests.

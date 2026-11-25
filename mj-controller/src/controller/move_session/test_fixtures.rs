@@ -242,6 +242,9 @@ pub struct RecordingProcessExecutor {
     pub handoff_gate: Option<std::sync::Arc<crate::upgrade::Gate>>,
     pub handoff_work: std::sync::Mutex<Option<crate::upgrade::Work>>,
     pub shutdown: std::sync::atomic::AtomicBool,
+    /// Resumable work under this label cannot reacquire admission, as when a
+    /// daemon handoff has closed it.
+    pub refuse_resume: Option<&'static str>,
 }
 
 /// The worker's checkpoint operations, which mj-controller cannot name outside
@@ -268,6 +271,7 @@ impl RecordingProcessExecutor {
             handoff_gate: None,
             handoff_work: Default::default(),
             shutdown: Default::default(),
+            refuse_resume: None,
         }
     }
 
@@ -305,6 +309,10 @@ impl CommandExecutor for RecordingProcessExecutor {
         Ok(())
     }
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        anyhow::ensure!(
+            self.refuse_resume != Some(label),
+            "daemon upgrade handoff is underway"
+        );
         if let Some(gate) = &self.handoff_gate {
             *self.handoff_work.lock().unwrap() = Some(gate.enter_unless_draining(label)?);
         }

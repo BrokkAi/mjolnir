@@ -423,7 +423,6 @@ fn preserve_retired_login(
 }
 
 /// Connection-only reads; a WAL in flight cannot be acknowledged before replay.
-#[cfg(any(unix, test))]
 pub fn read_retired_logins(root: &Path) -> Result<Vec<mj_core::credentials::RetiredLoginSnapshot>> {
     if root.join(PENDING_RELOAD_FILE).try_exists()? {
         return Ok(Vec::new());
@@ -457,7 +456,6 @@ pub fn read_retired_logins(root: &Path) -> Result<Vec<mj_core::credentials::Reti
     Ok(logins)
 }
 
-#[cfg(any(unix, test))]
 pub fn ack_retired_login(root: &Path, id: &str) -> Result<()> {
     ensure!(
         !root.join(PENDING_RELOAD_FILE).try_exists()?,

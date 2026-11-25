@@ -11,7 +11,7 @@ impl DashboardState {
         } else if let Err(error) = mj_core::path_input::validate_absolute_input(path) {
             wizard.project_directory_error = Some(error.to_string());
         } else {
-            let target_template_id = nth_key(&self.config.targets, wizard.target);
+            let target_template_id = wizard.target.clone();
             let directory = wizard.project_directory.trim().to_owned();
             wizard.project_directory_error = None;
             wizard.form.get_mut().set_submission_pending(true);
@@ -29,31 +29,17 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
-        let provider = match wizard.step {
-            WizardStep::Profile => wizard.selected_provider(self),
-            WizardStep::Target => wizard
-                .resolved_profile
-                .as_ref()
-                .map(|(_, provider)| provider.clone()),
-            _ => None,
-        };
-        if let Some(provider) = provider {
+        if let Some(request) = wizard.provider_selection_request(self) {
             if wizard.profile_selection_request.is_some() {
                 self.mode = Mode::New(wizard);
                 return DashboardAction::None;
             }
             self.invalidate_session_preflight();
             let generation = self.session_preflight_generation();
-            wizard.profile_selection_request = Some(generation);
-            let checking_target = wizard.step == WizardStep::Target;
-            let request = mj_client::http::ProviderProfileSelectionRequest {
-                provider,
-                profile_id: checking_target
-                    .then(|| wizard.selected_profile_id(self))
-                    .flatten(),
-                target_template_id: checking_target
-                    .then(|| nth_key(&self.config.targets, wizard.target)),
-            };
+            wizard.profile_selection_request = Some(ProviderSelection {
+                generation,
+                request: request.clone(),
+            });
             self.notices.set("Selecting profile…");
             self.mode = Mode::New(wizard);
             return DashboardAction::SelectProviderProfile {
@@ -83,7 +69,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardStep::Target => {
-                let target_template_id = nth_key(&self.config.targets, wizard.target);
+                let target_template_id = wizard.target.clone();
                 if let Some(reason) = self.target_unavailable(&target_template_id) {
                     self.notices.set(reason);
                     self.mode = Mode::New(wizard);
@@ -183,39 +169,47 @@ impl DashboardState {
         generation: u64,
         result: Result<String, String>,
     ) -> DashboardAction {
-        if generation != self.session_preflight_generation()
-            || !matches!(&self.mode, Mode::New(wizard)
-                if matches!(wizard.step, WizardStep::Profile | WizardStep::Target)
-                    && wizard.profile_selection_request == Some(generation))
-        {
+        // The reply to the request in flight settles it, whatever the draft
+        // asks now; a reply to any other request is refused.
+        let stamped = generation == self.session_preflight_generation()
+            && matches!(&self.mode, Mode::New(wizard)
+            if wizard
+                .profile_selection_request
+                .as_ref()
+                .is_some_and(|stamp| stamp.generation == generation));
+        if !stamped {
             return DashboardAction::None;
         }
         let Mode::New(mut wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             unreachable!();
         };
-        wizard.profile_selection_request = None;
+        let asked = wizard
+            .profile_selection_request
+            .take()
+            .map(|stamp| stamp.request);
+        // Only a draft that still asks the same question may take the answer;
+        // its group or choice may have gone while the daemon worked.
+        if asked != wizard.provider_selection_request(self) {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         let result = result.and_then(|id| {
-            (0..self.new_wizard_profile_count())
-                .find(|index| self.new_wizard_profile_id(*index).as_deref() == Some(&id))
+            self.profile_offered(&id)
+                .then_some(id.clone())
                 .ok_or_else(|| {
                     format!("Selected profile {id} is no longer available. Choose a profile again.")
                 })
         });
         match result {
-            Ok(index) => {
+            Ok(id) => {
                 let provider = wizard.selected_provider(self).or_else(|| {
                     wizard
                         .resolved_profile
                         .as_ref()
                         .map(|(_, provider)| provider.clone())
                 });
-                wizard.set_profile(index);
-                wizard.resolved_profile = provider.map(|provider| {
-                    (
-                        self.new_wizard_profile_id(index).expect("selected above"),
-                        provider,
-                    )
-                });
+                wizard.set_profile_choice(ProfileChoice::Profile(id.clone()));
+                wizard.resolved_profile = provider.map(|provider| (id, provider));
                 let profile = wizard.selected_profile_id(self).expect("selected above");
                 let remembered = self.state.remembered_subagent_policy_for(&profile);
                 wizard.subagents.refresh_create(
@@ -242,6 +236,30 @@ impl DashboardState {
         action
     }
 
+    /// Asks again for a provider selection whose configuration changed under
+    /// it, when it still asks the same question. A choice the reload changed
+    /// is not asked for: the draft shows the changed page instead.
+    fn reissue_stale_provider_selection(&mut self) -> Option<DashboardAction> {
+        let generation = self.session_preflight_generation();
+        let Mode::New(wizard) = &self.mode else {
+            return None;
+        };
+        let stamp = wizard
+            .profile_selection_request
+            .as_ref()
+            .filter(|stamp| stamp.generation != generation)?;
+        let unchanged = wizard.provider_selection_request(self).as_ref() == Some(&stamp.request);
+        let Mode::New(mut wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            unreachable!("checked above");
+        };
+        wizard.profile_selection_request = None;
+        if unchanged {
+            return Some(self.advance_new_wizard(wizard));
+        }
+        self.mode = Mode::New(wizard);
+        Some(DashboardAction::None)
+    }
+
     pub(in crate::wizards) fn invalidate_new_remote_preflight(&mut self, wizard: &mut NewWizard) {
         self.invalidate_session_preflight();
         wizard.profile_selection_request = None;
@@ -257,8 +275,12 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
-        let target_template_id = nth_key(&self.config.targets, wizard.target);
-        if !is_bare_project_target(&self.config.targets[&target_template_id]) {
+        let target_template_id = wizard.target.clone();
+        let Some(target) = self.config.targets.get(&target_template_id) else {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        };
+        if !is_bare_project_target(target) {
             if wizard.remote_repositories.is_some() && wizard.remote_preflight_error.is_none() {
                 return self.create_session_action(&wizard);
             }
@@ -266,7 +288,7 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
-        if wizard.selected_worktree_options(&self.config).is_none() {
+        if wizard.selected_worktree_options().is_none() {
             wizard.remote_preflight_error = None;
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
@@ -289,6 +311,11 @@ impl DashboardState {
     /// review never waits on a check that nothing started, whichever path
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
+        if let Some(action) = self.reissue_stale_provider_selection()
+            && action != DashboardAction::None
+        {
+            return Some(action);
+        }
         if let Some(action) = self.take_profile_hydration() {
             return Some(action);
         }
@@ -338,7 +365,7 @@ impl DashboardState {
         let auto_submit = match &self.mode {
             Mode::New(wizard) => {
                 wizard.step == WizardStep::Launching
-                    && wizard.selected_worktree_options(&self.config).is_some()
+                    && wizard.selected_worktree_options().is_some()
                     && !wizard.remote_preflight_in_flight
                     && wizard.remote_preflight_error.is_none()
             }
@@ -381,9 +408,10 @@ impl DashboardState {
         {
             return None;
         }
-        let target_template_id = nth_key(&self.config.targets, wizard.target);
-        if is_bare_project_target(&self.config.targets[&target_template_id]) {
-            if wizard.selected_worktree_options(&self.config).is_some() {
+        let target_template_id = wizard.target.clone();
+        let target = self.config.targets.get(&target_template_id)?;
+        if is_bare_project_target(target) {
+            if wizard.selected_worktree_options().is_some() {
                 return None;
             }
             let directory = wizard.project_directory.trim().to_owned();
@@ -415,8 +443,12 @@ impl DashboardState {
         &self,
         wizard: &NewWizard,
     ) -> DashboardAction {
-        let target_template_id = nth_key(&self.config.targets, wizard.target);
-        let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
+        let target_template_id = wizard.target.clone();
+        let raw_project = self
+            .config
+            .targets
+            .get(&target_template_id)
+            .is_some_and(is_bare_project_target);
         DashboardAction::CreateSession {
             remember_container_size: wizard.remember_container_size,
             subagents: wizard.subagents.create_selection(),
@@ -430,7 +462,7 @@ impl DashboardState {
                 raw_project
                     && wizard.create_managed_worktree
                     && wizard
-                        .selected_worktree_options(&self.config)
+                        .selected_worktree_options()
                         .is_some_and(|options| options.available),
             ),
             workspace_id: wizard.workspace_id.clone(),
@@ -565,7 +597,7 @@ impl DashboardState {
                     .to_owned(),
             };
             let replacement = self
-                .nth_offered_profile(self.default_new_profile_index())
+                .default_offered_profile_id()
                 .ok_or_else(|| "No profile is available here.".to_owned())?;
             changes.push(format!(
                 "Profile {} is not available ({}), so this session uses {replacement}.",

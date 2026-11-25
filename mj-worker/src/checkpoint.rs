@@ -375,11 +375,24 @@ pub fn restore_from_spec_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the restore spec from `PATH`, or from standard input for `-`.
 fn read_restore_spec(path: &Path) -> Result<CheckpointRestoreSpec> {
+    if path == Path::new(EXPORT_SPEC_STDIN) {
+        return read_restore_spec_from(&mut std::io::stdin().lock());
+    }
     let body = fs::read(path)
         .with_context(|| format!("read checkpoint restore spec {}", path.display()))?;
-    let mut spec: CheckpointRestoreSpec = serde_json::from_slice(&body)
-        .with_context(|| format!("parse checkpoint restore spec {}", path.display()))?;
+    resolve_restore_spec(
+        serde_json::from_slice(&body)
+            .with_context(|| format!("parse checkpoint restore spec {}", path.display()))?,
+    )
+}
+
+fn read_restore_spec_from(reader: &mut impl std::io::Read) -> Result<CheckpointRestoreSpec> {
+    resolve_restore_spec(read_json_from(reader, "checkpoint restore spec")?)
+}
+
+fn resolve_restore_spec(mut spec: CheckpointRestoreSpec) -> Result<CheckpointRestoreSpec> {
     spec.archive_path = resolve_target_path(&spec.archive_path)?;
     spec.workspace_root = resolve_target_path(&spec.workspace_root)?;
     spec.relay_root = resolve_target_path(&spec.relay_root)?;
@@ -407,5 +420,53 @@ mod recovery_tests {
         assert!(rename_directory_without_replacement(&staged, &absent).unwrap());
         assert_eq!(fs::read(absent.join("file")).unwrap(), b"archived");
         assert!(!staged.exists());
+    }
+}
+
+#[cfg(test)]
+mod restore_spec_stdin_tests {
+    use super::*;
+
+    /// A reader that hands out a few bytes per call, as a pipe fed through a
+    /// gzip filter does.
+    struct Trickle<'a>(&'a [u8]);
+
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.0.len().min(buffer.len()).min(4093);
+            buffer[..count].copy_from_slice(&self.0[..count]);
+            self.0 = &self.0[count..];
+            Ok(count)
+        }
+    }
+
+    /// `restore-checkpoint --spec -` reads the whole spec however its pipe
+    /// delivers it, including a spec longer than a pipe buffer, and resolves
+    /// the same paths a spec file does.
+    #[test]
+    fn a_restore_spec_longer_than_a_pipe_buffer_arrives_whole_over_stdin() {
+        let long = format!("/workspace/{}", "nested/".repeat(12_000));
+        let spec = serde_json::json!({
+            "archive_path": "/var/lib/hel/workers/restore.hel.zip",
+            "workspace_root": "/workspace",
+            "relay_root": "/var/lib/hel/workers/session",
+            "harness_home": "/home/dev/.codex",
+            "restore_repositories": true,
+            "restore_native": true,
+            "queue_policy": "restore",
+            "primary_repository_root": long,
+        });
+        let body = serde_json::to_vec(&spec).unwrap();
+        assert!(body.len() > 64 * 1024);
+        let parsed = read_restore_spec_from(&mut Trickle(&body)).unwrap();
+        assert_eq!(
+            parsed.primary_repository_root.as_deref(),
+            Some(Path::new(&long))
+        );
+        assert_eq!(
+            parsed.archive_path,
+            Path::new("/var/lib/hel/workers/restore.hel.zip")
+        );
+        assert!(parsed.restore_repositories && parsed.restore_native);
     }
 }

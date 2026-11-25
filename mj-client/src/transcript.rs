@@ -48,25 +48,86 @@ pub enum EntryCollapse {
 
 pub const BROWSER_LINE_BYTES: usize = 4 * 1024;
 
-/// Interpret the durable mailbox list shared by historical and live clients.
-/// Event bullets have two spaces; report bodies have four, so report bullets
-/// remain part of their event instead of becoming new events.
-pub fn mailbox_event_lines<'a>(
+/// A collapsed summary and the text revealed when the reader opens it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptDisclosure {
+    pub summary: Vec<String>,
+    pub body: Vec<String>,
+}
+
+/// Interpret system notices once for terminal and browser disclosures.
+pub fn transcript_disclosures<'a>(
     role: ChatRole,
-    mut lines: impl Iterator<Item = &'a str>,
-) -> Vec<Vec<String>> {
-    if role != ChatRole::System || lines.next() != Some("Mailbox events:") {
+    lines: impl Iterator<Item = &'a str>,
+) -> Vec<TranscriptDisclosure> {
+    if role != ChatRole::System {
         return Vec::new();
     }
-    let mut events: Vec<Vec<String>> = Vec::new();
-    for line in lines {
-        if let Some(header) = line.strip_prefix("  - ") {
-            events.push(vec![header.to_owned()]);
-        } else if let Some(event) = events.last_mut() {
-            event.push(line.strip_prefix("    ").unwrap_or(line).to_owned());
+    let lines: Vec<_> = lines.collect();
+    match lines.first().copied() {
+        Some("Mailbox events:") => {
+            let mut events: Vec<TranscriptDisclosure> = Vec::new();
+            for line in &lines[1..] {
+                // Event bullets have two spaces; report bodies have four.
+                if let Some(header) = line.strip_prefix("  - ") {
+                    events.push(TranscriptDisclosure {
+                        summary: vec![header.to_owned()],
+                        body: Vec::new(),
+                    });
+                } else if let Some(event) = events.last_mut() {
+                    event
+                        .body
+                        .push(line.strip_prefix("    ").unwrap_or(line).to_owned());
+                }
+            }
+            events
         }
+        Some(
+            "Before-push review override requested by the agent. The agent declined to fix these findings:",
+        ) => {
+            let mut findings: Vec<String> = Vec::new();
+            let mut in_finding = false;
+            let mut truncated = false;
+            for line in &lines[1..] {
+                if *line == "…[overrides truncated]…" {
+                    truncated = true;
+                    break;
+                }
+                if line.starts_with("Overridden synthesis (review ") {
+                    break;
+                }
+                if let Some(finding) = line.strip_prefix("- Finding: ") {
+                    findings.push(finding.to_owned());
+                    in_finding = true;
+                } else if line.starts_with("  Reason: ") {
+                    in_finding = false;
+                } else if in_finding && let Some(finding) = findings.last_mut() {
+                    finding.push(' ');
+                    finding.push_str(line);
+                }
+            }
+            if findings.is_empty() {
+                return Vec::new();
+            }
+            let mut summary = findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "- {}",
+                        finding.split_whitespace().collect::<Vec<_>>().join(" ")
+                    )
+                })
+                .collect::<Vec<_>>();
+            if truncated {
+                summary.push("…[overrides truncated]…".into());
+            }
+            vec![TranscriptDisclosure {
+                summary,
+                body: lines.into_iter().map(str::to_owned).collect(),
+            }]
+        }
+        _ => Vec::new(),
     }
-    events
 }
 
 /// The historical reader uses the canonical text interpretation on both
@@ -159,16 +220,6 @@ fn browser_transcript_collapsed(
         .into_iter()
         .map(|entry| browser_entry(&entry))
         .collect::<Vec<_>>();
-    for entry in &mut entries {
-        entry.mailbox_events = mailbox_event_lines(
-            if entry.role == "system" {
-                ChatRole::System
-            } else {
-                ChatRole::Agent
-            },
-            entry.lines.iter().map(String::as_str),
-        );
-    }
     entries.retain(|entry| !entry.lines.is_empty());
     // A collapse can remove an entry a viewer already received even when
     // older, unrelated entries remain in the window. Move the reset
@@ -762,6 +813,8 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
     } else {
         entry.text.lines().map(str::to_owned).collect()
     };
+    // Expanded notices retain the stored text, including long review paragraphs.
+    let disclosures = transcript_disclosures(entry.role, source.iter().map(String::as_str));
     BrowserTranscriptEntry {
         command_id: entry.source.0.as_ref().and_then(|item| {
             item.stable_id
@@ -789,7 +842,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         label,
         recorded_at_ms: entry.recorded_at_ms,
         tool_ended_at_ms: entry.tool_ended_at_ms,
-        mailbox_events: Vec::new(),
+        disclosures,
         generated: entry.role == ChatRole::User && !entry.is_user_authored(),
         lines: source
             .into_iter()
@@ -1380,7 +1433,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         tool_ended_at_ms,
         generated,
         lines,
-        mailbox_events,
+        disclosures,
         glyph,
         tone,
         tool_status,
@@ -1396,7 +1449,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         && previous.tool_ended_at_ms == *tool_ended_at_ms
         && previous.generated == *generated
         && previous.lines == *lines
-        && previous.mailbox_events == *mailbox_events
+        && previous.disclosures == *disclosures
         && previous.glyph == *glyph
         && previous.tone == *tone
         && previous.tool_status == *tool_status
@@ -1428,7 +1481,21 @@ mod tests {
                 "Mailbox events:\n{batch}\n  - Child task Check parser finished: failed\n    支持 Unicode and <script>literal text</script>.\n    - A report bullet stays in this event."
             ),
         );
-        let browser = browser_transcript(&[entry], 2, 0, None);
+        let notice = ChatEntry::plain(
+            3,
+            ChatRole::System,
+            include_str!("../tests/fixtures/review-override-notice.txt"),
+        );
+        let long_notice = ChatEntry::plain(
+            4,
+            ChatRole::System,
+            format!(
+                "Before-push review override requested by the agent. The agent declined to fix these findings:\n- Finding: [P2] Keep long review context\n  Reason: This finding is outside scope.\nOverridden synthesis (review long-review):\n{}\n{}END_OF_LONG_REVIEW\nRepositories:\n/workspace/mjolnir: abc123..def456",
+                "Review detail. ".repeat(400),
+                "Additional review detail.\n".repeat(30),
+            ),
+        );
+        let browser = browser_transcript(&[entry, notice, long_notice], 4, 0, None);
         mj_core::golden::assert_golden(
             env!("CARGO_MANIFEST_DIR"),
             "mailbox-browser-transcript",

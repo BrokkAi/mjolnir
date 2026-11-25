@@ -1302,15 +1302,24 @@ impl Controller {
                     }
                 }
             }
-            if restart.is_none() {
+            // An owning cancelled Suspend records its restart instead of
+            // reading it; anything else reads restart and receipt together.
+            let receipt = if restart.is_none() && owning_suspend && user_cancelled() {
                 restart = restart_reason(attempt)?;
-            }
-            let receipt = if user_cancelled() {
-                attempt.receipt(&ProcessExecutor)
+                attempt.restart_and_receipt(&ProcessExecutor, false)?.1
             } else {
-                attempt.receipt(executor)
+                let want_restart = restart.is_none();
+                let (read, receipt) = if user_cancelled() {
+                    attempt.restart_and_receipt(&ProcessExecutor, want_restart)?
+                } else {
+                    attempt.restart_and_receipt(executor, want_restart)?
+                };
+                if want_restart {
+                    restart = read;
+                }
+                receipt
             };
-            let refusal = receipt?.and_then(|receipt| receipt.error)
+            let refusal = receipt.and_then(|receipt| receipt.error)
                 .map(|reason| anyhow::Error::from(mj_core::refusal::Refusal::precondition(reason)));
             // An owning Suspend always records its verified archive before
             // submitting Close. An older archive is possible, so when one is

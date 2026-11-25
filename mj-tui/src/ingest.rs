@@ -684,6 +684,7 @@ impl DashboardState {
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.
         self.clamp_selections();
+        self.reconcile_new_wizard();
     }
 
     pub fn set_state(&mut self, mut state: State) {

@@ -4444,7 +4444,14 @@ case "$1 $2" in
         case "$1 $2" in
             "sh -c")
                 script=$(printf '%s' "$3" | sed 's|/var/lib/hel/workers/|workers/|g')
-                exec sh -c "$script"
+                # Keep the script's $0 and positional arguments, mapping the
+                # worker root they name the same way.
+                shift 3
+                for argument do
+                    set -- "$@" "$(printf '%s' "$argument" | sed 's|/var/lib/hel/workers/|workers/|g')"
+                    shift
+                done
+                exec sh -c "$script" "$@"
                 ;;
             "rm -f")
                 shift 3
@@ -5787,6 +5794,71 @@ async fn legacy_closing_and_destroying_subagent_routes_through_archive_free_comp
     }
 }
 
+/// Answer the batched suspend probes as the target's shell would, so fakes
+/// check what the controller parses instead of a second copy of the framing.
+/// `file` is the target's wire directory, `worker_alive` the worker's state at
+/// the moment of the call, and `origin` what `git config --get
+/// remote.origin.url` prints in every checkout. Returns `None` for any other
+/// command.
+#[cfg(unix)]
+fn batched_suspend_probe_answer(
+    command: &mj_core::targets::CommandSpec,
+    file: impl Fn(&str) -> Option<Vec<u8>>,
+    worker_alive: impl Fn() -> bool,
+    origin: &str,
+) -> Option<mj_core::targets::CommandOutput> {
+    let joined = command.args.join(" ");
+    let after = |marker: &str| -> Option<Vec<String>> {
+        let (_, rest) = joined.split_once(marker)?;
+        Some(
+            rest.split_whitespace()
+                .map(|token| token.trim_matches('\'').to_owned())
+                .filter(|token| !token.is_empty())
+                .collect(),
+        )
+    };
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let read = |name: &str| match file(name) {
+        Some(bytes) => (name.to_owned(), 0, text(&bytes)),
+        None => (name.to_owned(), 44, String::new()),
+    };
+    let frames: Vec<(String, i32, String)> =
+        if let Some(arguments) = after("mj-read-suspend-records") {
+            arguments[1..].iter().map(|name| read(name)).collect()
+        } else if let Some(arguments) = after("mj-read-suspend-origins") {
+            let accepted = read(mj_core::worker_suspend::ACCEPTED);
+            let mut frames = vec![("accepted".to_owned(), accepted.1, accepted.2)];
+            if accepted.1 != 0 {
+                frames.extend(
+                    (0..arguments.len() - 1)
+                        .map(|index| (format!("origin{index}"), 0, origin.to_owned())),
+                );
+            }
+            frames
+        } else if after("mj-wait-suspend-worker").is_some() {
+            if worker_alive() {
+                let progress = read(mj_core::worker_suspend::PROGRESS);
+                vec![
+                    ("alive".to_owned(), 0, "alive".to_owned()),
+                    ("progress".to_owned(), progress.1, progress.2),
+                ]
+            } else {
+                vec![("alive".to_owned(), 0, "dead".to_owned())]
+            }
+        } else {
+            return None;
+        };
+    let frames: Vec<_> = frames
+        .iter()
+        .map(|(name, status, stdout)| (name.as_str(), *status, stdout.as_str(), ""))
+        .collect();
+    Some(mj_core::targets::CommandOutput {
+        status: 0,
+        stdout: crate::targets::ssh_podman_probe_fixture(&frames),
+        stderr: Vec::new(),
+    })
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator() {
@@ -5831,17 +5903,18 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                 .unwrap()
                 .push((command.program.clone(), command.args.clone()));
             let joined = command.args.join(" ");
-            if joined.contains("remote.origin.url") {
-                return Ok(mj_core::targets::CommandOutput {
-                    status: 0,
-                    stdout: b"https://example.com/repo.git\n".to_vec(),
-                    stderr: Vec::new(),
-                });
-            }
             if self.failed_stop_observation == Some(command.purpose.as_str())
                 && (!self.lose_stop_reply || self.files.lock().unwrap().contains_key(wire::REQUEST))
             {
                 anyhow::bail!("SSH failed during {}", command.purpose);
+            }
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |name| self.files.lock().unwrap().get(name).cloned(),
+                || *self.worker_alive.lock().unwrap(),
+                "https://example.com/repo.git",
+            ) {
+                return Ok(answer);
             }
             if joined.contains("identity-alive")
                 || command.purpose == "probe Mjolnir worker daemon liveness"
@@ -6230,10 +6303,9 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     let manager = crate::session_manager::spawn_session_manager().unwrap();
     let admission = crate::controller::test_support::session_admission(session_id);
     for (worker_alive, command, lose_stop_reply) in [
-        (false, "read suspend record suspend-operation.json", false),
-        (false, READ_REQUEST, false),
+        (false, "read suspend acceptance and request", false),
         (true, READ_REQUEST, true),
-        (true, "read suspend record suspend-progress.json", false),
+        (true, "wait for suspend worker exit", false),
         (false, "probe Mjolnir worker daemon liveness", false),
     ] {
         *fake.worker_alive.lock().unwrap() = worker_alive;
@@ -6314,10 +6386,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
             assert_eq!(recorded, &serde_json::to_vec(&request).unwrap());
         } else {
             assert!(
-                matches!(
-                    command,
-                    "read suspend record suspend-operation.json" | READ_REQUEST
-                ) && !lose_stop_reply,
+                command == "read suspend acceptance and request" && !lose_stop_reply,
                 "the recorded stop disappeared during {command}"
             );
         }
@@ -6400,12 +6469,13 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
                 .unwrap()
                 .push((command.program.clone(), command.args.clone()));
             let joined = command.args.join(" ");
-            if joined.contains("config --get remote.origin.url") {
-                return Ok(mj_core::targets::CommandOutput {
-                    status: 0,
-                    stdout: b"https://example.com/app.git\n".to_vec(),
-                    stderr: Vec::new(),
-                });
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |name| self.files.lock().unwrap().get(name).cloned(),
+                || *self.worker_alive.lock().unwrap(),
+                "https://example.com/app.git",
+            ) {
+                return Ok(answer);
             }
             if joined.contains("worker identity-alive") {
                 let alive = *self.worker_alive.lock().unwrap();
@@ -6779,18 +6849,14 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             command: &mj_core::targets::CommandSpec,
         ) -> Result<mj_core::targets::CommandOutput> {
             let joined = command.args.join(" ");
-            if joined.contains("identity-alive") {
-                // Alive on first poll, dead on second poll.
-                let poll = self.alive_polls.fetch_add(1, Ordering::SeqCst);
-                return Ok(mj_core::targets::CommandOutput {
-                    status: 0,
-                    stdout: if poll == 0 {
-                        b"alive\n".to_vec()
-                    } else {
-                        b"dead\n".to_vec()
-                    },
-                    stderr: Vec::new(),
-                });
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |name| self.files.lock().unwrap().get(name).cloned(),
+                // Alive on the first bounded wait, dead on the second.
+                || self.alive_polls.fetch_add(1, Ordering::SeqCst) == 0,
+                "",
+            ) {
+                return Ok(answer);
             }
             for name in [
                 wire::ACCEPTED,
@@ -6993,12 +7059,13 @@ fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_su
     impl CommandExecutor for RemotePreflightStageFake {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let joined = command.args.join(" ");
-            if joined.contains("remote.origin.url") {
-                return Ok(CommandOutput {
-                    status: 0,
-                    stdout: b"https://example.com/org/repo.git\n".to_vec(),
-                    stderr: Vec::new(),
-                });
+            if let Some(answer) = batched_suspend_probe_answer(
+                command,
+                |_| None,
+                || false,
+                "https://example.com/org/repo.git",
+            ) {
+                return Ok(answer);
             }
             if joined.contains("uname") {
                 return Ok(CommandOutput {

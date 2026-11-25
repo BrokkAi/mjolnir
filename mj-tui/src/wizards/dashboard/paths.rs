@@ -69,7 +69,7 @@ pub(crate) fn focused_wizard_path_input<'a, W: WizardDraft>(
 ) -> Option<(&'a mut PathInput, CompletionHost, CompletionKind)> {
     let focused = wizard.form().borrow().focused();
     if focused == Some(WizardControl::MountSource) {
-        let host = CompletionHost::Target(nth_key(&dashboard.config.targets, wizard.target()));
+        let host = CompletionHost::Target(wizard.target_id(dashboard));
         return Some((
             &mut wizard.mounts_mut().source,
             host,
@@ -258,7 +258,7 @@ impl DashboardState {
             Ok((resolved, options, review_turns_off)) => {
                 let value = resolved.to_string_lossy().into_owned();
                 if let Mode::New(wizard) = &mut self.mode {
-                    let target = nth_key(&self.config.targets, wizard.target);
+                    let target = wizard.target.clone();
                     if wizard.worktree_options.as_ref().is_none_or(
                         |(old_target, old_directory, _, _)| {
                             old_target != &target || old_directory != &value
@@ -324,7 +324,7 @@ impl DashboardState {
         let draft = match &self.mode {
             Mode::New(w) => format!(
                 "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
-                self.config.targets.iter().nth(w.target),
+                self.config.targets.get_key_value(&w.target),
                 w.step,
                 w.project_directory.value(),
                 w.new_bundle_source.value(),

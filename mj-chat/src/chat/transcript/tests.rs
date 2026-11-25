@@ -5135,7 +5135,7 @@ fn golden_rich_transcript_tool_presentation() {
     let second_child = mailbox
         .transcript_click_targets
         .iter()
-        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 12)))
+        .find(|target| target.disclosure == Some(TranscriptDisclosureId::Event(2, 12)))
         .cloned()
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
@@ -5154,8 +5154,8 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
     assert_eq!(
-        mailbox.expanded_mailbox_events,
-        BTreeSet::from([MailboxDisclosureId::Event(2, 12)])
+        mailbox.expanded_disclosures,
+        BTreeSet::from([TranscriptDisclosureId::Event(2, 12)])
     );
     let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
     let report_start = cached
@@ -5192,7 +5192,7 @@ fn golden_rich_transcript_tool_presentation() {
     let first_child = mailbox
         .transcript_click_targets
         .iter()
-        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 10)))
+        .find(|target| target.disclosure == Some(TranscriptDisclosureId::Event(2, 10)))
         .cloned()
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
@@ -5223,8 +5223,8 @@ fn golden_rich_transcript_tool_presentation() {
     // Hard-won: d453f1142: delivered-message bodies had no collapse target.
     click_rendered_text(&mut mailbox, &rows, "text</script>.");
     assert_eq!(
-        mailbox.expanded_mailbox_events,
-        BTreeSet::from([MailboxDisclosureId::Event(2, 10)])
+        mailbox.expanded_disclosures,
+        BTreeSet::from([TranscriptDisclosureId::Event(2, 10)])
     );
     assert_eq!(mailbox.anchor, TranscriptAnchor::Row { entry: 0, row: 9 });
     let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
@@ -5242,10 +5242,10 @@ fn golden_rich_transcript_tool_presentation() {
     let first_report = mailbox.render_cache.entries[0]
         .as_ref()
         .unwrap()
-        .mailbox
+        .disclosure
         .as_ref()
         .unwrap()
-        .mailbox_events[10]
+        .disclosures[10]
         .0
         .start;
     mailbox.anchor = TranscriptAnchor::Row {
@@ -5269,7 +5269,7 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
     click_rendered_text(&mut mailbox, &rows, "verification timed out");
-    assert!(mailbox.expanded_mailbox_events.is_empty());
+    assert!(mailbox.expanded_disclosures.is_empty());
     assert_eq!(
         mailbox.anchor,
         TranscriptAnchor::Row {
@@ -5295,6 +5295,65 @@ fn golden_rich_transcript_tool_presentation() {
         &rows,
         &[],
     );
+
+    let mut overrides = ChatState::new(&snapshot(), &[]);
+    overrides.entries.push(ChatEntry::plain(
+        3,
+        ChatRole::System,
+        include_str!("../../../../mj-client/tests/fixtures/review-override-notice.txt"),
+    ));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut overrides, 68, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "review override shows only declined findings",
+        68,
+        24,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut overrides, &rows, "Unicode");
+    assert_eq!(
+        overrides.expanded_disclosures,
+        BTreeSet::from([TranscriptDisclosureId::Event(3, 0)])
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "clicking the second finding opens the complete override notice",
+        68,
+        48,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut overrides, 68, 48)),
+        &[],
+    );
+    overrides.entries[0].revision += 1;
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut overrides, 44, 52));
+    append_transcript_golden_state(
+        &mut output,
+        "override stays expanded across update and narrow resize",
+        44,
+        52,
+        &rows,
+        &[],
+    );
+    click_rendered_text(&mut overrides, &rows, "intentional.");
+    assert!(overrides.expanded_disclosures.is_empty());
+    append_transcript_golden_state(
+        &mut output,
+        "override body click restores the finding list",
+        44,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut overrides, 44, 24)),
+        &[],
+    );
+    overrides.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "raw override text remains complete",
+        68,
+        48,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut overrides, 68, 48)),
+        &[],
+    );
+    assert!(overrides.transcript_click_targets.is_empty());
 
     use chrono::TimeZone as _;
     let delivery_time = chrono::Local
@@ -5352,8 +5411,8 @@ fn golden_rich_transcript_tool_presentation() {
     );
     click_rendered_text(&mut incoming, &rows, "Message from Review agent");
     assert_eq!(
-        incoming.expanded_mailbox_events,
-        BTreeSet::from([MailboxDisclosureId::Message(
+        incoming.expanded_disclosures,
+        BTreeSet::from([TranscriptDisclosureId::Message(
             incoming.entries[1].message_id.clone().unwrap(),
         )])
     );
@@ -5379,8 +5438,8 @@ fn golden_rich_transcript_tool_presentation() {
     );
     click_rendered_text(&mut incoming, &rows, "terminal.");
     assert_eq!(
-        incoming.expanded_mailbox_events,
-        BTreeSet::from([MailboxDisclosureId::Message(
+        incoming.expanded_disclosures,
+        BTreeSet::from([TranscriptDisclosureId::Message(
             incoming.entries[2].message_id.clone().unwrap(),
         )])
     );

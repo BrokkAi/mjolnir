@@ -1348,6 +1348,170 @@ mod staged_in_place_tests {
             });
     }
 
+    // Hard-won: #1673: a reload failure was settled and its hold released after a daemon handoff had closed admission.
+    #[test]
+    fn in_place_move_reload_failure_after_admission_closed_settles_nothing() {
+        if !isolated("in_place_move_reload_failure_after_admission_closed_settles_nothing") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        fs::write(relay_root.join("reject-in-place-restart"), "test").unwrap();
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = RecordingProcessExecutor {
+                    refuse_resume: Some("in-place Move reload"),
+                    ..executor()
+                };
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let error = fixture
+                    .controller
+                    .execute_move(
+                        &admission,
+                        &mut operation,
+                        None,
+                        &executor,
+                        &channels.control,
+                        super::super::MoveSourceRelay::default(),
+                    )
+                    .await
+                    .unwrap_err();
+                channels.shutdown.shutdown().await.unwrap();
+                assert!(format!("{error:#}").contains("handoff"), "{error:#}");
+                // The successor daemon decides: the hold and fence stay, and
+                // nothing was written to the session record.
+                let hold =
+                    mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                        .unwrap()
+                        .operational_state()
+                        .in_place_move_hold
+                        .unwrap();
+                assert_eq!(hold.operation_id, operation.operation_id);
+                assert!(operation.in_place_expected_store_id.is_some());
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_SOURCE_PROFILE
+                );
+            });
+    }
+
+    // Hard-won: #1673: an unbounded in-place reload wait outlived daemon shutdown and cancellation.
+    #[test]
+    fn in_place_move_interrupt_during_reload_returns_promptly_and_recovery_settles() {
+        if !isolated("in_place_move_interrupt_during_reload_returns_promptly_and_recovery_settles")
+        {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let relay_root = seed_source_relay(&fixture.worker_root);
+        fs::write(relay_root.join("stall-in-place-restart-reply"), "test").unwrap();
+        let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channels = start_source_relay_manager(&relay_root);
+                let executor = executor();
+                let admission =
+                    crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+                let requests = relay_root.join("in-place-move-requests.log");
+                let interrupt = async {
+                    // The worker has the reload and the reply is stalled.
+                    for _ in 0..200 {
+                        if fs::read_to_string(&requests)
+                            .is_ok_and(|log| log.contains("restart_harness_in_place"))
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    executor
+                        .shutdown
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    std::time::Instant::now()
+                };
+                let (result, interrupted_at) = tokio::join!(
+                    async {
+                        let result = fixture
+                            .controller
+                            .execute_move(
+                                &admission,
+                                &mut operation,
+                                None,
+                                &executor,
+                                &channels.control,
+                                super::super::MoveSourceRelay::default(),
+                            )
+                            .await;
+                        (result, std::time::Instant::now())
+                    },
+                    interrupt
+                );
+                let (result, returned_at) = result;
+                channels.shutdown.shutdown().await.unwrap();
+                assert!(
+                    returned_at.saturating_duration_since(interrupted_at)
+                        < std::time::Duration::from_secs(1),
+                    "interruption took {:?}",
+                    returned_at.saturating_duration_since(interrupted_at)
+                );
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains("interrupted"), "{error}");
+                // The worker's hold and our fence stay for recovery.
+                assert!(operation.in_place_expected_store_id.is_some());
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_SOURCE_PROFILE
+                );
+                let hold =
+                    mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                        .unwrap()
+                        .operational_state()
+                        .in_place_move_hold
+                        .unwrap();
+                assert!(hold.harness_restarted, "{hold:?}");
+                // The next daemon settles the Move from the hold.
+                fixture.controller.state = crate::database::load_state().unwrap();
+                let executor = self::executor();
+                let channels = start_source_relay_manager(&relay_root);
+                let outcome = fixture
+                    .controller
+                    .recover_move_managed_controlled(
+                        &admission,
+                        operation,
+                        &executor,
+                        &channels.control,
+                    )
+                    .await
+                    .unwrap();
+                channels.shutdown.shutdown().await.unwrap();
+                assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+                assert_eq!(
+                    crate::database::load_session_record(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap()
+                        .last_profile,
+                    IN_PLACE_DESTINATION_PROFILE
+                );
+            });
+    }
+
     #[test]
     fn in_place_move_cancelled_after_started_settles_destination_and_installs_recent_handoff() {
         if !isolated(

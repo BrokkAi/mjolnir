@@ -256,7 +256,7 @@ pub(crate) fn transcript_lines(chat: &mut ChatState, width: u16) -> Vec<Line<'st
         chat.render_mode,
         chat.tool_display,
         &chat.expanded_tool_calls,
-        &chat.expanded_mailbox_events,
+        &chat.expanded_disclosures,
     );
     let mut lines = Vec::new();
     for index in 0..chat.entries.len() {
@@ -340,12 +340,12 @@ pub(crate) struct RowTrack {
     /// One per rendered row.
     pub copies: Vec<RowCopy>,
     /// Rendered row range and durable identity for each independently clickable event.
-    pub mailbox_events: Vec<(std::ops::Range<usize>, MailboxDisclosureId)>,
+    pub disclosures: Vec<(std::ops::Range<usize>, TranscriptDisclosureId)>,
 }
 
 /// Messages delivered in one batch share an ordinal, so use their durable ID.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum MailboxDisclosureId {
+pub(crate) enum TranscriptDisclosureId {
     Event(u64, usize),
     Message(String),
 }
@@ -490,10 +490,11 @@ fn render_entry_tracking(
     mut track: Option<&mut RowTrack>,
 ) -> Vec<Line<'static>> {
     if mode == TranscriptRenderMode::Rich
-        && let Some((rows, mailbox_track)) = render_mailbox_entry(entry, width, &BTreeSet::new())
+        && let Some((rows, disclosure_track)) =
+            render_disclosure_entry(entry, width, &BTreeSet::new())
     {
         if let Some(track) = track {
-            *track = mailbox_track;
+            *track = disclosure_track;
         }
         return rows;
     }
@@ -584,10 +585,13 @@ pub(super) fn estimated_entry_rows(
         if entry.role == ChatRole::Message {
             return 2;
         }
-        let events = mailbox_event_lines(entry.role, entry.text.lines());
-        if !events.is_empty() {
-            // One header per closed event, then the blank row.
-            return events.len() + 1;
+        let disclosures = transcript_disclosures(entry.role, entry.text.lines());
+        if !disclosures.is_empty() {
+            return disclosures
+                .iter()
+                .map(|item| item.summary.len())
+                .sum::<usize>()
+                + 1;
         }
         if let ToolView::Inline { output_lines } = tool
             && entry.role == ChatRole::Tool
@@ -629,29 +633,34 @@ pub(super) fn estimated_entry_rows(
     body + 2
 }
 
-/// Render event headers and report bodies together so clicks and selection
+/// Render disclosure summaries and bodies together so clicks and selection
 /// use the exact row positions that were drawn.
-pub(super) fn render_mailbox_entry(
+pub(super) fn render_disclosure_entry(
     entry: &ChatEntry,
     width: usize,
-    expanded: &BTreeSet<MailboxDisclosureId>,
+    expanded: &BTreeSet<TranscriptDisclosureId>,
 ) -> Option<(Vec<Line<'static>>, RowTrack)> {
     let message = entry.role == ChatRole::Message;
-    let events = if message {
-        vec![vec![entry_visual(entry).label]]
+    let disclosures = if message {
+        vec![TranscriptDisclosure {
+            summary: vec![entry_visual(entry).label],
+            body: Vec::new(),
+        }]
     } else {
-        mailbox_event_lines(entry.role, entry.text.lines())
+        transcript_disclosures(entry.role, entry.text.lines())
     };
-    if events.is_empty() {
+    if disclosures.is_empty() {
         return None;
     }
     let mut rows = Vec::new();
     let mut track = RowTrack::default();
-    for (index, lines) in events.into_iter().enumerate() {
+    for (index, disclosure) in disclosures.into_iter().enumerate() {
         let id = if message {
-            MailboxDisclosureId::Message(entry.message_id.clone().expect("message entry identity"))
+            TranscriptDisclosureId::Message(
+                entry.message_id.clone().expect("message entry identity"),
+            )
         } else {
-            MailboxDisclosureId::Event(entry.start_seq, index)
+            TranscriptDisclosureId::Event(entry.start_seq, index)
         };
         let open = expanded.contains(&id);
         let arrow = if open {
@@ -666,22 +675,27 @@ pub(super) fn render_mailbox_entry(
         } else {
             theme::muted()
         };
-        let mut header = vec![Span::styled(format!("{arrow} {}", lines[0]), style)];
-        if let Some(time) = format_event_time(entry.recorded_at_ms) {
-            header.push(Span::styled(
-                format!("{}{time}", theme::glyphs().footer_separator),
-                theme::muted(),
-            ));
-        }
         let event_start = rows.len();
-        if open {
-            let (header_rows, _, copies) =
-                wrap_styled_line_for_copy(Line::from(header), width, ROLE_GUTTER_WIDTH);
-            rows.extend(header_rows);
-            track.copies.extend(copies);
-        } else {
-            rows.push(truncate_line_to_width(Line::from(header), width));
-            track.copies.push(RowCopy::default());
+        for (line_index, summary) in disclosure.summary.iter().enumerate() {
+            let marker = if line_index == 0 { arrow } else { " " };
+            let mut header = vec![Span::styled(format!("{marker} {summary}"), style)];
+            if line_index == 0
+                && let Some(time) = format_event_time(entry.recorded_at_ms)
+            {
+                header.push(Span::styled(
+                    format!("{}{time}", theme::glyphs().footer_separator),
+                    theme::muted(),
+                ));
+            }
+            if open {
+                let (header_rows, _, copies) =
+                    wrap_styled_line_for_copy(Line::from(header), width, ROLE_GUTTER_WIDTH);
+                rows.extend(header_rows);
+                track.copies.extend(copies);
+            } else {
+                rows.push(truncate_line_to_width(Line::from(header), width));
+                track.copies.push(RowCopy::default());
+            }
         }
         if open {
             let first_row = rows.len();
@@ -693,9 +707,12 @@ pub(super) fn render_mailbox_entry(
                     false,
                     Some((&mut track, first_row)),
                 ));
-            } else if lines.len() > 1 {
-                let detail =
-                    ChatEntry::plain(entry.start_seq, ChatRole::System, lines[1..].join("\n"));
+            } else if !disclosure.body.is_empty() {
+                let detail = ChatEntry::plain(
+                    entry.start_seq,
+                    ChatRole::System,
+                    disclosure.body.join("\n"),
+                );
                 rows.extend(entry_body_rows_inner(
                     &detail,
                     width,
@@ -705,7 +722,7 @@ pub(super) fn render_mailbox_entry(
                 ));
             }
         }
-        track.mailbox_events.push((event_start..rows.len(), id));
+        track.disclosures.push((event_start..rows.len(), id));
     }
     rows.push(Line::from(""));
     track.copies.push(RowCopy::default());

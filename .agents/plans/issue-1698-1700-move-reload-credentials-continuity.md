@@ -24,6 +24,10 @@ After this change, the worker's post-reap reload boundary is the single safe own
 - [x] Retirement RPCs share credential admission: a Move sets its hold and drains prior reads/acks before preservation, so an acknowledgement cannot remove an in-flight reload's only receipt.
 - [x] Final targeted validation and review passed; this plan is included in the completion commit.
 
+- [x] Follow-up: merged master `45bc071e0`, preserving `3fe00362e` retry/hold ownership, Committed-phase waits, admission yielding and interruption behavior. Unified new-reload capability checks at protocol 93 while preserving old-worker forward settlement. Retired-login draining remains after successful post-reload admission/settlement only.
+- [x] Follow-up: removed Unix/test cfg guards from public retired-login readers/acknowledgers because the cross-platform stand-in calls them in non-test builds. Remaining added Unix-only tests/helpers are gated.
+- [x] Follow-up: merged-head validation passed (credentials 40, relay 14, reload_commit 16, in_place_move 12, reload_launch_config 5, acp::session 23, credential_sync 3, controller Move 59, parking 11, daemon Move 11). Format and six-crate strict Clippy passed. The merge and cfg fix are committed together without pushing; full ledger is `merge-validation.md` in the assigned report directory.
+
 ## Surprises & Discoveries
 
 - Observation: Relay protocol 92 was recently claimed on `master` by `1096adabc` (`RELAY_SEARCH_HISTORY_PROTOCOL = 92`), so the new combined capability for this plan takes protocol 93.
