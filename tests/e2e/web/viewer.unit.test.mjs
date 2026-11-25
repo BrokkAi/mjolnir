@@ -1686,6 +1686,7 @@ test('suspend safe fix refreshes preflight and ask sends the cleanup prompt', as
   const submissions = [];
   const requests = [];
   const preflight = { blockers: [{ kind: 'hidden_tracked_edits', paths: ['linked/file'], remedy: 'Clear both flags.' }] };
+  let nextSubmissionResult = { represented: false, status: 'Queued' };
   const context = vm.createContext({
     el: make, button: label => make('button', '', label),
     openSessionDialog: () => make('dialog'),
@@ -1698,7 +1699,10 @@ test('suspend safe fix refreshes preflight and ask sends the cleanup prompt', as
       }
       return preflight;
     },
-    sendSubmission: async body => submissions.push(body),
+    sendSubmission: async body => {
+      submissions.push(body);
+      return nextSubmissionResult;
+    },
   });
   const titleStart = viewerSource.indexOf('function blockerTitle(');
   const titleEnd = viewerSource.indexOf('  return section;', titleStart) + '  return section;\n}'.length;
@@ -1724,9 +1728,15 @@ test('suspend safe fix refreshes preflight and ask sends the cleanup prompt', as
   const asked = context.confirmSessionSuspension({ id: 'session-1', state: 'running' }, text => { notice = text; });
   await new Promise(resolve => setImmediate(resolve));
   const ask = nodes.filter(n => n.textContent === 'Ask session to fix').at(-1);
+  nextSubmissionResult = { failed: true, represented: false, status: 'Not sent: Session stopped' };
+  await ask.onclick();
+  assert.equal(ask.disabled, false);
+  assert.equal(notice, '');
+  assert.ok(nodes.some(n => n.textContent.includes('Could not send cleanup request: Not sent: Session stopped')));
+  nextSubmissionResult = { represented: false, status: 'Queued' };
   await ask.onclick();
   await asked;
-  assert.equal(submissions[0].action, 'prompt');
-  assert.match(submissions[0].text, /Hidden tracked edits\n- linked\/file\nFix: Clear both flags/);
+  assert.equal(submissions[1].action, 'prompt');
+  assert.match(submissions[1].text, /Hidden tracked edits\n- linked\/file\nFix: Clear both flags/);
   assert.match(notice, /Sent suspend-blocker/);
 });

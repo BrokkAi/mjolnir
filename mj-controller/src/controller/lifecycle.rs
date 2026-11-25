@@ -528,7 +528,14 @@ impl Controller {
                 preflight.keep_dir_bytes = worker_result.keep_dir_bytes;
                 preflight.operations = worker_result.operations;
                 preflight.raw = worker_result.raw;
-                preflight.blockers = worker_result.blockers;
+                preflight.blockers = worker_result
+                    .blockers
+                    .into_iter()
+                    .map(|mut blocker| {
+                        blocker.kind = blocker.normalized_kind().to_owned();
+                        blocker
+                    })
+                    .collect();
                 preflight.dry_run = worker_result.dry_run;
             } else {
                 let git = super::worktree::ExecutorGit::local(executor);

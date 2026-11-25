@@ -6995,7 +6995,12 @@ function confirmSessionSuspension(session, onNotice = () => {}) {
             ask.onclick = async () => {
               ask.disabled = true;
               try {
-                await sendSubmission({ action: 'prompt', session_id: session.id, text: formatBlockerCleanupPrompt(blockers) });
+                const pending = await sendSubmission({ action: 'prompt', session_id: session.id, text: formatBlockerCleanupPrompt(blockers) });
+                if (!pending || (!pending.represented && pending.status !== 'Queued')) {
+                  ask.disabled = false;
+                  body.prepend(el('p', 'danger', `Could not send cleanup request: ${pending?.status || 'request failed'}`));
+                  return;
+                }
                 finish(null);
                 onNotice('Sent suspend-blocker cleanup request.');
               } catch (error) {

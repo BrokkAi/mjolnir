@@ -216,8 +216,34 @@ pub struct SuspendBlocker {
 }
 
 impl SuspendBlocker {
+    /// Normalize either a current snake_case kind code or a legacy Rust Debug
+    /// `SnapshotRefused` string emitted by an older remote worker.
+    pub fn normalized_kind(&self) -> &str {
+        let raw = self.kind.as_str();
+        let prefix = raw
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or(raw);
+        match prefix {
+            "Untracked" | "untracked" => "untracked",
+            "OperationInProgress" | "operation_in_progress" => "operation_in_progress",
+            "DirtySubmodule" | "dirty_submodule" => "dirty_submodule",
+            "MissingManagedOrigin" | "missing_managed_origin" => "missing_managed_origin",
+            "OriginRemovedByTeardown" | "origin_removed_by_teardown" => {
+                "origin_removed_by_teardown"
+            }
+            "UnrepresentedGitState" | "unrepresented_git_state" => "unrepresented_git_state",
+            "HiddenTrackedEdits" | "hidden_tracked_edits" => "hidden_tracked_edits",
+            "IntentToAdd" | "intent_to_add" => "intent_to_add",
+            "UntrackedSubmoduleRegistration" | "untracked_submodule_registration" => {
+                "untracked_submodule_registration"
+            }
+            "TrackedKeepFiles" | "tracked_keep_files" => "tracked_keep_files",
+            _ => raw,
+        }
+    }
     pub fn title(&self) -> &str {
-        match self.kind.as_str() {
+        match self.normalized_kind() {
             "untracked" => "Untracked items",
             "operation_in_progress" => "Git operation in progress",
             "dirty_submodule" => "Dirty submodule",
@@ -228,12 +254,12 @@ impl SuspendBlocker {
             "intent_to_add" => "Intent-to-add files",
             "untracked_submodule_registration" => "Untracked submodule registration",
             "tracked_keep_files" => "Tracked .mj/keep files",
-            _ => &self.kind,
+            other => other,
         }
     }
     pub fn is_auto_fixable(&self) -> bool {
         matches!(
-            self.kind.as_str(),
+            self.normalized_kind(),
             "hidden_tracked_edits" | "unrepresented_git_state"
         )
     }
@@ -554,14 +580,22 @@ mod tests {
 
     #[test]
     fn suspend_blocker_wire_schema_preserves_legacy_kinds_and_rejects_unknown_fields() {
-        let legacy = r#"{"kind":"HiddenTrackedEdits legacy detail","paths":["linked/file"],"remedy":"preserve work"}"#;
+        let legacy = r#"{"kind":"HiddenTrackedEdits([Scoped { value: \"linked/file\" }])","paths":["linked/file"],"remedy":"preserve work"}"#;
         let blocker: SuspendBlocker = serde_json::from_str(legacy).unwrap();
-        assert_eq!(blocker.title(), "HiddenTrackedEdits legacy detail");
+        assert_eq!(blocker.normalized_kind(), "hidden_tracked_edits");
+        assert_eq!(blocker.title(), "Hidden tracked edits");
+        assert!(blocker.is_auto_fixable());
         assert_eq!(
             serde_json::from_str::<SuspendBlocker>(&serde_json::to_string(&blocker).unwrap())
                 .unwrap(),
             blocker
         );
+        let unknown: SuspendBlocker = serde_json::from_str(
+            r#"{"kind":"future_custom_blocker","paths":[],"remedy":"fix it"}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown.title(), "future_custom_blocker");
+        assert!(!unknown.is_auto_fixable());
         assert!(
             serde_json::from_str::<SuspendBlocker>(
                 r#"{"kind":"hidden_tracked_edits","paths":[],"remedy":"","extra":true}"#

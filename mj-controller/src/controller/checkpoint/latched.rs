@@ -1282,7 +1282,11 @@ fn history_only_origin_override(
                 })
         })
         .or_else(|| {
-            managed_worktree
+            let is_primary = repository_id == super::HOST_CHECKOUT_REPOSITORY
+                || primary_repository_id == Some(repository_id);
+            is_primary
+                .then_some(managed_worktree)
+                .flatten()
                 .and_then(crate::controller::lifecycle::origin_delta::managed_origin_override)
         })
 }
@@ -1381,6 +1385,26 @@ mod tests {
             repositories[1].capture,
             CheckpointRepositoryCapture::PlainDirectory
         );
+        // A secondary repository without a recorded or resolvable network source
+        // must never inherit the primary managed clone's origin.
+        let mut secondary_only = vec![CheckpointRepositorySpec {
+            id: "secondary-repo".into(),
+            relative_destination: PathBuf::from("secondary"),
+            capture: CheckpointRepositoryCapture::RemoteWorkspace,
+            origin_override: None,
+        }];
+        apply_history_only_policy(
+            &mut secondary_only,
+            Some(&owner),
+            &mj_core::config::Config::default(),
+            Some(&worktree),
+            &ProcessExecutor,
+        );
+        assert_eq!(
+            secondary_only[0].capture,
+            CheckpointRepositoryCapture::MetadataOnly
+        );
+        assert_eq!(secondary_only[0].origin_override, None);
         let snapshot = mj_checkpoint::archive::collect_git_metadata_snapshot(
             &mj_checkpoint::archive::SystemGit,
             &worktree.worktree_root,
