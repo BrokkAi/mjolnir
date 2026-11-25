@@ -152,8 +152,10 @@ estimates use hollow markers. These series count different source outcomes:
   reviewer study**, preserved as `reviewcharts/data.json`, `native.csv` and
   `README.txt`. Yield is the mean material-root total, deduplicated within each
   PR and pass across follow-up revisions. Its denominator is Terra 6.1/high's
-  material-root total from that same historical cohort. The cost unit is the
-  **full PR workflow**, including follow-up reviews. For Opus/high, Sonnet/high
+  material-root total from that same historical cohort. The chart includes its
+  matching **historical Terra/high** reference at index 100 and **$0.103 per PR
+  workflow**, alongside current Terra/high at $0.044 per diff. The cost unit is the
+  **full PR workflow**, including follow-up reviews. For Terra/high, Opus/high, Sonnet/high
   and Haiku/high, estimate that workflow at the observed initial-review mean
   cost times **95 revision reviews / 47 PRs**. This charges every follow-up but
   assumes it costs the same as an initial review; actual follow-up costs are
