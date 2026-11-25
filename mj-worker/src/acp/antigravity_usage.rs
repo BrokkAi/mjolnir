@@ -8,7 +8,7 @@ const USAGE_SCOPE_KEY: &str = "mjolnir.dev/usage-scope";
 /// live against their per-step transcripts to report the whole turn (every
 /// model step of the prompt). Another version, for example one found on PATH,
 /// keeps the adapter's undeclared scope until checked.
-const WHOLE_TURN_VERSIONS: [&str; 1] = ["1.5.11"];
+const WHOLE_TURN_VERSIONS: [&str; 2] = ["1.5.11", "1.5.15"];
 
 /// Whether this Antigravity ACP server, as it named itself in `initialize`,
 /// reports whole turns.
@@ -16,7 +16,7 @@ pub fn reports_whole_turns(agent_version: Option<&str>) -> bool {
     agent_version.is_some_and(|version| WHOLE_TURN_VERSIONS.contains(&version))
 }
 
-/// Antigravity 1.5.11 sums every model step of a prompt into one per-turn
+/// Antigravity 1.5.11 and 1.5.15 sum every model step of a prompt into one per-turn
 /// `Usage` report without declaring `mjolnir.dev/usage-scope`. Its counters
 /// match Claude's convention: `input_tokens` is uncached input, cache tokens
 /// are separate tallies, `output_tokens` includes `thought_tokens`, and

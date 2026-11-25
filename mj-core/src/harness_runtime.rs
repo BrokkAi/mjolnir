@@ -132,7 +132,7 @@ pub const MUSE_VERSION: &str = "1.4.25-R9361.1";
 pub const OPENCODE_VERSION: &str = "2.2.7";
 pub const DSH_ACP_VERSION: &str = "0.8.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
-pub const ANTIGRAVITY_VERSION: &str = "1.5.11";
+pub const ANTIGRAVITY_VERSION: &str = "1.5.15";
 
 pub const fn harness_node_minimum_version(kind: HarnessKind) -> &'static str {
     match kind {
@@ -514,7 +514,7 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Antigravity => HarnessPin {
-            install_id: "antigravity-1.5.11",
+            install_id: "antigravity-1.5.15",
             display_version: ANTIGRAVITY_VERSION,
             entrypoint: "bin/agy",
             cli_entrypoint: "bin/agy",

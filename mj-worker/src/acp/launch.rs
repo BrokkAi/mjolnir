@@ -580,7 +580,7 @@ const ANTIGRAVITY_GH_GRANT: &str = "command(gh)";
 /// more, so the title cannot tell `mj-agents`/`send_message` from a foreign
 /// server `mj-agents_send`/`message`. agy's own grant rule
 /// `mcp(<server>/*)` names the server, and agy matches it against the server
-/// that owns the tool, so the lookalike still asks (checked against agy 1.5.11;
+/// that owns the tool, so the lookalike still asks (checked against agy 1.5.15;
 /// `tests/e2e/antigravity_owned_mcp_grants.py` repeats the check). That is the
 /// whole mechanism: the worker answers none of agy's permission requests for
 /// these servers. Claude's allowed tools and Codex's server approval mode do
@@ -588,11 +588,19 @@ const ANTIGRAVITY_GH_GRANT: &str = "command(gh)";
 ///
 /// Also grant reads below the home directory agy sees in its launch environment.
 /// A trailing directory separator allows nested files and keeps sibling paths
-/// outside the grant (checked against agy 1.5.11). This grants no writes or
-/// commands; agy keeps applying its Auto-mode policy to those tools. One
+/// outside the grant (checked against agy 1.5.15). This grants no home writes
+/// or commands; agy keeps applying its Auto-mode policy to those tools. One
 /// command grant is staged: `command(gh)`, Mjolnir's GitHub CLI approval, so
 /// an agent's issue and pull-request work reaches no person. A person's own
 /// `deny` rules stay above it.
+///
+/// Also grant `write_file(<dir>/)` for each of the session's additional
+/// directories. In agy's terminal sandbox (1.5.15) the working directory stays
+/// writable but an additional directory is read-only unless such a grant
+/// exists, so a borrowed child's owner clone, extra repositories, mounts,
+/// project memory, and tool caches would otherwise be read-only there. A
+/// directory's own `.git` stays read-only whatever agy is granted (checked
+/// against agy 1.5.15).
 ///
 /// Unconstrained targets run agy with `--dangerously-skip-permissions`, which
 /// already approves every call.
@@ -628,7 +636,7 @@ pub(super) fn stage_antigravity_grants(spec: &LaunchSpec) -> Result<()> {
     let path = home
         .join("config/projects")
         .join(format!("{ANTIGRAVITY_PROJECT_ID}.json"));
-    let existing = match std::fs::read(&path) {
+    let existing: Option<serde_json::Value> = match std::fs::read(&path) {
         Ok(bytes) => Some(
             serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse Antigravity project file {}", path.display()))?,
@@ -645,32 +653,101 @@ pub(super) fn stage_antigravity_grants(spec: &LaunchSpec) -> Result<()> {
     // can never reach the project file without being recorded here first.
     // It lives outside agy's config directory, which agy reads as its own.
     let staged_path = home.join("mj-home-read-grants.json");
-    let mut staged_reads: Vec<String> = match std::fs::read(&staged_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse {}", staged_path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {}", staged_path.display()));
-        }
-    };
+    let mut staged_reads = read_staged_rules(&staged_path)?;
     let read_rule = home_read_rule(&user_home)?;
     if !staged_reads.contains(&read_rule) {
         staged_reads.push(read_rule.clone());
-        let mut bytes = serde_json::to_vec_pretty(&staged_reads)
-            .context("serialize the staged home read grants")?;
-        bytes.push(b'\n');
-        mj_core::config::atomic_write(&staged_path, &bytes)
-            .with_context(|| format!("write {}", staged_path.display()))?;
+        write_staged_rules(&staged_path, &staged_reads)?;
+    }
+    // The write rules follow the same ordering for the same reason: recorded
+    // first, so a launch with other directories later removes them. Each
+    // launch records the union with the earlier rules before the project
+    // file changes, and trims the record to its own rules after. A rule the
+    // project file already holds that no launch recorded is a person's own:
+    // it stays in `allow` and is never recorded, so no later launch removes it.
+    let staged_writes_path = home.join("mj-staged-write-grants.json");
+    let mut staged_writes = read_staged_rules(&staged_writes_path)?;
+    let mut recorded = staged_writes.clone();
+    let allowed = existing
+        .as_ref()
+        .and_then(|project| project.pointer("/permissionGrants/permissionGrants/allow"))
+        .and_then(serde_json::Value::as_array);
+    let mut write_rules = Vec::new();
+    for directory in &spec.additional_directories {
+        let rule = directory_write_rule(directory)?;
+        let persons_own = !staged_writes.contains(&rule)
+            && allowed.is_some_and(|allow| allow.iter().any(|entry| entry.as_str() == Some(&rule)));
+        if !persons_own && !write_rules.contains(&rule) {
+            write_rules.push(rule);
+        }
+    }
+    for rule in &write_rules {
+        if !staged_writes.contains(rule) {
+            staged_writes.push(rule.clone());
+        }
+    }
+    if staged_writes != recorded {
+        write_staged_rules(&staged_writes_path, &staged_writes)?;
+        recorded = staged_writes.clone();
     }
     let servers = owned_acp_mcp_tools(spec)
         .into_iter()
         .map(|(server, _)| server)
         .collect::<Vec<_>>();
-    let mut project = with_antigravity_grants(existing, &servers, &read_rule, &staged_reads)
-        .with_context(|| format!("update Antigravity project file {}", path.display()))?;
+    let mut project = with_antigravity_grants(
+        existing,
+        &servers,
+        &read_rule,
+        &staged_reads,
+        &write_rules,
+        &staged_writes,
+    )
+    .with_context(|| format!("update Antigravity project file {}", path.display()))?;
     project.push(b'\n');
     mj_core::config::atomic_write(&path, &project)
-        .with_context(|| format!("write Antigravity project file {}", path.display()))
+        .with_context(|| format!("write Antigravity project file {}", path.display()))?;
+    if recorded != write_rules {
+        write_staged_rules(&staged_writes_path, &write_rules)?;
+    }
+    Ok(())
+}
+
+/// The rules a launch has staged into the profile, in `path`; none if no
+/// launch has staged any yet. It lives outside agy's config directory, which
+/// agy reads as its own.
+fn read_staged_rules(path: &Path) -> Result<Vec<String>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn write_staged_rules(path: &Path, rules: &[String]) -> Result<()> {
+    let mut bytes =
+        serde_json::to_vec_pretty(rules).context("serialize the staged Antigravity grants")?;
+    bytes.push(b'\n');
+    mj_core::config::atomic_write(path, &bytes).with_context(|| format!("write {}", path.display()))
+}
+
+/// agy's rule for writes below an additional directory, with the same
+/// trailing-separator boundary as `home_read_rule`. A relative directory or
+/// the filesystem root fails visibly instead of granting writes elsewhere.
+fn directory_write_rule(directory: &Path) -> Result<String> {
+    anyhow::ensure!(
+        directory.is_absolute() && directory.parent().is_some(),
+        "an Antigravity additional directory must be an absolute path below the filesystem root: {}",
+        directory.display()
+    );
+    Ok(format!(
+        "write_file({})",
+        directory.join("").to_str().with_context(|| format!(
+            "Antigravity additional directory is not UTF-8: {}",
+            directory.display()
+        ))?
+    ))
 }
 
 /// agy's rule for reads below `user_home`. The trailing separator keeps
@@ -686,13 +763,16 @@ fn home_read_rule(user_home: &Path) -> Result<String> {
 }
 
 /// agy's project file with `mcp(<server>/*)` allowed for `servers` and for no
-/// other Mjolnir server, plus `read_rule` and none of the earlier
-/// `staged_reads`. Other project entries and grants are preserved.
+/// other Mjolnir server, plus `read_rule` and `write_rules` and none of the
+/// earlier `staged_reads` or `staged_writes`. Other project entries and
+/// grants, including a person's own `write_file` rules, are preserved.
 fn with_antigravity_grants(
     existing: Option<serde_json::Value>,
     servers: &[String],
     read_rule: &str,
     staged_reads: &[String],
+    write_rules: &[String],
+    staged_writes: &[String],
 ) -> Result<Vec<u8>> {
     fn object<'a>(
         parent: &'a mut serde_json::Map<String, serde_json::Value>,
@@ -722,6 +802,8 @@ fn with_antigravity_grants(
             rule == read_rule
                 || rule == ANTIGRAVITY_GH_GRANT
                 || staged_reads.iter().any(|staged| staged == rule)
+                || staged_writes.iter().any(|staged| staged == rule)
+                || write_rules.iter().any(|staged| staged == rule)
                 || owned.iter().any(|owned| owned == rule)
         })
     });
@@ -731,6 +813,7 @@ fn with_antigravity_grants(
             .map(|server| serde_json::Value::String(rule(server))),
     );
     allow.push(serde_json::Value::String(read_rule.to_owned()));
+    allow.extend(write_rules.iter().cloned().map(serde_json::Value::String));
     allow.push(serde_json::Value::String(ANTIGRAVITY_GH_GRANT.to_owned()));
     serde_json::to_vec_pretty(&project).context("serialize the project file")
 }
