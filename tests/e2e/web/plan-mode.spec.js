@@ -386,7 +386,7 @@ async function conversationLayout(page) {
   });
 }
 
-test('golden_viewer_conversation', async ({ context }) => {
+test('golden_viewer_conversation', async ({ context, browser }) => {
   const { assertGolden } = await import('./golden.mjs');
   const output = [];
   const page = await context.newPage();
@@ -456,7 +456,11 @@ test('golden_viewer_conversation', async ({ context }) => {
 
   await page.close();
 
-  const mailboxPage = await context.newPage();
+  const touchContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, hasTouch: true,
+    serviceWorkers: 'block', timezoneId: 'UTC',
+  });
+  const mailboxPage = await touchContext.newPage();
   await mailboxPage.clock.install({ time: new Date('2030-06-15T15:00:00Z') });
   const mailboxState = await mockViewerApi(mailboxPage);
   // Consume the shared Rust projection's exact browser response, so both
@@ -465,17 +469,17 @@ test('golden_viewer_conversation', async ({ context }) => {
     path.resolve(__dirname, '../../../mj-client/tests/golden/mailbox-browser-transcript.txt'), 'utf8',
   ));
   await publishSnapshotDelta(mailboxPage, mailboxState);
-  const events = mailboxPage.locator('#conversation-feed .mailbox-event');
+  const events = mailboxPage.locator('#conversation-feed [data-entry-id="2"] .transcript-disclosure');
   await expect(events).toHaveCount(13);
   const captureMailbox = async label => {
     await captureConversationState(output, mailboxPage, label, mailboxState);
     const folds = await events.evaluateAll(nodes => nodes.map(node => ({
-      header: node.querySelector('.mailbox-event-label').textContent,
+      header: node.querySelector('.disclosure-summary-line').textContent,
       open: node.open,
       arrow: getComputedStyle(node.querySelector('summary'), '::before').content.replaceAll('"', ''),
     })));
     output.push(`mailbox events: ${JSON.stringify(folds)}`);
-    const layout = await events.locator('.mailbox-event-label').evaluateAll(nodes => nodes.map(node => ({
+    const layout = await events.locator('.disclosure-summary-line').evaluateAll(nodes => nodes.map(node => ({
       height: node.getBoundingClientRect().height,
       lineHeight: parseFloat(getComputedStyle(node).lineHeight),
     })));
@@ -483,7 +487,7 @@ test('golden_viewer_conversation', async ({ context }) => {
     expect(await mailboxPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   };
   await captureMailbox('mailbox events are one line each on the phone');
-  await events.nth(12).locator('summary').click();
+  await events.nth(12).locator('summary').tap();
   await expect(events.nth(12)).toHaveAttribute('open', '');
   await expect(events.nth(11)).not.toHaveAttribute('open', '');
   await expect(events.nth(12).locator('.entry-body')).toContainText('支持 Unicode and <script>literal text</script>.');
@@ -492,7 +496,7 @@ test('golden_viewer_conversation', async ({ context }) => {
   await captureMailbox('click opens only the second repeated mailbox event');
   const mailboxEntry = mailboxState.conversation.entries[0];
   mailboxEntry.lines.push('  - Your PR #4625 was merged.');
-  mailboxEntry.mailbox_events.push(['Your PR #4625 was merged.']);
+  mailboxEntry.disclosures.push({ summary: ['Your PR #4625 was merged.'], body: [] });
   mailboxEntry.updated_seq += 1;
   mailboxState.conversation.latest_seq += 1;
   await publishSnapshotDelta(mailboxPage, mailboxState);
@@ -507,7 +511,33 @@ test('golden_viewer_conversation', async ({ context }) => {
   await captureMailbox('keyboard collapses mailbox detail at narrow phone width');
   await mailboxPage.setViewportSize({ width: 900, height: 900 });
   await captureMailbox('desktop mailbox events stay on one line');
-  await mailboxPage.close();
+
+  const override = mailboxPage.locator('#conversation-feed [data-entry-id="3"] .transcript-disclosure');
+  await expect(override).not.toHaveAttribute('open', '');
+  await expect(override.locator('.disclosure-summary-line')).toHaveText([
+    '- [P2] Keep the existing mailbox ordering across a live update',
+    '- [P3] 支持 Unicode and <script>literal text</script>',
+  ]);
+  await expect(override.locator('.entry-body')).toBeHidden();
+  await mailboxPage.setViewportSize({ width: 320, height: 568 });
+  await override.locator('.disclosure-summary-line').nth(1).tap();
+  await expect(override).toHaveAttribute('open', '');
+  await expect(override.locator('.entry-body')).toHaveText(
+    mailboxState.conversation.entries[1].lines.join('\n'),
+  );
+  await expect(override.locator('script')).toHaveCount(0);
+  await captureMailbox('touching a declined finding opens the full override notice');
+  const overrideEntry = mailboxState.conversation.entries[1];
+  overrideEntry.updated_seq += 1;
+  mailboxState.conversation.latest_seq += 1;
+  await publishSnapshotDelta(mailboxPage, mailboxState);
+  await expect(override).toHaveAttribute('open', '');
+  await captureMailbox('override remains open after a live update');
+  await override.locator('summary').focus();
+  await mailboxPage.keyboard.press('Enter');
+  await expect(override).not.toHaveAttribute('open', '');
+  await captureMailbox('keyboard restores only the declined finding list');
+  await touchContext.close();
 
   const longPage = await context.newPage();
   await longPage.setViewportSize({ width: 320, height: 568 });

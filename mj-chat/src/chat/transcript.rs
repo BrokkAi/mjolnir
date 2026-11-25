@@ -64,7 +64,7 @@ use super::rendering::{
 struct CachedEntry {
     fingerprint: u64,
     lines: Vec<Line<'static>>,
-    mailbox: Option<RowTrack>,
+    disclosure: Option<RowTrack>,
 }
 
 /// The primary transcript scrollbar. Its geometry is rebuilt after every draw.
@@ -233,19 +233,19 @@ pub(super) struct TranscriptRenderCache {
     entries: Vec<Option<CachedEntry>>,
     collapse: Vec<EntryCollapse>,
     collapse_input_fingerprint: u64,
-    expanded_mailbox_events: BTreeSet<MailboxDisclosureId>,
+    expanded_disclosures: BTreeSet<TranscriptDisclosureId>,
     // The active conversation owns these bodies and drops them on a session switch.
     hydrated_tool_details: BTreeMap<String, (ToolDetailRevision, HydratedToolDetail)>,
 }
 
-/// A frame-local target for toggling a tool or mailbox event. The
+/// A frame-local target for toggling a tool or transcript disclosure. The
 /// target is rebuilt with the rows so a click can never address a call that
 /// moved after scrolling or wrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TranscriptClickTarget {
     pub rect: Rect,
     pub start_seq: u64,
-    pub mailbox_event: Option<MailboxDisclosureId>,
+    pub disclosure: Option<TranscriptDisclosureId>,
 }
 
 /// Where one transcript frame drew its rows. A link click is resolved against
@@ -556,7 +556,7 @@ fn prepare_render_cache(
     mode: TranscriptRenderMode,
     tools: ToolDisplay,
     expanded_tool_calls: &BTreeSet<u64>,
-    expanded_mailbox_events: &BTreeSet<MailboxDisclosureId>,
+    expanded_disclosures: &BTreeSet<TranscriptDisclosureId>,
 ) {
     let mode_changed = cache.mode != mode || cache.tools != tools;
     let collapse_input_fingerprint = collapse_revision_fingerprint(entries);
@@ -564,7 +564,7 @@ fn prepare_render_cache(
         || mode_changed
         || cache.theme != theme::current()
         || cache.ascii != theme::ascii()
-        || cache.expanded_mailbox_events != *expanded_mailbox_events
+        || cache.expanded_disclosures != *expanded_disclosures
     {
         cache.theme = theme::current();
         cache.ascii = theme::ascii();
@@ -572,7 +572,7 @@ fn prepare_render_cache(
         cache.mode = mode;
         cache.tools = tools;
         cache.entries.clear();
-        cache.expanded_mailbox_events = expanded_mailbox_events.clone();
+        cache.expanded_disclosures = expanded_disclosures.clone();
     }
     cache.entries.resize(entries.len(), None);
     if !mode_changed
@@ -626,10 +626,10 @@ fn cached_entry_lines<'cache>(
             .is_none_or(|cached| cached.fingerprint != fingerprint);
     if stale {
         let width = usize::from(cache.width);
-        let mailbox = (cache.mode == TranscriptRenderMode::Rich)
-            .then(|| render_mailbox_entry(entry, width, &cache.expanded_mailbox_events))
+        let disclosure = (cache.mode == TranscriptRenderMode::Rich)
+            .then(|| render_disclosure_entry(entry, width, &cache.expanded_disclosures))
             .flatten();
-        let (lines, mailbox) = if let Some((lines, track)) = mailbox {
+        let (lines, disclosure) = if let Some((lines, track)) = disclosure {
             (lines, Some(track))
         } else {
             (
@@ -692,7 +692,7 @@ fn cached_entry_lines<'cache>(
         cache.entries[index] = Some(CachedEntry {
             fingerprint,
             lines,
-            mailbox,
+            disclosure,
         });
     }
     &cache.entries[index]
@@ -712,7 +712,7 @@ impl Default for TranscriptRenderCache {
             entries: Vec::new(),
             collapse: Vec::new(),
             collapse_input_fingerprint: 0,
-            expanded_mailbox_events: BTreeSet::new(),
+            expanded_disclosures: BTreeSet::new(),
             hydrated_tool_details: BTreeMap::new(),
         }
     }
@@ -1269,7 +1269,7 @@ impl ChatState {
             self.render_mode,
             self.tool_display,
             &self.expanded_tool_calls,
-            &self.expanded_mailbox_events,
+            &self.expanded_disclosures,
         );
         let top = AnchorRow { entry: 0, row: 0 };
         if self.entries.is_empty() && trailing.is_empty() {
@@ -1475,7 +1475,7 @@ impl ChatState {
             self.render_mode,
             self.tool_display,
             &self.expanded_tool_calls,
-            &self.expanded_mailbox_events,
+            &self.expanded_disclosures,
         );
     }
 
@@ -1718,8 +1718,8 @@ impl ChatState {
                 skip = 0;
                 continue;
             }
-            if let Some(mailbox) = &cached.mailbox {
-                for (rows, event) in &mailbox.mailbox_events {
+            if let Some(disclosure) = &cached.disclosure {
+                for (rows, event) in &disclosure.disclosures {
                     let start = rows.start.max(skip);
                     let end = rows.end.min(skip + visible_line_count);
                     if start >= end {
@@ -1733,7 +1733,7 @@ impl ChatState {
                             (end - start) as u16,
                         ),
                         start_seq: entries[index].start_seq,
-                        mailbox_event: Some(event.clone()),
+                        disclosure: Some(event.clone()),
                     });
                 }
             } else {
@@ -1815,11 +1815,11 @@ impl ChatState {
             let visible = rows.saturating_sub(skip);
             if target < screen_offset + visible {
                 let entry_row = skip + (target - screen_offset);
-                if let Some(mailbox) = self.render_cache.entries[index]
+                if let Some(disclosure) = self.render_cache.entries[index]
                     .as_ref()
-                    .and_then(|cached| cached.mailbox.as_ref())
+                    .and_then(|cached| cached.disclosure.as_ref())
                 {
-                    return mailbox
+                    return disclosure
                         .links
                         .iter()
                         .find(|link| {
@@ -1852,7 +1852,7 @@ impl ChatState {
         None
     }
 
-    /// Toggle a tool or mailbox event at a frame-local screen coordinate.
+    /// Toggle a tool or transcript disclosure at a frame-local screen coordinate.
     /// The selection router calls this only for a synthetic click, so ordinary
     /// mouse-down events remain owned by drag selection.
     pub(super) fn toggle_transcript_at(&mut self, column: u16, row: u16) -> bool {
@@ -1864,9 +1864,9 @@ impl ChatState {
         else {
             return false;
         };
-        if let Some(key) = &target.mailbox_event {
-            if !self.expanded_mailbox_events.insert(key.clone()) {
-                self.expanded_mailbox_events.remove(key);
+        if let Some(key) = &target.disclosure {
+            if !self.expanded_disclosures.insert(key.clone()) {
+                self.expanded_disclosures.remove(key);
                 // A body click can collapse the event containing the viewport
                 // top. Keep its header visible instead of skipping later text.
                 if let TranscriptAnchor::Row { entry, row } = self.anchor
@@ -1875,8 +1875,10 @@ impl ChatState {
                         .entries
                         .get(entry)
                         .and_then(Option::as_ref)
-                        .and_then(|cached| cached.mailbox.as_ref())
-                        .and_then(|mailbox| mailbox.mailbox_events.iter().find(|(_, id)| id == key))
+                        .and_then(|cached| cached.disclosure.as_ref())
+                        .and_then(|disclosure| {
+                            disclosure.disclosures.iter().find(|(_, id)| id == key)
+                        })
                     && rows.contains(&row)
                 {
                     self.anchor = TranscriptAnchor::Row {
@@ -1896,7 +1898,7 @@ impl ChatState {
 
         // A tool toggle can replace its whole layout; reset an anchor inside
         // that tool to its header.
-        if target.mailbox_event.is_none()
+        if target.disclosure.is_none()
             && let TranscriptAnchor::Row { entry, .. } = self.anchor
             && self
                 .entries
@@ -2058,7 +2060,7 @@ impl ChatState {
             };
             let copies = self.render_cache.entries[index]
                 .as_ref()
-                .and_then(|cached| cached.mailbox.as_ref())
+                .and_then(|cached| cached.disclosure.as_ref())
                 .map(|track| track.copies.clone())
                 .unwrap_or_else(|| {
                     view.map(|(mode, tool)| {
@@ -2162,7 +2164,7 @@ fn add_whole_tool_rows(
         targets.push(TranscriptClickTarget {
             rect: Rect::new(inner.x, row, inner.width, 1),
             start_seq,
-            mailbox_event: None,
+            disclosure: None,
         });
     }
 }
@@ -2209,7 +2211,7 @@ fn add_summary_tool_rows(
             targets.push(TranscriptClickTarget {
                 rect: Rect::new(inner.x, row, inner.width, 1),
                 start_seq: tools[0].start_seq,
-                mailbox_event: None,
+                disclosure: None,
             });
         }
         return;
@@ -2286,7 +2288,7 @@ fn add_summary_tool_rows(
             targets.push(TranscriptClickTarget {
                 rect: Rect::new(x, row, width, 1),
                 start_seq: *start_seq,
-                mailbox_event: None,
+                disclosure: None,
             });
         }
     }

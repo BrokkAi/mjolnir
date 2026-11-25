@@ -634,8 +634,8 @@ pub struct ChatState {
     expanded_tool_calls: BTreeSet<u64>,
     tool_detail_generation: u64,
     pending_tool_detail_requests: Vec<ChatEntry>,
-    /// Open mailbox events and incoming messages, keyed by durable identity.
-    expanded_mailbox_events: BTreeSet<transcript::MailboxDisclosureId>,
+    /// Open transcript disclosures, keyed by durable identity.
+    expanded_disclosures: BTreeSet<transcript::TranscriptDisclosureId>,
     /// Screen-coordinate targets rebuilt with every transcript frame.
     transcript_click_targets: Vec<TranscriptClickTarget>,
     /// Where the last transcript frame drew its rows, for resolving a click
@@ -829,7 +829,7 @@ impl ChatState {
             expanded_tool_calls: BTreeSet::new(),
             tool_detail_generation: 0,
             pending_tool_detail_requests: Vec::new(),
-            expanded_mailbox_events: BTreeSet::new(),
+            expanded_disclosures: BTreeSet::new(),
             transcript_click_targets: Vec::new(),
             transcript_link_frame: None,
             notices: Notices::default(),

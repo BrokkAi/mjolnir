@@ -9518,7 +9518,7 @@ function toolDetailFold(sessionId, stableId, version) {
 
 /// Rewrite one entry's row.
 ///
-/// Thinking and mailbox events are collapsed by default, and which folds the
+/// Thinking and system disclosures are collapsed by default, and which folds the
 /// reader had opened is recorded and restored, so an update does not snap shut
 /// something they were part way through reading.
 function paintEntry(node, entry, unansweredPrompt) {
@@ -9535,20 +9535,22 @@ function paintEntry(node, entry, unansweredPrompt) {
   const time = entryTimestamp(entry);
   if (time) heading.append(time);
 
-  const events = entry.mailbox_events || [];
+  const disclosures = entry.disclosures || [];
   // Thinking is background: it is there for someone who wants it, and closed
   // for everyone else.
-  if (events.length) {
-    node.classList.add('mailbox-entry');
-    node.replaceChildren(...events.map((lines, index) => {
-      const fold = el('details', 'block-fold mailbox-event');
-      fold.dataset.foldKey = `mailbox-${index}`;
+  if (disclosures.length) {
+    node.classList.add('disclosure-entry');
+    node.replaceChildren(...disclosures.map((disclosure, index) => {
+      const fold = el('details', 'block-fold transcript-disclosure');
+      fold.dataset.foldKey = `disclosure-${index}`;
       const summary = el('summary');
-      summary.append(el('span', 'mailbox-event-label', lines[0]));
+      const label = el('span', 'disclosure-label');
+      for (const line of disclosure.summary) label.append(el('span', 'disclosure-summary-line', line));
+      summary.append(label);
       const time = entryTimestamp(entry);
       if (time) summary.append(time);
       const body = el('div', 'entry-body');
-      body.append(renderToolOutput(lines.join('\n')));
+      body.append(renderToolOutput(disclosure.body.join('\n')));
       fold.append(summary, body);
       return fold;
     }));
