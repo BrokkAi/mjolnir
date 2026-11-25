@@ -75,7 +75,9 @@ pub use install::*;
 pub use prewarm::{prewarm_profile_content, shared_content_ssh};
 mod store;
 use store::*;
-pub use store::{install_session_executable, install_worker_binary, store_root};
+pub use store::{
+    install_session_executable, install_worker_binary, prestage_host_container_worker, store_root,
+};
 mod microvm;
 pub use microvm::ensure_microvm_engine;
 mod upgrade;

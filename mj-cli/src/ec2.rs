@@ -15,6 +15,7 @@ use mj_core::config::{
     config_path, mbx_s3_location, validate_id,
 };
 use mj_core::subprocess::run_with_input;
+use mj_core::targets::{CommandExecutor, ProcessExecutor, SshTrafficClass};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -618,6 +619,7 @@ fn create(mut args: CreateArgs, root: &Path) -> Result<()> {
         &args.types
     };
     let mut attempts = Vec::new();
+    let mut lookups = CreateLookups::default();
     for (region, requested_zones) in locations {
         let cloud = Cloud::new(AwsArgs {
             region: Some(region.clone()),
@@ -683,6 +685,7 @@ fn create(mut args: CreateArgs, root: &Path) -> Result<()> {
                     &mut record,
                     root,
                     &mut lock,
+                    &mut lookups,
                 );
                 match result {
                     Ok(mut host) => {
@@ -983,6 +986,35 @@ fn launch_instance(
     }
 }
 
+/// Values live only for one create invocation; resources remain attempt-owned.
+#[derive(Default)]
+struct CreateLookups {
+    aws: std::collections::HashMap<(String, String, String), Value>,
+    cidr: Option<String>,
+}
+
+impl CreateLookups {
+    fn call(
+        &mut self,
+        cloud: &Cloud,
+        service: &str,
+        operation: &str,
+        input: Value,
+    ) -> Result<Value> {
+        let key = (
+            cloud.options.region.clone().unwrap_or_default(),
+            format!("{service}:{operation}"),
+            input.to_string(),
+        );
+        if let Some(value) = self.aws.get(&key) {
+            return Ok(value.clone());
+        }
+        let value = cloud.call(service, &[operation], input)?;
+        self.aws.insert(key, value.clone());
+        Ok(value)
+    }
+}
+
 fn create_attempt(
     args: &CreateArgs,
     placement: &Placement<'_>,
@@ -990,6 +1022,7 @@ fn create_attempt(
     record: &mut Record,
     root: &Path,
     lock: &mut Option<mj_core::file_lock::FileLock>,
+    lookups: &mut CreateLookups,
 ) -> Result<Value> {
     let offerings = cloud.ec2(
         "describe-instance-type-offerings",
@@ -1009,7 +1042,9 @@ fn create_attempt(
         ))
         .into());
     }
-    let info = cloud.ec2(
+    let info = lookups.call(
+        cloud,
+        "ec2",
         "describe-instance-types",
         json!({"InstanceTypes":[placement.instance_type]}),
     )?;
@@ -1089,12 +1124,19 @@ fn create_attempt(
             format!("/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-{ssm_arch}")
         }
     };
-    let parameter = cloud.call("ssm", &["get-parameter"], json!({"Name":parameter_name}))?;
+    let parameter = lookups.call(
+        cloud,
+        "ssm",
+        "get-parameter",
+        json!({"Name":parameter_name}),
+    )?;
     let ami = parameter["Parameter"]["Value"]
         .as_str()
         .context("Ubuntu SSM parameter has no image ID")?;
     let root_device = if args.runtime == Ec2Runtime::Podman {
-        let image = cloud.ec2(
+        let image = lookups.call(
+            cloud,
+            "ec2",
             "describe-images",
             json!({"ImageIds":[ami],"Owners":["099720109477"]}),
         )?;
@@ -1108,20 +1150,25 @@ fn create_attempt(
     } else {
         "/dev/xvda".to_owned()
     };
-    let cidr = match &args.ssh_cidr {
-        Some(cidr) => cidr.clone(),
-        None => {
-            let address = reqwest::blocking::get("https://checkip.amazonaws.com")?
-                .error_for_status()?
-                .text()?;
-            let address: std::net::Ipv4Addr = address
-                .trim()
-                .parse()
-                .context("discover controller public IPv4; alternatively pass --ssh-cidr")?;
-            format!("{address}/32")
+    let cidr = if let Some(cidr) = &lookups.cidr {
+        cidr.clone()
+    } else {
+        match &args.ssh_cidr {
+            Some(cidr) => cidr.clone(),
+            None => {
+                let address = reqwest::blocking::get("https://checkip.amazonaws.com")?
+                    .error_for_status()?
+                    .text()?;
+                let address: std::net::Ipv4Addr = address
+                    .trim()
+                    .parse()
+                    .context("discover controller public IPv4; alternatively pass --ssh-cidr")?;
+                format!("{address}/32")
+            }
         }
     };
-    let identity = cloud.call("sts", &["get-caller-identity"], json!({}))?;
+    lookups.cidr = Some(cidr.clone());
+    let identity = lookups.call(cloud, "sts", "get-caller-identity", json!({}))?;
     let account = identity["Account"]
         .as_str()
         .context("AWS identity has no account ID")?
@@ -1229,10 +1276,10 @@ fn create_attempt(
         .to_owned();
     record.instance_id = Some(id.clone());
     record.save(root)?;
-    eprintln!("Launched {id}; waiting for EC2 status checks and cloud-init.");
+    eprintln!("Launched {id}; waiting for EC2 running state and cloud-init.");
     cloud.call(
         "ec2",
-        &["wait", "instance-status-ok"],
+        &["wait", "instance-running"],
         json!({"InstanceIds":[id]}),
     )?;
     let live = cloud.ec2("describe-instances", json!({"InstanceIds":[id]}))?;
@@ -1249,17 +1296,15 @@ fn create_attempt(
         &(&ssh).into(),
     )?;
     // A failed bootstrap reports its own log rather than a later symptom.
-    const CLOUD_INIT_WAIT: &str = "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log >&2; exit \"$status\"; fi";
+    const CLOUD_INIT_WAIT: &str = "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo -n tail -100 /var/log/cloud-init-output.log >&2; exit \"$status\"; fi";
     let verify_command = if args.runtime == Ec2Runtime::Nitro {
         // The bootstrap puts the enclave memory pool on the kernel command
         // line; it takes effect at the next boot. The reboot is issued here,
         // not by the bootstrap, so the wait can tell the new boot from the
         // old one instead of racing the shutdown.
-        let output = checked(
-            &mut ssh_command(
-                &ssh,
-                &format!("{CLOUD_INIT_WAIT}; cat /proc/sys/kernel/random/boot_id"),
-            ),
+        let output = execute_ssh(
+            &ssh,
+            &format!("{CLOUD_INIT_WAIT}; cat /proc/sys/kernel/random/boot_id"),
             &[],
         )?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1269,10 +1314,7 @@ fn create_attempt(
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .context("the host did not report its boot ID")?;
-        checked(
-            &mut ssh_command(&ssh, "sudo systemctl --no-block reboot"),
-            &[],
-        )?;
+        execute_ssh(&ssh, "sudo systemctl --no-block reboot", &[])?;
         eprintln!("Rebooting {id} to reserve the Nitro Enclaves memory pool.");
         mj_controller::controller::wait_for_ec2_reboot(
             &mj_controller::targets::ProcessExecutor,
@@ -1285,7 +1327,7 @@ fn create_attempt(
             "{CLOUD_INIT_WAIT}; podman info --format '{{{{.Host.Security.Rootless}}}}:{{{{.Store.GraphDriverName}}}}'"
         )
     };
-    let output = checked(&mut ssh_command(&ssh, &verify_command), &[])?;
+    let output = execute_ssh(&ssh, &verify_command, &[])?;
     if args.runtime == Ec2Runtime::Podman {
         ensure!(
             String::from_utf8_lossy(&output.stdout)
@@ -1295,7 +1337,8 @@ fn create_attempt(
         );
     }
     // Attach the persistent address after cloud-init's package downloads
-    // finish, before publishing a host that can accept session launches.
+    // finish: associating an EIP replaces the auto-assigned public IPv4 and
+    // drops in-flight outbound connections from apt-get/dnf.
     let address = cloud.ec2(
         "allocate-address",
         json!({
@@ -1416,22 +1459,53 @@ fn create_attempt(
     );
     match Config::load() {
         Ok(config) => {
-            for refresh in
-                mj_controller::targets::image_refresh_plan(&config, [record.target.as_str()], None)
-                    .pulls
-            {
-                eprintln!("Preloading {} on {}.", refresh.image, record.target);
-                if let Err(error) = mj_daemon::pollers::refresh_host_image(
-                    &refresh,
-                    &mj_controller::targets::ProcessExecutor,
-                    &|_| {},
+            let ssh_target = (&ssh).into();
+            let engine_ready = if args.runtime == Ec2Runtime::Nitro {
+                match mj_controller::controller::ensure_microvm_engine(
+                    &ssh_target,
+                    &ProcessExecutor,
                 ) {
-                    eprintln!(
-                        "Warning: dev image predownload failed for {}: {error:#}\nThe host is registered; the background image refresher can retry.",
-                        refresh.image
-                    );
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!(
+                            "Warning: Nitro engine preparation failed: {error:#}. The host is registered."
+                        );
+                        false
+                    }
                 }
-            }
+            } else {
+                true
+            };
+            std::thread::scope(|scope| {
+                if args.runtime == Ec2Runtime::Podman {
+                    let ssh_target = &ssh_target;
+                    scope.spawn(move || {
+                        let platform = mj_controller::targets::TargetPlatform {
+                            os: mj_controller::targets::TargetOs::Linux,
+                            architecture: if platform == "linux/amd64" { "x86_64" } else { "aarch64" },
+                        };
+                        if let Err(error) = mj_controller::controller::prestage_host_container_worker(&ProcessExecutor, ssh_target, platform) {
+                            eprintln!("Warning: worker pre-stage failed: {error:#}. The host is registered.");
+                        }
+                    });
+                }
+                if engine_ready {
+                    for refresh in mj_controller::targets::image_refresh_plan(
+                        &config,
+                        [record.target.as_str()],
+                        None,
+                    )
+                    .pulls
+                    {
+                        eprintln!("Preloading {} on {}.", refresh.image, record.target);
+                        scope.spawn(move || {
+                            if let Err(error) = mj_daemon::pollers::refresh_prepared_host_image(&refresh, &ProcessExecutor, &|_| {}) {
+                                eprintln!("Warning: dev image predownload failed for {}: {error:#}. The host is registered; the background image refresher can retry.", refresh.image);
+                            }
+                        });
+                    }
+                }
+            });
         }
         Err(error) => eprintln!(
             "Warning: could not plan EC2 image warming: {error:#}\nThe host is registered; the background image refresher can retry."
@@ -1499,20 +1573,23 @@ fn connection_for_user(
     })
 }
 
-fn ssh_command(ssh: &SshConnection, script: &str) -> Command {
-    let mut command = Command::new("ssh");
-    command.args(["-o", "BatchMode=yes"]);
-    command.args(mj_core::targets::ssh_args_with_identity(
-        &ssh.extra_args,
-        ssh.identity_file.as_deref(),
-    ));
-    command.arg(format!(
-        "{}@{}",
-        ssh.user.as_deref().unwrap_or("ubuntu"),
-        ssh.host
-    ));
-    command.arg(script);
-    command
+fn execute_ssh(
+    ssh: &SshConnection,
+    script: &str,
+    input: &[u8],
+) -> Result<mj_core::targets::CommandOutput> {
+    let command = mj_core::targets::ssh_command_owned(
+        SshTrafficClass::Control,
+        &ssh.into(),
+        vec!["sh".into(), "-c".into(), script.to_owned()],
+    )
+    .purpose("run EC2 host bootstrap command");
+    let output = if input.is_empty() {
+        ProcessExecutor.execute(&command)?
+    } else {
+        ProcessExecutor.execute_with_stdin(&command, &mut &input[..])?
+    };
+    mj_core::targets::checked_command_output(&command, output)
 }
 
 fn inventory(args: &ListArgs, root: &Path) -> Result<(Vec<Value>, bool)> {
@@ -1906,16 +1983,15 @@ fn tune(args: TuneArgs) -> Result<()> {
         "Applying mj's kernel limits to {} ({}).",
         args.host, ssh.host
     );
-    checked(
-        &mut ssh_command(ssh, "sudo bash -s"),
+    execute_ssh(
+        ssh,
+        "sudo bash -s",
         include_str!("ec2_sysctl.sh").as_bytes(),
     )?;
-    let readback = checked(
-        &mut ssh_command(
-            ssh,
-            "printf 'fs.inotify.max_user_instances='; cat /proc/sys/fs/inotify/max_user_instances;\
+    let readback = execute_ssh(
+        ssh,
+        "printf 'fs.inotify.max_user_instances='; cat /proc/sys/fs/inotify/max_user_instances;\
              printf 'kernel.keys.maxkeys='; cat /proc/sys/kernel/keys/maxkeys",
-        ),
         &[],
     )?;
     let stdout = String::from_utf8_lossy(&readback.stdout);
@@ -2208,7 +2284,7 @@ elif op == 'describe-key-pairs':
     response = {'KeyPairs':[json.loads((resources/'key.json').read_text())] if (resources/'key.json').exists() else []}
 elif op == 'delete-security-group': (resources/'group.json').unlink()
 elif op == 'delete-key-pair': (resources/'key.json').unlink()
-elif op not in ('authorize-security-group-ingress','wait instance-status-ok','wait instance-terminated'):
+elif op not in ('authorize-security-group-ingress','wait instance-running','wait instance-terminated'):
     sys.exit('unexpected AWS operation: '+op)
 print(json.dumps(response))
 "#;
@@ -2225,6 +2301,14 @@ elif args[:2] == ['image', 'inspect']:
 elif args == ['image', 'prune', '-f']:
     pass
 elif args and args[0] == 'pull':
+    if (root.parent/'parallel-podman').exists():
+        import time
+        home = pathlib.Path(os.environ['HOME'])
+        (home/'pull-started').touch()
+        for attempt in range(500):
+            if (home/'worker-started').exists(): break
+            time.sleep(0.01)
+        else: sys.exit('worker prestaging did not overlap the image pull')
     config = pathlib.Path(os.environ['MJ_CONFIG_DIR'])/'config.toml'
     assert config.exists() and 'builder' in config.read_text(), 'host must be registered before preloading'
     # Hard-won: c66e5f4: a slow preload held the operation lock and blocked destroy.
@@ -2290,6 +2374,10 @@ else:
         )
         .unwrap();
         fs::set_permissions(&flock, fs::Permissions::from_mode(0o700)).unwrap();
+        // Bootstrap failure diagnostics invoke `sudo -n tail ...`; never reach host sudo.
+        let fake_sudo = remote_bin.join("sudo");
+        fs::write(&fake_sudo, "#!/bin/sh\necho \"fake sudo: $*\" >&2\n").unwrap();
+        fs::set_permissions(&fake_sudo, fs::Permissions::from_mode(0o700)).unwrap();
         let mbx_version = mj_controller::controller::MBX_VERSION;
         let cached_mbx = directory
             .path()
@@ -2324,6 +2412,7 @@ else:
                 "ssh",
                 concat!(
                     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\n",
+                    "case \" $* \" in *' -O check '*) exit 0 ;; *' ControlMaster=yes '*) exit 0 ;; esac\n",
                     "export HOME=\"$MJ_EC2_FIXTURE_CHILD/remote-home\" SHELL=/bin/bash\n",
                     "cd \"$HOME\" || exit 1\n",
                     "export PATH=\"$MJ_EC2_FIXTURE_CHILD/remote-bin:$PATH\"\n",
@@ -2333,14 +2422,16 @@ else:
                     "[ -e \"$MJ_EC2_FIXTURE_CHILD/boot_id\" ] || echo boot-1 > \"$MJ_EC2_FIXTURE_CHILD/boot_id\"\n",
                     "remote_command=$(printf '%s' \"$remote_command\" | sed \"s#/proc/sys/kernel/random/boot_id#$MJ_EC2_FIXTURE_CHILD/boot_id#g\")\n",
                     "case \"$remote_command\" in\n",
+                    "*worker-binaries/.upload-*mkdir*|*mkdir*worker-binaries/.upload-*) if [ -e \"$MJ_EC2_FIXTURE_CHILD/parallel-podman\" ]; then touch \"$HOME/worker-started\"; tries=0; while [ ! -e \"$HOME/pull-started\" ]; do tries=$((tries+1)); [ \"$tries\" -lt 500 ] || exit 99; sleep 0.01; done; fi; exec sh -c \"$remote_command\" ;;\n",
+                    "*hel-mbx-stage*) if [ -e \"$MJ_EC2_FIXTURE_CHILD/fail-mbx-upload\" ]; then sh -c \"$remote_command\"; exit 1; fi; exec sh -c \"$remote_command\" ;;\n",
                     "*'systemctl --no-block reboot'*) echo boot-2 > \"$MJ_EC2_FIXTURE_CHILD/boot_id\" ;;\n",
                     "*dmesg*) printf '6.18.56-126.188.amzn2023\\nnitro_enclaves: CMA pool: 49152 MiB reserved\\n' ;;\n",
                     // `tune` pipes the sysctl script to `sudo bash -s`; capture it
                     // instead of running it on the test host.
-                    "*'sudo bash -s'*) cat > \"$MJ_EC2_FIXTURE_CHILD/tune-script\" ;;\n",
+                    "*'sudo bash -s'*) printf 'MJOLNIR-SSH-SESSION-STARTED\\n'; cat > \"$MJ_EC2_FIXTURE_CHILD/tune-script\" ;;\n",
                     "*'cat /proc/sys/fs/inotify/max_user_instances'*) printf 'fs.inotify.max_user_instances=8192\nkernel.keys.maxkeys=4096\n' ;;\n",
                     "*microvm*\"'image' 'inspect'\"*) exit 125 ;;\n",
-                    "*microvm*\"'pull'\"*) : ;;\n",
+                    "*microvm*\"'pull'\"*) if [ -e \"$MJ_EC2_FIXTURE_CHILD/parallel-pulls\" ]; then marker=$(printf '%s' \"$remote_command\" | cksum | cut -d' ' -f1); mkdir -p \"$HOME/pull-barrier\"; touch \"$HOME/pull-barrier/$marker\"; tries=0; while [ \"$(ls \"$HOME/pull-barrier\" | wc -l)\" -lt 2 ]; do tries=$((tries+1)); [ \"$tries\" -lt 500 ] || exit 99; sleep 0.01; done; touch \"$HOME/pull-barrier/$marker.done\"; fi ;;\n",
                     "*) exec sh -c \"$remote_command\" ;;\nesac\n",
                 ),
             ),
@@ -2586,6 +2677,32 @@ else:
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
+        let mut invariant_keys = std::collections::BTreeSet::new();
+        for call in &calls {
+            if matches!(
+                call["operation"].as_str(),
+                Some(
+                    "get-caller-identity"
+                        | "describe-instance-types"
+                        | "get-parameter"
+                        | "describe-images"
+                )
+            ) {
+                let region = call["args"]
+                    .as_array()
+                    .unwrap()
+                    .windows(2)
+                    .find(|pair| pair[0] == "--region")
+                    .map(|pair| pair[1].clone());
+                assert!(
+                    invariant_keys.insert(format!(
+                        "{region:?}:{}:{}",
+                        call["operation"], call["request"]
+                    )),
+                    "invariant lookup repeated across AZ retries: {call}"
+                );
+            }
+        }
         let launches: Vec<_> = calls
             .iter()
             .filter(|call| call["operation"] == "run-instances")
@@ -2820,7 +2937,7 @@ else:
             if uncertain {
                 fs::write(bin.join("lost-launch-response"), "").unwrap();
             } else {
-                fs::write(bin.join("errors.json"), r#"[{"operation":"wait instance-status-ok","code":"InsufficientInstanceCapacity","message":"An error after the launch was accepted"}]"#).unwrap();
+                fs::write(bin.join("errors.json"), r#"[{"operation":"wait instance-running","code":"InsufficientInstanceCapacity","message":"An error after the launch was accepted"}]"#).unwrap();
             }
             let mut args = create_args();
             args.zone.push("us-east-1b".into());
@@ -3039,6 +3156,7 @@ else:
             return;
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        fs::write(fixture.join("parallel-pulls"), "").unwrap();
         let bin = fixture.join("bin");
         let root = mj_core::ec2_records::ec2_records_dir();
         fs::write(bin.join("nitro"), "").unwrap();
@@ -3178,6 +3296,15 @@ else:
                 .iter()
                 .any(|call| call["operation"] == "describe-images")
         );
+        assert_eq!(
+            fs::read_dir(fixture.join("remote-home/pull-barrier"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "done"))
+                .count(),
+            2,
+            "both image pulls must pass the rendezvous concurrently"
+        );
         let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
         assert!(ssh_calls.contains("ec2-user@192.0.2.1"));
         assert!(ssh_calls.contains("ec2-user@192.0.2.7"));
@@ -3214,6 +3341,120 @@ else:
                 .iter()
                 .any(|call| call["operation"] == "associate-address")
         );
+    }
+
+    #[test]
+    fn podman_preload_and_worker_prestage_overlap() {
+        if fixture_child(
+            "ec2::tests::podman_preload_and_worker_prestage_overlap",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        fs::write(fixture.join("parallel-podman"), "").unwrap();
+        let root = mj_core::ec2_records::ec2_records_dir();
+        create(create_args(), &root).unwrap();
+        assert!(fixture.join("remote-home/worker-started").exists());
+        assert!(
+            fixture.join("bin/image-ready").exists(),
+            "image pull must pass the rendezvous"
+        );
+        let binaries = fixture.join("remote-home/.local/share/hel/workers/worker-binaries");
+        assert!(
+            fs::read_dir(binaries)
+                .unwrap()
+                .any(|entry| entry.unwrap().path().join("hel").exists()),
+            "worker prestage must publish successfully after the rendezvous"
+        );
+        let record = records(&root).unwrap().pop().unwrap();
+        destroy(
+            DestroyArgs {
+                host: record.operation,
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mbx_upload_failure_removes_unpublished_staging() {
+        if fixture_child(
+            "ec2::tests::mbx_upload_failure_removes_unpublished_staging",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        fs::write(fixture.join("fail-mbx-upload"), "").unwrap();
+        let root = mj_core::ec2_records::ec2_records_dir();
+        let error = create(create_args(), &root).unwrap_err();
+        assert!(format!("{error:#}").contains("upload the pinned mbx binary"));
+        let files: Vec<_> = fs::read_dir(fixture.join("remote-home/.local/bin"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            files.is_empty(),
+            "failed uploads must remove their temporary file: {files:?}"
+        );
+        let record = records(&root).unwrap().pop().unwrap();
+        destroy(
+            DestroyArgs {
+                host: record.operation,
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bootstrap_failure_waits_for_running_and_defers_eip_until_cloud_init_finishes() {
+        if fixture_child(
+            "ec2::tests::bootstrap_failure_waits_for_running_and_defers_eip_until_cloud_init_finishes",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        fs::write(fixture.join("bin/cloud-init"), "#!/bin/sh\nexit 1\n").unwrap();
+        let root = mj_core::ec2_records::ec2_records_dir();
+        let error = create(create_args(), &root).unwrap_err();
+        assert!(format!("{error:#}").contains("retained for inspection"));
+        let address = fixture.join("bin/address.json");
+        assert!(
+            !address.exists(),
+            "EIP must not be associated before cloud-init finishes downloading packages"
+        );
+        let calls: Vec<Value> = fs::read_to_string(fixture.join("bin/calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let operations: Vec<_> = calls
+            .iter()
+            .filter_map(|call| call["operation"].as_str())
+            .collect();
+        assert!(operations.contains(&"wait instance-running"));
+        assert!(!operations.contains(&"wait instance-status-ok"));
+        assert!(!operations.contains(&"allocate-address"));
+        assert!(!operations.contains(&"associate-address"));
+        let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
+        assert!(ssh_calls.contains("@192.0.2.1"));
+        assert!(
+            ssh_calls.contains("IdentitiesOnly=yes") && ssh_calls.contains("UserKnownHostsFile=")
+        );
+        let record = records(&root).unwrap().pop().unwrap();
+        destroy(
+            DestroyArgs {
+                host: record.operation,
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
     }
 
     #[test]
