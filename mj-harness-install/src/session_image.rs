@@ -86,6 +86,11 @@ pub fn recipe_hash(files: &BTreeMap<String, String>) -> Result<String> {
 /// before the clone, in `/`, `/tmp`, or `/workspace/<id>`. Inside a checkout the
 /// shims come first, so the checkout's own versions win; elsewhere the lookup
 /// falls through to these wrappers, which run the version baked into the image.
+/// The fall-through is mise's own: with `not_found_system_fallback = true` (the
+/// default in the pinned mise 2026.11.9), a shim with no active project
+/// `mise.toml` searches the remaining `PATH` entries after `/opt/mise/shims`. It
+/// therefore reaches `/opt/mj-image/bin` before `/usr/bin`, and exits "No version
+/// is set for shim" only when no later `PATH` entry provides the binary.
 const IMAGE_FALLBACK_BIN_DIR: &str = "/opt/mj-image/bin";
 
 /// Shell for the image build's install layer, run in the recipe directory right

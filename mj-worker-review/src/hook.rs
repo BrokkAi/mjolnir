@@ -149,7 +149,14 @@ clean_upstream_merge_push() {
   # A conflict exits 1: resolutions are new work that needs review.
   cm_merged_tree=$(git merge-tree --write-tree --allow-unrelated-histories --no-messages \
     "$cm_reviewed" "$cm_parent2" 2>/dev/null) || return 1
-  [ "$cm_merged_tree" = "$cm_tree" ]
+  [ "$cm_merged_tree" = "$cm_tree" ] || return 1
+  # Unreviewed commits between the reviewed point and the first parent must not
+  # have needed a conflict resolution that happens to match upstream's side.
+  if [ "$cm_parent1" != "$cm_reviewed" ]; then
+    cm_actual_tree=$(git merge-tree --write-tree --allow-unrelated-histories --no-messages \
+      "$cm_parent1" "$cm_parent2" 2>/dev/null) || return 1
+    [ "$cm_actual_tree" = "$cm_tree" ] || return 1
+  fi
 }
 if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
   while read -r local_ref local_sha remote_ref remote_sha; do
@@ -1101,5 +1108,42 @@ mod tests {
         publish_upstream(temp.path(), "upstream.txt", b"newest\n");
         merge_upstream(&root);
         rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/ambiguous"]));
+    }
+
+    #[test]
+    fn hook_clean_merge_exemption_refuses_unreviewed_work_resolved_to_the_upstream_side() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(&root, "feature.txt", b"reviewed feature\n");
+        reviewed(&root);
+        let reviewed_commit = git(&root, &["rev-parse", "HEAD"]);
+        // Unreviewed work edits a line that upstream also edits; the merge
+        // takes upstream's side, so its tree equals Git's merge of the
+        // reviewed point with upstream.
+        commit_file(&root, "tracked.txt", b"unreviewed\n");
+        let upstream = publish_upstream(temp.path(), "tracked.txt", b"upstream\n");
+        let clean = git(
+            &root,
+            &["merge-tree", "--write-tree", &reviewed_commit, &upstream],
+        );
+        let conflicted = SystemGit
+            .run(
+                &root,
+                &GitCommand {
+                    arguments: ["merge", "-q", "--no-edit", "origin/main"]
+                        .map(Into::into)
+                        .to_vec(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_ne!(conflicted.status, 0);
+        git(&root, &["checkout", "--theirs", "tracked.txt"]);
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "take upstream's side"]);
+        assert_eq!(git(&root, &["rev-parse", "HEAD^{tree}"]), clean);
+        rejected_as_unreviewed(&push(&root, true, &["HEAD:refs/heads/feature"]));
     }
 }
