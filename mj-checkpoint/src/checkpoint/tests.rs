@@ -2556,6 +2556,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         excluded_environment: Vec::new(),
         cwd: spec.workspace_root.join("app"),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: Some(NATIVE.into()),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,

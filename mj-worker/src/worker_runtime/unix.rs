@@ -26,8 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::review_capture::ReviewCapture;
 use super::{
-    AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig, acp_additional_directories,
-    reviewer_workspace_directories,
+    AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig, reviewer_workspace_directories,
 };
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
@@ -424,12 +423,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             })
         })),
     }));
-    let mut additional_directories = acp_additional_directories(&config);
-    super::tool_cache::extend_writable_directories(
-        config.harness,
-        &session_environment,
-        &mut additional_directories,
-    );
+    let additional_directories = super::acp_session_directories(&config, &session_environment);
     let instruction_role = crate::acp::InstructionRole::from_launch(&config);
     let approval_choices = config.approval_choices();
     let acp_spec = LaunchSpec {
@@ -1181,12 +1175,8 @@ async fn restart_harness_in_place_response(
         };
     }
     let supervisor_path = relay_root.join("acp-supervisor.json");
-    let mut additional_directories = acp_additional_directories(&launch_config);
-    super::tool_cache::extend_writable_directories(
-        launch_config.harness,
-        &prepared.environment,
-        &mut additional_directories,
-    );
+    let additional_directories =
+        super::acp_session_directories(&launch_config, &prepared.environment);
     let updated_credentials = super::credential_endpoint(&launch_config);
     let updated_harness = launch_config.harness;
 
@@ -2825,6 +2815,23 @@ fn initialize_launch_environment(
     }
 }
 
+/// What the harness's own sandbox profile is built from: the directories the
+/// ACP session is given, and the roots whose Git directories it needs.
+fn harness_sandbox(
+    config: &WorkerLaunchConfig,
+    base_environment: &BTreeMap<String, String>,
+) -> super::git_sandbox::HarnessSandbox {
+    let mut environment = base_environment.clone();
+    environment.extend(config.environment.clone());
+    super::git_sandbox::HarnessSandbox {
+        directories: super::acp_session_directories(config, &environment),
+        git_roots: std::iter::once(config.cwd.clone())
+            .chain(config.additional_directories.iter().cloned())
+            .chain(config.writable_directories.iter().cloned())
+            .collect(),
+    }
+}
+
 struct PreparedHarnessEnvironment {
     launch: super::harness_launch::PreparedHarnessLaunch,
     git_setup: tempfile::TempDir,
@@ -2927,6 +2934,7 @@ async fn apply_profile_configuration(
             let role = subagent_role;
             let policy = config.execution_policy;
             let subtle_subagents = config.subtle_subagents;
+            let sandbox = harness_sandbox(config, base_environment);
             let (registered, environment, mode) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -2942,6 +2950,7 @@ async fn apply_profile_configuration(
                         subtle_subagents,
                         review_tools,
                         managed_subagent,
+                        &sandbox,
                     )?;
                     // The staged home holds the configuration Codex runs
                     // with, overlay included. An unreadable one fails startup
@@ -2977,6 +2986,8 @@ async fn apply_profile_configuration(
             let role = subagent_role;
             let capabilities = (config.oracle, config.orchestrators_enabled);
             let subtle_subagents = config.subtle_subagents;
+            let policy = config.execution_policy;
+            let sandbox = harness_sandbox(config, base_environment);
             if managed_subagent {
                 // Marketplace refreshes on every child start fetch from Git or
                 // HTTP sources; the child's staged plugins are copied from
@@ -3032,6 +3043,13 @@ async fn apply_profile_configuration(
                             &home,
                         )?;
                     }
+                    super::git_sandbox::configure_claude_git_sandbox(
+                        &root,
+                        &session_id,
+                        &home,
+                        policy,
+                        &sandbox,
+                    )?;
                     Ok((registered, mailbox_hook_available))
                 })
                 .await
@@ -3090,6 +3108,7 @@ async fn apply_profile_configuration(
                 .then(|| {
                     std::iter::once(config.cwd.clone())
                         .chain(config.additional_directories.iter().cloned())
+                        .chain(config.writable_directories.iter().cloned())
                         .collect::<Vec<_>>()
                 });
             config.environment =

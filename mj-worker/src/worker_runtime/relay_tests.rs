@@ -406,6 +406,7 @@ pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         excluded_environment: Vec::new(),
         cwd: ".local/share/hel/workspaces/session/repo".into(),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
@@ -7784,6 +7785,50 @@ fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         });
         assert!(acp_additional_directories(&config).is_empty());
+    }
+}
+
+#[test]
+fn a_borrowed_childs_preserved_owner_roots_reach_the_sandbox_but_not_review_discovery() {
+    let owner = PathBuf::from("/workspace/owner");
+    let workspace = PathBuf::from("/workspace/api");
+    let cwd = PathBuf::from("/workspace/owner/crates/foo");
+    let tool_cache = PathBuf::from("/cache/tools");
+    for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Muse] {
+        let mut config = launch_config("/profile");
+        config.harness = harness;
+        config.cwd = cwd.clone();
+        config.additional_directories = vec![workspace.clone()];
+        // The working directory and a root already attached are not repeated.
+        config.writable_directories = vec![owner.clone(), cwd.clone(), workspace.clone()];
+
+        let expected = if harness == HarnessKind::Muse {
+            vec![workspace.clone()]
+        } else {
+            vec![workspace.clone(), owner.clone()]
+        };
+        assert_eq!(acp_additional_directories(&config), expected, "{harness:?}");
+        assert_eq!(
+            reviewer_workspace_directories(&config),
+            std::slice::from_ref(&workspace),
+            "{harness:?} reviews only the repositories it was launched with"
+        );
+
+        // The harness sandbox profile starts from the same list as the ACP
+        // launch, tool caches included.
+        let environment = BTreeMap::from([(
+            "MJ_TOOL_CACHE_DIR".to_owned(),
+            tool_cache.display().to_string(),
+        )]);
+        let mut with_cache = expected;
+        if harness != HarnessKind::Muse {
+            with_cache.push(tool_cache.clone());
+        }
+        assert_eq!(
+            acp_session_directories(&config, &environment),
+            with_cache,
+            "{harness:?}"
+        );
     }
 }
 

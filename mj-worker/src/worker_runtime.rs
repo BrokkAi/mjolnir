@@ -399,10 +399,11 @@ mod json_gh_rules;
 #[cfg(unix)]
 pub(crate) use json_gh_rules::opencode_reviewer_environment;
 #[cfg(unix)]
+mod git_sandbox;
+#[cfg(unix)]
 mod project_tools;
 #[cfg(unix)]
 mod shell_environment;
-#[cfg(unix)]
 mod tool_cache;
 #[cfg(unix)]
 pub use discovery::discover_profile_config;
@@ -500,6 +501,11 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             }
         }
     }
+    for directory in &mut config.writable_directories {
+        if directory.is_relative() {
+            *directory = base.join(&*directory);
+        }
+    }
     if let Some(memory) = config.project_memory.as_mut() {
         if let Some(socket) = memory.history_socket.as_mut()
             && socket.is_relative()
@@ -542,15 +548,39 @@ fn reviewer_workspace_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The directories one ACP session may write, as the bridge receives them:
+/// the launch's workspace roots, a borrowed child's preserved owner roots
+/// (`writable_directories`, absent for Muse, which takes a single root), and
+/// the project-memory replica.
 #[cfg(unix)]
 fn acp_additional_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
     let mut directories = config.additional_directories.clone();
+    if config.harness != HarnessKind::Muse {
+        for directory in &config.writable_directories {
+            if directory != &config.cwd && !directories.contains(directory) {
+                directories.push(directory.clone());
+            }
+        }
+    }
     if !matches!(config.harness, HarnessKind::Claude | HarnessKind::Muse)
         && let Some(memory) = &config.project_memory
         && !directories.contains(&memory.root)
     {
         directories.push(memory.root.clone());
     }
+    directories
+}
+
+/// [`acp_additional_directories`] plus the tool-cache directories the session
+/// environment names. The ACP launch and the harness's own sandbox profile
+/// both start from this one list, so they cannot disagree.
+#[cfg(unix)]
+fn acp_session_directories(
+    config: &WorkerLaunchConfig,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Vec<PathBuf> {
+    let mut directories = acp_additional_directories(config);
+    tool_cache::extend_writable_directories(config.harness, environment, &mut directories);
     directories
 }
 
