@@ -77,6 +77,7 @@ ARMS = {
     "R": ["gpt-6.2-sol:medium"],
     "S": ["gpt-6.2-sol:low"],
     "T": ["gpt-6.2-sol:medium"],
+    "U": ["gpt-6.2-sol:high"],  # one profile-pinned high-effort review per diff
 }
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for path, setting in ((CORPUS_PATH, "REVIEW_ARMS_CORPUS"),
