@@ -7832,6 +7832,25 @@ fn a_borrowed_childs_preserved_owner_roots_reach_the_sandbox_but_not_review_disc
     }
 }
 
+#[test]
+fn the_harness_sandbox_takes_its_directories_from_the_launch_environment() {
+    let mut config = launch_config("/profile");
+    config.harness = HarnessKind::Codex;
+    // The configuration still names a tool cache that the launch removed as
+    // excluded; the sandbox must not grant it back.
+    config
+        .environment
+        .insert("MJ_TOOL_CACHE_DIR".into(), "/cache/excluded".into());
+    config.excluded_environment.push("MJ_TOOL_CACHE_DIR".into());
+    let launch_environment =
+        BTreeMap::from([("MJ_NX_HOME_DIR".to_owned(), "/cache/nx".to_owned())]);
+
+    assert_eq!(
+        unix::harness_sandbox(&config, &launch_environment).directories,
+        [PathBuf::from("/cache/nx")]
+    );
+}
+
 // Hard-won: #1305: one file over 100 KiB blocked every memory snapshot and checkpoint.
 #[test]
 fn project_memory_connection_requests_round_trip_replica_and_baseline() {

@@ -2817,14 +2817,16 @@ fn initialize_launch_environment(
 
 /// What the harness's own sandbox profile is built from: the directories the
 /// ACP session is given, and the roots whose Git directories it needs.
-fn harness_sandbox(
+///
+/// `launch_environment` is the environment the harness launches with, so tool
+/// caches come from exactly the variables the ACP launch sees, with
+/// `excluded_environment` already removed.
+pub(super) fn harness_sandbox(
     config: &WorkerLaunchConfig,
-    base_environment: &BTreeMap<String, String>,
+    launch_environment: &BTreeMap<String, String>,
 ) -> super::git_sandbox::HarnessSandbox {
-    let mut environment = base_environment.clone();
-    environment.extend(config.environment.clone());
     super::git_sandbox::HarnessSandbox {
-        directories: super::acp_session_directories(config, &environment),
+        directories: super::acp_session_directories(config, launch_environment),
         git_roots: std::iter::once(config.cwd.clone())
             .chain(config.additional_directories.iter().cloned())
             .chain(config.writable_directories.iter().cloned())

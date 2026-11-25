@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::ExecutionPolicy;
 
 /// The name of the Codex permission profile Mjolnir stages.
@@ -56,11 +56,45 @@ impl GitSandboxTarget {
             self.git_dir.join("commondir"),
         ]
     }
+
+    /// The read-only entries of a Codex profile. Hooks, configuration and a
+    /// worktree's `config.worktree` are listed even when absent, so the
+    /// sandbox cannot create one that later runs outside it. `commondir`
+    /// (read by Git, so an empty mount breaks it) and `config.lock` are listed
+    /// only when present.
+    fn codex_read_only_paths(&self) -> Vec<PathBuf> {
+        let config_worktree = self.git_dir.join("config.worktree");
+        let mut paths = vec![
+            self.common_dir.join("hooks"),
+            self.common_dir.join("config"),
+        ];
+        if self.is_worktree || config_worktree.exists() {
+            paths.push(config_worktree);
+        }
+        paths.extend(
+            [
+                self.common_dir.join("config.lock"),
+                self.git_dir.join("commondir"),
+            ]
+            .into_iter()
+            .filter(|path| path.exists()),
+        );
+        paths
+    }
 }
 
-/// Resolve the Git directories enclosing `roots`. A root that does not exist
-/// or lies in no repository contributes nothing.
+/// Resolve the Git directories enclosing `roots`. A root that does not exist,
+/// lies in no repository, or names Git directories the workspace has no claim
+/// to contributes nothing.
+///
+/// A workspace controls its own `.git` file and the `commondir` file of a
+/// Git directory inside it, so neither is trusted to point anywhere. Every
+/// target must be a real Git directory; one outside `roots` must also be the
+/// administrative directory its own repository made for this working tree
+/// (`<common>/worktrees/<name>`, whose `gitdir` file points back at the
+/// `.git` file that names it).
 pub(super) fn resolve_git_sandbox_targets(roots: &[PathBuf]) -> Vec<GitSandboxTarget> {
+    let approved = roots.iter().map(|root| canonical(root)).collect::<Vec<_>>();
     let mut targets = BTreeSet::new();
     for root in roots {
         if !root.is_absolute() || !root.is_dir() {
@@ -74,7 +108,7 @@ pub(super) fn resolve_git_sandbox_targets(roots: &[PathBuf]) -> Vec<GitSandboxTa
         }) else {
             continue;
         };
-        match resolve_dotgit(&dotgit, &base) {
+        match resolve_dotgit(&dotgit, &base, &approved) {
             Ok(Some(target)) => {
                 targets.insert(target);
             }
@@ -89,10 +123,38 @@ pub(super) fn resolve_git_sandbox_targets(roots: &[PathBuf]) -> Vec<GitSandboxTa
     targets.into_iter().collect()
 }
 
-fn resolve_dotgit(dotgit: &Path, base: &Path) -> Result<Option<GitSandboxTarget>> {
+fn is_git_directory(directory: &Path) -> bool {
+    directory.join("HEAD").is_file()
+}
+
+fn is_common_directory(directory: &Path) -> bool {
+    is_git_directory(directory)
+        && directory.join("objects").is_dir()
+        && directory.join("refs").is_dir()
+}
+
+fn resolve_dotgit(
+    dotgit: &Path,
+    base: &Path,
+    approved: &[PathBuf],
+) -> Result<Option<GitSandboxTarget>> {
     let metadata = std::fs::metadata(dotgit)?;
     if metadata.is_dir() {
         let git_dir = canonical(dotgit);
+        ensure!(
+            is_common_directory(&git_dir),
+            "{} is not a Git directory",
+            dotgit.display()
+        );
+        // A `.git` symlink is the workspace's to plant, so it may lead only to
+        // a Git directory inside the approved roots; a real directory found
+        // above a subdirectory session is the repository itself.
+        ensure!(
+            !std::fs::symlink_metadata(dotgit)?.file_type().is_symlink()
+                || approved.iter().any(|root| git_dir.starts_with(root)),
+            "{} is a symlink to a Git directory outside the workspace",
+            dotgit.display()
+        );
         return Ok(Some(GitSandboxTarget {
             common_dir: git_dir.clone(),
             git_dir,
@@ -111,26 +173,36 @@ fn resolve_dotgit(dotgit: &Path, base: &Path) -> Result<Option<GitSandboxTarget>
     else {
         bail!("gitfile {} has no gitdir line", dotgit.display());
     };
-    let pointer = Path::new(pointer);
-    let git_dir = if pointer.is_absolute() {
-        pointer.to_owned()
-    } else {
-        base.join(pointer)
-    };
+    let git_dir = base.join(pointer);
     let Ok(git_dir) = std::fs::canonicalize(&git_dir) else {
         return Ok(None);
     };
     let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
         Ok(text) => {
-            let common = Path::new(text.trim());
-            canonical(&if common.is_absolute() {
-                common.to_owned()
-            } else {
-                git_dir.join(common)
-            })
+            let Ok(common) = std::fs::canonicalize(git_dir.join(text.trim())) else {
+                bail!("commondir of {} names no directory", git_dir.display());
+            };
+            common
         }
         Err(_) => git_dir.clone(),
     };
+    ensure!(
+        is_git_directory(&git_dir) && is_common_directory(&common_dir),
+        "{} does not lead to a Git directory",
+        dotgit.display()
+    );
+    let inside = |directory: &Path| approved.iter().any(|root| directory.starts_with(root));
+    if !(inside(&git_dir) && inside(&common_dir)) {
+        let administrative = git_dir.parent() == Some(common_dir.join("worktrees").as_path());
+        let backlink = std::fs::read_to_string(git_dir.join("gitdir"))
+            .ok()
+            .and_then(|text| std::fs::canonicalize(git_dir.join(text.trim())).ok());
+        ensure!(
+            administrative && backlink.is_some() && backlink == std::fs::canonicalize(dotgit).ok(),
+            "{} points outside the workspace at a Git directory that does not belong to it",
+            dotgit.display()
+        );
+    }
     Ok(Some(GitSandboxTarget {
         git_dir,
         common_dir,
@@ -202,14 +274,19 @@ pub(super) fn configure_codex_permissions(
     for directory in writable.filter(|directory| directory.is_absolute()) {
         grants.insert(directory.to_string_lossy().into_owned(), "write");
     }
-    // An entry for a missing path is skipped, but Codex mounts an empty file
-    // there for a read-only one, and an empty `commondir` breaks Git. Only
-    // protect what exists.
-    for protected in targets.iter().flat_map(GitSandboxTarget::protected_paths) {
-        if protected.exists() {
-            grants.insert(protected.to_string_lossy().into_owned(), "read");
-        }
+    for protected in targets
+        .iter()
+        .flat_map(GitSandboxTarget::codex_read_only_paths)
+    {
+        grants.insert(protected.to_string_lossy().into_owned(), "read");
     }
+    // Codex's `workspace-write` sandbox has no network unless the person
+    // asked for it; keeping their explicit `network_access = false` is theirs.
+    let network = config
+        .get("sandbox_workspace_write")
+        .and_then(|table| table.get("network_access"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true);
     let filesystem = grants
         .into_iter()
         .map(|(path, access)| (path, toml::Value::String(access.into())))
@@ -223,7 +300,7 @@ pub(super) fn configure_codex_permissions(
             "network".to_owned(),
             toml::Value::Table(toml::Table::from_iter([(
                 "enabled".to_owned(),
-                toml::Value::Boolean(true),
+                toml::Value::Boolean(network),
             )])),
         ),
         ("filesystem".to_owned(), toml::Value::Table(filesystem)),
@@ -624,12 +701,14 @@ mod tests {
         ] {
             expected.insert(path(writable), "write");
         }
-        // A clone and a worktree both have hooks and configuration to protect.
-        // Missing paths (`config.lock`, `config.worktree`) are not listed: Codex
-        // would mount an empty file there, and an empty `commondir` breaks Git.
+        // A clone and a worktree both have hooks and configuration to protect,
+        // and a worktree its (here absent) `config.worktree`. Other missing
+        // paths (`config.lock`) are not listed: Codex mounts an empty file
+        // there, and an empty `commondir` breaks Git.
         for protected in [
             git_dir.join("hooks"),
             git_dir.join("config"),
+            worktree_dir.join("config.worktree"),
             worktree_dir.join("commondir"),
         ] {
             expected.insert(path(&protected), "read");
@@ -643,6 +722,155 @@ mod tests {
         );
         // A gitfile is not a directory Codex can mount over.
         assert!(!filesystem.contains_key(path(&repositories.worktree.join(".git")).as_str()));
+    }
+
+    #[test]
+    fn codex_profile_protects_hooks_and_worktree_config_that_do_not_exist_yet() {
+        let repositories = repositories();
+        let git_dir = repositories.clone.join(".git");
+        let worktree_dir = git_dir.join("worktrees/linked");
+        std::fs::remove_dir_all(git_dir.join("hooks")).unwrap();
+        let profile = |roots: Vec<PathBuf>| {
+            let mut config = toml::Table::new();
+            configure_codex_permissions(
+                &mut config,
+                Path::new("config.toml"),
+                ExecutionPolicy::ConfiguredApprovals,
+                &sandbox(roots, Vec::new()),
+            )
+            .unwrap();
+            config["permissions"][CODEX_PROFILE]["filesystem"]
+                .as_table()
+                .unwrap()
+                .iter()
+                .filter(|(_, access)| access.as_str() == Some("read"))
+                .map(|(path, _)| path.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        let path = |path: PathBuf| path.to_str().unwrap().to_owned();
+
+        // Without them the sandbox could create a hook or a worktree config
+        // that Git later runs outside it.
+        assert_eq!(
+            profile(vec![repositories.worktree.clone()]),
+            BTreeSet::from([
+                path(git_dir.join("hooks")),
+                path(git_dir.join("config")),
+                path(worktree_dir.join("config.worktree")),
+                path(worktree_dir.join("commondir")),
+            ])
+        );
+        // A clone has no `commondir`, and an empty one breaks Git; its
+        // optional files are listed only when they exist.
+        assert_eq!(
+            profile(vec![repositories.clone.clone()]),
+            BTreeSet::from([path(git_dir.join("hooks")), path(git_dir.join("config"))])
+        );
+    }
+
+    #[test]
+    fn codex_profile_keeps_a_persons_network_refusal() {
+        let network = |sandbox_workspace_write: &str| {
+            let mut config: toml::Table = toml::from_str(sandbox_workspace_write).unwrap();
+            configure_codex_permissions(
+                &mut config,
+                Path::new("config.toml"),
+                ExecutionPolicy::ConfiguredApprovals,
+                &sandbox(Vec::new(), Vec::new()),
+            )
+            .unwrap();
+            config["permissions"][CODEX_PROFILE]["network"]["enabled"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(network(""));
+        assert!(network(
+            "[sandbox_workspace_write]\nnetwork_access = true\n"
+        ));
+        assert!(!network(
+            "[sandbox_workspace_write]\nnetwork_access = false\n"
+        ));
+    }
+
+    #[test]
+    fn a_workspace_cannot_point_the_sandbox_at_git_directories_that_are_not_its_own() {
+        let repositories = repositories();
+        let admin = repositories.clone.join(".git/worktrees/linked");
+        let other = repositories.base.join("other");
+        git(
+            &repositories.clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other",
+                other.to_str().unwrap(),
+            ],
+        );
+        let workspace = repositories.base.join("workspace");
+        let plant = |name: &str, gitfile: String| {
+            let root = workspace.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".git"), gitfile).unwrap();
+            root
+        };
+        let resolve = |root: &Path| resolve_git_sandbox_targets(&[root.to_owned()]);
+        let pointing_at = |directory: &Path| format!("gitdir: {}\n", directory.display());
+
+        // A directory that is no repository (an `.ssh`).
+        let ssh = repositories.base.join("victim/.ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        assert!(resolve(&plant("ssh", pointing_at(&ssh))).is_empty());
+
+        // An unrelated real repository, named directly or by one of its
+        // worktrees' administrative directories that points back elsewhere.
+        assert!(
+            resolve(&plant(
+                "direct",
+                pointing_at(&repositories.clone.join(".git"))
+            ))
+            .is_empty()
+        );
+        assert!(
+            resolve(&plant(
+                "stolen",
+                pointing_at(&repositories.clone.join(".git/worktrees/other"))
+            ))
+            .is_empty()
+        );
+
+        // A fake Git directory inside the workspace whose `commondir` leads
+        // to a real repository outside it.
+        let forged = plant("forged", "gitdir: fake\n".into());
+        std::fs::create_dir_all(forged.join("fake/objects")).unwrap();
+        std::fs::create_dir_all(forged.join("fake/refs")).unwrap();
+        std::fs::write(forged.join("fake/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            forged.join("fake/commondir"),
+            repositories.clone.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(resolve(&forged).is_empty());
+
+        // A `.git` symlink into a real repository outside the workspace.
+        let linked = workspace.join("linked-dotgit");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(repositories.clone.join(".git"), linked.join(".git")).unwrap();
+        assert!(resolve(&linked).is_empty());
+
+        // A real external worktree proves ownership both ways and is
+        // accepted; so is one whose directory moved when its repository is
+        // in the workspace's approved roots.
+        let accepted = resolve(&repositories.worktree);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].git_dir, admin);
+        let moved = repositories.base.join("moved");
+        std::fs::rename(&other, &moved).unwrap();
+        assert!(resolve(&moved).is_empty(), "the backlink no longer matches");
+        let trusted = resolve_git_sandbox_targets(&[moved.clone(), repositories.clone.clone()]);
+        assert!(trusted.iter().any(|target| target.is_worktree
+            && target.git_dir == repositories.clone.join(".git/worktrees/other")));
     }
 
     #[test]
