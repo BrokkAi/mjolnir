@@ -47,18 +47,6 @@ pub(super) fn clear_github_subscriptions_with(
         "UPDATE github_watch_classifications SET interested=0, created=0 WHERE session_id=?1",
         [session_id],
     )?;
-    // GitHub assigns increasing issue/PR numbers within each repository.
-    // Capture one cutoff per watched repository, using its indexed maximum;
-    // reset storage grows with repositories, not the retained item feed.
-    connection.execute(
-        "INSERT INTO github_session_reset_frontiers(session_id, owner, repo, through_number)
-         SELECT ?1, c.owner, c.repo,
-                COALESCE((SELECT MAX(i.number) FROM github_seen_items i
-                          WHERE i.owner=c.owner AND i.repo=c.repo), 0)
-         FROM github_watch_cursors c WHERE true
-         ON CONFLICT(session_id, owner, repo) DO UPDATE SET through_number=MAX(github_session_reset_frontiers.through_number, excluded.through_number)",
-        [session_id],
-    )?;
     connection.execute(
         "DELETE FROM github_watch_classification_failures WHERE session_id=?1",
         [session_id],
@@ -196,9 +184,13 @@ pub fn record_github_classification_failure(
     repo: String,
     number: i64,
     session_id: String,
+    clear_ordinal: u64,
 ) -> Result<()> {
     submit_database_write("record_github_classification_failure", move |connection| {
         let tx = connection.transaction()?;
+        if github_classification_frontier_with(&tx, &session_id)? != Some(clear_ordinal) {
+            return Ok(());
+        }
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM github_watch_classifications WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4)",
             params![owner,repo,number,session_id], |row| row.get::<_,bool>(0))? {
             tx.commit()?; return Ok(());
@@ -320,8 +312,7 @@ pub fn load_github_item_classified_sessions(
     let mut statement = connection.prepare(
         "SELECT session_id FROM github_watch_classifications
          WHERE owner=?1 AND repo=?2 AND number=?3
-         UNION SELECT session_id FROM github_session_reset_frontiers
-         WHERE owner=?1 AND repo=?2 AND through_number >= ?3",
+",
     )?;
     statement
         .query_map(params![owner, repo, number], |row| row.get(0))?
@@ -345,19 +336,7 @@ pub fn commit_github_item_classification(
         };
         // SQLite serializes this decision with /clear. Evidence from an older
         // conversation cannot restore a watch or deliver a notification.
-        if clear_ordinal != classification.clear_ordinal
-            || tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM github_session_reset_frontiers
-                 WHERE session_id=?1 AND owner=?2 AND repo=?3 AND through_number >= ?4)",
-                params![
-                    classification.session_id,
-                    classification.owner,
-                    classification.repo,
-                    classification.number
-                ],
-                |row| row.get::<_, bool>(0),
-            )?
-        {
+        if clear_ordinal != classification.clear_ordinal {
             return Ok((false, false));
         }
         let mut enqueued_lifecycle = false;

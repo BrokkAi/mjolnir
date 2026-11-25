@@ -712,7 +712,7 @@ async fn classify_recorded_items(
         let classifier = classifier.clone(); let control = api.control.clone();
         async move {
             if stop.is_cancelled() { return Ok(()); }
-            let number = item.number; let session_id = session.id.clone();
+            let number = item.number; let session_id = session.id.clone(); let clear_ordinal = session.clear_ordinal;
             match async {
                 let evidence = evidence?;
                 classify_for_session(owner, repo, item, session, evidence, classifier, control).await
@@ -722,7 +722,7 @@ async fn classify_recorded_items(
                 Err(error) => {
                     tracing::warn!(%owner, %repo, number, %session_id, attempt=attempts.saturating_add(1), %error, "GitHub classification failed; retrying with backoff");
                     let owner = owner.to_owned(); let repo = repo.to_owned();
-                    blocking_db(move || database::record_github_classification_failure(owner, repo, number, session_id)).await
+                    blocking_db(move || database::record_github_classification_failure(owner, repo, number, session_id, clear_ordinal)).await
                 }
             }
         }
@@ -3628,9 +3628,17 @@ mod tests {
     }
 
     impl GithubClassifier for ClearingClassifier {
-        fn classify<'a>(&'a self, _: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
+        fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                let interested = evidence.session.conversation.contains("OLD INTEREST")
+                    || (evidence.session.conversation.contains("NEW INTEREST")
+                        && evidence.item.title.contains("new"));
+                if evidence.session.conversation.contains("NEW INTEREST") {
+                    assert!(
+                        !serde_json::to_string(&evidence.session.history)?.contains("OLD INTEREST")
+                    );
+                }
                 if self.clear_next.swap(false, Ordering::SeqCst) {
                     blocking_db(|| {
                         use mj_core::relay::{
@@ -3669,8 +3677,9 @@ mod tests {
                         Ok(())
                     })
                     .await?;
+                    bail!("old classifier failed after clear");
                 }
-                Ok(GithubItemVerdict { interested: true })
+                Ok(GithubItemVerdict { interested })
             })
         }
     }
@@ -3688,35 +3697,53 @@ mod tests {
         let mut session = database::test_session("cleared", "project");
         session.created_at = at(-120);
         database::save_session(&session).unwrap();
-        let record_items = |numbers: std::ops::RangeInclusive<u64>, created: String| {
-            database::record_github_page(
-                "acme".into(),
-                "repo".into(),
-                numbers
-                    .map(|number| {
-                        parse_github_item(&github_item(
-                            number,
-                            number,
-                            "interesting item",
-                            created.clone(),
-                            true,
-                        ))
-                        .unwrap()
-                    })
-                    .collect(),
-                database::GithubFeedProgress::Main(created),
-            )
-            .unwrap();
+        let set_interest = |id: &str, text: &str, position| {
+            let mut materialized = database::load_materialized_session(id).unwrap().unwrap();
+            materialized.applied_event_ordinal = position;
+            materialized.applied_event_digest = format!("{position:064x}");
+            materialized
+                .transcript
+                .push(Arc::new(mj_core::state::TranscriptItem {
+                    stable_id: format!("user:interest-{position}"),
+                    position,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: now.timestamp_millis(),
+                    last_changed_at_ms: now.timestamp_millis(),
+                    body: mj_core::state::TranscriptBody::User {
+                        content: vec![serde_json::json!({"type":"text","text":text})],
+                    },
+                }));
+            database::save_materialized_session(&materialized).unwrap();
         };
-        // Include more pending pairs than one poll can classify, with GitHub's
-        // clock ahead of the worker, plus a failed pair that is due to retry.
-        database::github_repo_cursor("acme", "repo").unwrap();
-        record_items(1..=MAX_CLASSIFICATIONS_PER_POLL as u64 + 2, at(60));
+        set_interest("cleared", "OLD INTEREST", 1);
+        let record_items =
+            |numbers: std::ops::RangeInclusive<u64>, created: String, title: &str| {
+                database::record_github_page(
+                    "acme".into(),
+                    "repo".into(),
+                    numbers
+                        .map(|number| {
+                            parse_github_item(&github_item(
+                                number,
+                                number,
+                                title,
+                                created.clone(),
+                                true,
+                            ))
+                            .unwrap()
+                        })
+                        .collect(),
+                    database::GithubFeedProgress::Main(created),
+                )
+                .unwrap();
+            };
+        record_items(1..=2, at(60), "old item");
         database::record_github_classification_failure(
             "acme".into(),
             "repo".into(),
             2,
             "cleared".into(),
+            0,
         )
         .unwrap();
         database::seed_github_retry_due("acme", "repo", 2, "cleared").unwrap();
@@ -3736,10 +3763,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            classifier.calls.load(Ordering::SeqCst),
-            MAX_CLASSIFICATIONS_PER_POLL
-        );
+        assert_eq!(classifier.calls.load(Ordering::SeqCst), 2);
         assert!(
             database::load_github_watches("acme", "repo")
                 .unwrap()
@@ -3758,8 +3782,9 @@ mod tests {
         stale.session_id = "cleared".into();
         assert!(!database::commit_github_item_classification(stale, None).unwrap());
 
-        // More old pairs than the per-poll batch must not crowd out new work.
-        let fresh = MAX_CLASSIFICATIONS_PER_POLL as u64 + 4;
+        // Later classifications use the new conversation's interests.
+        set_interest("cleared", "NEW INTEREST", 3);
+        let fresh = 4;
         let cleared = database::load_materialized_session("cleared")
             .unwrap()
             .unwrap();
@@ -3776,9 +3801,9 @@ mod tests {
             .unwrap()
             .to_rfc3339_opts(SecondsFormat::Secs, true);
         // A PR opened after the clear can carry the same whole-second timestamp.
-        record_items(fresh..=fresh, clear_second.clone());
+        record_items(fresh..=fresh, clear_second.clone(), "new item");
         // First-seen items remain eligible when GitHub's clock is behind too.
-        record_items(fresh + 1..=fresh + 1, at(-60));
+        record_items(fresh + 1..=fresh + 1, at(-60), "new item");
         classify_recorded_items(
             "acme",
             "repo",
@@ -3790,10 +3815,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            classifier.calls.load(Ordering::SeqCst),
-            MAX_CLASSIFICATIONS_PER_POLL + 2
-        );
+        let calls_before_rebuild = classifier.calls.load(Ordering::SeqCst);
         let watches = database::load_github_watches("acme", "repo").unwrap();
         assert_eq!(
             watches.iter().map(|watch| watch.number).collect::<Vec<_>>(),
@@ -3812,7 +3834,8 @@ mod tests {
         let mut healthy = database::test_session("healthy", "project");
         healthy.created_at = at(90);
         database::save_session(&healthy).unwrap();
-        record_items(fresh + 2..=fresh + 2, at(120));
+        set_interest("healthy", "NEW INTEREST", 1);
+        record_items(fresh + 2..=fresh + 2, at(120), "new item");
         classify_recorded_items(
             "acme",
             "repo",
@@ -3826,7 +3849,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             classifier.calls.load(Ordering::SeqCst),
-            MAX_CLASSIFICATIONS_PER_POLL + 3
+            calls_before_rebuild + 1
         );
         assert!(
             database::pending_mailbox_events(100)
