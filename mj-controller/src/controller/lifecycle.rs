@@ -1864,6 +1864,38 @@ impl Controller {
         }
     }
 
+    /// Stop the quiescent worker and record the session `Parked`. Admission
+    /// is yielded around the stop, which can wait on a hung target, so a
+    /// handoff does not wait for it; the readmission is required before the
+    /// intent is retired or `Parked` is persisted, so a retired owner never
+    /// writes after the handoff closed admission.
+    fn park_quiescent_session(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        cleanup: &(impl CommandExecutor + Sync),
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        let (backend, root) = self.worker_placement(session_id)?;
+        let owner = crate::worker_lifecycle::require(session_id)?;
+        executor.begin_resumable_work()?;
+        let stopped = mj_core::runtime::off_async_worker(|| {
+            super::worker_binary::stop_worker(&owner, cleanup, &backend, &root)
+        });
+        executor.end_resumable_work("restore parked session")?;
+        stopped?;
+        retire_worker_restart_intent(session_id)?;
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .context("session disappeared during suspend")?;
+        record.state = SessionState::Parked;
+        record.last_checkpoint_error = Some(format!("{error:#}"));
+        record.updated_at = now();
+        self.persist_session_state(session_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn restart_after_refused_origin_delta(
         &mut self,
@@ -1880,28 +1912,16 @@ impl Controller {
         }
         let cleanup = executor.shutdown_only();
         if attempt.already_quiescent() {
-            let parked = (|| -> Result<()> {
-                let (backend, root) = self.worker_placement(session_id)?;
-                super::worker_binary::stop_worker(
-                    &crate::worker_lifecycle::require(session_id)?,
-                    &cleanup,
-                    &backend,
-                    &root,
-                )?;
-                retire_worker_restart_intent(session_id)?;
-                let record = self
-                    .state
-                    .sessions
-                    .get_mut(session_id)
-                    .context("session disappeared during suspend")?;
-                record.state = SessionState::Parked;
-                record.last_checkpoint_error = Some(format!("{error:#}"));
-                record.updated_at = now();
-                self.persist_session_state(session_id)?;
-                attempt.clear_after_restart(&cleanup)
-            })();
+            // Bounded like the failed-launch cleanup it replaces, and ending
+            // for daemon shutdown.
+            let parked_cleanup =
+                cleanup.with_cleanup_timeout(super::FAILED_STARTUP_CLEANUP_TIMEOUT);
+            let parked = self
+                .park_quiescent_session(session_id, executor, &parked_cleanup, &error)
+                .and_then(|()| attempt.clear_after_restart(&parked_cleanup));
             return match parked {
                 Ok(()) => error,
+                Err(_) if executor.shutdown_interrupted() => error,
                 Err(rollback) => error.context(format!("restore parked session: {rollback:#}")),
             };
         }

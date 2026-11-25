@@ -7381,3 +7381,123 @@ fn checkpoint_report_roots_follow_the_environment_binding_after_owned_child_regi
         "the environment retains the borrower report after the borrower is stopped and removed"
     );
 }
+
+/// Parking a quiescent session after a refused suspend stops its worker under
+/// the failed-launch bound and the shutdown-only view, yields admission around
+/// the stop, and requires the readmission before anything durable is written:
+/// a handoff that closed admission leaves `Parked` unwritten for the next
+/// daemon.
+#[cfg(unix)]
+#[tokio::test]
+async fn parking_a_quiescent_session_yields_admission_and_stops_bounded_before_any_write() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    const NAME: &str =
+        "parking_a_quiescent_session_yields_admission_and_stops_bounded_before_any_write";
+    const SESSION_ID: &str = "parked-rollback-bounds";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    #[derive(Default)]
+    struct Probe {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for Probe {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            self.events.lock().unwrap().push("unbounded".into());
+            anyhow::bail!("the worker stop must run through the bounded cleanup path")
+        }
+
+        fn execute_cleanup_with_timeout(
+            &self,
+            command: &CommandSpec,
+            timeout: Duration,
+        ) -> Result<CommandOutput> {
+            self.events.lock().unwrap().push(format!(
+                "stop bound={}s shutdown_only={}",
+                timeout.as_secs(),
+                command.is_shutdown_only()
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            self.events.lock().unwrap().push("yield admission".into());
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+            self.events.lock().unwrap().push("readmit".into());
+            anyhow::bail!("the daemon handoff closed admission")
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let mut controller = stopped_podman_cleanup_controller(SESSION_ID);
+    controller.state.sessions.get_mut(SESSION_ID).unwrap().state = SessionState::Closing;
+    persist_controller_fixture(&mut controller);
+    let admission = crate::controller::test_support::session_admission(SESSION_ID);
+    let probe = Probe::default();
+    let shutdown_only = probe.shutdown_only();
+    let cleanup =
+        shutdown_only.with_cleanup_timeout(crate::controller::FAILED_STARTUP_CLEANUP_TIMEOUT);
+    let error = anyhow::anyhow!("suspend refused");
+    let outcome = crate::worker_lifecycle::run_admitted(&admission, SESSION_ID, async {
+        controller.park_quiescent_session(SESSION_ID, &probe, &cleanup, &error)
+    })
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{outcome:#}").contains("the daemon handoff closed admission"),
+        "{outcome:#}"
+    );
+    assert_eq!(
+        *probe.events.lock().unwrap(),
+        [
+            "yield admission",
+            "stop bound=30s shutdown_only=true",
+            "readmit"
+        ]
+    );
+    assert_eq!(
+        controller.state.sessions[SESSION_ID].state,
+        SessionState::Closing,
+        "a refused readmission leaves the record for the next daemon"
+    );
+}
