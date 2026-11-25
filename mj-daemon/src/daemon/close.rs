@@ -56,68 +56,95 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: String,
     ) -> Result<mj_core::suspend_consent::ResolveSuspendBlockersResponse> {
-        let _work = mj_controller::upgrade::activity_unless_draining("resolve suspend blockers")?;
-        let admission = self
-            .session_gate
-            .try_enter_foreground(
-                &session_id,
-                "resolve suspend blockers",
-                mj_controller::recovery_gate::LifecycleOrigin::Person,
-            )
-            .map_err(|error| {
-                mj_core::refusal::Refusal::precondition(format!(
-                    "Session is busy: {}",
-                    error.holders.join(", ")
-                ))
-            })?;
-        // Hold an atomic worker idle barrier whenever the session has a live
-        // worker so a concurrent prompt cannot start a turn while Git index
-        // flags are cleared or linked worktrees are relocated.
-        let workspace_lease = match self.session_record(&session_id) {
-            Some(record) if record.target.is_some() && record.state == SessionState::Running => {
-                let handle = self
-                    .session_manager
-                    .wait_for_session(&session_id, Duration::from_secs(5))
-                    .await
-                    .map_err(|error| {
-                        mj_core::refusal::Refusal::precondition(format!("{error:#}"))
-                    })?;
-                let session_admission =
-                    mj_controller::recovery_gate::SessionAdmission::Foreground(admission.clone());
-                Some(
-                    mj_controller::controller::IdleWorkspaceLease::acquire(
-                        &session_admission,
-                        &handle,
-                        record.harness_kind,
-                    )
-                    .await
-                    .map_err(|error| {
-                        mj_core::refusal::Refusal::precondition(format!("{error:#}"))
-                    })?,
-                )
-            }
-            _ => None,
-        };
         let runtime = Arc::clone(self);
-        let probe_session_id = session_id.clone();
-        let response = super::terminal_operations::process_probe(None, move |executor| {
-            Controller::load()?.resolve_suspend_blockers(&probe_session_id, executor)
-        })
-        .await;
-        if let Some(lease) = workspace_lease {
-            lease.release().await.context(
-                "blocker remediation finished, but the worker idle barrier could not be released",
+        // Own daemon admission, session gate, and worker idle barrier inside a
+        // spawned task so client disconnect cannot drop guards while Git
+        // mutations are still running.
+        mj_core::runtime::spawn(async move {
+            let _work = mj_controller::upgrade::activity_unless_draining(
+                "resolve suspend blockers",
             )?;
-        }
-        let mut response = response?;
-        let current = runtime.runtime_publication()?;
-        response.preflight.interrupting = current
-            .verdicts
-            .get(&response.preflight.session_id)
-            .is_some_and(|verdict| verdict.active_work);
-        response.preflight.children_not_handed_back =
-            super::verdicts::unfinished_suspend_children(&current, &response.preflight.session_id);
-        Ok(response)
+            let admission = runtime
+                .session_gate
+                .try_enter_foreground(
+                    &session_id,
+                    "resolve suspend blockers",
+                    mj_controller::recovery_gate::LifecycleOrigin::Person,
+                )
+                .map_err(|error| {
+                    mj_core::refusal::Refusal::precondition(format!(
+                        "Session is busy: {}",
+                        error.holders.join(", ")
+                    ))
+                })?;
+            // Hold an atomic worker idle barrier for live running sessions;
+            // only Parked sessions are confirmed to have no running worker.
+            let workspace_lease = match runtime.session_record(&session_id) {
+                Some(record)
+                    if record.target.is_some() && record.state == SessionState::Running =>
+                {
+                    let handle = runtime
+                        .session_manager
+                        .wait_for_session(&session_id, Duration::from_secs(5))
+                        .await
+                        .map_err(|error| {
+                            mj_core::refusal::Refusal::precondition(format!("{error:#}"))
+                        })?;
+                    let session_admission =
+                        mj_controller::recovery_gate::SessionAdmission::Foreground(
+                            admission.clone(),
+                        );
+                    Some(
+                        mj_controller::controller::IdleWorkspaceLease::acquire(
+                            &session_admission,
+                            &handle,
+                            record.harness_kind,
+                        )
+                        .await
+                        .map_err(|error| {
+                            mj_core::refusal::Refusal::precondition(format!("{error:#}"))
+                        })?,
+                    )
+                }
+                Some(record) if record.state == SessionState::Parked => None,
+                Some(record) => {
+                    return Err(mj_core::refusal::Refusal::precondition(format!(
+                        "Session must be running (idle) or parked to fix suspend blockers (current state: {:?}).",
+                        record.state
+                    ))
+                    .into());
+                }
+                None => {
+                    return Err(
+                        mj_core::refusal::Refusal::precondition("unknown session").into(),
+                    );
+                }
+            };
+            let probe_session_id = session_id.clone();
+            let response = super::terminal_operations::process_probe(None, move |executor| {
+                Controller::load()?.resolve_suspend_blockers(&probe_session_id, executor)
+            })
+            .await;
+            if let Some(lease) = workspace_lease {
+                lease.release().await.context(
+                    "blocker remediation finished, but the worker idle barrier could not be released",
+                )?;
+            }
+            let mut response = response?;
+            let current = runtime.runtime_publication()?;
+            response.preflight.interrupting = current
+                .verdicts
+                .get(&response.preflight.session_id)
+                .is_some_and(|verdict| verdict.active_work);
+            response.preflight.children_not_handed_back =
+                super::verdicts::unfinished_suspend_children(
+                    &current,
+                    &response.preflight.session_id,
+                );
+            Ok(response)
+        })
+        .await
+        .context("resolve suspend blockers task panicked")?
     }
     pub async fn suspend_preflight(
         self: &Arc<Self>,

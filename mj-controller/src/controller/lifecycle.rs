@@ -1183,10 +1183,11 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let is_origin_delta = checkpoint_export_policy != CheckpointExportPolicy::HistoryOnly && (previous.state == SessionState::Parked || matches!(
-            checkpoint_export_policy,
-            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
-        ));
+        let is_origin_delta = previous.state == SessionState::Parked
+            || matches!(
+                checkpoint_export_policy,
+                CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+            );
         let user_cancelled = || executor.cancellation_requested() && !executor.shutdown_interrupted();
         // After a person cancels, the stop's records and worker still need
         // their cleanup, but daemon shutdown must still be able to end it.
@@ -2301,7 +2302,7 @@ impl Controller {
             ));
             // Parked acceptance is independent of the export policy. A verified
             // legacy close without acceptance may already have sealed its old relay.
-            let resume_origin = !consent.history_only && policy.is_some()
+            let resume_origin = policy.is_some()
                 && (origin_policy && verified.is_none()
                     || self.state.sessions[session_id].target.is_some() && {
                         let attempt = if cancelled {
