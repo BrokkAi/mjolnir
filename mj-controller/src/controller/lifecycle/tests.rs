@@ -4234,13 +4234,25 @@ fn suspend_refusal_includes_paths_for_grouped_external_worktrees() {
         )
         .unwrap_err();
     let message = format!("{refusal:#}");
+    assert!(
+        message.contains("Cannot suspend until these blockers are resolved:"),
+        "{message}"
+    );
+    assert!(
+        message.contains("1. External worktrees & Git state (2 items)"),
+        "{message}"
+    );
     for worktree in &worktrees {
         assert!(
-            message.contains(&worktree.display().to_string()),
-            "refusal omitted {}: {message}",
+            message.contains(&format!("\n  - {}", worktree.display())),
+            "refusal omitted bulleted {}: {message}",
             worktree.display()
         );
     }
+    assert!(
+        message.contains("\n  Fix:"),
+        "refusal omitted Fix line: {message}"
+    );
     assert!(
         message.contains("worktree remove --force <path>"),
         "refusal omitted grouped removal command: {message}"

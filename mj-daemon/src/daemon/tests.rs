@@ -17661,6 +17661,64 @@ async fn suspend_preflight_routes_warn_only_about_unfinished_borrowed_children()
     server.await.unwrap().unwrap();
 }
 
+/// A borrower that is not idle must block checkout edits, not be repaired under.
+#[cfg(unix)]
+#[tokio::test]
+async fn resolve_suspend_blockers_refuses_non_idle_borrower() {
+    const CHILD: &str = "MJ_TEST_RESOLVE_SUSPEND_BLOCKERS_BORROWER";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "resolve_suspend_blockers_refuses_non_idle_borrower",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let parent = "resolve-parent";
+    let borrower = "resolve-borrower";
+    mj_controller::database::save_session(&runtime_test_session(
+        parent,
+        "default",
+        SessionState::Parked,
+    ))
+    .unwrap();
+    mj_controller::database::register_subagent_with_startup(
+        &runtime_test_session(borrower, "default", SessionState::Provisioning),
+        &runtime_test_subagent(borrower, parent),
+        Vec::new(),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    // Keep the upgrade coordinator: dropping it closes the session gate.
+    let (state, _recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
+    let error = state
+        .resolve_suspend_blockers(parent.into())
+        .await
+        .expect_err("a provisioning borrower must refuse remediation");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(&format!(
+            "Cannot fix suspend blockers while sub-agent {borrower} ({borrower}) is Provisioning."
+        )),
+        "{message}"
+    );
+    let stored = mj_controller::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent].state, SessionState::Parked);
+    assert_eq!(
+        stored.sessions[borrower].state,
+        SessionState::Provisioning
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn parent_suspend_records_only_children_it_stops_and_resume_keeps_failed_children_eligible() {

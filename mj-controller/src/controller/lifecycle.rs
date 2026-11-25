@@ -749,25 +749,10 @@ impl Controller {
         let (preflight, _) =
             self.checkpoint_preflight(session_id, false, false, false, move_keep, executor)?;
         if preflight.has_blockers() {
-            let summary = preflight
-                .blockers
-                .iter()
-                .map(|b| {
-                    let missing_paths = b
-                        .paths
-                        .iter()
-                        .filter(|path| !b.remedy.contains(path.as_str()))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if missing_paths.is_empty() {
-                        b.remedy.clone()
-                    } else {
-                        format!("{} [{}]", b.remedy, missing_paths.join(", "))
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(mj_core::refusal::Refusal::precondition(summary).into());
+            return Err(mj_core::refusal::Refusal::precondition(
+                mj_core::suspend_consent::format_suspend_blockers(&preflight.blockers),
+            )
+            .into());
         }
         for op in &preflight.operations {
             if !consent.abort_operations.covers(op) {
