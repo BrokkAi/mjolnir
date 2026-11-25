@@ -61,18 +61,21 @@ impl GithubClassificationBoundary {
         let Some(started_at_ms) = self.started_at_ms else {
             return Ok(true);
         };
+        // GitHub timestamps have whole-second precision. Overlap the clear's
+        // second so an item opened just after it is not lost permanently.
         Ok(chrono::DateTime::parse_from_rfc3339(created_at)
             .context("invalid GitHub item creation time")?
-            .timestamp_millis()
-            > started_at_ms)
+            .timestamp()
+            >= started_at_ms.div_euclid(1000))
     }
 }
 
 /// Capture before reading classification evidence. The writer checks this
 /// generation again in the transaction that creates subscriptions and mail.
+/// `None` defers a session whose projection is rebuilding behind its receipt.
 pub fn load_github_classification_boundary(
     session_id: &str,
-) -> Result<GithubClassificationBoundary> {
+) -> Result<Option<GithubClassificationBoundary>> {
     let mut connection = open_reader(&database_path())?;
     let tx = connection.transaction()?;
     github_classification_boundary_with(&tx, session_id)
@@ -81,24 +84,23 @@ pub fn load_github_classification_boundary(
 fn github_classification_boundary_with(
     connection: &Connection,
     session_id: &str,
-) -> Result<GithubClassificationBoundary> {
+) -> Result<Option<GithubClassificationBoundary>> {
     let (clear_ordinal, applied_ordinal): (u64, u64) = connection.query_row(
         "SELECT COALESCE((SELECT through_ordinal FROM mailbox_reset_frontiers WHERE session_id=?1), 0),
                 COALESCE((SELECT applied_event_ordinal FROM materialized_sessions WHERE session_id=?1), 0)",
         [session_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    ensure!(
-        applied_ordinal >= clear_ordinal,
-        "GitHub session projection is rebuilding after /clear"
-    );
-    Ok(GithubClassificationBoundary {
+    if applied_ordinal < clear_ordinal {
+        return Ok(None);
+    }
+    Ok(Some(GithubClassificationBoundary {
         clear_ordinal,
         started_at_ms: materialized::last_materialized_context_boundary_with_time(
             connection, session_id,
         )?
         .map(|(_, at_ms)| at_ms),
-    })
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,7 +348,10 @@ pub fn commit_github_item_classification(
     let has_event = event.is_some();
     let inserted = submit_database_write("commit_github_item_classification", move |connection| {
         let tx = connection.transaction()?;
-        let boundary = github_classification_boundary_with(&tx, &classification.session_id)?;
+        let Some(boundary) = github_classification_boundary_with(&tx, &classification.session_id)?
+        else {
+            return Ok((false, false));
+        };
         // SQLite serializes this decision with /clear. Neither evidence from
         // an older conversation nor an older pending item can restore a watch.
         if boundary.clear_ordinal != classification.clear_ordinal

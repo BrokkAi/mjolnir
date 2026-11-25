@@ -567,7 +567,11 @@ async fn classify_recorded_items(
         let id = session.id.clone();
         let boundary =
             blocking_db(move || database::load_github_classification_boundary(&id)).await?;
-        boundaries.insert(session.id.clone(), boundary);
+        if let Some(boundary) = boundary {
+            boundaries.insert(session.id.clone(), boundary);
+        } else {
+            tracing::debug!(session_id = %session.id, "deferring GitHub classification until the session projection catches up after /clear");
+        }
     }
     let mut pending = Vec::new();
     for item in items {
@@ -592,7 +596,10 @@ async fn classify_recorded_items(
             {
                 continue;
             }
-            if !boundaries[&session.id].accepts_created_at(&item.created_at)? {
+            let Some(boundary) = boundaries.get(&session.id) else {
+                continue;
+            };
+            if !boundary.accepts_created_at(&item.created_at)? {
                 continue;
             }
             let failure = failures.get(&(item.number, session.id.clone()));
@@ -3746,11 +3753,27 @@ mod tests {
         // More old pairs than the per-poll batch must not crowd out new work.
         let fresh = MAX_CLASSIFICATIONS_PER_POLL as u64 + 4;
         record_items(3..=fresh - 1, at(-60));
-        record_items(fresh..=fresh, at(60));
+        let cleared = database::load_materialized_session("cleared")
+            .unwrap()
+            .unwrap();
+        let clear_at_ms = cleared
+            .transcript
+            .iter()
+            .find(|item| {
+                item.stable_id
+                    .starts_with(mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
+            })
+            .unwrap()
+            .created_at_ms;
+        let clear_second = DateTime::from_timestamp_millis(clear_at_ms)
+            .unwrap()
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        // A PR opened after the clear can carry the same whole-second timestamp.
+        record_items(fresh..=fresh, clear_second.clone());
         classify_recorded_items(
             "acme",
             "repo",
-            &[session],
+            std::slice::from_ref(&session),
             classifier.clone(),
             &at(-120),
             &api,
@@ -3767,6 +3790,31 @@ mod tests {
         let mail = database::pending_mailbox_events(100).unwrap();
         assert_eq!(mail.len(), 1);
         assert!(mail[0].event_key.contains(&format!("#{fresh}:interest:")));
+
+        // Rebuilding one session must not prevent another from receiving mail.
+        database::save_materialized_session(&mj_core::state::MaterializedSession::empty("cleared"))
+            .unwrap();
+        let mut healthy = database::test_session("healthy", "project");
+        healthy.created_at = clear_second;
+        database::save_session(&healthy).unwrap();
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &[session, healthy],
+            classifier.clone(),
+            &at(-120),
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(classifier.calls.load(Ordering::SeqCst), 4);
+        assert!(
+            database::pending_mailbox_events(100)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.target_session_id == "healthy")
+        );
     }
 
     // Hard-won: review 7fb8c222b: queued creator watches bypassed the enablement recheck.
