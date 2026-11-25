@@ -16,7 +16,7 @@ Add one GPT 6.2 Sol/high review on each of the original 70 historical mjolnir di
 - [x] Run Opus/high canaries on claude4 and claude7, attest actual provider/model/effort, then finish all batches using only those judge profiles.
 - [x] Score all/low/medium/high and medium+high; compare high with low and medium on the same 70 diffs and publish costs/latencies and confidence intervals.
 - [x] Updated and checksum-verified the combined PNG in Minastirith Downloads, excluding historical Terra.
-- [ ] Complete repository review and push the final readout.
+- [x] (2026-11-25 02:02Z) Final publication 8133aa900 passed clean repository review and was pushed to origin/master.
 
 ## Surprises & Discoveries
 
