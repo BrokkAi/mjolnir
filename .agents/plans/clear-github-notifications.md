@@ -15,7 +15,7 @@ After `/clear`, a session stops receiving notifications from its previous issue 
 - [x] (2026-11-25 19:50Z) Exclude pre-clear creator output and history from later classification evidence.
 - [x] (2026-11-25 19:50Z) Reject successful and failed classifier results whose captured clear ordinal changed.
 - [x] (2026-11-25 19:51Z) Finish targeted validation and clippy.
-- [ ] Complete required review and publication to origin/master.
+- [x] (2026-11-25 19:54Z) Complete required review and push implementation through 935d316f1 to origin/master; defer the repair-overlap finding below.
 
 ## Surprises & Discoveries
 
@@ -79,8 +79,10 @@ Reuse rusqlite transactions and the serialized database writer. Keep `load_githu
 ## Outcomes & Retrospective
 
 
-The implementation resets session GitHub subscriptions and separates subsequent classifier decisions by conversation. Validation is complete; required review and publication remain.
+The implementation resets session GitHub subscriptions and separates subsequent classifier decisions by conversation. Implementation, validation, required review, and publication to origin/master are complete. One rare overlap with projection repair is deferred: a repair can begin after readiness was checked, expose a pre-clear checkpoint to an evidence reader, and catch up before the result commits under the same durable clear ordinal. A follow-up should bind readiness to the snapshots used for the session digest, creator output, and history, coordinating those readers with projection replacement. The reset and actual clear transitions are covered; this repair/read ownership change was intentionally left outside the requested feature.
 
 Revision note (2026-11-25 19:50Z): Removed unshipped cutoffs and migration; retained the existing conversation owner and fenced failure writes as well as successful results.
 
 Revision note (2026-11-25 19:51Z): Success and failure fencing regression and existing classification tests pass after simplifying to conversation ownership.
+
+Revision note (2026-11-25 19:54Z): Record the successful push and the deferred projection-repair/read consistency finding from final review.
