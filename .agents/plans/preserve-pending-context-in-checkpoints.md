@@ -157,3 +157,5 @@ Plan amended after the first release attempt to handle only observed publication
 
 
 Plan updated 2026-11-25 23:47Z: all three observed release blockers are repaired. The logger move preserves implementation byte-for-byte except cross-crate visibility and two internal paths; tracing-subscriber moved with its only user and Cargo.lock changed only dependency edges. Full workspace formatting and crate-size checks pass. Focused logging tests pass 10 client and 1 CLI test; final all-target client/CLI clippy passes. Viewer fixture files pass 4 and 41 tests, and the isolated projects test passes with existing matching dependencies. Review the integrated repair, push it, and retry the unpublished 2.76.0 tag per RELEASING.md.
+
+CI-repair review identified implicit tracing metadata changed by the logger module move. Preserve the original mj::logging target explicitly on both emitted events, so existing RUST_LOG filters retain the startup record and invalid-filter warning. Changed-file formatting and final client/CLI all-target clippy pass; unchanged logging tests were not repeated.

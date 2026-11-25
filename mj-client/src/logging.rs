@@ -269,7 +269,9 @@ impl ControllerLog {
             .try_init()
             .map_err(|error| anyhow::anyhow!("install Mjolnir log subscriber: {error}"))?;
 
+        // Preserve existing RUST_LOG filters after moving this module to mj-client.
         tracing::info!(
+            target: "mj::logging",
             version = env!("CARGO_PKG_VERSION"),
             process_id = std::process::id(),
             command,
@@ -277,7 +279,7 @@ impl ControllerLog {
             "Mjolnir started"
         );
         if let Some(error) = filter_error {
-            tracing::warn!(%error, "ignored invalid RUST_LOG filter");
+            tracing::warn!(target: "mj::logging", %error, "ignored invalid RUST_LOG filter");
         }
         Ok(Self {
             _writer_guard: writer_guard,
