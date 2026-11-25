@@ -876,7 +876,7 @@ Targets menu after size click: false
 │                                            ││No conversation open.                                                                       │
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▄ ─
+│                                            │─ Targets ▾ ── none configured ─────────────────────────────────────────────────────── ▁   ▄ ─
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
 │                                            ││ + refreshing…                                                                              │
@@ -968,7 +968,7 @@ Profiles menu after size click: false
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ───────── ▁   ▄ ─
+│                                            │─ Profiles ▾ ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────── ▁   ▄ ─
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯

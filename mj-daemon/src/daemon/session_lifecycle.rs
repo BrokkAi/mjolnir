@@ -207,7 +207,8 @@ mod tests {
                 Some(preparation),
                 {
                     let release = release.clone();
-                    move |_, _, cancelled, _session_admission| async move {
+                    move |_, _, control, _session_admission| async move {
+                        let cancelled = control.cancelled.clone();
                         release.notified().await;
                         assert!(
                             !cancelled.load(Ordering::Acquire),

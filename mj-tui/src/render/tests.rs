@@ -426,7 +426,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
         .into_iter()
         .find(|line| line.contains("Targets"))
         .expect("focused Targets row");
-    assert!(focused_targets.contains("─ Targets ──"));
+    assert!(focused_targets.contains("─ Targets ▾ ──"));
     assert!(focused_targets.ends_with('─'));
     assert!(!focused_targets.contains('═'));
     dashboard.focus = Focus::Sessions;
@@ -1433,7 +1433,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
     let profiles_row = |dashboard: &mut DashboardState| {
         drawn(dashboard, 120, 44)
             .into_iter()
-            .find(|line| line.contains("─ Profiles ──"))
+            .find(|line| line.contains("─ Profiles ▾ ──"))
             .expect("the minimized Profiles row")
     };
 
@@ -1533,7 +1533,7 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
     minimize_all_panes(&mut dashboard);
     let row = drawn(&mut dashboard, 120, 44)
         .into_iter()
-        .find(|line| line.contains("─ Profiles ──"))
+        .find(|line| line.contains("─ Profiles ▾ ──"))
         .expect("the minimized Profiles row");
     assert!(row.contains("Anthropic ~63%"), "{row:?}");
     assert!(row.contains("codex-1 check refused"), "{row:?}");
@@ -1550,7 +1550,7 @@ fn an_exhausted_quota_reads_zero_in_the_minimized_row() {
 
     let quota = drawn(&mut dashboard, 120, 44)
         .into_iter()
-        .find(|line| line.contains("─ Profiles ──"))
+        .find(|line| line.contains("─ Profiles ▾ ──"))
         .expect("the minimized Profiles row");
     assert!(quota.contains("Anthropic ~0%"), "{quota:?}");
     assert!(!quota.contains("Anthropic ~100%"), "{quota:?}");
@@ -1566,7 +1566,7 @@ fn a_rolling_only_quota_keeps_its_percentage_visible() {
 
     let quota = drawn(&mut dashboard, 120, 44)
         .into_iter()
-        .find(|line| line.contains("─ Profiles ──"))
+        .find(|line| line.contains("─ Profiles ▾ ──"))
         .expect("the minimized Profiles row");
 
     assert!(quota.contains("Anthropic 5H ~40%"), "{quota:?}");
@@ -1586,7 +1586,7 @@ fn the_minimized_rows_stay_explicit_about_readings_they_do_not_have() {
     let targets = |lines: &[String]| {
         lines
             .iter()
-            .find(|line| line.contains("─ Targets ──"))
+            .find(|line| line.contains("─ Targets ▾ ──"))
             .expect("the minimized Targets row")
             .clone()
     };
@@ -1624,7 +1624,7 @@ fn the_minimized_rows_stay_explicit_about_readings_they_do_not_have() {
     // A quota that failed to refresh.
     let quota = drawn(&mut dashboard, 120, 44)
         .into_iter()
-        .find(|line| line.contains("─ Profiles ──"))
+        .find(|line| line.contains("─ Profiles ▾ ──"))
         .expect("the minimized Profiles row");
     assert!(quota.contains("claude-1 unavailable"), "{quota:?}");
 }

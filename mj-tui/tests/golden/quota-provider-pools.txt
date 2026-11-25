@@ -1488,7 +1488,7 @@ background runs (x..end, colour):
 17: 0..100 Rgb(22, 27, 30) NONE
 18: 0..21 Rgb(22, 27, 30) NONE, 21..27 Rgb(22, 27, 30) BOLD, 27..45 Rgb(22, 27, 30) NONE, 45..51 Rgb(22, 27, 30) BOLD, 51..100 Rgb(22, 27, 30) NONE
 19: 0..100 Rgb(22, 27, 30) NONE
-minimized partial totals: ─ Profiles ── OpenAI 5H ~100%*, codex-short-spent refreshing…
+minimized partial totals: ─ Profiles ▾ ── OpenAI 5H ~100%*, codex-short-spent refreshing…
 === Unicode unreadable week and exhausted overlapping windows (132x34) ===
 ╭ Profiles (refreshed 16s ago)─────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │OPENAI                                                                                                                            │
