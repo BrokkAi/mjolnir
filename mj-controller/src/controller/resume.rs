@@ -2615,8 +2615,16 @@ impl Controller {
                     // directly (preserving archived untracked files & stashes).
                 } else {
                     recreated_managed_worktree = if history_only_archive
-                        && worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
-                        super::worktree::restore_managed_clone_fresh_head(executor, worktree)?
+                        && worktree.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    {
+                        if let Some(fresh_head) =
+                            super::worktree::restore_managed_clone_fresh_head(executor, worktree)?
+                        {
+                            self.record_fresh_managed_clone_head(session_id, fresh_head)?;
+                            true
+                        } else {
+                            false
+                        }
                     } else {
                         restore_managed_worktree(executor, worktree)?
                     };
@@ -2991,6 +2999,30 @@ impl Controller {
         Ok(record.state == SessionState::Running
             || crate::database::load_worker_restart(session_id)?
                 .is_some_and(|intent| record.target.as_deref() == Some(&intent.target)))
+    }
+
+    pub(in crate::controller) fn record_fresh_managed_clone_head(
+        &mut self,
+        session_id: &str,
+        fresh_head: String,
+    ) -> Result<()> {
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let worktree = record
+            .managed_worktree
+            .as_mut()
+            .context("fresh managed clone has no worktree record")?;
+        ensure!(
+            worktree.kind == mj_core::state::ManagedCheckoutKind::Clone,
+            "fresh managed clone head belongs to a non-clone checkout"
+        );
+        worktree.base_commit = Some(fresh_head);
+        // accept_resumed_session persisted the old checkout before the clone
+        // was recreated; publish the new baseline in the same durable record.
+        crate::database::save_resumed_session(record, None)
     }
 
     fn keep_started_resume_after_failure(

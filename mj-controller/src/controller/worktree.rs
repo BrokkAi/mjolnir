@@ -3186,12 +3186,19 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
 pub(super) fn restore_managed_clone_fresh_head(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
-) -> Result<bool> {
+) -> Result<Option<String>> {
     if managed_worktree_checkout_exists(executor, worktree)? {
-        return Ok(false);
+        return Ok(None);
     }
     create_managed_clone_with_snapshot(executor, worktree, CloneSeedMode::FreshHead)?;
-    Ok(true)
+    managed_git_stdout(
+        executor,
+        &worktree.target,
+        &worktree.worktree_root,
+        ["rev-parse", "--verify", "HEAD"],
+        "read fresh managed clone HEAD",
+    )
+    .map(Some)
 }
 
 pub(super) fn restore_managed_worktree(

@@ -4268,6 +4268,19 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
 
 #[test]
 fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_blockers() {
+    const TEST: &str =
+        "history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_blockers";
+    const CHILD: &str = "MJ_TEST_HISTORY_ONLY_FRESH_CLONE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
     let temp = tempfile::tempdir().unwrap();
     let origin = temp.path().join("origin.git");
     std::fs::create_dir_all(&origin).unwrap();
@@ -4289,13 +4302,14 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
     test_git(&source, &["push", "-u", "origin", "main"]);
     let base_commit = test_git(&source, &["rev-parse", "HEAD"]);
 
-    let worktree_root = temp.path().join("clones").join("sess-origin-seed");
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worktree_root = source.join(".mj").join("clones").join(session_id);
     let worktree = ManagedWorktree {
         kind: ManagedCheckoutKind::Clone,
         source_project_directory: source.clone(),
         source_repository: source.clone(),
         worktree_root: worktree_root.clone(),
-        branch: "main".into(),
+        branch: format!("mj/{session_id}"),
         target: ManagedWorktreeTarget::Local,
         base_commit: Some(base_commit),
     };
@@ -4365,7 +4379,7 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
         &archive_path,
         &mj_checkpoint::archive::ArchiveInput {
             session: mj_core::archive::SessionManifest {
-                id: "sess-origin-seed".into(),
+                id: session_id.into(),
                 title: "Origin Seed".into(),
                 harness_kind: mj_core::config::HarnessKind::Codex,
                 profile_id: "codex".into(),
@@ -4400,17 +4414,65 @@ fn history_only_archive_preserves_conversation_and_restores_fresh_clone_despite_
     );
     let archive = mj_checkpoint::archive::read_archive_verified(&archive_path).unwrap();
     assert_eq!(archive.canonical_session().unwrap(), canonical);
+    std::fs::write(source.join("next.txt"), "new upstream head\n").unwrap();
+    test_git(&source, &["add", "next.txt"]);
+    test_git(&source, &["commit", "-m", "advance source"]);
+    let fresh_head = test_git(&source, &["rev-parse", "HEAD"]);
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Stopped;
+    session.managed_worktree = Some(Box::new(worktree.clone()));
+    crate::database::save_session(&session).unwrap();
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
     // Retiring the owning clone deliberately leaves external checkouts alone.
     std::fs::remove_dir_all(&worktree_root).unwrap();
     let mut missing_base = worktree.clone();
     missing_base.base_commit = Some("0000000000000000000000000000000000000001".into());
-    assert!(restore_managed_clone_fresh_head(&ProcessExecutor, &missing_base).unwrap());
+    let restored_head = restore_managed_clone_fresh_head(&ProcessExecutor, &missing_base).unwrap();
+    assert_eq!(restored_head.as_deref(), Some(fresh_head.as_str()));
+    assert!(
+        restore_managed_clone_fresh_head(&ProcessExecutor, &missing_base)
+            .unwrap()
+            .is_none()
+    );
+    controller
+        .record_fresh_managed_clone_head(session_id, restored_head.unwrap())
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[session_id]
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .base_commit
+            .as_deref(),
+        Some(fresh_head.as_str())
+    );
+    let persisted = crate::database::load_session_record(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .base_commit
+            .as_deref(),
+        Some(fresh_head.as_str())
+    );
     mj_checkpoint::archive::restore_git_snapshot(
         &mj_checkpoint::archive::SystemGit,
         &worktree_root,
         &snapshot,
     )
     .unwrap();
+    assert_eq!(test_git(&worktree_root, &["rev-parse", "HEAD"]), fresh_head);
     assert_eq!(
         std::fs::read_to_string(worktree_root.join("README.md")).unwrap(),
         "base\n"
