@@ -169,22 +169,30 @@ impl DashboardState {
         generation: u64,
         result: Result<String, String>,
     ) -> DashboardAction {
-        // Accepted only for the configuration generation it was asked under and
-        // while the draft still asks the same question; anything else is a
-        // reply to a choice that no longer exists.
-        let current = generation == self.session_preflight_generation()
+        // The reply to the request in flight settles it, whatever the draft
+        // asks now; a reply to any other request is refused.
+        let stamped = generation == self.session_preflight_generation()
             && matches!(&self.mode, Mode::New(wizard)
-            if wizard.profile_selection_request.as_ref().is_some_and(|stamp| {
-                stamp.generation == generation
-                    && wizard.provider_selection_request(self).as_ref() == Some(&stamp.request)
-            }));
-        if !current {
+            if wizard
+                .profile_selection_request
+                .as_ref()
+                .is_some_and(|stamp| stamp.generation == generation));
+        if !stamped {
             return DashboardAction::None;
         }
         let Mode::New(mut wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             unreachable!();
         };
-        wizard.profile_selection_request = None;
+        let asked = wizard
+            .profile_selection_request
+            .take()
+            .map(|stamp| stamp.request);
+        // Only a draft that still asks the same question may take the answer;
+        // its group or choice may have gone while the daemon worked.
+        if asked != wizard.provider_selection_request(self) {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         let result = result.and_then(|id| {
             self.profile_offered(&id)
                 .then_some(id.clone())

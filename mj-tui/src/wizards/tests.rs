@@ -2113,6 +2113,38 @@ fn a_draft_whose_target_vanished_without_a_reconcile_never_panics_in_launching()
 }
 
 #[test]
+fn a_reply_settles_its_request_even_when_the_provider_group_has_gone() {
+    use mj_core::config::QuotaProvider;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    ready_open_new_wizard(&mut dashboard);
+    let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new");
+    };
+    wizard.step = WizardStep::Profile;
+    wizard.focused_provider = Some(QuotaProvider::Anthropic);
+    wizard.profile_selection_request = None;
+    let DashboardAction::SelectProviderProfile { generation, .. } =
+        dashboard.advance_new_wizard(wizard)
+    else {
+        panic!("select");
+    };
+    // Discovery removes the focused group while the daemon is still working.
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    wizard.focused_provider = None;
+    assert!(!new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(
+        dashboard.apply_provider_profile_selection(generation, Ok("claude-1".into())),
+        DashboardAction::None
+    );
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Profile);
+    assert_eq!(wizard.profile_selection_request, None);
+    assert!(wizard.profile_advance_enabled(&dashboard));
+}
+
+#[test]
 fn a_profile_that_changes_provider_between_pages_is_rechecked_against_current_membership() {
     use mj_core::config::QuotaProvider;
     let mut dashboard = dashboard_with_session(stopped_session());
