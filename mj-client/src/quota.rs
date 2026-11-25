@@ -51,6 +51,21 @@ impl QuotaWindow {
             .is_none_or(|scope| mj_core::config::model_matches_scope(model, scope))
     }
 
+    /// Whether this is an unscoped seven-day allowance. A declared duration
+    /// decides (exactly seven days, whatever the label); only a window with no
+    /// duration falls back on a week label, so a monthly or model-scoped
+    /// window is never read as a week.
+    pub fn is_weekly_period(&self) -> bool {
+        self.model_scope.is_none()
+            && match self.duration_seconds {
+                Some(seconds) => seconds == 7 * 24 * 60 * 60,
+                None => matches!(
+                    self.label.to_ascii_lowercase().as_str(),
+                    "week" | "weekly" | "7d"
+                ),
+            }
+    }
+
     /// Whether this allowance spans a week or longer, including model-scoped labels.
     pub fn is_weekly_or_longer(&self) -> bool {
         let label = if self.model_scope.is_some() {

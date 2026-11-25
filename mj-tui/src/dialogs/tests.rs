@@ -1143,8 +1143,9 @@ fn golden_dashboard_dialogs() {
 
     // Extend the full dialog golden through the Profiles menu and real controls.
     use mj_core::usage::{
-        AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, SessionUsageEstimate,
-        SessionUsageReport, UnknownCost, UsageAgentRole,
+        AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, ProfileQuotaUsage,
+        ProfileUsageEstimate, SessionUsageEstimate, SessionUsageReport, UnknownCost,
+        UsageAgentRole,
     };
     let mut usage = dashboard_with_session(running_session());
     usage.begin_support_pane_menu(crate::SupportPane::Quota);
@@ -1155,6 +1156,21 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
+    let claude_profile = usage.config.profiles["claude-1"].clone();
+    let codex_profile = usage.config.profiles["codex-1"].clone();
+    usage
+        .config
+        .profiles
+        .insert("claude".into(), claude_profile.clone());
+    usage.config.profiles.insert("codex".into(), codex_profile);
+    usage
+        .config
+        .profiles
+        .insert("claude-idle".into(), claude_profile);
+    for (id, profile) in &mut usage.config.profiles {
+        profile.enabled = matches!(id.as_str(), "claude" | "claude-idle" | "codex");
+    }
+    usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
     usage.handle_key(key(KeyCode::Char('3')));
     append_dialog_render(
         &mut output,
@@ -1267,6 +1283,35 @@ fn golden_dashboard_dialogs() {
             codex_models[4].clone(),
         ),
     ];
+    report.profile_usage = vec![
+        ProfileUsageEstimate {
+            profile: Some("claude".into()),
+            cost_usd_ticks: Ok(82_000_000_000),
+            coverage: report.sessions[0].coverage.clone(),
+        },
+        ProfileUsageEstimate {
+            profile: Some("codex".into()),
+            cost_usd_ticks: Err(UnknownCost),
+            ..Default::default()
+        },
+    ];
+    report.quota_usage = vec![
+        ProfileQuotaUsage {
+            profile: "claude".into(),
+            consumed_basis_points: Some(1000),
+            monthly_price_usd: Some(200),
+        },
+        ProfileQuotaUsage {
+            profile: "claude-idle".into(),
+            consumed_basis_points: Some(0),
+            monthly_price_usd: Some(100),
+        },
+        ProfileQuotaUsage {
+            profile: "codex".into(),
+            consumed_basis_points: Some(2000),
+            monthly_price_usd: Some(200),
+        },
+    ];
     // Dollars per hour; the 20th bar also ran a model with no known rate, and
     // the 14th ran only such models.
     let hour_dollars = [
@@ -1281,6 +1326,67 @@ fn golden_dashboard_dialogs() {
             has_unknown_cost: n == 19 || n == 13,
         })
         .collect();
+    let mut known = report.clone();
+    known.profile_usage[1].cost_usd_ticks = Ok(30_000_000_000);
+    known.cost_usd_ticks = Ok(112_000_000_000);
+    usage.apply_session_usage_result(first, Ok(known));
+    append_dialog_render(
+        &mut output,
+        "Usage known provider totals with partial coverage",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    let mut unweighted = report.clone();
+    unweighted.quota_usage[1].monthly_price_usd = None;
+    usage.apply_session_usage_result(first, Ok(unweighted));
+    append_dialog_render(
+        &mut output,
+        "Usage unknown plan weight",
+        70,
+        22,
+        &drawn(&mut usage, 70, 22),
+    );
+    let mut missing = report.clone();
+    missing.quota_usage[1].consumed_basis_points = None;
+    usage.apply_session_usage_result(first, Ok(missing));
+    append_dialog_render(
+        &mut output,
+        "Usage missing idle account reading",
+        70,
+        17,
+        &drawn(&mut usage, 70, 17),
+    );
+    let mut retained = report.clone();
+    retained.profile_usage.extend([
+        ProfileUsageEstimate {
+            profile: Some("retired-account".into()),
+            cost_usd_ticks: Ok(5_000_000_000),
+            ..Default::default()
+        },
+        ProfileUsageEstimate {
+            profile: None,
+            cost_usd_ticks: Err(UnknownCost),
+            ..Default::default()
+        },
+    ]);
+    usage.quota_providers = Default::default();
+    usage.apply_session_usage_result(first, Ok(retained));
+    append_dialog_render(
+        &mut output,
+        "Usage unresolved and retained provider labels",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    append_dialog_render(
+        &mut output,
+        "Usage unresolved and retained providers",
+        70,
+        17,
+        &drawn(&mut usage, 70, 17),
+    );
+    usage.quota_providers = crate::render::quota_pools::ProviderDiscovery::start(&usage.config);
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
@@ -1346,6 +1452,12 @@ fn golden_dashboard_dialogs() {
     usage.apply_session_usage_result(first, Ok(report.clone()));
     assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
     let mut codex_report = report.clone();
+    codex_report
+        .profile_usage
+        .retain(|usage| usage.profile.as_deref() == Some("codex"));
+    codex_report
+        .quota_usage
+        .retain(|quota| quota.profile == "codex");
     codex_report.sessions = vec![report.sessions[1].clone()];
     codex_report.sessions[0]
         .models
@@ -1391,7 +1503,12 @@ fn golden_dashboard_dialogs() {
     click(&mut usage);
     let (hour_request, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_start_ms, Some((490_000 + 2) * HOUR_MS));
-    usage.apply_session_usage_result(hour_request, Ok(codex_report.clone()));
+    let mut hour_report = codex_report.clone();
+    hour_report
+        .quota_usage
+        .iter_mut()
+        .for_each(|q| q.consumed_basis_points = Some(125));
+    usage.apply_session_usage_result(hour_request, Ok(hour_report));
     append_dialog_render(
         &mut output,
         "Usage one hour selected",

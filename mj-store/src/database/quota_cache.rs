@@ -54,6 +54,78 @@ fn history_since(
         .collect()
 }
 
+/// The probes that measure consumption over `since..=until`, oldest first: the
+/// nearest usable probe before `since`, every probe inside the span (failed
+/// ones included), and the nearest usable probe after `until`. A usable probe
+/// has no error and at least one window; a failed probe carries no reading, so
+/// it cannot stand for the state at the span's edge. Each edge is one
+/// `LIMIT 1` walk of `quota_history_profile_time`, so no lookback is assumed
+/// and no history outside the span is loaded. An edge with no usable probe is
+/// absent, and the caller treats the span as not bracketed there.
+pub fn load_quota_history_bracketing(
+    identity: &str,
+    profile_id: &str,
+    since: u64,
+    until: u64,
+) -> Result<Vec<ProfileQuota>> {
+    history_bracketing(
+        &*open_reader(&database_path())?,
+        identity,
+        profile_id,
+        since,
+        until,
+    )
+}
+
+fn history_bracketing(
+    connection: &Connection,
+    identity: &str,
+    profile_id: &str,
+    since: u64,
+    until: u64,
+) -> Result<Vec<ProfileQuota>> {
+    const USABLE: &str = "json_extract(body, '$.error') IS NULL
+         AND json_array_length(body, '$.windows') > 0";
+    let query = |filter: &str, order: &str, limit: &str, bounds: &[u64]| -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT body FROM quota_history
+             WHERE profile_id = ?1 AND identity = ?2 AND {filter}
+             ORDER BY sampled_at_epoch_seconds {order}, id {order} {limit}"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&profile_id, &identity];
+        values.extend(bounds.iter().map(|bound| bound as &dyn rusqlite::ToSql));
+        connection
+            .prepare(&sql)?
+            .query_map(values.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(anyhow::Error::from)
+    };
+    let before = query(
+        &format!("sampled_at_epoch_seconds < ?3 AND {USABLE}"),
+        "DESC",
+        "LIMIT 1",
+        &[since],
+    )?;
+    let within = query(
+        "sampled_at_epoch_seconds >= ?3 AND sampled_at_epoch_seconds <= ?4",
+        "ASC",
+        "",
+        &[since, until],
+    )?;
+    let after = query(
+        &format!("sampled_at_epoch_seconds > ?3 AND {USABLE}"),
+        "ASC",
+        "LIMIT 1",
+        &[until],
+    )?;
+    before
+        .iter()
+        .chain(&within)
+        .chain(&after)
+        .map(|body| serde_json::from_str(body).context("decode stored quota probe"))
+        .collect()
+}
+
 /// Save a fresh probe and, on success, its reset cache in one transaction.
 /// Called on a blocking task through the only database writer.
 pub fn save_quota_report(identity: &str, report: &ProfileQuota) -> Result<()> {
@@ -229,5 +301,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, observed.len());
+    }
+
+    #[test]
+    fn quota_history_bracketing_brackets_a_span_with_usable_probes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open(&dir.path().join("quota.sqlite3")).unwrap();
+        let probe = |at: u64, failed: bool| ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            profile_id: "test".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            windows: if failed {
+                Vec::new()
+            } else {
+                vec![mj_client::quota::QuotaWindow {
+                    label: "Weekly".into(),
+                    remaining_percent: Some(50),
+                    duration_seconds: None,
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(1_000_000),
+                }]
+            },
+            extra: None,
+            error: failed.then(|| "provider down".into()),
+            refreshed_at_epoch_seconds: at,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        // Failed probes sit right outside both edges; another login's probe
+        // sits closer to the span than any usable one of this login.
+        for (identity, at, failed) in [
+            ("a", 10, false),
+            ("a", 50, true),
+            ("a", 90, true),
+            ("a", 100, false),
+            ("a", 150, true),
+            ("a", 200, false),
+            ("a", 210, true),
+            ("a", 250, false),
+            ("a", 260, false),
+            ("b", 95, false),
+            ("b", 205, false),
+        ] {
+            save_report(&mut connection, identity, &probe(at, failed)).unwrap();
+        }
+        let times = |history: Vec<ProfileQuota>| {
+            history
+                .iter()
+                .map(|probe| probe.refreshed_at_epoch_seconds)
+                .collect::<Vec<_>>()
+        };
+        // Probes at the span's own edges are inside it; the failed ones inside
+        // stay for the caller to skip.
+        assert_eq!(
+            times(history_bracketing(&connection, "a", "test", 100, 200).unwrap()),
+            [10, 100, 150, 200, 250]
+        );
+        assert_eq!(
+            times(history_bracketing(&connection, "a", "test", 101, 199).unwrap()),
+            [100, 150, 200]
+        );
+        // An edge with no usable probe beyond it is simply absent.
+        assert_eq!(
+            times(history_bracketing(&connection, "a", "test", 5, 300).unwrap()),
+            [10, 50, 90, 100, 150, 200, 210, 250, 260]
+        );
+        assert_eq!(
+            times(history_bracketing(&connection, "a", "test", 300, 400).unwrap()),
+            [260]
+        );
     }
 }
