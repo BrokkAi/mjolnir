@@ -1282,22 +1282,10 @@ fn create_attempt(
         &["wait", "instance-running"],
         json!({"InstanceIds":[id]}),
     )?;
-    let address = cloud.ec2(
-        "allocate-address",
-        json!({
-            "Domain":"vpc", "TagSpecifications":[tags(record,"elastic-ip")]
-        }),
-    )?;
-    let allocation = address["AllocationId"]
+    let live = cloud.ec2("describe-instances", json!({"InstanceIds":[id]}))?;
+    let host = live["Reservations"][0]["Instances"][0]["PublicIpAddress"]
         .as_str()
-        .context("AWS returned no Elastic IP allocation ID")?;
-    let host = address["PublicIp"]
-        .as_str()
-        .context("AWS returned no Elastic IP address")?;
-    cloud.ec2(
-        "associate-address",
-        json!({"InstanceId":id,"AllocationId":allocation}),
-    )?;
+        .context("instance has no public IPv4; use a public subnet")?;
     let ssh = if args.runtime == Ec2Runtime::Nitro {
         connection_for_user(record, root, host, "ec2-user")?
     } else {
@@ -1348,6 +1336,34 @@ fn create_attempt(
             "Podman did not report rootless overlay operation"
         );
     }
+    // Attach the persistent address after cloud-init's package downloads
+    // finish: associating an EIP replaces the auto-assigned public IPv4 and
+    // drops in-flight outbound connections from apt-get/dnf.
+    let address = cloud.ec2(
+        "allocate-address",
+        json!({
+            "Domain":"vpc", "TagSpecifications":[tags(record,"elastic-ip")]
+        }),
+    )?;
+    let allocation = address["AllocationId"]
+        .as_str()
+        .context("AWS returned no Elastic IP allocation ID")?;
+    let host = address["PublicIp"]
+        .as_str()
+        .context("AWS returned no Elastic IP address")?;
+    cloud.ec2(
+        "associate-address",
+        json!({"InstanceId":id,"AllocationId":allocation}),
+    )?;
+    let ssh = if args.runtime == Ec2Runtime::Nitro {
+        connection_for_user(record, root, host, "ec2-user")?
+    } else {
+        connection(record, root, host)?
+    };
+    mj_controller::controller::wait_for_ec2_ssh(
+        &mj_controller::targets::ProcessExecutor,
+        &(&ssh).into(),
+    )?;
     let cache = (args.runtime == Ec2Runtime::Podman)
         .then(|| TargetBuildCache {
             directory: Some(
@@ -3290,7 +3306,7 @@ else:
             "both image pulls must pass the rendezvous concurrently"
         );
         let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
-        assert!(!ssh_calls.contains("ec2-user@192.0.2.1"));
+        assert!(ssh_calls.contains("ec2-user@192.0.2.1"));
         assert!(ssh_calls.contains("ec2-user@192.0.2.7"));
         for image in [mj_core::config::DEFAULT_SESSION_IMAGE, bundle_image] {
             let expected = format!("'pull' '--platform=linux/amd64' '{image}'");
@@ -3395,9 +3411,9 @@ else:
     }
 
     #[test]
-    fn bootstrap_failure_retains_tagged_eip_for_recovery_cleanup() {
+    fn bootstrap_failure_waits_for_running_and_defers_eip_until_cloud_init_finishes() {
         if fixture_child(
-            "ec2::tests::bootstrap_failure_retains_tagged_eip_for_recovery_cleanup",
+            "ec2::tests::bootstrap_failure_waits_for_running_and_defers_eip_until_cloud_init_finishes",
             None,
         ) {
             return;
@@ -3408,7 +3424,10 @@ else:
         let error = create(create_args(), &root).unwrap_err();
         assert!(format!("{error:#}").contains("retained for inspection"));
         let address = fixture.join("bin/address.json");
-        assert!(address.exists(), "bootstrap ran after EIP allocation");
+        assert!(
+            !address.exists(),
+            "EIP must not be associated before cloud-init finishes downloading packages"
+        );
         let calls: Vec<Value> = fs::read_to_string(fixture.join("bin/calls"))
             .unwrap()
             .lines()
@@ -3418,17 +3437,12 @@ else:
             .iter()
             .filter_map(|call| call["operation"].as_str())
             .collect();
-        let index = |operation| {
-            operations
-                .iter()
-                .position(|value| *value == operation)
-                .unwrap()
-        };
-        assert!(index("wait instance-running") < index("allocate-address"));
-        assert!(index("allocate-address") < index("associate-address"));
+        assert!(operations.contains(&"wait instance-running"));
         assert!(!operations.contains(&"wait instance-status-ok"));
+        assert!(!operations.contains(&"allocate-address"));
+        assert!(!operations.contains(&"associate-address"));
         let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
-        assert!(!ssh_calls.contains("@192.0.2.1"));
+        assert!(ssh_calls.contains("@192.0.2.1"));
         assert!(
             ssh_calls.contains("IdentitiesOnly=yes") && ssh_calls.contains("UserKnownHostsFile=")
         );
@@ -3441,7 +3455,6 @@ else:
             &root,
         )
         .unwrap();
-        assert!(!address.exists(), "recovery cleanup must release the EIP");
     }
 
     #[test]
