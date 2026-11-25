@@ -839,8 +839,6 @@ impl Adapter for MjolnirAdapter {
             title,
             subagent: sessions.ownership.owns_session(session_id),
             messages,
-            touched: Vec::new(),
-            edits: Vec::new(),
         })
     }
 }
@@ -1484,8 +1482,9 @@ enum IndexVersion {
     /// This build's schema, or an index not yet stamped with one.
     Current,
     /// An older SessionWiki built it. This build cannot read it, and the next
-    /// write rebuilds the cache at this build's schema; SessionWiki keeps the
-    /// durable tables (tags, notes, summaries, archive) across the rebuild.
+    /// write brings the cache to this build's schema: the schema one behind
+    /// upgrades in place, older ones are rebuilt. SessionWiki keeps the
+    /// durable tables (tags, notes, summaries, archive) either way.
     Older(i64),
     /// A newer SessionWiki built it. Rebuilding it down would only make the
     /// newer program rebuild it back, so Mjolnir neither reads nor writes it.
@@ -2047,8 +2046,6 @@ fn copy_session(session: &Session) -> Session {
                 is_thought: message.is_thought,
             })
             .collect(),
-        touched: Vec::new(),
-        edits: Vec::new(),
     }
 }
 
@@ -4053,7 +4050,7 @@ mod tests {
     }
 
     #[test]
-    fn an_index_an_older_sessionwiki_wrote_is_rebuilt_and_needs_a_full_pass() {
+    fn an_index_an_older_sessionwiki_wrote_is_upgraded_or_rebuilt_and_needs_a_full_pass() {
         use sessionwiki::index::SCHEMA_VERSION;
         let _held = tags::testing::lock();
         let (_index_dir, mut connection) = tags::testing::isolated_index();
@@ -4073,32 +4070,50 @@ mod tests {
         );
         assert!(full_pass_holds(&marker, filled));
 
-        connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
-            .unwrap();
-        drop(connection);
-        assert_eq!(index_version(), IndexVersion::Older(SCHEMA_VERSION - 1));
-        assert_eq!(index_state(), WikiIndexState::Indexing);
-        assert!(readable_index().unwrap().is_none());
-        assert_eq!(
-            unindexed(&source, &[session_id.to_owned()]).unwrap(),
-            [session_id],
-            "a row in a cache the next write drops does not count as indexed"
-        );
-        assert!(index_is_writable());
+        // One schema behind upgrades in place and keeps the indexed rows; two
+        // behind is rebuilt and loses them. Both need a full pass afterwards.
+        let mut connection = connection;
+        for (behind, keeps_rows) in [(1, true), (2, false)] {
+            let older = SCHEMA_VERSION - behind;
+            if behind == 1 {
+                // A real schema-9 index still holds the provenance tables the
+                // in-place upgrade drops; dropping them moves the schema cookie.
+                connection
+                    .execute_batch(
+                        "CREATE TABLE touched(session_id TEXT NOT NULL, path TEXT NOT NULL);
+                         CREATE TABLE edits(session_id TEXT NOT NULL, path TEXT NOT NULL);",
+                    )
+                    .unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", older)
+                .unwrap();
+            drop(connection);
+            assert_eq!(index_version(), IndexVersion::Older(older));
+            assert_eq!(index_state(), WikiIndexState::Indexing);
+            assert!(readable_index().unwrap().is_none());
+            assert_eq!(
+                unindexed(&source, &[session_id.to_owned()]).unwrap(),
+                [session_id],
+                "a row in a cache the next write may drop does not count as indexed"
+            );
+            assert!(index_is_writable());
 
-        let connection = open_for_sync().unwrap();
-        let rebuilt = IndexStamp::of(&connection).unwrap();
-        assert_eq!(rebuilt.schema, SCHEMA_VERSION);
-        assert!(
-            !full_pass_holds(&marker, rebuilt),
-            "the rebuilt cache lost every row, so an incremental pass would skip old sessions"
-        );
-        assert!(
-            wiki_session_for_test(session_id, &BTreeSet::new())
-                .unwrap()
-                .is_none()
-        );
+            connection = open_for_sync().unwrap();
+            let upgraded = IndexStamp::of(&connection).unwrap();
+            assert_eq!(upgraded.schema, SCHEMA_VERSION);
+            assert!(
+                !full_pass_holds(&marker, upgraded),
+                "an upgraded cache must get a full pass (schema {older} -> {SCHEMA_VERSION})"
+            );
+            assert_eq!(
+                wiki_session_for_test(session_id, &BTreeSet::new())
+                    .unwrap()
+                    .is_some(),
+                keeps_rows,
+                "schema {older} -> {SCHEMA_VERSION}"
+            );
+        }
 
         // A newer index is the one case left alone.
         connection
@@ -4382,8 +4397,6 @@ mod tests {
                     is_thought: false,
                 })
                 .collect(),
-            touched: Vec::new(),
-            edits: Vec::new(),
         }
     }
 
@@ -5086,14 +5099,6 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        for id in &ids_for_paths {
-            connection
-                .execute(
-                    "INSERT INTO touched(session_id, path) VALUES (?1, '/src/project/src/a.rs')",
-                    [id],
-                )
-                .unwrap();
-        }
         connection
             .execute(
                 "UPDATE files SET title = 'standalone-only-name' WHERE session_id = ?1",
