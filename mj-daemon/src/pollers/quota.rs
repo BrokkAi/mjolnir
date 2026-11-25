@@ -1207,7 +1207,7 @@ pub fn refresh_host_image(
     refresh_prepared_host_image(refresh, executor, report)
 }
 
-fn refresh_prepared_host_image(
+pub fn refresh_prepared_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
@@ -1260,7 +1260,7 @@ fn refresh_prepared_host_image(
         );
         ImageRefreshOutcome::Unchanged
     };
-    if !matches!(refresh.host, ImageHost::SshNitro(_)) {
+    if cached.is_some() && !matches!(refresh.host, ImageHost::SshNitro(_)) {
         run_refresh_command(&refresh.prune, executor)?;
     }
     Ok(outcome)

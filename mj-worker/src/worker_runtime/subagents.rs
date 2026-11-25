@@ -638,7 +638,9 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_profile(root, "", home, role, policy, true, false, false, false)
+    configure_codex_mcp_profile(
+        root, "", home, role, policy, true, false, false, false, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the worker startup policy and owned MCP options.
@@ -652,6 +654,7 @@ fn configure_codex_mcp_profile(
     review_tools: bool,
     managed_subagent: bool,
     claude_mcp: bool,
+    sandbox: Option<&super::git_sandbox::HarnessSandbox>,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
@@ -677,6 +680,13 @@ fn configure_codex_mcp_profile(
     )?;
     let changed =
         (managed_subagent && disable_codex_subagent_features(&mut config, &path)?) || changed;
+    let changed = match sandbox {
+        Some(sandbox) => {
+            super::git_sandbox::configure_codex_permissions(&mut config, &path, policy, sandbox)?
+                || changed
+        }
+        None => changed,
+    };
     if changed {
         mj_core::config::atomic_write(&path, toml::to_string(&config)?.as_bytes())
             .with_context(|| format!("write staged Codex configuration {}", path.display()))?;
@@ -851,6 +861,7 @@ pub(super) fn configure_codex_profile(
     subtle_subagents: bool,
     review_tools: bool,
     managed_subagent: bool,
+    sandbox: &super::git_sandbox::HarnessSandbox,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_profile(
@@ -866,6 +877,7 @@ pub(super) fn configure_codex_profile(
             mj_core::config::HarnessKind::Codex,
         )
         .is_empty(),
+        Some(sandbox),
     )
 }
 
@@ -2675,6 +2687,7 @@ enabled = false
                             false,
                             true,
                             false,
+                            None,
                         )
                         .unwrap()
                     };
@@ -2778,7 +2791,8 @@ enabled = false
                         true,
                         false,
                         false,
-                        false
+                        false,
+                        None,
                     )
                     .unwrap()
                 );
@@ -2794,7 +2808,8 @@ enabled = false
                 true,
                 false,
                 false,
-                false
+                false,
+                None,
             )
             .unwrap()
         );
@@ -2864,7 +2879,8 @@ enabled = false
                     true,
                     false,
                     false,
-                    false
+                    false,
+                    None,
                 )
                 .unwrap()
             );
@@ -3705,6 +3721,7 @@ mod review_gate_tests {
                         tools,
                         false,
                         false,
+                        None,
                     )
                     .unwrap();
                     let servers = codex_servers(&home);
@@ -3814,6 +3831,7 @@ mod review_gate_tests {
             true,
             false,
             false,
+            None,
         )
         .unwrap();
         let servers = codex_servers(&home);
@@ -3850,6 +3868,7 @@ mod review_gate_tests {
             false,
             false,
             false,
+            None,
         )
         .unwrap();
         let servers = codex_servers(&home);
@@ -3890,6 +3909,7 @@ mod review_gate_tests {
             true,
             false,
             false,
+            None,
         )
         .unwrap();
         configure_codex_mcp_profile(
@@ -3902,6 +3922,7 @@ mod review_gate_tests {
             true,
             false,
             false,
+            None,
         )
         .unwrap();
         let servers = codex_servers(&home);

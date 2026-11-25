@@ -4,6 +4,26 @@ use super::*;
 use mj_core::targets::SshTrafficClass;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
+/// Warm the host store used by subsequent container launches.
+pub fn prestage_host_container_worker(
+    executor: &impl CommandExecutor,
+    ssh: &targets::SshTarget,
+    platform: targets::TargetPlatform,
+) -> Result<()> {
+    let source = super::binary_select::materialize_worker_source(worker_binary_for_arch(
+        platform.architecture,
+        WorkerBinaryRequirement::for_os(platform.os),
+    )?)?;
+    let digest = mj_core::worker_launch::worker_executable_digest(&source)?;
+    let host = targets::TargetLocator::SshBare {
+        ssh: ssh.clone(),
+        worker_id: None,
+        workspace: ".local/share/hel/workspaces/prestage".into(),
+    };
+    let store = mj_core::target_path::text(&store_root(&host, "prestage")?);
+    ensure_published(executor, &host, "prestage", &source, &store, &digest)
+}
+
 /// Beside the session roots, in their target filesystem (inside containers).
 pub fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
     store_directory(Path::new(&targets::worker_root(locator, session_id)?))

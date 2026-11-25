@@ -2632,6 +2632,40 @@ pub async fn reconcile_on(
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
 ) -> Result<SessionSync> {
+    let fresh_login = (!target.skips_login_file_sync)
+        .then(|| {
+            canonical.profile.as_ref().map(|owner| {
+                owner
+                    .for_target(target)
+                    .map_err(|error| format!("{error:#}"))
+            })
+        })
+        .flatten();
+    let effective_login = fresh_login.as_ref().unwrap_or(&canonical.login);
+    let mut reads = Vec::new();
+    if canonical
+        .skills
+        .for_format(client.skills_archive_format(), target.skills_scope)
+        .is_ok()
+    {
+        reads.push(RelayRequest::SkillsState);
+    }
+    if !target.skips_login_file_sync && effective_login.is_ok() {
+        reads.push(RelayRequest::CredentialState);
+    }
+    if target.sync_github_token && matches!(canonical.github, GithubSync::Known(_)) {
+        reads.push(RelayRequest::GithubTokenState);
+    }
+    if syncs_slopcop_login(target) && !matches!(canonical.slopcop_login, HostSlopcopLogin::Unknown)
+    {
+        reads.push(RelayRequest::SlopcopLoginState);
+    }
+    reads.retain(|request| request.supported_at(client.protocol_version()));
+    let methods: Vec<_> = reads.iter().map(RelayRequest::method_name).collect();
+    let mut observed: BTreeMap<_, _> = methods
+        .into_iter()
+        .zip(client.call_many(reads).await?)
+        .collect();
     let mut sync = SessionSync {
         unchanged_login: None,
         current_access_token: None,
@@ -2655,12 +2689,7 @@ pub async fn reconcile_on(
     // Profiles without a harness login file already receive credentials
     // through their environment or target credential chain.
     if !target.skips_login_file_sync {
-        let fresh = canonical.profile.as_ref().map(|owner| {
-            owner
-                .for_target(target)
-                .map_err(|error| format!("{error:#}"))
-        });
-        match fresh.as_ref().unwrap_or(&canonical.login) {
+        match effective_login {
             Ok(login) => {
                 // The session whose failure asked for this pass is delivered the
                 // newest login, like every session. Whether that login is the
@@ -2681,14 +2710,14 @@ pub async fn reconcile_on(
                     .and_then(|_| {
                         mj_core::credentials::claude_access_token_fingerprint(&login.bytes)
                     });
-                match reconcile_credentials(
+                match reconcile_credentials_observed(
                     client,
                     target,
                     &login.access,
-                    &login.credential,
-                    &login.bytes,
+                    (&login.credential, &login.bytes),
                     actions,
                     canonical.profile.as_deref(),
+                    observed.remove("credential_state"),
                 )
                 .await
                 {
@@ -2715,17 +2744,28 @@ pub async fn reconcile_on(
         .skills
         .for_format(client.skills_archive_format(), target.skills_scope)
     {
-        Ok(skills) => match reconcile_skills(client, target, skills).await {
-            Ok(true) => actions.push(CredentialSyncAction::SkillsPushed),
-            Ok(false) => {}
-            Err(error) => note(SyncStep::Skills, "skills", format!("{error:#}")),
-        },
+        Ok(skills) => {
+            match reconcile_skills_observed(client, target, skills, observed.remove("skills_state"))
+                .await
+            {
+                Ok(true) => actions.push(CredentialSyncAction::SkillsPushed),
+                Ok(false) => {}
+                Err(error) => note(SyncStep::Skills, "skills", format!("{error:#}")),
+            }
+        }
         Err(error) => note(SyncStep::Skills, "skills", format!("{error:#}")),
     }
     if target.sync_github_token {
         match &canonical.github {
             GithubSync::Known(token) => {
-                match reconcile_github_token(client, target, token.as_deref()).await {
+                match reconcile_github_token_observed(
+                    client,
+                    target,
+                    token.as_deref(),
+                    observed.remove("github_token_state"),
+                )
+                .await
+                {
                     Ok(action) => actions.extend(action),
                     Err(error) => note(SyncStep::GithubToken, "GitHub token", format!("{error:#}")),
                 }
@@ -2735,7 +2775,14 @@ pub async fn reconcile_on(
             }
         }
     }
-    match reconcile_slopcop_login(client, target, &canonical.slopcop_login).await {
+    match reconcile_slopcop_login_observed(
+        client,
+        target,
+        &canonical.slopcop_login,
+        observed.remove("slopcop_login_state"),
+    )
+    .await
+    {
         Ok(action) => actions.extend(action),
         Err(error) => note(SyncStep::Slopcop, "slopcop login", format!("{error:#}")),
     }
@@ -2776,6 +2823,27 @@ async fn reconcile_aws(
     client: &mut RelayClient,
     aws: &AwsSync,
 ) -> Result<Option<CredentialSyncAction>> {
+    let needs_reads = !matches!(
+        aws,
+        AwsSync::Unavailable {
+            scoped_required: false,
+            ..
+        }
+    );
+    let mut reads = if needs_reads {
+        vec![
+            RelayRequest::AwsCredentialsState,
+            RelayRequest::AwsCredentialsScope,
+        ]
+    } else {
+        Vec::new()
+    };
+    reads.retain(|request| request.supported_at(client.protocol_version()));
+    let methods: Vec<_> = reads.iter().map(RelayRequest::method_name).collect();
+    let mut observed: BTreeMap<_, _> = methods
+        .into_iter()
+        .zip(client.call_many(reads).await?)
+        .collect();
     match aws {
         AwsSync::Install(credentials) => {
             let expected = mj_core::aws_credentials::snapshot(&credentials.encode()?);
@@ -2787,8 +2855,21 @@ async fn reconcile_aws(
             let scope_current = credentials.scope().is_none()
                 || client.protocol_version()
                     < mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL
-                || client.aws_credentials_scope().await?.as_ref() == credentials.scope();
-            if scope_current && client.aws_credentials_state().await? == expected {
+                || (match observed.remove("aws_credentials_scope") {
+                    Some(reply) => match reply? {
+                        RelayResponsePayload::AwsCredentialsScope { scope, .. } => Ok(scope),
+                        _ => bail!("unexpected AWS scope response"),
+                    },
+                    None => client.aws_credentials_scope().await,
+                })?
+                .as_ref()
+                    == credentials.scope();
+            if scope_current
+                && (match observed.remove("aws_credentials_state") {
+                    Some(reply) => reply.and_then(credential_snapshot),
+                    None => client.aws_credentials_state().await,
+                })? == expected
+            {
                 return Ok(None);
             }
             let installed = client.install_aws_credentials(credentials).await?;
@@ -2819,7 +2900,10 @@ async fn reconcile_aws(
                 "the session's worker (relay protocol {}) predates withdrawing AWS credentials, so the host's own may still be installed. Mjolnir is replacing that worker automatically as soon as the session is idle and will then withdraw them; nothing needs to be done",
                 client.protocol_version()
             );
-            let held = client.aws_credentials_state().await?;
+            let held = (match observed.remove("aws_credentials_state") {
+                Some(reply) => reply.and_then(credential_snapshot),
+                None => client.aws_credentials_state().await,
+            })?;
             // What the worker recorded when credentials were installed: kept
             // while unexpired and issued for this session's role and session.
             // Anything else, including credentials with no record, may be the
@@ -2828,7 +2912,13 @@ async fn reconcile_aws(
             // across a daemon restart.
             if held.present
                 && let Some(expected) = expected_scope
-                && let Some(recorded) = client.aws_credentials_scope().await?
+                && let Some(recorded) = (match observed.remove("aws_credentials_scope") {
+                    Some(reply) => match reply? {
+                        RelayResponsePayload::AwsCredentialsScope { scope, .. } => Ok(scope),
+                        _ => bail!("unexpected AWS scope response"),
+                    },
+                    None => client.aws_credentials_scope().await,
+                })?
                 && expected.matches(&recorded)
             {
                 // The record is the session's to write; only one the
@@ -3104,7 +3194,32 @@ pub async fn reconcile_credentials(
     actions: &mut Vec<CredentialSyncAction>,
     owner: Option<&ProfileLogin>,
 ) -> Result<Option<CredentialSnapshot>> {
-    let mut session = client.credential_state().await?;
+    reconcile_credentials_observed(
+        client,
+        target,
+        access,
+        (canonical, canonical_bytes),
+        actions,
+        owner,
+        None,
+    )
+    .await
+}
+
+async fn reconcile_credentials_observed(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    access: &LoginAccess,
+    canonical_login: (&CredentialSnapshot, &[u8]),
+    actions: &mut Vec<CredentialSyncAction>,
+    owner: Option<&ProfileLogin>,
+    observed: Option<Result<RelayResponsePayload>>,
+) -> Result<Option<CredentialSnapshot>> {
+    let (canonical, canonical_bytes) = canonical_login;
+    let mut session = (match observed {
+        Some(reply) => reply.and_then(credential_snapshot),
+        None => client.credential_state().await,
+    })?;
     if let Some(owner) = owner
         && let Some(fingerprint) = owner.fingerprint(target)
         && owner
@@ -3376,7 +3491,19 @@ pub async fn reconcile_github_token(
     target: &CredentialSyncTarget,
     canonical: Option<&str>,
 ) -> Result<Option<CredentialSyncAction>> {
-    let session = match client.github_token_state().await {
+    reconcile_github_token_observed(client, target, canonical, None).await
+}
+
+async fn reconcile_github_token_observed(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    canonical: Option<&str>,
+    observed: Option<Result<RelayResponsePayload>>,
+) -> Result<Option<CredentialSyncAction>> {
+    let session = match match observed {
+        Some(reply) => reply.and_then(github_token_snapshot),
+        None => client.github_token_state().await,
+    } {
         Ok(state) => state,
         Err(error) if sync_method_unsupported(&error) => {
             tracing::debug!(
@@ -3432,6 +3559,15 @@ pub async fn reconcile_slopcop_login(
     target: &CredentialSyncTarget,
     host: &HostSlopcopLogin,
 ) -> Result<Option<CredentialSyncAction>> {
+    reconcile_slopcop_login_observed(client, target, host, None).await
+}
+
+async fn reconcile_slopcop_login_observed(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    host: &HostSlopcopLogin,
+    observed: Option<Result<RelayResponsePayload>>,
+) -> Result<Option<CredentialSyncAction>> {
     let wanted = match host {
         _ if !syncs_slopcop_login(target) => return Ok(None),
         HostSlopcopLogin::Unknown => return Ok(None),
@@ -3446,7 +3582,10 @@ pub async fn reconcile_slopcop_login(
         );
         return Ok(None);
     }
-    let session = client.slopcop_login_state().await?;
+    let session = (match observed {
+        Some(reply) => reply.and_then(credential_snapshot),
+        None => client.slopcop_login_state().await,
+    })?;
     match wanted {
         Some(login) => {
             let wanted = login.snapshot();
@@ -3484,8 +3623,20 @@ pub async fn reconcile_skills(
     target: &CredentialSyncTarget,
     canonical: &mj_core::skills::SkillsArchive,
 ) -> Result<bool> {
+    reconcile_skills_observed(client, target, canonical, None).await
+}
+
+async fn reconcile_skills_observed(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    canonical: &mj_core::skills::SkillsArchive,
+    observed: Option<Result<RelayResponsePayload>>,
+) -> Result<bool> {
     let canonical_state = canonical.state();
-    let session = match client.skills_state().await {
+    let session = match match observed {
+        Some(reply) => reply.and_then(skills_sync_state),
+        None => client.skills_state().await,
+    } {
         Ok(state) => state,
         Err(error) if sync_method_unsupported(&error) => {
             tracing::debug!(
@@ -3524,6 +3675,113 @@ pub fn sync_method_unsupported(error: &anyhow::Error) -> bool {
 mod retired_tests {
     use super::*;
     use mj_core::config::{HarnessKind, HarnessProfile};
+
+    #[tokio::test]
+    async fn credential_prefetch_keeps_sibling_steps_after_one_framed_rejection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for reject_skills in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let mut target = test_fixtures::skills_sync_target(home.path());
+            target.skips_login_file_sync = true;
+            target.sync_github_token = true;
+            target.skills_scope = mj_core::skills::SkillsScope::Isolated;
+            let skills = Arc::new(CanonicalSkills::collect(&target));
+            let expected = skills
+                .for_format(
+                    mj_core::skills::SkillsArchiveFormat::Gzip,
+                    target.skills_scope,
+                )
+                .unwrap()
+                .state();
+            let canonical = SessionCanonical {
+                profile: None,
+                login: Err("no login file".into()),
+                pinned: None,
+                skills,
+                github: GithubSync::Known(None),
+                slopcop_login: HostSlopcopLogin::SignedOut,
+            };
+            let (controller, worker) = tokio::io::duplex(65536);
+            let mut client =
+                test_fixtures::duplex_relay_client(controller, test_fixtures::SESSION_ID);
+            let peer = mj_core::runtime::spawn(async move {
+                let (reader, mut writer) = tokio::io::split(worker);
+                let mut lines = BufReader::new(reader).lines();
+                let mut requests = Vec::new();
+                // No responses until the whole prefetch is on the wire.
+                for _ in 0..3 {
+                    requests.push(
+                        serde_json::from_str::<RelayRequestEnvelope>(
+                            &lines.next_line().await.unwrap().unwrap(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                assert_eq!(
+                    requests
+                        .iter()
+                        .map(|request| request.request.method_name())
+                        .collect::<Vec<_>>(),
+                    vec!["skills_state", "github_token_state", "slopcop_login_state"]
+                );
+                for request in requests {
+                    let body = if reject_skills
+                        && matches!(request.request, RelayRequest::SkillsState)
+                    {
+                        RelayResponseBody::Error {
+                            error: mj_core::relay::relay_protocol_error(
+                                RelayErrorCode::Internal,
+                                "skills failed",
+                                false,
+                                None,
+                            ),
+                        }
+                    } else {
+                        RelayResponseBody::Ok {
+                            payload: match request.request {
+                                RelayRequest::SkillsState => RelayResponsePayload::SkillsState {
+                                    present: expected.present,
+                                    fingerprint: expected.fingerprint.clone(),
+                                },
+                                RelayRequest::GithubTokenState => {
+                                    RelayResponsePayload::GithubTokenState {
+                                        present: false,
+                                        fingerprint: String::new(),
+                                    }
+                                }
+                                RelayRequest::SlopcopLoginState => {
+                                    RelayResponsePayload::CredentialState {
+                                        present: false,
+                                        fingerprint: String::new(),
+                                        freshness_epoch_ms: None,
+                                    }
+                                }
+                                _ => unreachable!(),
+                            },
+                        }
+                    };
+                    let mut frame = serde_json::to_vec(&RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body,
+                    })
+                    .unwrap();
+                    frame.push(b'\n');
+                    writer.write_all(&frame).await.unwrap();
+                }
+            });
+            let sync = reconcile_on(&mut client, &target, &canonical)
+                .await
+                .unwrap();
+            assert!(sync.actions.is_empty());
+            assert_eq!(sync.failures.len(), usize::from(reject_skills));
+            if reject_skills {
+                assert!(matches!(sync.failures[0].step, SyncStep::Skills));
+            }
+            assert!(client.abandoned.is_none());
+            peer.await.unwrap();
+        }
+    }
 
     fn authorize(
         login: &mj_core::credentials::RetiredLoginSnapshot,

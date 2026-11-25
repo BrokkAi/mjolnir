@@ -3303,8 +3303,8 @@ fn a_missing_image_is_pulled_once_and_not_again_when_present() {
         .filter(|args| args.contains(&"prune".to_owned()))
         .count();
     assert_eq!(
-        prunes, 1,
-        "only the refresh that downloaded the image has anything to prune: {commands:?}"
+        prunes, 0,
+        "a fresh pull has no previous image to prune: {commands:?}"
     );
     assert!(
         commands

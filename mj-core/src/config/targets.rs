@@ -94,14 +94,14 @@ impl ProjectBundle {
                 );
             }
             if let Some(source) = repository.github.as_deref() {
-                crate::remote_git::validate_configured_project_source(source).with_context(
-                    || {
+                crate::remote_git::project_source(source, crate::remote_git::Shorthand::Allowed)
+                    .map(drop)
+                    .with_context(|| {
                         format!(
                             "invalid Git source for bundle {bundle_id:?} repository {:?}",
                             repository.id
                         )
-                    },
-                )?;
+                    })?;
             }
             if repository
                 .local

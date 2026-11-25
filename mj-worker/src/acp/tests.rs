@@ -520,7 +520,7 @@ fn opencode_mcp_calls_always_reach_the_person() {
     }
 }
 
-/// agy 1.5.11 titles an MCP call `mcp_<server>_<tool>` and names no server in
+/// agy 1.5.15 titles an MCP call `mcp_<server>_<tool>` and names no server in
 /// the request, so a title cannot tell an owned tool from a lookalike. Its own
 /// `mcp(<server>/*)` grant can: the worker stages one per registered owned
 /// server in agy's project file and answers none of agy's requests itself.
@@ -654,6 +654,158 @@ fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
     std::fs::write(&project, "unchanged").unwrap();
     stage_antigravity_grants(&spec).unwrap();
     assert_eq!(std::fs::read_to_string(&project).unwrap(), "unchanged");
+}
+
+/// agy 1.5.15's terminal sandbox leaves an additional directory read-only
+/// unless the project file holds `write_file(<dir>/)` for it, so the worker
+/// stages one per directory. Each launch replaces what an earlier launch
+/// staged and keeps a person's own rules, even `write_file` ones.
+#[test]
+fn antigravity_additional_directories_are_granted_writes_and_replaced_each_launch() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("config/projects/default-cli-project.json");
+    let staged_record = home.path().join("mj-staged-write-grants.json");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    let own_write = format!(
+        "write_file({})",
+        home.path().join("personal").join("").display()
+    );
+    std::fs::write(
+        &project,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "default-cli-project",
+            "permissionGrants": {
+                "permissionGrants": {
+                    "allow": ["command(gh pr list)", own_write],
+                    "deny": ["write_file(/never/)"]
+                },
+                "v2Migrated": true
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut spec = reload_fallback_spec(HarnessKind::Antigravity);
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    spec.environment.insert(
+        "MJ_ANTIGRAVITY_HOME".into(),
+        home.path().to_string_lossy().into_owned(),
+    );
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let user_home = home.path().join("user-home");
+    spec.environment
+        .insert(home_variable.into(), user_home.to_str().unwrap().into());
+    let rule = |directory: &Path| format!("write_file({})", directory.join("").display());
+    let allowed = |project: &Path| -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project).unwrap()).unwrap();
+        value["permissionGrants"]["permissionGrants"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let clone = home.path().join("owner-clone");
+    let cache = home.path().join("tool-cache");
+    // A directory named twice is granted once, and the grant ends at its
+    // separator, so a same-prefix sibling stays outside it.
+    spec.additional_directories = vec![clone.clone(), cache.clone(), clone.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let staged = allowed(&project);
+    for directory in [&clone, &cache] {
+        assert_eq!(
+            staged.iter().filter(|r| **r == rule(directory)).count(),
+            1,
+            "{staged:?}"
+        );
+    }
+    assert!(
+        rule(&clone).ends_with(&format!("{})", std::path::MAIN_SEPARATOR)),
+        "{}",
+        rule(&clone)
+    );
+    assert!(staged.contains(&own_write), "{staged:?}");
+    let denied: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    assert_eq!(
+        denied["permissionGrants"]["permissionGrants"]["deny"],
+        serde_json::json!(["write_file(/never/)"])
+    );
+    assert_eq!(denied["permissionGrants"]["v2Migrated"], true);
+    // Staging again is stable.
+    stage_antigravity_grants(&spec).unwrap();
+    assert_eq!(allowed(&project), staged);
+    // A launch with other directories removes the earlier grants.
+    let mount = home.path().join("mount");
+    spec.additional_directories = vec![mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let replaced = allowed(&project);
+    assert!(replaced.contains(&rule(&mount)), "{replaced:?}");
+    assert!(replaced.contains(&own_write), "{replaced:?}");
+    for directory in [&clone, &cache] {
+        assert!(!replaced.contains(&rule(directory)), "{replaced:?}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&std::fs::read(&staged_record).unwrap()).unwrap(),
+        vec![rule(&mount)]
+    );
+    // A directory the person already granted themselves stays theirs: it is
+    // never recorded, so a later launch without it keeps the rule.
+    let granted = home.path().join("granted");
+    let mut own: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    own["permissionGrants"]["permissionGrants"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule(&granted).into());
+    std::fs::write(&project, serde_json::to_vec(&own).unwrap()).unwrap();
+    spec.additional_directories = vec![granted.clone(), mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    let both = allowed(&project);
+    assert_eq!(
+        both.iter().filter(|r| **r == rule(&granted)).count(),
+        1,
+        "{both:?}"
+    );
+    assert!(both.contains(&rule(&mount)), "{both:?}");
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&std::fs::read(&staged_record).unwrap()).unwrap(),
+        vec![rule(&mount)]
+    );
+    spec.additional_directories = vec![mount.clone()];
+    stage_antigravity_grants(&spec).unwrap();
+    assert!(allowed(&project).contains(&rule(&granted)));
+    // A launch with none leaves only the person's own write rules.
+    spec.additional_directories.clear();
+    stage_antigravity_grants(&spec).unwrap();
+    let cleared = allowed(&project);
+    assert!(cleared.contains(&own_write), "{cleared:?}");
+    assert!(!cleared.iter().any(|r| r == &rule(&mount)), "{cleared:?}");
+    // A rule recorded by a launch that crashed before it reached the project
+    // file is still removed once it did.
+    std::fs::write(&staged_record, serde_json::to_vec(&[rule(&clone)]).unwrap()).unwrap();
+    let mut crashed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&project).unwrap()).unwrap();
+    crashed["permissionGrants"]["permissionGrants"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push(rule(&clone).into());
+    std::fs::write(&project, serde_json::to_vec(&crashed).unwrap()).unwrap();
+    stage_antigravity_grants(&spec).unwrap();
+    assert!(!allowed(&project).contains(&rule(&clone)));
+    // A relative directory or the filesystem root fails visibly and changes
+    // nothing, instead of granting writes below the wrong directory.
+    let before = std::fs::read_to_string(&project).unwrap();
+    for bad in [
+        PathBuf::from("relative/directory"),
+        home.path().ancestors().last().unwrap().to_path_buf(),
+    ] {
+        spec.additional_directories = vec![mount.clone(), bad.clone()];
+        let error = stage_antigravity_grants(&spec).unwrap_err().to_string();
+        assert!(error.contains("additional directory"), "{bad:?}: {error}");
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), before);
+    }
 }
 
 #[test]

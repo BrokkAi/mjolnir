@@ -527,6 +527,7 @@ fn cache_test_launch(
         excluded_environment: Vec::new(),
         cwd: directory.to_path_buf(),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,

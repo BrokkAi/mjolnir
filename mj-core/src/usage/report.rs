@@ -159,6 +159,48 @@ pub struct AgentUsageEstimate {
     pub cost_usd_ticks: CostUsdTicks,
 }
 
+/// Usage of the turns recorded on one profile, whichever parent or sub-agent
+/// ran them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileUsageEstimate {
+    /// The profile each turn recorded when it started; None for turns that
+    /// recorded none.
+    pub profile: Option<String>,
+    /// Counted exactly as a session's coverage, over this profile's turns, so
+    /// `coverage.is_partial()` says whether the cost is a lower bound.
+    pub coverage: crate::storage::UsageCoverage,
+    /// Sum of the turns' model costs; unknown when any is unknown.
+    pub cost_usd_ticks: CostUsdTicks,
+}
+
+impl Default for ProfileUsageEstimate {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            coverage: Default::default(),
+            cost_usd_ticks: Ok(0),
+        }
+    }
+}
+
+/// How much of one profile's unscoped weekly quota was consumed during the
+/// report's span, as the daemon read it from the profile's quota history.
+/// Not a dollar value: it never converts API cost to quota.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileQuotaUsage {
+    pub profile: String,
+    /// 10,000 is all of one weekly allowance. An estimate from the probes the
+    /// history holds. None when no part of the span could be measured.
+    pub consumed_basis_points: Option<u64>,
+    /// The probes did not cover the whole span (no reading before the start or
+    /// after the end, a reset whose earlier use was lost, or an interval that
+    /// could not be read), so the figure covers only part of it.
+    #[serde(default)]
+    pub partial: bool,
+    /// The profile's plan price, which weights profiles of one provider.
+    pub monthly_price_usd: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
     /// The span `sessions` and `agent_usage` cover: the selected hour, or
@@ -177,6 +219,14 @@ pub struct SessionUsageReport {
     /// destroyed before kind retention was introduced remain unclassified.
     #[serde(default)]
     pub agent_usage: Vec<AgentUsageEstimate>,
+    /// The same turns grouped by the profile each was recorded on, which can
+    /// differ from its parent session's profile.
+    #[serde(default)]
+    pub profile_usage: Vec<ProfileUsageEstimate>,
+    /// Weekly quota consumed over `since_ms..until_ms`, per profile; filled
+    /// by the daemon, not the store.
+    #[serde(default)]
+    pub quota_usage: Vec<ProfileQuotaUsage>,
     /// Sum of `sessions`; unknown when any session's cost is unknown.
     pub cost_usd_ticks: CostUsdTicks,
 }
@@ -190,6 +240,8 @@ impl Default for SessionUsageReport {
             profiles: Vec::new(),
             sessions: Vec::new(),
             agent_usage: Vec::new(),
+            profile_usage: Vec::new(),
+            quota_usage: Vec::new(),
             cost_usd_ticks: Ok(0),
         }
     }
