@@ -774,12 +774,8 @@ impl RelayRequest {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
-            Self::HistoryQuery {
-                query: crate::history::HistoryQuery::SearchHistory { .. },
-            } => super::RELAY_SEARCH_HISTORY_PROTOCOL,
-            Self::HistoryQuery { .. }
-            | Self::HistoryRequests
-            | Self::CompleteHistoryRequest { .. } => 16,
+            Self::HistoryQuery { query } => query.protocol_requirement().0,
+            Self::HistoryRequests | Self::CompleteHistoryRequest { .. } => 16,
             Self::GuardianRequests | Self::CompleteGuardianRequest { .. } => {
                 super::RELAY_GUARDIAN_REVIEW_PROTOCOL
             }
