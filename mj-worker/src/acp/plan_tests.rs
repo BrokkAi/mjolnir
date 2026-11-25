@@ -636,6 +636,7 @@ impl PlanProbe {
             managed_subagent,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

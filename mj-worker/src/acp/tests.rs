@@ -60,6 +60,7 @@ for line in sys.stdin:
                 managed_subagent: false,
                 instruction_role: None,
                 subagent_mcp_socket: None,
+                claude_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
                 goal_recovery: Default::default(),
@@ -188,6 +189,7 @@ for line in sys.stdin:
                 managed_subagent: false,
                 instruction_role: None,
                 subagent_mcp_socket: None,
+                claude_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
                 goal_recovery: Default::default(),
@@ -341,6 +343,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1476,6 +1479,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1569,6 +1573,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1685,6 +1690,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1833,6 +1839,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -2335,6 +2342,7 @@ async fn answer_to_ext_request(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2542,6 +2550,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2946,6 +2955,7 @@ async fn policy_is_enforced_before_session_is_reported(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3234,6 +3244,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: plan.then(|| crate::acp::ContextReset {
             request_id: "restore".into(),
@@ -3308,6 +3319,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3592,6 +3604,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4015,6 +4028,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4620,6 +4634,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4956,6 +4971,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5100,6 +5116,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5198,6 +5215,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -5572,6 +5590,7 @@ mod terminals {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -6168,6 +6187,7 @@ for line in sys.stdin:
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -6383,6 +6403,7 @@ for line in sys.stdin:
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
         instruction_role: None,
+        claude_mcp_socket: None,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
@@ -6554,6 +6575,7 @@ while True:
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6709,6 +6731,7 @@ while True:
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6820,6 +6843,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6906,6 +6930,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -7156,6 +7181,7 @@ pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -7247,6 +7273,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -7406,6 +7433,7 @@ fn missing_native_session_spec(
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -7817,6 +7845,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             managed_subagent: false,
             instruction_role: None,
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -8303,6 +8332,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -8752,6 +8782,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         managed_subagent: false,
         instruction_role: None,
         subagent_mcp_socket: None,
+        claude_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -9819,6 +9850,7 @@ for line in sys.stdin:
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             managed_subagent: false,
             environment: bad_launch.environment.clone(),
             launch_config: Box::new(bad_launch),
@@ -9965,6 +9997,7 @@ if "{session_id}" == "ses-initial":
     cmd_tx
         .send(CommandRequest::ReloadLaunchConfig {
             subagent_mcp_socket: None,
+            claude_mcp_socket: None,
             managed_subagent: false,
             environment: next_launch.environment.clone(),
             command: Some(next_command),
@@ -10162,6 +10195,7 @@ for line in sys.stdin:
                 .send(CommandRequest::ReloadLaunchConfig {
                     launch_config: Box::new(config),
                     subagent_mcp_socket: Some(socket.clone()),
+                    claude_mcp_socket: None,
                     managed_subagent: false,
                     environment: BTreeMap::from([(
                         "MJ_ANTIGRAVITY_HOME".into(),
@@ -10274,4 +10308,131 @@ fn reload_launch_config_clears_stale_accepted_config_selectors() {
 #[tokio::test]
 async fn reload_launch_config_failed_retirement_refuses_before_destructive_commit() {
     exercise_planned_reload_continuity(None, true).await;
+}
+
+#[test]
+fn claude_mcp_acp_registration_and_owned_mcp_contract() {
+    use agent_client_protocol::v1::schema::{PermissionOption, ToolKind};
+    use mj_core::claude_mcp::{CLAUDE_MCP_SERVER, ClaudeMcpCapabilities};
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Antigravity,
+        HarnessKind::Dsh,
+        HarnessKind::OpenCode,
+        HarnessKind::Grok,
+        HarnessKind::Kimi,
+        HarnessKind::Muse,
+    ] {
+        spec.harness = harness;
+        spec.claude_mcp_socket = Some(ClaudeMcpSocket {
+            path: "/worker/claude-mcp.sock".into(),
+            profile_registration: false,
+        });
+        let servers = extra_mcp(&spec);
+        let server = servers.iter().find_map(|s| match s {
+            McpServer::Stdio(s) if s.name == CLAUDE_MCP_SERVER => Some(s),
+            _ => None,
+        });
+        let capabilities = ClaudeMcpCapabilities::for_harness(harness);
+        assert_eq!(server.is_none(), capabilities.is_empty());
+        let owned = owned_acp_mcp_tools(&spec);
+        if let Some(server) = server {
+            assert_eq!(
+                server.args,
+                ClaudeMcpCapabilities::server_args(
+                    std::path::Path::new("/worker/claude-mcp.sock"),
+                    harness
+                )
+            );
+            assert_eq!(
+                owned
+                    .iter()
+                    .find(|(n, _)| n == CLAUDE_MCP_SERVER)
+                    .unwrap()
+                    .1,
+                capabilities.tool_names()
+            );
+            if harness == HarnessKind::Codex {
+                assert_eq!(
+                    serde_json::to_value(server).unwrap()["_meta"]["codex"]["defaultToolsApprovalMode"],
+                    "approve"
+                );
+            }
+        }
+        if harness == HarnessKind::Antigravity {
+            let home = tempfile::tempdir().unwrap();
+            spec.environment.insert(
+                if cfg!(windows) { "USERPROFILE" } else { "HOME" }.into(),
+                home.path().to_string_lossy().into_owned(),
+            );
+            spec.environment.insert(
+                harness.home_env().into(),
+                home.path().to_string_lossy().into_owned(),
+            );
+            stage_antigravity_grants(&spec).unwrap();
+            let project = home.path().join("config/projects/default-cli-project.json");
+            assert!(
+                std::fs::read_to_string(&project)
+                    .unwrap()
+                    .contains("mcp(mj-claude/*)")
+            );
+            spec.claude_mcp_socket
+                .as_mut()
+                .unwrap()
+                .profile_registration = true;
+            stage_antigravity_grants(&spec).unwrap();
+            assert!(
+                !std::fs::read_to_string(&project)
+                    .unwrap()
+                    .contains("mcp(mj-claude/*)")
+            );
+            spec.claude_mcp_socket
+                .as_mut()
+                .unwrap()
+                .profile_registration = false;
+        }
+        if harness == HarnessKind::Dsh {
+            let approvals = OwnedMcpApprovals::for_launch(&spec);
+            for (title, allowed) in capabilities
+                .tool_names()
+                .iter()
+                .map(|t| (format!("mcp  mj-claude  {}", t.replace('_', " ")), true))
+                .chain([
+                    (String::from("mcp  mj-claude  web fetch"), false),
+                    (String::from("mcp  foreign  monitor"), false),
+                ])
+            {
+                let request = RequestPermissionRequest::new(
+                    "native",
+                    ToolCallUpdate::new(
+                        "call",
+                        ToolCallUpdateFields::new()
+                            .title(title.clone())
+                            .kind(ToolKind::Other),
+                    ),
+                    vec![PermissionOption::new(
+                        "once",
+                        "Allow once",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                );
+                assert_eq!(approvals.response(&request).is_some(), allowed, "{title}");
+            }
+        }
+        spec.claude_mcp_socket
+            .as_mut()
+            .unwrap()
+            .profile_registration = true;
+        assert!(
+            !extra_mcp(&spec)
+                .iter()
+                .any(|s| matches!(s, McpServer::Stdio(s) if s.name == CLAUDE_MCP_SERVER))
+        );
+    }
 }

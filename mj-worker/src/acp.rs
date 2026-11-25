@@ -24,13 +24,14 @@ use drive::*;
 #[cfg(unix)]
 pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
 #[cfg(unix)]
-pub(crate) use launch::launch_subagent_mcp_socket;
-#[cfg(unix)]
 pub(crate) use launch::read_claude_login_fingerprint;
 use launch::*;
 pub use launch::{
-    ClaudeLoginIdentity, ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket,
+    ClaudeLoginIdentity, ClaudeMcpSocket, ContextReset, LaunchSpec, ReviewerMcpServer,
+    SubagentMcpSocket,
 };
+#[cfg(unix)]
+pub(crate) use launch::{launch_claude_mcp_socket, launch_subagent_mcp_socket};
 pub(crate) use launch::{launch_extra_mcp_servers, launch_subagent_policy};
 pub use opencode_logins::ImportedLogins;
 use permissions::*;
@@ -351,6 +352,7 @@ pub enum CommandRequest {
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
         subagent_mcp_socket: Option<SubagentMcpSocket>,
+        claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
         managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
@@ -465,6 +467,7 @@ pub(super) enum SessionRestart {
     ReloadLaunchConfig {
         launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
         subagent_mcp_socket: Option<SubagentMcpSocket>,
+        claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
         managed_subagent: bool,
         environment: BTreeMap<String, String>,
         command: Option<PathBuf>,
@@ -516,6 +519,7 @@ impl Eq for SessionRestart {}
 struct LaunchConfigReload {
     launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
     subagent_mcp_socket: Option<SubagentMcpSocket>,
+    claude_mcp_socket: Option<crate::acp::ClaudeMcpSocket>,
     managed_subagent: bool,
     environment: BTreeMap<String, String>,
     command: Option<PathBuf>,
@@ -627,6 +631,7 @@ async fn run_inner(
                             pending_supervisor_spec = None;
                             spec.environment = runtime.environment;
                             spec.subagent_mcp_socket = runtime.subagent_mcp_socket;
+                            spec.claude_mcp_socket = runtime.claude_mcp_socket;
                             spec.managed_subagent = runtime.managed_subagent;
                             Ok(())
                         }
@@ -773,6 +778,7 @@ async fn run_inner(
         if let Some(LaunchConfigReload {
             launch_config,
             subagent_mcp_socket,
+            claude_mcp_socket,
             managed_subagent,
             environment,
             command,
@@ -813,6 +819,7 @@ async fn run_inner(
                     spec.instruction_role = InstructionRole::from_launch(&launch_config);
                     spec.project_memory = launch_config.project_memory.clone();
                     spec.subagent_mcp_socket = subagent_mcp_socket;
+                    spec.claude_mcp_socket = claude_mcp_socket;
                     spec.managed_subagent = managed_subagent;
                     spec.subagent_policy = launch_subagent_policy(&launch_config);
                     spec.extra_mcp_servers = launch_extra_mcp_servers(&launch_config);
@@ -1094,6 +1101,7 @@ async fn run_bridge(
         Ok(Some(SessionRestart::ReloadLaunchConfig {
             launch_config,
             subagent_mcp_socket,
+            claude_mcp_socket,
             managed_subagent,
             environment,
             command,
@@ -1111,6 +1119,7 @@ async fn run_bridge(
             reload_launch_config: Some(LaunchConfigReload {
                 launch_config,
                 subagent_mcp_socket,
+                claude_mcp_socket,
                 managed_subagent,
                 environment,
                 command,

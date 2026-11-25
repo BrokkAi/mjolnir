@@ -15,6 +15,9 @@ name = "mj_worker"
 workspace = true
 
 [dependencies]
+htmd = "0.5"
+html2text = "0.17"
+croner = "4"
 jsonc-parser.workspace = true
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"

@@ -71,19 +71,41 @@ plots retain the stated usage-scope and context-tier assumptions.
 The chart retains the requested shared axes: estimated USD per single review
 and yield relative to Terra 6.1/high = 100 within each source study. The
 historical Terra point is omitted; its normalization denominator is retained.
-Frontier models and Greptile solo references are named directly; other points
-use numbers in the key. Sol 6.2 high is below medium on all-confirmed yield
+Frontier models and Greptile solo references are named directly and stay out
+of the numbered key. Other points, including **Haiku/xhigh (point 5)**, use
+numbers in the key. Haiku/high keeps its direct frontier label. Cost bounds
+are shown as ranges in the key, with no horizontal pricing bars on the plot. Kimi is labeled `K3.1 Pro/high`.
+It has no mark on either combination frontier, so this relabel changes the
+visible single-model chart only. Sol 6.2 high is below medium on all-confirmed yield
 while costing more, so it does not join that point-estimate frontier.
 
 Current measured points use the single-reviewer rows of [pareto.csv](pareto.csv)
 and [the medium + high table](pareto-sev-high-medium.csv), freshly judged in
 `verify10`. The chart's historical Claude yields/costs use the
 [previous initial-review reconstruction and source tables](../sol-62-opus-high/README.md#single-model-review-performance-versus-cost).
-Those are different-corpus estimates: three initial yields assume Terra's
-88/145 initial-to-workflow retention transfers to the Claude arms; Haiku/xhigh
-uses recovered initial-only grades and a pricing bound. No historical Claude
+Those are different-corpus estimates: Haiku/high, Sonnet/high and Opus/high
+initial yields assume Terra's 88/145 initial-to-workflow retention transfers
+to those arms. Haiku/xhigh uses recovered initial-only grades and a pricing
+bound. Haiku/high is named on the plot; Haiku/xhigh is listed in the key. No historical Claude
 reviewer was rerun here. The combined frontier is descriptive across studies
 and launch protocols, rather than a controlled ranking.
+
+The added **Grok 4.7/high** point is also a historical estimate, marked `*`.
+The mbx Grok study stopped for quota after **253/285** planned revision reviews.
+Its accepted workflow projection is **32.0604** material roots per 47-PR pass.
+Applying the same Terra initial/workflow retention gives **19.4574** estimated
+initial-review roots, or a **66.3** index against the historical Terra initial
+mean (29.3333). This adds the original projection's assumption that performance
+on completed PRs transfers to the missing, nonrandom PRs. Its **$0.496389 per
+review** cost is the observed first-pass mean over **41 initial heads**, obtained
+from the saved $36.236412 / 73-event scenario; it is not a PR workflow cost.
+The retained `reviewcharts/grok-summary.json`, `grok-method.txt` and
+`grok-metrics.json` identify the measurement and its limitations. Their exact
+paths, hashes and the derivation are in
+[single-model-estimate-sources.json](single-model-estimate-sources.json).
+[Plotted point values](review-single-model-cost.csv) include both Haiku efforts,
+Grok and the renamed K3.1 point. All 19 earlier point values and frontier flags
+are preserved; Grok adds a twentieth point and does not change the frontier.
 
 DSF remains a projection from 35 reviews on the first 16 diffs in job order,
 where the earlier run stopped for latency. Its yield is recalibrated using the

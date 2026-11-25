@@ -136,6 +136,7 @@ pub(super) fn configure_claude_subagent_mcp(
                     config_path.display()
                 )
             })?;
+        servers.remove(mj_core::claude_mcp::CLAUDE_MCP_SERVER);
         let Some(role) = role else {
             servers.remove(SUBAGENT_MCP_SERVER);
             servers.remove(REVIEW_MCP_SERVER);
@@ -241,7 +242,7 @@ pub(super) fn configure_kimi_subagent_mcp(
     root: &Path,
     session_id: &str,
     home: &Path,
-    role: mj_core::subagent::SubagentMcpRole,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
     review_tools: bool,
 ) -> Result<()> {
     use mj_core::subagent::{REVIEW_MCP_SERVER, SUBAGENT_MCP_SERVER};
@@ -250,8 +251,7 @@ pub(super) fn configure_kimi_subagent_mcp(
         root.is_absolute()
             && private_staged_home(root, session_id, home)
             && regular_file_or_absent(&path),
-        "cannot register the Kimi {} tools outside a private staged profile",
-        role.id(),
+        "cannot register the Kimi session tools outside a private staged profile",
     );
     let command = root.join("hel");
     let command = command
@@ -267,6 +267,12 @@ pub(super) fn configure_kimi_subagent_mcp(
             .or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
             .context("Kimi mcpServers must be an object")?;
+        servers.insert(mj_core::claude_mcp::CLAUDE_MCP_SERVER.into(), serde_json::json!({"transport":"stdio", "command":command, "args":mj_core::claude_mcp::ClaudeMcpCapabilities::server_args(&root.join(super::claude_mcp::CLAUDE_MCP_SOCKET), mj_core::config::HarnessKind::Kimi), "runtime_id":"local"}));
+        let Some(role) = role else {
+            servers.remove(SUBAGENT_MCP_SERVER);
+            servers.remove(REVIEW_MCP_SERVER);
+            return Ok(());
+        };
         servers.insert(
             SUBAGENT_MCP_SERVER.into(),
             serde_json::json!({
@@ -632,7 +638,9 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_profile(root, "", home, role, policy, true, false, false, None)
+    configure_codex_mcp_profile(
+        root, "", home, role, policy, true, false, false, false, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the worker startup policy and owned MCP options.
@@ -645,6 +653,7 @@ fn configure_codex_mcp_profile(
     subtle_subagents: bool,
     review_tools: bool,
     managed_subagent: bool,
+    claude_mcp: bool,
     sandbox: Option<&super::git_sandbox::HarnessSandbox>,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
@@ -667,6 +676,7 @@ fn configure_codex_mcp_profile(
         policy,
         subtle_subagents,
         review_tools,
+        claude_mcp,
     )?;
     let changed =
         (managed_subagent && disable_codex_subagent_features(&mut config, &path)?) || changed;
@@ -724,6 +734,7 @@ fn disable_codex_subagent_features(config: &mut toml::Table, path: &Path) -> Res
 }
 
 /// Returns whether the configuration changed.
+#[allow(clippy::too_many_arguments)] // Independent owned-server registration policies.
 fn configure_codex_mcp_servers(
     config: &mut toml::Table,
     path: &Path,
@@ -732,9 +743,10 @@ fn configure_codex_mcp_servers(
     policy: mj_core::config::ExecutionPolicy,
     subtle_subagents: bool,
     review_tools: bool,
+    claude_mcp: bool,
 ) -> Result<bool> {
     let name = mj_core::subagent::SUBAGENT_MCP_SERVER;
-    if role.is_none() && !config.contains_key("mcp_servers") {
+    if role.is_none() && !claude_mcp && !config.contains_key("mcp_servers") {
         return Ok(false);
     }
     let servers = config
@@ -742,6 +754,19 @@ fn configure_codex_mcp_servers(
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
         .as_table_mut()
         .with_context(|| format!("mcp_servers in {} must be a table", path.display()))?;
+    let before = servers.clone();
+    if claude_mcp {
+        let mut server = serde_json::json!({"command":std::env::current_exe()?, "args":mj_core::claude_mcp::ClaudeMcpCapabilities::server_args(&root.join(super::claude_mcp::CLAUDE_MCP_SOCKET), mj_core::config::HarnessKind::Codex)});
+        if policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals {
+            server["default_tools_approval_mode"] = serde_json::json!("approve");
+        }
+        servers.insert(
+            mj_core::claude_mcp::CLAUDE_MCP_SERVER.into(),
+            toml::Value::try_from(server)?,
+        );
+    } else {
+        servers.remove(mj_core::claude_mcp::CLAUDE_MCP_SERVER);
+    }
     if let Some(role) = role {
         let worker = std::env::current_exe().context("locate worker for Codex delegation")?;
         let mut args = vec![
@@ -820,7 +845,7 @@ fn configure_codex_mcp_servers(
         let removed_review = servers
             .remove(mj_core::subagent::REVIEW_MCP_SERVER)
             .is_some();
-        return Ok(removed_agents || removed_review);
+        return Ok(removed_agents || removed_review || *servers != before);
     }
     Ok(true)
 }
@@ -848,6 +873,10 @@ pub(super) fn configure_codex_profile(
         subtle_subagents,
         review_tools,
         managed_subagent,
+        !mj_core::claude_mcp::ClaudeMcpCapabilities::for_harness(
+            mj_core::config::HarnessKind::Codex,
+        )
+        .is_empty(),
         Some(sandbox),
     )
 }
@@ -1453,6 +1482,75 @@ impl Drop for LiveWaiter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn configure_codex_claude_mcp_independent_registration() {
+        use mj_core::{config::ExecutionPolicy, subagent::SubagentMcpRole};
+        let root = tempfile::tempdir().unwrap();
+        let mut config = toml::Table::new();
+        for role in [Some(SubagentMcpRole::Parent), None] {
+            configure_codex_mcp_servers(
+                &mut config,
+                &root.path().join("config.toml"),
+                root.path(),
+                role,
+                ExecutionPolicy::ConfiguredApprovals,
+                true,
+                true,
+                true,
+            )
+            .unwrap();
+            let server = &config["mcp_servers"]["mj-claude"];
+            assert_eq!(
+                server["default_tools_approval_mode"].as_str(),
+                Some("approve")
+            );
+            assert!(server.get("omit_tools_from").is_none());
+            assert_eq!(
+                server["args"].clone().try_into::<Vec<String>>().unwrap(),
+                mj_core::claude_mcp::ClaudeMcpCapabilities::server_args(
+                    &root
+                        .path()
+                        .join(crate::worker_runtime::claude_mcp::CLAUDE_MCP_SOCKET),
+                    mj_core::config::HarnessKind::Codex
+                )
+            );
+        }
+        configure_codex_mcp_servers(
+            &mut config,
+            &root.path().join("config.toml"),
+            root.path(),
+            None,
+            ExecutionPolicy::ConfiguredApprovals,
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(config["mcp_servers"].get("mj-claude").is_none());
+    }
+
+    #[test]
+    fn configure_kimi_claude_mcp_independent_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        for role in [Some(mj_core::subagent::SubagentMcpRole::Parent), None] {
+            configure_kimi_subagent_mcp(root.path(), "session", &home, role, true).unwrap();
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
+            assert_eq!(config["mcpServers"]["mj-claude"]["transport"], "stdio");
+            assert_eq!(config["mcpServers"]["mj-claude"]["runtime_id"], "local");
+            assert_eq!(
+                config["mcpServers"].get("mj-agents").is_some(),
+                role.is_some()
+            );
+            assert_eq!(
+                config["mcpServers"].get("mj-review").is_some(),
+                role.is_some()
+            );
+        }
+    }
+
     // Hard-won: #1473: OpenCode must retain each message before acknowledging the relay lease.
     #[test]
     fn opencode_mailbox_plugin_retains_before_ack_and_deduplicates_retries() {
@@ -1618,7 +1716,7 @@ console.log("OpenCode durable mailbox bridge passed");
             root.path(),
             "reviewer",
             &home,
-            mj_core::subagent::SubagentMcpRole::Child,
+            Some(mj_core::subagent::SubagentMcpRole::Child),
             false,
         )
         .unwrap();
@@ -1649,7 +1747,7 @@ console.log("OpenCode durable mailbox bridge passed");
                 root.path(),
                 "reviewer",
                 outside.path(),
-                mj_core::subagent::SubagentMcpRole::Child,
+                Some(mj_core::subagent::SubagentMcpRole::Child),
                 false,
             )
             .is_err()
@@ -1662,7 +1760,7 @@ console.log("OpenCode durable mailbox bridge passed");
         let home = root.path().join("profile");
         std::fs::create_dir(&home).unwrap();
         let role = mj_core::subagent::SubagentMcpRole::MessageOnly;
-        configure_kimi_subagent_mcp(root.path(), "primary", &home, role, true).unwrap();
+        configure_kimi_subagent_mcp(root.path(), "primary", &home, Some(role), true).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
         let server = &config["mcpServers"]["mj-review"];
@@ -1681,7 +1779,7 @@ console.log("OpenCode durable mailbox bridge passed");
             ])
         );
         // A later launch without review removes the registration again.
-        configure_kimi_subagent_mcp(root.path(), "primary", &home, role, false).unwrap();
+        configure_kimi_subagent_mcp(root.path(), "primary", &home, Some(role), false).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.join("mcp.json")).unwrap()).unwrap();
         assert!(config["mcpServers"].get("mj-review").is_none());
@@ -2588,6 +2686,7 @@ enabled = false
                             true,
                             false,
                             true,
+                            false,
                             None,
                         )
                         .unwrap()
@@ -2692,6 +2791,7 @@ enabled = false
                         true,
                         false,
                         false,
+                        false,
                         None,
                     )
                     .unwrap()
@@ -2706,6 +2806,7 @@ enabled = false
                 None,
                 ExecutionPolicy::ConfiguredApprovals,
                 true,
+                false,
                 false,
                 false,
                 None,
@@ -2776,6 +2877,7 @@ enabled = false
                     role,
                     ExecutionPolicy::ConfiguredApprovals,
                     true,
+                    false,
                     false,
                     false,
                     None,
@@ -3618,6 +3720,7 @@ mod review_gate_tests {
                         true,
                         tools,
                         false,
+                        false,
                         None,
                     )
                     .unwrap();
@@ -3727,6 +3830,7 @@ mod review_gate_tests {
             true,
             true,
             false,
+            false,
             None,
         )
         .unwrap();
@@ -3761,6 +3865,7 @@ mod review_gate_tests {
             Some(SubagentMcpRole::Parent),
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             true,
+            false,
             false,
             false,
             None,
@@ -3803,6 +3908,7 @@ mod review_gate_tests {
             true,
             true,
             false,
+            false,
             None,
         )
         .unwrap();
@@ -3814,6 +3920,7 @@ mod review_gate_tests {
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             true,
             true,
+            false,
             false,
             None,
         )
