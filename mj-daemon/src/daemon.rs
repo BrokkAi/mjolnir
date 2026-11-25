@@ -749,6 +749,14 @@ impl ActiveLifecycle {
         !self.kind.cancelled_only_by_its_owner() && durable != Some(SessionState::StartupCleanup)
     }
 
+    /// Whether a person's cancel of this restart ends it by releasing its
+    /// durable intent. A shutdown that interrupted the rollback leaves the
+    /// intent, and the image pin it holds, to the next daemon.
+    fn cancelled_restart_releases_intent(&self) -> bool {
+        matches!(self.phase, LifecyclePhase::CancellingRestart)
+            && !self.control.stopped_for_shutdown()
+    }
+
     /// Stop this operation for daemon shutdown. An operation that can still be
     /// cancelled is cancelled. One a person already cancelled has its cleanup
     /// stopped. A committed one is interrupted, because the
@@ -773,7 +781,9 @@ impl ActiveLifecycle {
             && self.control.cancel_accepted()
             && matches!(
                 self.phase,
-                LifecyclePhase::Cancelling | LifecyclePhase::CancellingMoveDestination
+                LifecyclePhase::Cancelling
+                    | LifecyclePhase::CancellingRestart
+                    | LifecyclePhase::CancellingMoveDestination
             )
         {
             self.control.interrupt_cancelled_cleanup();

@@ -891,8 +891,7 @@ impl RuntimeState {
                                 .lifecycle
                                 .get_mut(&operation_session_id)
                                 .expect("Restart owns its lifecycle until completion");
-                            let user_cancelled =
-                                matches!(active.phase, LifecyclePhase::CancellingRestart);
+                            let user_cancelled = active.cancelled_restart_releases_intent();
                             active.phase = LifecyclePhase::CompletingRestart;
                             user_cancelled
                                 .then(|| active.restart_intent.clone())

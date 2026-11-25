@@ -3410,6 +3410,23 @@ async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
         .expect("shutdown after a person's cancel must wake its waiters");
     // The executor built from the control sees the shutdown as its own token.
     assert!(control.executor().shutdown_interrupted());
+
+    // The dashboard moves a cancelled Restart or container upgrade to its own
+    // phase; shutdown must still stop that rollback.
+    for kind in [LifecycleKind::Restart, LifecycleKind::UpgradeContainer] {
+        let control = LifecycleControl::default();
+        let mut cancelled = operation(kind, control.clone());
+        assert!(cancelled.request_cancel("test-session", "person cancel from dashboard"));
+        cancelled.phase = LifecyclePhase::CancellingRestart;
+        assert!(!control.stopped_for_shutdown());
+        assert!(cancelled.cancelled_restart_releases_intent());
+        assert!(cancelled.interrupt_for_shutdown());
+        assert!(control.stopped_for_shutdown());
+        // The dying daemon leaves the durable intent to its successor.
+        assert!(!cancelled.cancelled_restart_releases_intent());
+        assert!(!control.grant_commit());
+        assert!(control.executor().shutdown_interrupted());
+    }
 }
 
 #[tokio::test]

@@ -5965,6 +5965,80 @@ exit 0
         assert!(started.elapsed() < Duration::from_secs(20));
     }
 
+    /// The views hand admission callbacks to the one supervising executor,
+    /// once per call: a caller that brackets work the callee already brackets
+    /// would readmit twice, so the views must neither add nor drop a call.
+    #[test]
+    fn views_forward_each_admission_callback_exactly_once() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Default)]
+        struct Counting {
+            begun: AtomicUsize,
+            yielded: AtomicUsize,
+            ended: AtomicUsize,
+        }
+
+        impl CommandExecutor for Counting {
+            fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+                unreachable!("only admission callbacks are driven here")
+            }
+            fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &CommandSpec,
+                _: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn pause_deadline(&self) -> DeadlinePause {
+                DeadlinePause::none()
+            }
+            fn begin_resumable_work(&self) -> Result<()> {
+                self.begun.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn yield_admission_if_resumable(&self) -> bool {
+                self.yielded.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+                self.ended.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let probe = Counting::default();
+        let shutdown_only = probe.shutdown_only();
+        let bounded = shutdown_only.with_cleanup_timeout(Duration::from_secs(1));
+        for view in [
+            &shutdown_only as &dyn CommandExecutor,
+            &bounded as &dyn CommandExecutor,
+        ] {
+            let before = (
+                probe.begun.load(Ordering::SeqCst),
+                probe.yielded.load(Ordering::SeqCst),
+                probe.ended.load(Ordering::SeqCst),
+            );
+            view.begin_resumable_work().unwrap();
+            assert!(view.yield_admission_if_resumable());
+            view.end_resumable_work("test").unwrap();
+            assert_eq!(
+                (
+                    probe.begun.load(Ordering::SeqCst) - before.0,
+                    probe.yielded.load(Ordering::SeqCst) - before.1,
+                    probe.ended.load(Ordering::SeqCst) - before.2,
+                ),
+                (1, 1, 1)
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn abortable_stdin_unblocks_on_early_child_exit_and_cancellation() {

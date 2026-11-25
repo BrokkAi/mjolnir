@@ -1365,12 +1365,11 @@ impl Controller {
                     WorkerRunMode::CheckpointOnly
                 };
                 let capture_manager = if attempt.already_quiescent() { None } else { manager };
+                // `start_worker` brackets its own admission yields, on either
+                // executor; bracketing it here would readmit twice.
                 let relay = if user_cancelled() {
-                    executor.begin_resumable_work()?;
-                    let result = attempt.start_worker(self, admission, session_id, &cleanup,
-                        capture_manager, run_mode, observe_original).await;
-                    executor.end_resumable_work("observe suspend seal after cancellation")?;
-                    result
+                    attempt.start_worker(self, admission, session_id, &cleanup,
+                        capture_manager, run_mode, observe_original).await
                 } else {
                     attempt.start_worker(self, admission, session_id, executor,
                         capture_manager, run_mode, observe_original).await
@@ -1936,8 +1935,8 @@ impl Controller {
             if cancelled {
                 // Cancellation ends the suspend. The retained checkout still
                 // needs its agent back after quiescence finished.
-                executor.begin_resumable_work()?;
-                let restarted = attempt
+                // `start_worker` brackets its own admission yields.
+                attempt
                     .start_worker(
                         self,
                         admission,
@@ -1947,9 +1946,8 @@ impl Controller {
                         WorkerRunMode::Harness,
                         false,
                     )
-                    .await;
-                executor.end_resumable_work("record restart after cancelled suspend")?;
-                restarted?.release();
+                    .await?
+                    .release();
             } else {
                 attempt
                     .start_worker(
