@@ -1,0 +1,104 @@
+{
+  "round": "verify10",
+  "rates_verified_utc": "2026-11-25",
+  "units": "USD per million tokens",
+  "rates": {
+    "gemini-4-hydrogen": {
+      "input": 1.5,
+      "cached_input": 0.075,
+      "output": 7.5,
+      "source": "https://aistudio.google.com/docs/pricing#gemini-4-hydrogen"
+    },
+    "kimi-code/k3.1-pro": {
+      "input": 2.0,
+      "cached_input": 0.2,
+      "cache_write": 2.0,
+      "output": 10.0,
+      "source": "https://platform.kimi.ai/",
+      "caching_source": "https://platform.kimi.ai/docs/guide/context-caching"
+    },
+    "muse-ember-1.0": {
+      "input": 0.1,
+      "cached_input": 0.004,
+      "output": 0.5,
+      "above_200k_multiplier": 3.0,
+      "source": "https://dev.meta.ai/models/muse-ember"
+    }
+  },
+  "interpretation": "Estimated standard API equivalent, not subscription spend. Output already includes thinking.",
+  "source_manifest_sha256": "6db042340cc9219fab8c1f7b54840a2d688c9c324bc6563122e73d2dab9b9d32",
+  "options": {
+    "Gemini/high": {
+      "reviews": 70,
+      "diffs": 70,
+      "cost_low": 0.659326815,
+      "cost_high": 0.659326815,
+      "cost": 0.659326815,
+      "usage_scope_counts": {
+        "unspecified": 70
+      },
+      "mean_tokens": {
+        "fresh_input": 160830.25714285715,
+        "output": 28250.02857142857,
+        "cached_input": 2749416.2,
+        "cache_write": 0.0
+      },
+      "cost_note": "Assumes the saved unspecified-scope prompt-response counters cover the full turn.",
+      "pricing_source": "https://aistudio.google.com/docs/pricing#gemini-4-hydrogen"
+    },
+    "Gemini/medium": {
+      "reviews": 70,
+      "diffs": 70,
+      "cost_low": 0.21157153178571428,
+      "cost_high": 0.21157153178571428,
+      "cost": 0.21157153178571428,
+      "usage_scope_counts": {
+        "unspecified": 70
+      },
+      "mean_tokens": {
+        "fresh_input": 71818.68571428572,
+        "output": 7698.671428571429,
+        "cached_input": 614712.9,
+        "cache_write": 0.0
+      },
+      "cost_note": "Assumes the saved unspecified-scope prompt-response counters cover the full turn.",
+      "pricing_source": "https://aistudio.google.com/docs/pricing#gemini-4-hydrogen"
+    },
+    "Kimi/high": {
+      "reviews": 70,
+      "diffs": 70,
+      "cost_low": 0.43369626285714286,
+      "cost_high": 0.43369626285714286,
+      "cost": 0.43369626285714286,
+      "usage_scope_counts": {
+        "turn": 70
+      },
+      "mean_tokens": {
+        "fresh_input": 80047.61428571428,
+        "output": 9728.871428571429,
+        "cached_input": 881561.6,
+        "cache_write": 0.0
+      },
+      "cost_note": "Complete turn counters; five-minute API cache-write tariff, mutually exclusive input categories.",
+      "pricing_source": "https://platform.kimi.ai/"
+    },
+    "Ember/xhigh": {
+      "reviews": 70,
+      "diffs": 70,
+      "cost_low": 0.0259267956,
+      "cost_high": 0.0777803868,
+      "cost": 0.0777803868,
+      "usage_scope_counts": {
+        "turn": 70
+      },
+      "mean_tokens": {
+        "fresh_input": 119845.38571428572,
+        "output": 13957.4,
+        "cached_input": 1740889.2571428572,
+        "cache_write": 0.0
+      },
+      "cost_note": "Context-tier bound: all tokens below 200k vs all above; marker uses conservative upper endpoint. Per-request context sizes were not retained.",
+      "pricing_source": "https://dev.meta.ai/models/muse-ember"
+    }
+  }
+}
