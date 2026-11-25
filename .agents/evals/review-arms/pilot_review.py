@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 import shlex
 import subprocess
 
@@ -95,28 +96,40 @@ def prompt_with_rubric(rubric, capture, task, brief=None, reads=None):
 # audit.py accepts without changing what reviewers see against the product, so they stay at git's
 # defaults: planning runs without system or global git config and refuses a repository whose own
 # config sets them (see patch_config_conflicts), and the pinned session image has no git config.
+# Attributes (-diff, binary, diff=<driver>) come from the checked-out .gitattributes, so planning
+# reads them from the head tree, which is what every session has checked out (writers and reviewers
+# start at the intro commit, brief_driver.wait_pilot_ready), and refuses a non-empty
+# .git/info/attributes in the planning clone.
 PATCH_FLAGS = ("--no-ext-diff", "--ignore-submodules=none", "--full-index", "--no-color", "--no-textconv",
                "--no-relative", "-U3", "-M")
 PLANNING_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 def pathspecs(paths, excludes=()):
-    """Pathspecs naming exactly `paths`, not globs, and none of the files under `excludes`."""
-    return [f":(literal){path}" for path in paths] + [f":(exclude,literal){path}/" for path in excludes]
+    """Pathspecs naming exactly `paths`, not globs, and none of the exact paths in `excludes`."""
+    return [f":(literal){path}" for path in paths] + [f":(exclude,literal){path}" for path in excludes]
 
 
-def descendant_excludes(all_paths):
-    """For each changed path that is a leading directory of another, the path itself.
+def record_excludes(records):
+    """For each changed-file record, the paths of other records that lie under one of its paths.
 
     A file `foo` replaced by a directory (or the reverse) is changed together with `foo/bar`, and
-    `:(literal)foo` also matches `foo/bar`, which would print it twice.
+    `:(literal)foo` also matches `foo/bar`, which would print it twice. Only those exact other paths
+    are excluded: excluding the whole `foo/` would also hide a record's own destination when `foo`
+    is renamed to `foo/inner.txt`.
     """
-    directories = set()
-    for path in all_paths:
-        while "/" in path:
-            path = path.rsplit("/", 1)[0]
-            directories.add(path)
-    return directories & set(all_paths)
+    below = {}
+    for index, paths in enumerate(records):
+        for path in paths:
+            while "/" in path:
+                parent = path.rsplit("/", 1)[0]
+                below.setdefault(parent, []).append((index, path))
+                path = parent
+    result = []
+    for index, paths in enumerate(records):
+        found = [path for own in paths for owner, path in below.get(own, ()) if owner != index]
+        result.append(tuple(dict.fromkeys(found)))
+    return result
 
 
 def plan_reads(files, budget=READ_BYTES):
@@ -188,23 +201,35 @@ def reads_text(base_tree, head_tree, reads):
     return "\n".join(lines)
 
 
-def git_output(*args):
-    return subprocess.check_output(["git", "-C", driver.REPO, *args], env={**os.environ, **PLANNING_ENV})
+def git_output(*args, env=None):
+    """git in the pilot's clone; by default in the caller's environment, as Stage 2a captured."""
+    return subprocess.check_output(["git", "-C", driver.REPO, *args], env=env)
+
+
+def planning_git(head_tree):
+    """git for bounded-read planning: no system or global config, attributes of the session's tree."""
+    return lambda *args: git_output(f"--attr-source={head_tree}", *args, env={**os.environ, **PLANNING_ENV})
 
 
 def patch_config_conflicts():
-    """Config of the planning repository that could change patch bytes against the session's."""
+    """Settings of the planning clone itself that could change patch bytes against the session's."""
+    env = {**os.environ, **PLANNING_ENV}
     result = subprocess.run(["git", "-C", driver.REPO, "config", "--get-regexp",
                              r"^(diff|color)\.|^core\.(quotepath|abbrev|attributesfile)$"],
-                            env={**os.environ, **PLANNING_ENV}, capture_output=True, text=True)
+                            env=env, capture_output=True, text=True)
     if result.returncode not in (0, 1):
         raise RuntimeError(f"git config failed in {driver.REPO}: {result.stderr.strip()}")
-    return [line.split(" ", 1)[0] for line in result.stdout.splitlines()]
+    found = [line.split(" ", 1)[0] for line in result.stdout.splitlines()]
+    info = Path(driver.REPO) / git_output("rev-parse", "--git-path", "info/attributes", env=env).decode().strip()
+    if info.is_file() and any(line.strip() and not line.lstrip().startswith("#")
+                              for line in info.read_text(errors="replace").splitlines()):
+        found.append(str(info))
+    return found
 
 
-def changed_files(diff):
+def changed_files(diff, git=git_output):
     """(added, removed, paths) per file of `git diff --numstat -z -M`; a rename lists old and new."""
-    numstat = iter(git_output(*diff, "--numstat", "-z", "-M").decode(errors="replace").split("\0")[:-1])
+    numstat = iter(git(*diff, "--numstat", "-z", "-M").decode(errors="replace").split("\0")[:-1])
     files = []
     for record in numstat:
         added, removed, path = record.split("\t", 2)
@@ -217,17 +242,13 @@ def file_diffs(base_tree, head_tree):
     if conflicts := patch_config_conflicts():
         raise ValueError(f"{driver.REPO} sets {', '.join(conflicts)}, which can change patch bytes between "
                          "the planning clone and the session; remove it from the repository's config")
-    files = [paths for _, _, paths in changed_files(("diff", *PATCH_FLAGS[:2], base_tree, head_tree))]
+    git = planning_git(head_tree)
+    files = [paths for _, _, paths in changed_files(("diff", *PATCH_FLAGS[:2], base_tree, head_tree), git)]
     for paths in files:
         if any("\ufffd" in path for path in paths):
             raise ValueError(f"a changed path is not valid UTF-8 and cannot be named in a read: {paths}")
-    nested = descendant_excludes([path for paths in files for path in paths])
-    result = []
-    for paths in files:
-        excludes = tuple(path for path in paths if path in nested)
-        data = git_output("diff", *PATCH_FLAGS, base_tree, head_tree, "--", *pathspecs(paths, excludes))
-        result.append((paths, data, excludes))
-    return result
+    return [(paths, git("diff", *PATCH_FLAGS, base_tree, head_tree, "--", *pathspecs(paths, excludes)), excludes)
+            for paths, excludes in zip(files, record_excludes(files), strict=True)]
 
 
 def capture(bug):

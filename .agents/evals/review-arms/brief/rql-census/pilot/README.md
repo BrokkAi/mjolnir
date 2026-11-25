@@ -132,8 +132,10 @@ role reads the diff; they are independent, so a reviewer-only rerun keeps the ac
   other `audit.py`-accepted flags in `pilot_review.PATCH_FLAGS`; planning runs without system or
   global git config and refuses a clone whose own config sets `diff.*`, `color.*` or
   `core.quotePath`, because the rest have no accepted flag and the pinned session image has no git
-  config. A changed path that is a directory of another changed path gets its own read with
-  `:(exclude,literal)path/`. Each job's `inputs.json` records `writer_diff_reading` or
+  config. Planning reads git attributes from the head tree (what every session has checked out)
+  and refuses a non-empty `.git/info/attributes`. A changed file with other changed paths under one
+  of its paths (a file replaced by a directory, a move into its own name) gets its own read that
+  excludes those exact paths with `:(exclude,literal)path`. Each job's `inputs.json` records `writer_diff_reading` or
   `reviewer_diff_reading` and a digest of the instruction text, budget and flags, and
   `prompt_sha256` covers the rendered list.
 

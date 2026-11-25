@@ -1050,6 +1050,14 @@ if not (attempt / "recover").exists():
         (repo / "bar").mkdir()
         write("bar/x", b"x\n")
         write("bar/y", b"y\n")
+        # Moves between a path and a directory of its own name, with a sibling in another record.
+        moved = b"".join(b"moved line %03d\n" % n for n in range(12))
+        write("rn1", moved)
+        (repo / "rn2").mkdir()
+        moved2 = b"".join(b"other moved line %03d\n" % n for n in range(12))
+        write("rn2/inner.txt", moved2)
+        write("rn2/gone.txt", b"gone\n")
+        write("blob.dat", b"text in the base\n")
         git("add", "-A")
         git("commit", "-q", "-m", "base")
         base = git("rev-parse", "HEAD").decode().strip()
@@ -1065,9 +1073,18 @@ if not (attempt / "recover").exists():
         (repo / "foo").mkdir()
         write("foo/inner.txt", b"inner\n")
         write("bar", b"a directory that becomes a file\n")
+        git("rm", "-q", "rn1", "rn2/inner.txt", "rn2/gone.txt")
+        (repo / "rn1").mkdir()
+        write("rn1/inner.txt", moved)
+        write("rn1/other.txt", b"sibling\n")
+        write("rn2", moved2)
+        # Binary in the session's checkout, text in a planning clone that is at the base.
+        write(".gitattributes", b"blob.dat -diff\n")
+        write("blob.dat", b"text in the head\n")
         git("add", "-A")
         git("commit", "-q", "-m", "change")
         head = git("rev-parse", "HEAD").decode().strip()
+        git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", base)
 
         # Planning sees the default configuration whatever the host sets; the session's clone has a
         # different abbreviation length, context and color. The reads must print the planned bytes.
@@ -1077,13 +1094,15 @@ if not (attempt / "recover").exists():
               unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)})):
             capture = pilot_review.capture({"base_commit": base, "intro_commit": head})
             reads = pilot_review.plan_reads(pilot_review.file_diffs(*capture[:2]))
-        full = git("diff", *pilot_review.PATCH_FLAGS, *capture[:2])
-        self.assertIn(b"diff --git a/big.txt b/big.txt", full)
-        self.assertGreater(len(full), 3 * exec_cap)
         reader = self.root / "reader"
-        git("clone", "-q", "--no-local", str(repo), str(reader), cwd=self.root)
+        git("-c", "advice.detachedHead=false", "clone", "-q", "--no-local", str(repo), str(reader), cwd=self.root)
+        git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", head, cwd=reader)
         for key, value in (("core.abbrev", "12"), ("diff.context", "1"), ("color.ui", "always")):
             git("config", key, value, cwd=reader)
+        # What the session prints: its checkout is at the head, whatever the planning clone has.
+        full = git("diff", *pilot_review.PATCH_FLAGS, *capture[:2], cwd=reader)
+        self.assertIn(b"diff --git a/big.txt b/big.txt", full)
+        self.assertGreater(len(full), 3 * exec_cap)
         outputs = [subprocess.check_output(["bash", "-c", pilot_review.read_command(*capture[:2], read)], cwd=reader)
                    for read in reads]
         self.assertGreater(len(reads), 3)
@@ -1093,8 +1112,21 @@ if not (attempt / "recover").exists():
             self.assertLessEqual(len(output), pilot_review.READ_BYTES)
             self.assertLess(pilot_review.READ_BYTES, exec_cap)
             output.decode()
-        self.assertIn(("foo",), [tuple(read[3]) for read in reads])
-        self.assertIn(("bar",), [tuple(read[3]) for read in reads])
+        excludes = [tuple(read[3]) for read in reads]
+        self.assertIn(("foo/inner.txt",), excludes)
+        self.assertIn(("bar/x", "bar/y"), excludes)
+        # A move into or out of a directory of its own name keeps its other path.
+        self.assertIn(("rn1/other.txt",), excludes)
+        self.assertIn(("rn2/gone.txt",), excludes)
+        self.assertTrue(any(b"rename from rn1\nrename to rn1/inner.txt" in out for out in outputs))
+        self.assertTrue(any(b"rename from rn2/inner.txt\nrename to rn2\n" in out for out in outputs))
+        self.assertIn(b"Binary files", full.split(b"diff --git a/blob.dat")[1])
+        # A non-empty .git/info/attributes in the planning clone can differ from the session's.
+        (repo / ".git/info/attributes").write_text("*.dat diff=other\n")
+        with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
+            with self.assertRaisesRegex(ValueError, "info/attributes"):
+                pilot_review.file_diffs(*capture[:2])
+        (repo / ".git/info/attributes").unlink()
         # A repository whose own config can change the patch is refused, not planned.
         git("config", "diff.algorithm", "patience")
         with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
@@ -1125,6 +1157,20 @@ if not (attempt / "recover").exists():
         self.assertIn(f"Run this exact command: `git -C . diff --no-ext-diff --ignore-submodules=none {capture[0]} {capture[1]}`",
                       old_reviewer["prompt"])
         self.assertFalse([key for key in old_writer["inputs"] | old_reviewer["inputs"] if "diff_reading" in key])
+        # The default captures in the caller's environment, as Stage 2a did: a host config that
+        # turns rename detection off still reaches its diffstat, and bounded planning ignores it.
+        host_config.write_text("[diff]\n\trenames = false\n")
+        plain = [*pilot_review.PATCH_FLAGS[:2], "--shortstat", *capture[:2]]
+        inherited = subprocess.check_output(["git", "-C", repo, "diff", *plain],
+                                            env={**os.environ, "GIT_CONFIG_GLOBAL": str(host_config)}).decode().strip()
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)}):
+            _, renames_off_reviewer = render()
+        self.assertIn(f"Repository: . -- {inherited}", renames_off_reviewer["prompt"])
+        self.assertNotIn(f"Repository: . -- {inherited}", old_reviewer["prompt"])
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)}):
+            _, renames_off_bounded = render(reviewer_diff_reading=pilot_review.BOUNDED_READS)
+        self.assertEqual(renames_off_bounded["prompt"].split("Per-file diffstat")[0],
+                         render(reviewer_diff_reading=pilot_review.BOUNDED_READS)[1]["prompt"].split("Per-file diffstat")[0])
         new_writer, new_reviewer = render(writer_diff_reading=pilot_review.BOUNDED_READS,
                                           reviewer_diff_reading=pilot_review.BOUNDED_READS)
         for params, kind in ((new_writer, "writer"), (new_reviewer, "reviewer")):
