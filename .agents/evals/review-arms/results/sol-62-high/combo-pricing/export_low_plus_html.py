@@ -16,13 +16,22 @@ def export():
                                                    if name == 'budget-pareto.csv'})
     payload['vmax'] = panel['max_f']
     data = json.dumps(payload, separators=(',', ':'), ensure_ascii=True).replace('</', '<\\/')
-    layout = '\nmain{max-width:1000px;padding:12px 16px 16px}.panels{display:block}\n'
+    layout = '\nmain{max-width:1000px;padding:12px 16px 16px}.panels{display:block}\n.marker-key{width:min(520px,100%);display:block;margin:8px 0}\n'
     scale = colorbar_svg(payload['vmax']).replace('Expected confirmed findings ', 'Low+ confirmed findings ')
+    key = '\n'.join([
+        '<svg viewBox="0 0 520 44" class="marker-key" role="img" aria-label="Chart marker key">',
+        '<circle cx="8" cy="10" r="3.6" fill="#fff" stroke="#0b0b0b"/>',
+        '<text x="22" y="14" class="al">Best setup within some budget</text>',
+        '<path d="M8 25L14 31L8 37L2 31Z" fill="#ddd" stroke="#0b0b0b"/>',
+        '<text x="22" y="35" class="al">Greptile solo reference (excluded from optimization)</text>',
+        '</svg>',
+    ])
     page = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Low+ review findings</title><style>{CSS}{layout}</style></head>
 <body><main>
 {scale}
+{key}
 <div class="panels"><figure>{svg_panel(panel, payload['domain'], payload['vmax'])}</figure></div>
 <div id="tip" role="status"></div>
 <script id="budget-data" type="application/json">{data}</script>
