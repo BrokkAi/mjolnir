@@ -1,0 +1,341 @@
+{
+  "round": "verify10",
+  "sessions": 1796,
+  "solo": [
+    {
+      "model": "deepseek-flash",
+      "effort": "low",
+      "diffs": 16,
+      "sessions": 35,
+      "all": 15.5,
+      "low": 6.5,
+      "medium": 7.166666666666667,
+      "high": 1.8333333333333333,
+      "medium_high": 9.0,
+      "exact": {
+        "all": "31/2",
+        "low": "13/2",
+        "medium": "43/6",
+        "high": "11/6",
+        "medium_high": "9"
+      },
+      "mean_cost_usd": 0.10665714285714285,
+      "observed_median_latency_s": 297.3,
+      "observed_p95_latency_s": 546.57
+    },
+    {
+      "model": "gemini-4-hydrogen",
+      "effort": "high",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 74.0,
+      "low": 19.0,
+      "medium": 41.0,
+      "high": 14.0,
+      "medium_high": 55.0,
+      "exact": {
+        "all": "74",
+        "low": "19",
+        "medium": "41",
+        "high": "14",
+        "medium_high": "55"
+      },
+      "mean_cost_usd": null,
+      "observed_median_latency_s": 199.5,
+      "observed_p95_latency_s": 347.20500000000004
+    },
+    {
+      "model": "gemini-4-hydrogen",
+      "effort": "medium",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 28.0,
+      "low": 6.0,
+      "medium": 16.0,
+      "high": 6.0,
+      "medium_high": 22.0,
+      "exact": {
+        "all": "28",
+        "low": "6",
+        "medium": "16",
+        "high": "6",
+        "medium_high": "22"
+      },
+      "mean_cost_usd": null,
+      "observed_median_latency_s": 74.95,
+      "observed_p95_latency_s": 124.41
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "diffs": 70,
+      "sessions": 210,
+      "all": 81.33333333333333,
+      "low": 15.0,
+      "medium": 52.333333333333336,
+      "high": 14.0,
+      "medium_high": 66.33333333333333,
+      "exact": {
+        "all": "244/3",
+        "low": "15",
+        "medium": "157/3",
+        "high": "14",
+        "medium_high": "199/3"
+      },
+      "mean_cost_usd": 0.16750190476190477,
+      "observed_median_latency_s": 90.9,
+      "observed_p95_latency_s": 154.85999999999999
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "diffs": 70,
+      "sessions": 140,
+      "all": 48.5,
+      "low": 8.5,
+      "medium": 29.5,
+      "high": 10.5,
+      "medium_high": 40.0,
+      "exact": {
+        "all": "97/2",
+        "low": "17/2",
+        "medium": "59/2",
+        "high": "21/2",
+        "medium_high": "40"
+      },
+      "mean_cost_usd": 0.09984214285714285,
+      "observed_median_latency_s": 46.05,
+      "observed_p95_latency_s": 70.315
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "diffs": 70,
+      "sessions": 140,
+      "all": 123.0,
+      "low": 33.5,
+      "medium": 71.0,
+      "high": 18.5,
+      "medium_high": 89.5,
+      "exact": {
+        "all": "123",
+        "low": "67/2",
+        "medium": "71",
+        "high": "37/2",
+        "medium_high": "179/2"
+      },
+      "mean_cost_usd": 0.3296992857142857,
+      "observed_median_latency_s": 213.9,
+      "observed_p95_latency_s": 403.97499999999997
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "diffs": 70,
+      "sessions": 221,
+      "all": 90.16666666666667,
+      "low": 30.666666666666668,
+      "medium": 51.833333333333336,
+      "high": 7.666666666666667,
+      "medium_high": 59.5,
+      "exact": {
+        "all": "541/6",
+        "low": "92/3",
+        "medium": "311/6",
+        "high": "23/3",
+        "medium_high": "119/2"
+      },
+      "mean_cost_usd": 0.04358144796380091,
+      "observed_median_latency_s": 42.7,
+      "observed_p95_latency_s": 74.1
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "diffs": 70,
+      "sessions": 140,
+      "all": 156.5,
+      "low": 59.0,
+      "medium": 84.0,
+      "high": 13.5,
+      "medium_high": 97.5,
+      "exact": {
+        "all": "313/2",
+        "low": "59",
+        "medium": "84",
+        "high": "27/2",
+        "medium_high": "195/2"
+      },
+      "mean_cost_usd": 0.09299714285714286,
+      "observed_median_latency_s": 83.94999999999999,
+      "observed_p95_latency_s": 137.41
+    },
+    {
+      "model": "gpt-6.2-sol",
+      "effort": "high",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 180.0,
+      "low": 68.0,
+      "medium": 93.0,
+      "high": 19.0,
+      "medium_high": 112.0,
+      "exact": {
+        "all": "180",
+        "low": "68",
+        "medium": "93",
+        "high": "19",
+        "medium_high": "112"
+      },
+      "mean_cost_usd": 0.2884514285714286,
+      "observed_median_latency_s": 123.85,
+      "observed_p95_latency_s": 260.26500000000004
+    },
+    {
+      "model": "gpt-6.2-sol",
+      "effort": "low",
+      "diffs": 70,
+      "sessions": 210,
+      "all": 130.33333333333334,
+      "low": 58.0,
+      "medium": 59.333333333333336,
+      "high": 13.0,
+      "medium_high": 72.33333333333333,
+      "exact": {
+        "all": "391/3",
+        "low": "58",
+        "medium": "178/3",
+        "high": "13",
+        "medium_high": "217/3"
+      },
+      "mean_cost_usd": 0.11405380952380953,
+      "observed_median_latency_s": 47.1,
+      "observed_p95_latency_s": 121.16999999999999
+    },
+    {
+      "model": "gpt-6.2-sol",
+      "effort": "medium",
+      "diffs": 70,
+      "sessions": 210,
+      "all": 209.0,
+      "low": 93.66666666666667,
+      "medium": 97.0,
+      "high": 18.333333333333332,
+      "medium_high": 115.33333333333333,
+      "exact": {
+        "all": "209",
+        "low": "281/3",
+        "medium": "97",
+        "high": "55/3",
+        "medium_high": "346/3"
+      },
+      "mean_cost_usd": 0.24068666666666666,
+      "observed_median_latency_s": 109.9,
+      "observed_p95_latency_s": 231.97000000000003
+    },
+    {
+      "model": "greptile",
+      "effort": "base",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 117.0,
+      "low": 48.0,
+      "medium": 54.0,
+      "high": 15.0,
+      "medium_high": 69.0,
+      "exact": {
+        "all": "117",
+        "low": "48",
+        "medium": "54",
+        "high": "15",
+        "medium_high": "69"
+      },
+      "mean_cost_usd": 1.0,
+      "observed_median_latency_s": 146.8,
+      "observed_p95_latency_s": 223.775
+    },
+    {
+      "model": "greptile",
+      "effort": "plus",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 171.0,
+      "low": 71.0,
+      "medium": 84.0,
+      "high": 16.0,
+      "medium_high": 100.0,
+      "exact": {
+        "all": "171",
+        "low": "71",
+        "medium": "84",
+        "high": "16",
+        "medium_high": "100"
+      },
+      "mean_cost_usd": 3.0,
+      "observed_median_latency_s": 265.9,
+      "observed_p95_latency_s": 434.95500000000004
+    },
+    {
+      "model": "kimi-code/k3.1-pro",
+      "effort": "high",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 65.0,
+      "low": 13.0,
+      "medium": 42.0,
+      "high": 10.0,
+      "medium_high": 52.0,
+      "exact": {
+        "all": "65",
+        "low": "13",
+        "medium": "42",
+        "high": "10",
+        "medium_high": "52"
+      },
+      "mean_cost_usd": null,
+      "observed_median_latency_s": 340.25,
+      "observed_p95_latency_s": 822.1
+    },
+    {
+      "model": "muse-ember-1.0",
+      "effort": "xhigh",
+      "diffs": 70,
+      "sessions": 70,
+      "all": 29.0,
+      "low": 8.0,
+      "medium": 14.0,
+      "high": 7.0,
+      "medium_high": 21.0,
+      "exact": {
+        "all": "29",
+        "low": "8",
+        "medium": "14",
+        "high": "7",
+        "medium_high": "21"
+      },
+      "mean_cost_usd": null,
+      "observed_median_latency_s": 292.35,
+      "observed_p95_latency_s": 733.4300000000001
+    }
+  ],
+  "high_novelty": {
+    "all": {
+      "high_union": 180,
+      "not_in_any_of_three_medium": 11,
+      "not_in_any_low_or_medium": 10,
+      "not_in_entire_previous_pool": 6
+    },
+    "medium_high": {
+      "high_union": 112,
+      "not_in_any_of_three_medium": 4,
+      "not_in_any_low_or_medium": 4,
+      "not_in_entire_previous_pool": 3
+    },
+    "high": {
+      "high_union": 19,
+      "not_in_any_of_three_medium": 0,
+      "not_in_any_low_or_medium": 0,
+      "not_in_entire_previous_pool": 0
+    }
+  }
+}

@@ -769,7 +769,7 @@ impl DashboardState {
                 session_id: session.id.clone(),
             };
         }
-        if let Some(issue) = session.configuration_issue(&self.config) {
+        if let Some(issue) = self.state.configuration_issue(session, &self.config) {
             self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::ConfigurationRepair {
                 session_id: session.id.clone(),
                 error: issue,

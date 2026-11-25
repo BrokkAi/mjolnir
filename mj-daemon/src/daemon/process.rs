@@ -194,6 +194,10 @@ pub(super) async fn run_daemon_runtime(
     .context("SSH master lock cleanup task failed")?;
     Controller::recover_config_id_rename()?;
     let config = Config::load()?;
+    // Records written before secret references were stored as references hold
+    // the resolved values. Rewrite them before anything reads or serves them.
+    mj_controller::database::scrub_resolved_target_secrets(&config)
+        .context("remove resolved secrets from recorded target settings")?;
     mj_controller::database::recover_interrupted_checkpointing_sessions(
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     )?;

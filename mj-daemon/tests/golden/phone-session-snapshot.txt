@@ -844,7 +844,6 @@
     "targeted_turn_control_supported": false,
     "retry_assessment_pending": false,
     "id": "child-1",
-    "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
     "given_title": "Phone launch",

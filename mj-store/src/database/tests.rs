@@ -6730,7 +6730,7 @@ fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
         harness: mj_core::config::HarnessKind::Codex,
         bridge_command: "review-bridge".into(),
         bridge_args: vec!["--private-launch".into()],
-        environment: BTreeMap::from([("PRIVATE_LAUNCH".into(), "retain in the daemon".into())]),
+        environment: BTreeMap::new(),
         excluded_environment: vec![],
         execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
         model: Some("review-model".into()),

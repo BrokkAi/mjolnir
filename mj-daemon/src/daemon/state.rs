@@ -1599,26 +1599,26 @@ impl RuntimeState {
     }
 
     fn startup_configuration_context(&self, session_id: &str, key: &str, value: &str) -> String {
-        let location = self
-            .owner()
-            .controller()
-            .state
-            .sessions
-            .get(session_id)
-            .map(|record| {
-                let host = record.target.as_ref().map(|target| {
-                    mj_core::targets::storage::session_storage_paths(
-                        target,
-                        session_id,
-                        record.project_directory.as_deref(),
-                    )
-                    .host
-                });
-                match host {
-                    Some(host) => format!("target {} on {host}", record.target_template_id),
-                    None => format!("target {}", record.target_template_id),
-                }
+        let owner = self.owner();
+        let controller = owner.controller();
+        let location = controller.state.sessions.get(session_id).map(|record| {
+            let checkout = controller.state.checkout(session_id).ok();
+            let host = record.target.as_ref().map(|target| {
+                mj_core::targets::storage::session_storage_paths(
+                    target,
+                    session_id,
+                    checkout
+                        .as_ref()
+                        .and_then(|checkout| checkout.project_directory())
+                        .as_deref(),
+                )
+                .host
             });
+            match host {
+                Some(host) => format!("target {} on {host}", record.target_template_id),
+                None => format!("target {}", record.target_template_id),
+            }
+        });
         format!(
             "startup configuration {key}={value} for session {session_id} ({}) failed",
             location.as_deref().unwrap_or("target no longer registered")

@@ -924,16 +924,19 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
 
     let raw_worktree_path =
         PathBuf::from("/srv/project/.mj/worktrees/managed-worktree/packages/app");
+    // The record stores no path: the checkout derives it from the descriptor.
     let managed_worktree = managed_checkout_record(
         "managed-worktree",
         ManagedCheckoutKind::Worktree,
-        Some(raw_worktree_path.clone()),
+        None,
         ManagedWorktreeTarget::Local,
     );
     state
         .sessions
         .insert(managed_worktree.id.clone(), managed_worktree.clone());
 
+    // Records written before the path became derivable carry a copy, which is
+    // still honored.
     let raw_clone_path = PathBuf::from("/srv/project/.mj/clones/managed-clone/packages/app");
     let managed_clone = managed_checkout_record(
         "managed-clone",
@@ -982,14 +985,20 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         .sessions
         .insert(legacy_workspace.id.clone(), legacy_workspace.clone());
 
-    // Incomplete managed legacy data keeps managed ownership; its actual
-    // project directory is unknown instead of being silently treated as user-owned.
-    let incomplete_managed = managed_checkout_record(
+    // A descriptor whose source project lies outside its repository cannot
+    // derive a path: it keeps managed ownership, and its project directory is
+    // unknown instead of being silently treated as user-owned.
+    let mut incomplete_managed = managed_checkout_record(
         "incomplete-managed",
         ManagedCheckoutKind::Worktree,
         None,
         ManagedWorktreeTarget::Local,
     );
+    incomplete_managed
+        .managed_worktree
+        .as_mut()
+        .unwrap()
+        .source_project_directory = PathBuf::from("/elsewhere/app");
     state
         .sessions
         .insert(incomplete_managed.id.clone(), incomplete_managed.clone());
@@ -1014,8 +1023,9 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         .map(|id| (id.clone(), id.clone()))
         .collect();
     let add_child = |state: &mut State, id: &str, parent: &SessionRecord| {
+        // A borrowed child records no checkout of its own.
         let mut child = checkout_session(id);
-        child.project_directory = parent.project_directory.clone();
+        child.project_directory = None;
         child.managed_worktree = None;
         state.sessions.insert(child.id.clone(), child.clone());
         state
@@ -1062,12 +1072,12 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
     assert!(matches!(
         state.checkout("managed-worktree").unwrap(),
         Checkout::ManagedWorktree { worktree, project_directory: Some(path) }
-            if worktree.kind == ManagedCheckoutKind::Worktree && path == raw_worktree_path
+            if worktree.kind == ManagedCheckoutKind::Worktree && path.as_ref() == raw_worktree_path
     ));
     assert!(matches!(
         state.checkout("managed-clone").unwrap(),
         Checkout::ManagedWorktree { worktree, project_directory: Some(path) }
-            if worktree.kind == ManagedCheckoutKind::Clone && path == raw_clone_path
+            if worktree.kind == ManagedCheckoutKind::Clone && path.as_ref() == raw_clone_path
     ));
     assert!(matches!(
         state.checkout("bundle-workspace").unwrap(),
@@ -1093,7 +1103,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         Checkout::ManagedWorktree {
             project_directory: Some(path),
             ..
-        } if path == Path::new("/home/dev/other-project")
+        } if path.as_ref() == Path::new("/home/dev/other-project")
     ));
 
     for (child_id, parent_id, expected_kind) in [
@@ -1135,7 +1145,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
             .checkout_for_record("child-managed-worktree", &projected_child)
             .unwrap(),
         Checkout::Borrowed { checkout, .. }
-            if checkout.project_directory() == Some(raw_worktree_path.as_path())
+            if checkout.project_directory().as_deref() == Some(raw_worktree_path.as_path())
     ));
 }
 
@@ -2444,4 +2454,126 @@ fn resolve_default_container_size_preserves_precedence_and_clamping() {
     assert_eq!(parse_container_memory("16Gi").unwrap(), 16 << 30);
     assert_eq!(parse_container_memory("8g").unwrap(), 8 << 30);
     assert!(parse_container_memory("18446744073709551615g").is_err());
+}
+
+// A secret-sourced target environment entry is recorded as its reference and
+// resolved only when a launch asks, so the record never holds the secret, and a
+// rotated or removed secret applies at the next launch.
+#[test]
+fn target_runtime_records_secret_references_and_resolves_them_only_per_launch() {
+    use crate::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
+    let resolver = |secret: Option<&str>| {
+        SecretResolver::fixed(
+            BTreeMap::new(),
+            secret
+                .map(|secret| BTreeMap::from([("stored".to_owned(), secret.to_owned())]))
+                .unwrap_or_default(),
+        )
+    };
+    let mut template: TargetTemplate =
+        serde_json::from_str(r#"{"kind":"local-podman","image":"test"}"#).unwrap();
+    let TargetTemplate::LocalPodman { container } = &mut template else {
+        unreachable!()
+    };
+    container.environment = with_secret_resolver(resolver(Some("sk-first")), || {
+        Environment::from_sources(BTreeMap::from([
+            (
+                "API_KEY".to_owned(),
+                EnvironmentValue::FromSecret("stored".to_owned()),
+            ),
+            (
+                "MODE".to_owned(),
+                EnvironmentValue::Literal("fast".to_owned()),
+            ),
+        ]))
+    });
+    let runtime = TargetRuntimeSettings::from(&template);
+    let stored = serde_json::to_string(&runtime).unwrap();
+    assert!(!stored.contains("sk-first"), "{stored}");
+    assert_eq!(
+        runtime.environment,
+        BTreeMap::from([("MODE".to_owned(), "fast".to_owned())])
+    );
+    // A record read back from the store resolves the same way.
+    let runtime: TargetRuntimeSettings = serde_json::from_str(&stored).unwrap();
+    let launch = |secret| with_secret_resolver(resolver(secret), || runtime.launch_environment());
+    assert_eq!(launch(Some("sk-first")).unwrap()["API_KEY"], "sk-first");
+    assert_eq!(launch(Some("sk-rotated")).unwrap()["API_KEY"], "sk-rotated");
+    assert_eq!(launch(Some("sk-rotated")).unwrap()["MODE"], "fast");
+    let error = launch(None).unwrap_err().to_string();
+    assert!(
+        error.contains("API_KEY") && error.contains("stored"),
+        "{error}"
+    );
+    // A record written before references were recorded has no such field.
+    let legacy = stored.replace("\"environment_references\"", "\"unrelated\"");
+    let legacy: TargetRuntimeSettings = serde_json::from_str(&legacy).unwrap();
+    assert!(legacy.environment_references.is_empty());
+}
+
+// A sub-agent records no checkout of its own: it works in its owner's. Strict
+// validation must judge it by that checkout, not demand a configured bundle
+// for a parent that is a plain project directory.
+#[test]
+fn strict_validation_judges_a_borrowed_sub_agent_by_its_owners_checkout() {
+    let mut config = sample_config();
+    config.bundles.clear();
+    let mut parent = checkout_session("raw-parent");
+    parent.project = None;
+    parent.project_directory = Some(PathBuf::from("/work/plain-directory"));
+    let mut child = checkout_session("raw-child");
+    child.project = None;
+    child.project_directory = None;
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.environment_owners = [
+        (parent.id.clone(), parent.id.clone()),
+        (child.id.clone(), parent.id.clone()),
+    ]
+    .into_iter()
+    .collect();
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentMetadata {
+            kind: crate::subagent::SubagentKind::Worker,
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Borrow checkout".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            request_key: "request".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+            handback_tool: false,
+            orchestrator: false,
+            reported_finish: None,
+        },
+    );
+    state.validate_against_config(&config).unwrap();
+    // The record alone cannot name the borrowed checkout.
+    assert!(child.configuration_issue(&config).is_some());
+}
+
+#[test]
+fn a_managed_checkout_directory_keeps_posix_separators() {
+    let worktree = ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: PathBuf::from("/srv/repo/packages/app"),
+        source_repository: PathBuf::from("/srv/repo"),
+        worktree_root: PathBuf::from("/srv/repo/.mj/clones/s1"),
+        branch: "main".into(),
+        target: ManagedWorktreeTarget::Ssh {
+            destination: "dev@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        base_commit: None,
+    };
+    let directory = worktree.checkout_directory().unwrap();
+    assert_eq!(
+        crate::target_path::text(&directory),
+        "/srv/repo/.mj/clones/s1/packages/app"
+    );
 }

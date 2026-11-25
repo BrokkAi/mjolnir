@@ -5,19 +5,19 @@ pub const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMOR
 
 pub fn project_memory_launch(
     session: &mj_core::state::SessionRecord,
+    checkout: &mj_core::state::Checkout<'_>,
     bundle: Option<&ProjectBundle>,
     workspace: &(String, Vec<String>),
     target_profile_home: &str,
     parent_worktree: Option<&mj_core::state::ManagedWorktree>,
 ) -> Result<ProjectMemoryLaunchConfig> {
-    // A sub-agent records its parent's checkout as its project directory.
-    // For an isolated parent that is the parent's own clone, not the project,
-    // so the child takes the parent's checkout for its identity and shares
-    // the parent's memory (R10-4).
+    // A sub-agent works in its owner's checkout. For an isolated owner that is
+    // the owner's own clone, not the project, so the child takes the owner's
+    // checkout for its identity and shares the owner's memory (R10-4).
     let identity = if let Some(project) = &session.project {
         project.memory_identity()?
     } else {
-        ProjectMemoryIdentity::for_legacy_session(session, bundle, parent_worktree)?
+        ProjectMemoryIdentity::for_legacy_session(session, checkout, bundle, parent_worktree)?
     };
     let project_key = identity.key()?;
     let replica_slug = project_memory_replica_slug(&project_key, &session.id);

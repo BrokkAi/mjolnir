@@ -256,6 +256,7 @@ impl ViewerSnapshot {
                 let checkout = state
                     .checkout(&session.id)
                     .expect("viewer session has a valid checkout owner");
+                let configuration_issue = session.configuration_issue_in(&checkout, config);
                 let resume_refusals = targets
                     .iter()
                     .filter_map(|target_id| {
@@ -353,7 +354,7 @@ impl ViewerSnapshot {
                     supports_open_request: false,
                     relay_state: None,
                     id: session.id.clone(),
-                    publication_state: session.publication_state(),
+                    publication_state: session.publication_state_in(&checkout),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
                     title: session.listed_title().to_owned(),
@@ -375,12 +376,11 @@ impl ViewerSnapshot {
                     active: session.state.is_active(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
-                    has_error: session.last_error.is_some()
-                        || session.configuration_issue(config).is_some(),
+                    has_error: session.last_error.is_some() || configuration_issue.is_some(),
                     has_checkpoint: session.checkpoint.is_some(),
                     failed_launch_retry,
                     retained_target: session.target.is_some(),
-                    configuration_issue: session.configuration_issue(config),
+                    configuration_issue,
                     // A session that failed to launch (or a close that left it
                     // dead) carries its reason here so a client need not open
                     // the local diagnostic to learn why. A failed resume rolls

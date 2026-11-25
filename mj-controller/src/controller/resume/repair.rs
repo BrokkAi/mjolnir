@@ -787,7 +787,7 @@ impl Controller {
             || worktree.as_ref().is_some_and(|original| {
                 recovery.destination_checkout == target_path(&original.worktree_root)
                     || checkout.project_directory().is_some_and(|project| {
-                        recovery.destination_checkout == target_path(project)
+                        recovery.destination_checkout == target_path(&project)
                     })
             });
         let allowed_checkouts =
