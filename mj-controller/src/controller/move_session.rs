@@ -972,20 +972,6 @@ impl Controller {
             .as_ref()
             .unwrap_or(&operation.source_profile_id);
         let profile = self.config.named_profile(profile_id)?;
-        let source_kind = self
-            .config
-            .named_profile(&operation.source_profile_id)
-            .map(|p| p.kind)
-            .unwrap_or(
-                self.state
-                    .sessions
-                    .get(&operation.selection.session_id)
-                    .context("Move session missing")?
-                    .harness_kind,
-            );
-        let continuity =
-            self.config
-                .native_continuity(source_kind, &operation.source_profile_id, profile_id)?;
         let session = self
             .state
             .sessions
@@ -1007,9 +993,7 @@ impl Controller {
         if let Some(choice) = &operation.selection.oracle_choice {
             session.oracle_choice = Some(Box::new(choice.clone()));
         }
-        if !continuity {
-            session.native_session_id = None;
-        }
+        session.native_session_id = operation.destination_native_session_id.clone();
         session.updated_at = now();
         Ok(())
     }
@@ -2280,7 +2264,15 @@ impl Controller {
                 source_additional_mounts: Vec::new(),
                 source_resource_allocation: None,
                 destination_target: None,
-                destination_native_session_id: None,
+                destination_native_session_id: if checked.in_place && self.config.native_continuity(
+                    source.harness_kind,
+                    &source.last_profile,
+                    checked.selection.profile_id.as_ref().unwrap_or(&source.last_profile),
+                )? {
+                    source.native_session_id.clone()
+                } else {
+                    None
+                },
                 destination_store_id: None,
                 configuration_fingerprint: self
                     .move_configuration_fingerprint(&checked.selection)?,
@@ -2788,8 +2780,7 @@ impl Controller {
                         let reopen_admission = self.source_has_request_queue(&id);
                         if started {
                             let destination_id = operation.selection.profile_id.as_ref().unwrap_or(&operation.source_profile_id).clone();
-                            let source_kind = self.config.named_profile(&operation.source_profile_id).map(|profile| profile.kind).unwrap_or(self.state.sessions[&id].harness_kind);
-                            let native_continuity = self.config.native_continuity(source_kind, &operation.source_profile_id, &destination_id)?;
+                            let native_continuity = operation.destination_native_session_id.is_some();
                             self.apply_in_place_destination(&operation)?;
                             if let Some(launch) = self.committed_in_place_launch(&operation, executor)? {
                                 self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = launch.environment.get("AWS_PROFILE").cloned();
@@ -3702,11 +3693,7 @@ impl Controller {
                             .named_profile(&operation.source_profile_id)
                             .map(|profile| profile.kind)
                             .unwrap_or(previous_session.harness_kind);
-                        let native_continuity = self.config.native_continuity(
-                            source_harness_kind,
-                            &operation.source_profile_id,
-                            &dest_profile_id,
-                        )?;
+                        let native_continuity = operation.destination_native_session_id.is_some();
                         let utility_handoff = if !native_continuity {
                             let materialized = crate::database::load_materialized_session(&id)?
                                 .context(

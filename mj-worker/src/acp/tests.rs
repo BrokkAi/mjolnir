@@ -9704,15 +9704,18 @@ async fn reload_launch_config_spawns_updated_command_args_and_writes_supervisor_
         format!(
             r#"
 import json, sys
+from pathlib import Path
 for line in sys.stdin:
     req = json.loads(line)
     if "method" not in req or "id" not in req:
         continue
     m = req["method"]
+    with Path("{session_id}-methods").open("a") as methods:
+        methods.write(m + "\n")
     if m == "initialize":
         res = {{"protocolVersion": 1}}
     elif m == "session/new":
-        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}]}}}}
+        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}, {{"id": "agent-full-access", "name": "Full access"}}]}}}}
     else:
         res = {{}}
     print(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}), flush=True)
@@ -9744,7 +9747,8 @@ for line in sys.stdin:
     let mut next_launch =
         crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
     next_launch.cwd = temp.path().to_path_buf();
-    next_launch.harness = HarnessKind::Claude;
+    next_launch.harness = HarnessKind::Codex;
+    next_launch.native_session_id = None;
     let next_command = PathBuf::from("python3");
     let next_args = vec![
         "-u".into(),
@@ -9772,7 +9776,7 @@ for line in sys.stdin:
             leases: None,
             on_restart: Some(Box::new(HarnessReloadTransition {
                 commit: None,
-                harness: HarnessKind::Claude,
+                harness: HarnessKind::Codex,
                 claude_login_path: None,
                 boundary_mailbox_hook_available: false,
                 mailbox_delivery_mode: None,
@@ -9814,12 +9818,13 @@ for line in sys.stdin:
     );
     applied.send(Ok(None)).unwrap();
 
-    assert!(matches!(
-        resolution
-            .await
-            .expect("reload reply channel should resolve"),
-        ReloadResolution::Started
-    ));
+    let resolution = resolution
+        .await
+        .expect("reload reply channel should resolve");
+    assert!(
+        matches!(resolution, ReloadResolution::Started),
+        "{resolution:?}"
+    );
 
     let written_spec = std::fs::read_to_string(&supervisor_path).unwrap();
     assert!(
@@ -9840,6 +9845,13 @@ for line in sys.stdin:
         }
     }
     assert!(spawned.exists());
+    let methods = std::fs::read_to_string(temp.path().join("ses-reloaded-methods")).unwrap();
+    assert!(methods.lines().any(|method| method == "session/new"));
+    assert!(
+        !methods
+            .lines()
+            .any(|method| method == "session/load" || method == "session/resume")
+    );
     shutdown.cancel();
     let _ = runtime.await;
 }

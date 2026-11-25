@@ -975,18 +975,18 @@ async fn run_bridge(
             };
             if !exited {
                 if let Err(error) = child.kill().await {
-                    tracing::warn!(
-                        operation = "acp_bridge_restart",
-                        %error,
-                        "could not kill ACP bridge during planned restart"
-                    );
+                    if matches!(&result, Ok(Some(SessionRestart::ReloadLaunchConfig { .. }))) {
+                        merge_drive_error(&mut result, error.into());
+                    } else {
+                        tracing::warn!(%error, "could not kill ACP bridge during restart");
+                    }
                 }
                 if let Err(error) = child.wait().await {
-                    tracing::warn!(
-                        operation = "acp_bridge_restart",
-                        %error,
-                        "could not reap ACP bridge during planned restart"
-                    );
+                    if matches!(&result, Ok(Some(SessionRestart::ReloadLaunchConfig { .. }))) {
+                        merge_drive_error(&mut result, error.into());
+                    } else {
+                        tracing::warn!(%error, "could not reap ACP bridge during restart");
+                    }
                 }
             }
         } else {
