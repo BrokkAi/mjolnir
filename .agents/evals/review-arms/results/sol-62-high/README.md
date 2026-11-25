@@ -57,6 +57,13 @@ four medium impact. Compared with the entire retained 1,726-session pool,
 the same diff, not additional expected yield from a single medium review.
 There are **no new high-impact groups** under either comparison.
 
+## Updated combination charts
+
+The [latest combination frontiers and budget maps](combo-pricing/README.md)
+include Sol 6.2/high and the newly priced Hydrogen, Kimi and Ember setups,
+using verify10 judgments throughout. Greptile remains solo-only, and the
+plots retain the stated usage-scope and context-tier assumptions.
+
 ## Single-model cost chart
 
 ![Current solo models and historical estimates, with high effort added](review-single-model-cost.png)

@@ -1,0 +1,15 @@
+Budget maps: best expected review findings within a latency and cost budget
+
+- Each map colors every latency and cost budget by the best expected findings among setups that fit both limits. Region edges are the observed setups' own latencies and costs; nothing is interpolated or binned.
+- 386 priced setups are optimized. 0 setups with an unknown price are omitted, because an unknown price is not a free one. 183 Greptile combinations are omitted. Greptile alone appears as two diamonds at its own measured findings, latency and cost; its repository context could not be pinned to each diff's commit.
+- Both panels share one absolute color scale. Compare colors across panels, not region shapes.
+- Cost covers reviewer turns only. It excludes carrier work, judging and subscriptions. Hydrogen assumes its saved counters cover the full turn. Ember uses the conservative upper context-tier price. See the accompanying pricing source for the lower bound.
+- Review time is simulated. Reviewers start together, so each sampled session assignment takes the slowest reviewer on every diff; the median of those times across diffs is averaged over many sampled assignments. It excludes startup and contention.
+- Findings are expected confirmed totals across 70 historical diffs from current Opus 5.5/high judgments. Inputs are the published CSVs' rounded values, so this is not an audited full-precision frontier. Equal rounded scores count as ties.
+- Priced setups combine 1 to 3 parallel reviewers from Ember (xhigh), Hydrogen (medium, high), Kimi (high), Sol 6.1 (medium, high, xhigh), Sol 6.2 (low, medium, high), Terra 6.1 (high, xhigh). All covered model families now have API price estimates.
+- Both maps use the color range 0 to 265.0. The all-findings panel peaks at 265.00; the medium + high panel peaks at 140.00.
+- Extent: latency 38.5 to 441.3 s and cost $0.039 to $3.360, chosen to include every option and both Greptile diamonds; the last observed row and column are open-ended.
+- Price break: the vertex of the cost-versus-findings staircase's concave hull where cost per added finding jumps most. It describes this option set only.
+- The existing frontier flags in the CSVs do not define membership here. A setup is marked when it is in the tied best set of at least one budget cell.
+- All confirmed: 35 setups are best at some budget (0 only by tying a setup that is no slower and no costlier); 222 x 333 observed thresholds reduce to 31 x 35 score-changing ones.
+- Medium + high impact: 44 setups are best at some budget (1 only by tying a setup that is no slower and no costlier); 222 x 333 observed thresholds reduce to 39 x 43 score-changing ones.
