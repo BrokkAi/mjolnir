@@ -135,6 +135,76 @@ historical frontier and retain the original per-configuration sample caps.
 [High](pareto-sev-high.csv) · [Medium](pareto-sev-medium.csv) ·
 [Low](pareto-sev-low.csv)
 
+### Single-model review performance versus cost
+
+![Current single-model results and historical estimates on one cost-versus-yield chart](review-single-model-cost.png)
+
+The single scatter plot combines **current results and historical estimates**
+using **cost per single review**. Yield is normalized to Terra 6.1/high = 100
+within each source study. Filled markers are current measurements; hollow
+markers are historical or partial-cohort DSF results. An asterisk identifies
+three estimated historical yields.
+
+The **combined point-estimate frontier** minimizes cost and maximizes the
+plotted yield index across non-Greptile points. It is descriptive: historical
+and current outcomes use different corpora, grading and normalization baselines.
+Its models and both Greptile solo references are **labeled directly by name**;
+the other nine points use numbers with a lookup key. The frontier is calculated
+from the plotted values, rather than a hardcoded list. These series count
+different source outcomes:
+
+- **Current study:** the single-reviewer rows of [pareto.csv](pareto.csv), from
+  the blinded Opus `verify9` round. Yield averages one reviewer's confirmed
+  group count within each diff, then sums across all 70 diffs. Its denominator
+  is the Terra 6.1/high total on those same 70 diffs. Costs are estimated
+  reviewer-turn API costs; Greptile uses its per-review service prices.
+  Greptile is a service reference whose repository context could not be pinned
+  to each diff's commit; the PNG legend and caption state that limitation.
+- **Historical initial reviews:** the earlier **mr-boxington PR/revision
+  reviewer study**, preserved in `reviewcharts/data.json`, `terra-grades.json`,
+  `terra-metrics.json`, `haiku-xhigh-grades.json` and `haiku-xhigh-metrics.json`.
+  Initial heads come from `revision_index=0` in the metrics. Accepted material
+  roots whose source references include those heads give **Terra/high
+  28/30/30** and **Haiku/xhigh 22/21/19** over three 47-review passes. Historical
+  yield divides each mean by Terra's **29.333** initial-review material roots;
+  its matching initial-review cost reference is **$0.051**.
+  Initial-only grades for **Haiku/high, Sonnet/high and Opus/high** were not
+  preserved. Their initial-review yields are **estimates**, marked `*` in the
+  PNG: each all-revision material-root mean is multiplied by Terra's measured
+  initial/all-revision ratio, **88/145 = 0.607**. This assumes that ratio
+  transfers between models; it does not establish their actual initial yield.
+  Cost uses the prior first-pass mean over **47 initial-head reviews**, with
+  the requested five-minute cache-write normalization. Haiku/xhigh's horizontal
+  range is a request-tier pricing bound, with its marker at the midpoint.
+  Initial-review scope, the three estimated yields and the different corpus
+  and grading method are stated in the PNG. No new Claude reviews were run.
+- **DSF/low estimate:** `verify9/sessions.csv`, `groups.csv` and
+  `session_groups.csv` supply the DSF and control outcomes on the same 16
+  covered diffs. Each matched-control estimate is DSF's 16-diff total times
+  that control's 70-diff total divided by its total on the same 16 diffs; the
+  chart uses the median of the reference-control estimates. The displayed
+  index divides that estimated 70-diff yield by **current Terra/high on all
+  70 diffs**, rather than taking the raw DSF16/Terra16 ratio. Cost scales the
+  observed subset reviewer cost by matched-control workload cost ratios. Its
+  study peak token rates were checked against the [DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing/). The
+  subset was the **first 16 diffs in job order**, and the run **stopped for
+  latency**; it was not randomly sampled. Matched controls adjust measured
+  subset yield but cannot establish that DSF's relative performance transfers
+  to the remaining 54 diffs. The projected point has that unmeasured transfer
+  uncertainty; the PNG also states the selection rule and limitation.
+
+The frozen local input table is
+`/mnt/optane/review-arms-20261113/sol-62-repeats/figure/single-model-cost-inputs.json`.
+It identifies the original historical bundle and its hash and contains the
+historical rows, matched DSF calibration table and cost assumptions. The local
+`single-review-yield-audit.json` and `derive_initial_review_yields.py` record
+the initial-head grade reconstruction, source hashes and estimation formula. The
+companion `review-single-model-cost.csv` records each plotted value, raw yield,
+baseline and source. These detailed inputs remain local. The local
+`plot_single_model_cost.py` reproduces the chart from that snapshot and the
+checked-in current CSVs. Corpus, grading and follow-up exposure differ between
+studies; within-study normalization does not make this a controlled comparison.
+
 ### Budget maps
 
 ![Best expected confirmed findings within a latency and cost budget, all confirmed findings](review-opus-high-budget-all.png)

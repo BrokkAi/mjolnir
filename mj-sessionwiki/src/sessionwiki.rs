@@ -14,7 +14,6 @@ pub mod history;
 mod indexed_messages;
 #[cfg(test)]
 mod native_tests;
-mod provenance;
 mod search_history;
 mod search_query;
 pub mod tags;
@@ -416,7 +415,6 @@ impl MjolnirAdapter {
 struct IndexedTranscript {
     messages: Vec<Message>,
     title: Option<String>,
-    evidence: provenance::Evidence,
 }
 
 /// The session a checkpoint file name belongs to, with its generation.
@@ -528,7 +526,6 @@ fn agent_message(chunks: &[Value]) -> (Role, String) {
 /// the call it belongs to. Modern summaries are complete at the tool row.
 struct TranscriptIndex<'a, R> {
     messages: Vec<(u64, Message)>,
-    evidence: provenance::Evidence,
     context_start: u64,
     terminals: TerminalOutputs<'a, R>,
     legacy_tools: Vec<(usize, &'a str, ToolCall)>,
@@ -538,7 +535,6 @@ impl<R: TerminalRecord> Default for TranscriptIndex<'_, R> {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            evidence: provenance::Evidence::default(),
             context_start: 0,
             terminals: TerminalOutputs::default(),
             legacy_tools: Vec::new(),
@@ -586,10 +582,6 @@ impl<'a, R: TerminalRecord> TranscriptIndex<'a, R> {
         } else {
             None
         };
-        if compact.is_some() || call.is_some() {
-            self.evidence
-                .observe_tool(value, presentation, created_at_ms);
-        }
         let description = title.map(str::to_owned).unwrap_or_else(|| {
             let summary = call.as_ref().map_or_else(
                 || "[invalid tool call]".to_owned(),
@@ -671,7 +663,6 @@ impl<'a, R: TerminalRecord> TranscriptIndex<'a, R> {
                 .filter_map(|(position, message)| in_context(position).then_some(message))
                 .collect(),
             title,
-            evidence: self.evidence,
         }
     }
 }
@@ -802,7 +793,6 @@ impl Adapter for MjolnirAdapter {
         let IndexedTranscript {
             messages,
             title: snapshot_title,
-            evidence,
         } = if sessions.live.contains_key(session_id) {
             self.projected_transcript(session_id)?
         } else {
@@ -849,8 +839,6 @@ impl Adapter for MjolnirAdapter {
             title,
             subagent: sessions.ownership.owns_session(session_id),
             messages,
-            touched: evidence.paths.into_iter().collect(),
-            edits: evidence.edits,
         })
     }
 }
@@ -1308,7 +1296,6 @@ fn sync_blocking(
     top_level::prune(&mut connection, &excluded, &ownership)?;
     write_session_tags(&mut connection, &mjolnir.indexed_tags())
         .context("store Mjolnir's session metadata in the SessionWiki index")?;
-    provenance::backfill(&mut connection, &mjolnir).context("backfill Mjolnir file provenance")?;
     // A full pass has walked every store, so the index is complete enough for
     // a search to be trusted. The marker is what a later daemon reads instead
     // of walking the corpus again to find out. A cache rebuilt during the pass
@@ -1495,8 +1482,9 @@ enum IndexVersion {
     /// This build's schema, or an index not yet stamped with one.
     Current,
     /// An older SessionWiki built it. This build cannot read it, and the next
-    /// write rebuilds the cache at this build's schema; SessionWiki keeps the
-    /// durable tables (tags, notes, summaries, archive) across the rebuild.
+    /// write brings the cache to this build's schema: the schema one behind
+    /// upgrades in place, older ones are rebuilt. SessionWiki keeps the
+    /// durable tables (tags, notes, summaries, archive) either way.
     Older(i64),
     /// A newer SessionWiki built it. Rebuilding it down would only make the
     /// newer program rebuild it back, so Mjolnir neither reads nor writes it.
@@ -2056,17 +2044,6 @@ fn copy_session(session: &Session) -> Session {
                 ts: message.ts,
                 tool: message.tool.clone(),
                 is_thought: message.is_thought,
-            })
-            .collect(),
-        touched: session.touched.clone(),
-        edits: session
-            .edits
-            .iter()
-            .map(|edit| sessionwiki::model::EditEvent {
-                path: edit.path.clone(),
-                kind: edit.kind,
-                snippet: edit.snippet.clone(),
-                ts: edit.ts,
             })
             .collect(),
     }
@@ -3843,11 +3820,10 @@ mod tests {
             "→ edit(Edit config.toml) ⇒ ok · 0 lines"
         );
         assert_eq!(session.messages[2].text, "done");
-        assert_eq!(session.touched, vec!["/old/container/config.toml"]);
     }
 
     #[test]
-    fn tool_retention_preserves_wiki_summary_and_file_evidence() {
+    fn tool_retention_preserves_wiki_summary_and_compacts_raw_details() {
         use agent_client_protocol::v1::schema::SessionUpdate;
         use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
         use mj_core::state::{MaterializedSession, TranscriptItem};
@@ -3952,22 +3928,6 @@ mod tests {
                     "→ execute(cargo test) ⇒ error · {lines} lines — error[E0063]: missing field"
                 ),
             );
-            if status == "completed" {
-                assert_eq!(
-                    before.evidence.paths,
-                    BTreeSet::from(["src/new.rs".into(), "src/unchanged.rs".into()])
-                );
-                assert_eq!(before.evidence.edits.len(), 1);
-                assert_eq!(
-                    before.evidence.edits[0].kind,
-                    sessionwiki::model::EditKind::Write
-                );
-                assert!(before.evidence.edits[0].snippet.contains("new line"));
-            } else {
-                assert!(before.evidence.paths.is_empty());
-                assert!(before.evidence.edits.is_empty());
-            }
-
             // Verify the old raw fallback produces the same result and
             // compacting a legacy row fills in the missing metadata.
             let modern = TranscriptItem::clone(&projection.transcript[0]);
@@ -3976,15 +3936,9 @@ mod tests {
                 unreachable!()
             };
             *presentation = None;
-            let expected_edits = serde_json::to_value(&before.evidence.edits).unwrap();
             projection.transcript[0] = Arc::new(legacy.clone());
             let raw = projected_transcript(&projection);
             assert_eq!(raw.messages[0].text, before.messages[0].text);
-            assert_eq!(raw.evidence.paths, before.evidence.paths);
-            assert_eq!(
-                serde_json::to_value(&raw.evidence.edits).unwrap(),
-                expected_edits
-            );
 
             for mut item in [modern, legacy] {
                 assert!(compact_tool_call_for_retention(&mut item.body));
@@ -4003,11 +3957,6 @@ mod tests {
                 projection.transcript[0] = Arc::new(item);
                 let after = projected_transcript(&projection);
                 assert_eq!(after.messages[0].text, before.messages[0].text);
-                assert_eq!(after.evidence.paths, before.evidence.paths);
-                assert_eq!(
-                    serde_json::to_value(&after.evidence.edits).unwrap(),
-                    expected_edits
-                );
             }
         }
     }
@@ -4101,7 +4050,7 @@ mod tests {
     }
 
     #[test]
-    fn an_index_an_older_sessionwiki_wrote_is_rebuilt_and_needs_a_full_pass() {
+    fn an_index_an_older_sessionwiki_wrote_is_upgraded_or_rebuilt_and_needs_a_full_pass() {
         use sessionwiki::index::SCHEMA_VERSION;
         let _held = tags::testing::lock();
         let (_index_dir, mut connection) = tags::testing::isolated_index();
@@ -4114,7 +4063,6 @@ mod tests {
         let filled = IndexStamp::of(&connection).unwrap();
         record_full_pass(&marker, filled);
         sync_adapter(&mut connection, &source);
-        provenance::backfill(&mut connection, &source).unwrap();
         assert_eq!(
             IndexStamp::of(&connection).unwrap(),
             filled,
@@ -4122,32 +4070,50 @@ mod tests {
         );
         assert!(full_pass_holds(&marker, filled));
 
-        connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
-            .unwrap();
-        drop(connection);
-        assert_eq!(index_version(), IndexVersion::Older(SCHEMA_VERSION - 1));
-        assert_eq!(index_state(), WikiIndexState::Indexing);
-        assert!(readable_index().unwrap().is_none());
-        assert_eq!(
-            unindexed(&source, &[session_id.to_owned()]).unwrap(),
-            [session_id],
-            "a row in a cache the next write drops does not count as indexed"
-        );
-        assert!(index_is_writable());
+        // One schema behind upgrades in place and keeps the indexed rows; two
+        // behind is rebuilt and loses them. Both need a full pass afterwards.
+        let mut connection = connection;
+        for (behind, keeps_rows) in [(1, true), (2, false)] {
+            let older = SCHEMA_VERSION - behind;
+            if behind == 1 {
+                // A real schema-9 index still holds the provenance tables the
+                // in-place upgrade drops; dropping them moves the schema cookie.
+                connection
+                    .execute_batch(
+                        "CREATE TABLE touched(session_id TEXT NOT NULL, path TEXT NOT NULL);
+                         CREATE TABLE edits(session_id TEXT NOT NULL, path TEXT NOT NULL);",
+                    )
+                    .unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", older)
+                .unwrap();
+            drop(connection);
+            assert_eq!(index_version(), IndexVersion::Older(older));
+            assert_eq!(index_state(), WikiIndexState::Indexing);
+            assert!(readable_index().unwrap().is_none());
+            assert_eq!(
+                unindexed(&source, &[session_id.to_owned()]).unwrap(),
+                [session_id],
+                "a row in a cache the next write may drop does not count as indexed"
+            );
+            assert!(index_is_writable());
 
-        let connection = open_for_sync().unwrap();
-        let rebuilt = IndexStamp::of(&connection).unwrap();
-        assert_eq!(rebuilt.schema, SCHEMA_VERSION);
-        assert!(
-            !full_pass_holds(&marker, rebuilt),
-            "the rebuilt cache lost every row, so an incremental pass would skip old sessions"
-        );
-        assert!(
-            wiki_session_for_test(session_id, &BTreeSet::new())
-                .unwrap()
-                .is_none()
-        );
+            connection = open_for_sync().unwrap();
+            let upgraded = IndexStamp::of(&connection).unwrap();
+            assert_eq!(upgraded.schema, SCHEMA_VERSION);
+            assert!(
+                !full_pass_holds(&marker, upgraded),
+                "an upgraded cache must get a full pass (schema {older} -> {SCHEMA_VERSION})"
+            );
+            assert_eq!(
+                wiki_session_for_test(session_id, &BTreeSet::new())
+                    .unwrap()
+                    .is_some(),
+                keeps_rows,
+                "schema {older} -> {SCHEMA_VERSION}"
+            );
+        }
 
         // A newer index is the one case left alone.
         connection
@@ -4317,35 +4283,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provenance_backfill_repairs_an_unchanged_checkpoint_without_rebuilding_the_index() {
-        let _held = tags::testing::lock();
-        let (_index_dir, mut connection) = tags::testing::isolated_index();
-        let directory = tempfile::tempdir().unwrap();
-        write_archive(directory.path(), "old-session", 4);
-        let source = adapter(directory.path(), "old-session");
-        let key = source.key_for("old-session");
-        tags::testing::index_row(&connection, "old-session", "mjolnir");
-        connection
-            .execute(
-                "UPDATE files SET path = ?1 WHERE session_id = 'old-session'",
-                [&key],
-            )
-            .unwrap();
-        provenance::backfill(&mut connection, &source).unwrap();
-        assert_eq!(
-            sessionwiki::index::files_for(&connection, "old-session").unwrap(),
-            vec!["/old/container/config.toml"]
-        );
-        provenance::backfill(&mut connection, &source).unwrap();
-        assert_eq!(
-            sessionwiki::index::sessions_for_file(&connection, "config.toml", 20)
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
     /// A running session is listed under the same key as a stopped one, with
     /// its own change token, so it is searchable before it is ever closed and
     /// reconciliation never archives it. When it stops, the key stays and the
@@ -4460,8 +4397,6 @@ mod tests {
                     is_thought: false,
                 })
                 .collect(),
-            touched: Vec::new(),
-            edits: Vec::new(),
         }
     }
 
@@ -5164,14 +5099,6 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        for id in &ids_for_paths {
-            connection
-                .execute(
-                    "INSERT INTO touched(session_id, path) VALUES (?1, '/src/project/src/a.rs')",
-                    [id],
-                )
-                .unwrap();
-        }
         connection
             .execute(
                 "UPDATE files SET title = 'standalone-only-name' WHERE session_id = ?1",
@@ -5236,7 +5163,6 @@ mod tests {
                 query: "quokka".into(),
                 limit: 2,
             },
-            blame: None,
         };
         let history = history::query_in_with(
             &connection,
@@ -5254,60 +5180,6 @@ mod tests {
         history_ids.sort();
         assert_eq!(history_ids, parent_ids);
 
-        let trace = history::query_in_with(
-            &connection,
-            &mj_core::history::HistoryRequest {
-                request_id: "test-trace".into(),
-                query: mj_core::history::HistoryQuery::TraceFile {
-                    path: "src/a.rs".into(),
-                    limit: 2,
-                },
-                blame: None,
-            },
-            &ownership,
-            &crate::import::NativeScanCache::new(),
-        )
-        .unwrap();
-        let mut trace_ids: Vec<String> = trace["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["session"]["id"].as_str().unwrap().to_owned())
-            .collect();
-        trace_ids.sort();
-        assert_eq!(trace_ids, parent_ids);
-
-        let blame_time = chrono::DateTime::parse_from_rfc3339("2026-10-05T00:00:00Z")
-            .unwrap()
-            .timestamp();
-        let blame = history::query_in_with(
-            &connection,
-            &mj_core::history::HistoryRequest {
-                request_id: "test-blame".into(),
-                query: mj_core::history::HistoryQuery::BlameFile {
-                    path: PathBuf::from("src/a.rs"),
-                    start_line: 1,
-                    end_line: 1,
-                },
-                blame: Some(mj_core::history::BlameEvidence {
-                    repository: PathBuf::from("/src/project"),
-                    relative_path: PathBuf::from("src/a.rs"),
-                    porcelain: format!(
-                        "{} 1 1 1\nauthor-time {blame_time}\n\tline\n",
-                        "a".repeat(40),
-                    ),
-                }),
-            },
-            &ownership,
-            &crate::import::NativeScanCache::new(),
-        )
-        .unwrap();
-        assert_eq!(blame["runs"][0]["status"], "confident");
-        assert_eq!(
-            blame["runs"][0]["sessions"][0]["session_id"],
-            ids_for_paths[0]
-        );
-
         let child_brief = history::query_in_with(
             &connection,
             &mj_core::history::HistoryRequest {
@@ -5316,7 +5188,6 @@ mod tests {
                     session_id: ids_for_paths[2].clone(),
                     max_chars: 200,
                 },
-                blame: None,
             },
             &ownership,
             &crate::import::NativeScanCache::new(),
@@ -5365,6 +5236,28 @@ mod tests {
             assert_eq!(ids(query, false), ["main-session"], "query {query:?}");
             assert_eq!(ids(query, true), ["main-session"], "query {query:?}");
         }
+        let history = history::query_in_with(
+            &connection,
+            &mj_core::history::HistoryRequest {
+                request_id: "test-search-history".into(),
+                query: mj_core::history::HistoryQuery::SearchHistory {
+                    query: "bridge derivation".into(),
+                    session_ids: None,
+                    session_id: None,
+                    role: None,
+                    order: None,
+                    limit: 10,
+                    context_messages: 0,
+                    max_chars: 16_000,
+                    cursor: None,
+                },
+            },
+            &top_level::Snapshot::default(),
+            &crate::import::NativeScanCache::new(),
+        )
+        .expect("search indexed history");
+        assert_eq!(history["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(history["sessions"][0]["session_id"], "main-session");
     }
 
     /// I1-5: a phrase only a sub-agent wrote reaches its parent's index as
@@ -5438,7 +5331,6 @@ mod tests {
                     query: "quokka".into(),
                     limit: 10,
                 },
-                blame: None,
             },
             &top_level::Snapshot::default(),
             &crate::import::NativeScanCache::new(),

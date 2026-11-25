@@ -371,7 +371,7 @@ fn query(
         "data": value,
         "index_state": super::index_state(),
         "source": "indexed_snapshot",
-        "coverage": "Indexed history can lag live sessions. Retained transcripts may omit original timestamps, tool output, or older messages. File evidence discarded before provenance indexing cannot be recovered.",
+        "coverage": "Indexed history can lag live sessions. Retained transcripts may omit original timestamps, tool output, or older messages.",
     }))
 }
 
@@ -489,45 +489,6 @@ fn run_query(
             )?;
             Ok(json!({"sessions":rows,"limit":limit(*count)}))
         }
-        TraceFile { path, limit: count } => {
-            let candidates = index::sessions_for_file(
-                connection,
-                &path.replace('\\', "/"),
-                super::MAX_WIKI_LIMIT,
-            )?;
-            let mut rows = Vec::with_capacity(limit(*count));
-            for (row, matched) in candidates {
-                if rows.len() >= limit(*count) {
-                    break;
-                }
-                if !visibility.is_child_lenient(&row) {
-                    rows.push(json!({"session":row,"matched_path":matched}));
-                }
-            }
-            Ok(json!({"sessions":rows}))
-        }
-        SessionFiles {
-            session_id,
-            start,
-            limit: count,
-        } => {
-            let row = resolve(connection, session_id, visibility)?;
-            let files = index::files_for(connection, &row.session_id)?;
-            let end = start.saturating_add(limit(*count)).min(files.len());
-            Ok(
-                json!({"session_id":row.session_id,"files":files.get(*start..end).unwrap_or_default(),
-                "next_start":(end < files.len()).then_some(end),"total":files.len(),
-                "provenance_indexed":row.tool != "mjolnir" || row.tags.as_deref().is_some_and(|tags| tags.split(',').any(|tag| tag == super::provenance::REVISION)) }),
-            )
-        }
-        BlameFile { .. } => blame(
-            connection,
-            request
-                .blame
-                .as_ref()
-                .context("target did not supply Git blame evidence")?,
-            visibility,
-        ),
         GetSessionBrief {
             session_id,
             max_chars,
@@ -648,50 +609,6 @@ fn read_page(
     json!({"session_id":session_id,"messages":page,"next":next,"total_messages":messages.len()})
 }
 
-fn blame(
-    connection: &rusqlite::Connection,
-    evidence: &mj_core::history::BlameEvidence,
-    visibility: &mut QueryVisibility<'_>,
-) -> Result<Value> {
-    ensure!(
-        evidence.porcelain.len() <= mj_core::history::MAX_BLAME_BYTES,
-        "Git blame evidence exceeds its byte budget"
-    );
-    let query = evidence.relative_path.to_string_lossy().replace('\\', "/");
-    // sessions_touching uses SQL LIKE; intersect with the literal-path matcher
-    // so '%' and '_' in a real file name cannot introduce unrelated candidates.
-    let mut ids = std::collections::BTreeSet::new();
-    for (row, _) in index::sessions_for_file(connection, &query, 10_000)? {
-        if !visibility.is_child_lenient(&row) {
-            ids.insert(row.session_id);
-        }
-    }
-    let candidates: Vec<_> = index::sessions_touching(connection, &query)?
-        .into_iter()
-        .filter(|candidate| ids.contains(&candidate.session_id))
-        .collect();
-    let runs = sessionwiki::blame::group_runs(&sessionwiki::blame::parse_line_porcelain(
-        &evidence.porcelain,
-    ));
-    let runs: Vec<_> = runs.into_iter().map(|run| {
-        let attribution = if run.commit.bytes().all(|byte| byte == b'0') {
-            sessionwiki::blame::Attribution::Unattributed
-        } else {
-            sessionwiki::blame::attribute_commit(run.author_time, &evidence.repository.to_string_lossy(), &candidates)
-        };
-        let candidate = |s: sessionwiki::blame::TouchingSession| json!({"session_id":s.session_id,"tool":s.tool,"title":s.title,"project":s.project,"archived":s.archived});
-        let (status, sessions) = match attribution {
-            sessionwiki::blame::Attribution::Confident(session) => ("confident", vec![candidate(session)]),
-            sessionwiki::blame::Attribution::Ambiguous(sessions) => ("ambiguous", sessions.into_iter().map(candidate).collect()),
-            sessionwiki::blame::Attribution::Unattributed => ("unattributed", vec![]),
-        };
-        json!({"start":run.start,"end":run.end,"commit":run.commit,"status":status,"sessions":sessions})
-    }).collect();
-    Ok(
-        json!({"path":evidence.relative_path,"runs":runs,"heuristic":true,"note":"Attribution uses recorded file edits and commit timing; verify against the conversation and Git history."}),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,12 +616,11 @@ mod tests {
         HistoryRequest {
             request_id: "test".into(),
             query,
-            blame: None,
         }
     }
 
     #[test]
-    fn indexed_history_supports_search_drilldown_archives_and_literal_file_evidence() {
+    fn indexed_history_supports_search_drilldown_archives_and_resolution() {
         let _held = super::super::tags::testing::lock();
         let (_directory, connection) = super::super::tags::testing::isolated_index();
         for id in ["session-one", "session-two"] {
@@ -718,18 +634,6 @@ mod tests {
                     "We chose zebraprotocol for reliable delivery. {}",
                     "é🙂".repeat(40_000)
                 )],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO touched VALUES ('session-one', '/old/target/src/a_%.rs')",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO touched VALUES ('session-two', '/different/src/axY.rs')",
-                [],
             )
             .unwrap();
         connection
@@ -778,28 +682,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hits["hits"][0]["i"], 0);
-        let trace = query_in(
-            &connection,
-            &request(HistoryQuery::TraceFile {
-                path: "src/a_%.rs".into(),
-                limit: 20,
-            }),
-        )
-        .unwrap();
-        assert_eq!(trace["sessions"].as_array().unwrap().len(), 1);
-        assert_eq!(trace["sessions"][0]["session"]["id"], "session-one");
-        assert_eq!(trace["sessions"][0]["session"]["archived"], true);
-        let files = query_in(
-            &connection,
-            &request(HistoryQuery::SessionFiles {
-                session_id: "session-one".into(),
-                start: 0,
-                limit: 20,
-            }),
-        )
-        .unwrap();
-        assert_eq!(files["files"][0], "/old/target/src/a_%.rs");
-        assert_eq!(files["provenance_indexed"], false);
         let ownership = super::super::top_level::Snapshot::default();
         let cache = crate::import::NativeScanCache::new();
         let mut visibility = QueryVisibility::new(&ownership, &cache);
@@ -829,18 +711,6 @@ mod tests {
             .to_string(),
             "session \"fresh\" exists but is not in the index"
         );
-        let evidence = mj_core::history::BlameEvidence {
-            repository: "/src/project".into(),
-            relative_path: "src/a_%.rs".into(),
-            porcelain: format!(
-                "{} 1 1 1\nauthor-time 1789777800\n\tline\n{} 2 2 1\nauthor-time 1789777800\n\tchanged\n",
-                "a".repeat(40),
-                "0".repeat(40)
-            ),
-        };
-        let result = blame(&connection, &evidence, &mut visibility).unwrap();
-        assert_eq!(result["runs"][0]["status"], "confident");
-        assert_eq!(result["runs"][1]["status"], "unattributed");
     }
     #[test]
     fn transcript_pages_preserve_unicode_indices_and_continue_inside_large_messages() {
@@ -1035,9 +905,15 @@ mod tests {
         for id in ["good", "broken"] {
             super::super::tags::testing::index_row(&connection, id, "mjolnir");
             connection
-                .execute("INSERT INTO touched VALUES (?1, '/src/shared.rs')", [id])
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, 'user', 'shared needle')",
+                    [id],
+                )
                 .unwrap();
         }
+        connection
+            .execute("INSERT INTO msgs(msgs) VALUES ('rebuild')", [])
+            .unwrap();
         connection
             .execute(
                 "UPDATE files SET tool = 'codex', path = ?1 WHERE session_id = 'broken'",
@@ -1046,15 +922,22 @@ mod tests {
             .unwrap();
         let value = query_in(
             &connection,
-            &request(HistoryQuery::TraceFile {
-                path: "src/shared.rs".into(),
+            &request(HistoryQuery::SearchHistory {
+                query: "needle".into(),
+                session_ids: None,
+                session_id: None,
+                role: None,
+                order: None,
                 limit: 20,
+                context_messages: 0,
+                max_chars: 16_000,
+                cursor: None,
             }),
         )
         .unwrap();
         let sessions = value["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0]["session"]["id"], "good");
+        assert_eq!(sessions[0]["session_id"], "good");
         let notices = value["notices"].as_array().unwrap();
         assert_eq!(notices.len(), 1);
         assert!(notices[0].as_str().unwrap().contains("broken"));
@@ -1141,7 +1024,6 @@ mod tests {
         let permits = Arc::new(tokio::sync::Semaphore::new(4));
         let search = |id: &str| HistoryRequest {
             request_id: id.into(),
-            blame: None,
             query: HistoryQuery::SearchHistory {
                 query: "hello".into(),
                 session_ids: None,

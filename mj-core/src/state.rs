@@ -2701,6 +2701,24 @@ pub struct OperatorPresence {
     pub revision: u64,
 }
 
+/// The per-profile choices a new session starts from. The runtime feed flattens
+/// this into its metadata and [`State`] holds the same fields; every copy
+/// between them goes through [`State::launch_preferences`] and
+/// [`State::apply_launch_preferences`], whose exhaustive destructuring makes a
+/// new preference a compile error until each side carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPreferences {
+    #[serde(
+        default,
+        alias = "last_subagent_policy",
+        deserialize_with = "crate::subagent::deserialize_policy_map"
+    )]
+    pub last_subagent_policies: BTreeMap<String, crate::subagent::SubagentPolicy>,
+    /// The most recent Oracle choice for each profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_oracle_choices: BTreeMap<String, bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -2767,6 +2785,35 @@ impl State {
             .or_else(|| self.last_subagent_policies.get(""))
             .cloned()
     }
+    /// The remembered launch choices, as the runtime feed carries them.
+    pub fn launch_preferences(&self) -> LaunchPreferences {
+        let Self {
+            last_subagent_policies,
+            last_oracle_choices,
+            ..
+        } = self;
+        LaunchPreferences {
+            last_subagent_policies: last_subagent_policies.clone(),
+            last_oracle_choices: last_oracle_choices.clone(),
+        }
+    }
+
+    /// Replaces the remembered launch choices with the feed's. Returns whether
+    /// anything changed.
+    pub fn apply_launch_preferences(&mut self, preferences: LaunchPreferences) -> bool {
+        let LaunchPreferences {
+            last_subagent_policies,
+            last_oracle_choices,
+        } = preferences;
+        let changed = self.last_subagent_policies != last_subagent_policies
+            || self.last_oracle_choices != last_oracle_choices;
+        if changed {
+            self.last_subagent_policies = last_subagent_policies;
+            self.last_oracle_choices = last_oracle_choices;
+        }
+        changed
+    }
+
     /// The remembered Oracle choice for a profile; enabled when it has none.
     pub fn last_oracle_choice_for(&self, profile_id: &str) -> bool {
         self.last_oracle_choices

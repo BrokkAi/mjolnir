@@ -28,6 +28,9 @@ fn children(runtime: &RuntimeProjection) -> Children<'_> {
     children
 }
 
+/// The sub-agents a suspend would stop before they hand back: the unfinished
+/// members of each branch under `parent`, not the branch roots that hold them.
+/// A branch root that has handed back is not named for its busy descendants.
 pub(super) fn unfinished_suspend_children(
     runtime: &RuntimeProjection,
     parent: &str,
@@ -63,11 +66,35 @@ pub(super) fn unfinished_suspend_children(
         .filter(|id| {
             runtime.native_agents[*id].agent.parent_session_id.is_none() && unfinished_branch(id)
         });
-    borrowed
+    let roots = borrowed
         .into_iter()
-        .map(|child| child.id.clone())
-        .chain(native.cloned())
-        .collect()
+        .map(|child| child.id.as_str())
+        .chain(native.map(String::as_str));
+
+    // The verdict's own `unfinished` flag is the sole judge of each member.
+    let children = children(runtime);
+    let mut seen = BTreeSet::new();
+    let mut named = Vec::new();
+    for root in roots {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if runtime.verdicts.get(id).is_some_and(|v| v.unfinished) {
+                named.push(id.to_owned());
+            }
+            pending.extend(
+                children
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .map(|(id, _)| *id),
+            );
+        }
+    }
+    named
 }
 
 fn interrupt_targets<'a>(
@@ -1048,7 +1075,56 @@ mod tests {
         project(&mut capture, &before, None, None);
         assert_eq!(
             unfinished_suspend_children(&capture, "parent"),
-            [id, mj_core::native_agent::view_id("parent", "finished")]
+            [id, mj_core::native_agent::view_id("parent", "descendant")]
+        );
+    }
+
+    #[test]
+    fn suspend_names_the_unfinished_descendant_not_the_branch_that_handed_back() {
+        let mut capture = RuntimeProjection::default();
+        capture.metadata.config = super::super::tests::runtime_test_config().into();
+        for id in ["parent", "child", "grandchild", "sibling"] {
+            insert_running_session(&mut capture, id);
+            let view = capture.sessions.get_mut(id).unwrap();
+            view.connected = true;
+            view.operational.as_mut().unwrap().harness_turn = None;
+            capture
+                .environment_owners
+                .insert(id.into(), "parent".into());
+        }
+        capture.records.get_mut("child").unwrap().state = SessionState::Parked;
+        insert_subagent_link(&mut capture, "parent", "child");
+        insert_subagent_link(&mut capture, "parent", "sibling");
+        insert_subagent_link(&mut capture, "child", "grandchild");
+        let set_busy = |capture: &mut RuntimeProjection, id: &str, busy: bool| {
+            capture
+                .sessions
+                .get_mut(id)
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap()
+                .harness_turn = busy.then_some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        };
+        let mut previous = RuntimeProjection::default();
+        let mut observed = Vec::new();
+        for (grandchild, sibling) in [(false, false), (true, false), (true, true)] {
+            set_busy(&mut capture, "grandchild", grandchild);
+            set_busy(&mut capture, "sibling", sibling);
+            project(&mut capture, &previous, None, None);
+            observed.push(unfinished_suspend_children(&capture, "parent"));
+            previous = capture.clone();
+        }
+        // Parked and idle children stay silent; a busy grandchild is named
+        // without its finished parent, beside any other unfinished branch
+        // and in a stable order.
+        assert_eq!(
+            observed,
+            [
+                Vec::<String>::new(),
+                vec!["grandchild".to_owned()],
+                vec!["grandchild".to_owned(), "sibling".to_owned()],
+            ]
         );
     }
 

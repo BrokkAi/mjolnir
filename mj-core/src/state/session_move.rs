@@ -838,12 +838,42 @@ impl MoveOperation {
         !self.is_resolved() && (self.restore_artifact().is_some() || self.source_snapshot.is_some())
     }
 
+    /// Whether this in-place Move owns its worker's dispatch hold and so owns
+    /// the retry too.
+    ///
+    /// An in-place Move transfers no archive: the worker holds the state a
+    /// retry resumes, behind `in_place_expected_store_id` and the hold named
+    /// by `operation_id`. The worker may already have committed or started the
+    /// reload this Move asked for while the daemon lost the reply, so the next
+    /// attempt must be this Move again (same `operation_id`), never a new one
+    /// that the worker's hold would refuse and that would overwrite the
+    /// record the fence lives in.
+    ///
+    /// The store fence is cleared only once the session record matches what
+    /// the worker holds (or the hold is released), so a `Failed` or
+    /// `Cancelled` Move that still carries it is awaited just as an active one.
+    pub fn awaits_worker_reload(&self) -> bool {
+        self.in_place && !self.is_resolved() && self.in_place_expected_store_id.is_some()
+    }
+
+    /// Whether a retry of this Move has something to resume: a checkpoint, or
+    /// the worker-held reload of an in-place Move.
+    pub fn retry_retained(&self) -> bool {
+        self.checkpoint_retained() || self.awaits_worker_reload()
+    }
+
+    /// Whether the sealed selection of this Move, rather than the request,
+    /// decides a retry's defaults.
+    pub fn holds_retry_state(&self) -> bool {
+        self.holds_source_environment() || self.awaits_worker_reload()
+    }
+
     /// Whether a surface should offer to retry this failed or cancelled Move:
     /// it still has its checkpoint, or queued work already began on the
     /// destination and only this Move may finish admitting it.
     pub fn offers_retry(&self) -> bool {
         matches!(self.phase, MovePhase::Failed | MovePhase::Cancelled)
-            && (self.checkpoint_retained()
+            && (self.retry_retained()
                 || (self.queue_admission_started && !self.queue_admission_finished))
     }
 

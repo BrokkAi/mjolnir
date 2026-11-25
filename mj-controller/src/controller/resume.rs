@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-use crate::checkpoint_transfer::restore_command;
+use crate::checkpoint_transfer::restore_stdin_command;
 use crate::handoff::NativePriorSource;
 use crate::session_manager::new_command_id;
 use mj_checkpoint::archive::{
@@ -932,7 +932,6 @@ impl Controller {
                 _ => PathBuf::from(path),
             };
             let remote_archive = format!("{worker_root}/restore.hel.zip");
-            let remote_spec = format!("{worker_root}/restore-spec.json");
             let move_destination =
                 crate::database::load_move_operation(session_id)?.filter(|operation| {
                     matches!(
@@ -1080,13 +1079,9 @@ impl Controller {
                 upload_checkpoint_spec(syncing, &backend, session_id, &local_seed, &remote_seed)?;
                 staged.aws_profile
             } else {
-                let staging = tempfile::tempdir().context("create restore staging")?;
-                let local_spec = staging.path().join("restore-spec.json");
-                std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
                 let controller = &*self;
                 let backend_ref = &backend;
                 let worker_root_ref = worker_root.as_str();
-                let local_spec_ref = local_spec.as_path();
                 let staged_aws_profile = if let Some(transfer) = move_transfer.as_mut() {
                     // Direct cross-target Move: install destination worker
                     // binary first so `receive-move-stream` is available, then
@@ -1151,14 +1146,6 @@ impl Controller {
                     transfer.operation.phase = mj_core::state::MovePhase::Restoring;
                     transfer.operation.updated_at = now();
                     crate::database::save_move_operation(transfer.operation)?;
-                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    upload_checkpoint_spec(
-                        restoring,
-                        backend_ref,
-                        session_id,
-                        local_spec_ref,
-                        &remote_spec,
-                    )?;
                     staged
                 } else {
                     // Two independent lanes into the target. The checkpoint transfer
@@ -1225,23 +1212,25 @@ impl Controller {
                                     )?;
                                 }
                             }
-                            upload_checkpoint_spec(
-                                restoring,
-                                backend_ref,
-                                session_id,
-                                local_spec_ref,
-                                &remote_spec,
-                            )
+                            Ok(())
                         },
                     )?;
                     staged
                 };
                 {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    let output = execute_checked(
+                    // The spec streams over stdin, so no upload of it
+                    // precedes the restore. Both branches above install this
+                    // build's worker first; an older one would read `-` as a
+                    // file name.
+                    let command = restore_stdin_command(&backend, session_id)?;
+                    let output = super::checkpoint::send_spec_streamed(
                         restoring,
-                        restore_command(&backend, session_id, &remote_spec)?,
+                        &command,
+                        &restore,
+                        "restore target checkpoint",
                     )?;
+                    let output = targets::checked_command_output(&command, output)?;
                     if move_transfer.is_some() {
                         // Remove the transferred Move archive from the
                         // destination worker root once restore has unpacked it.

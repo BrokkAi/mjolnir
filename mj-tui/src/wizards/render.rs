@@ -20,7 +20,7 @@ fn target_step_choices<W: WizardDraft>(
     let mut help = Vec::new();
     // Only what is there is listed; what is not is named under the table.
     let offered = dashboard.offered_target_indices();
-    let selected_row = dashboard.target_row(wizard.target());
+    let selected_row = dashboard.target_row(wizard.target(dashboard));
     let rows = dashboard
         .config
         .targets
@@ -28,7 +28,7 @@ fn target_step_choices<W: WizardDraft>(
         .enumerate()
         .filter(|(index, _)| offered.contains(index))
         .map(|(index, (id, target))| {
-            let selected = index == wizard.target();
+            let selected = index == wizard.target(dashboard);
             let rejection = wizard.target_rejection(dashboard, id);
             let (cpu, memory) = match wizard.resource_allocation() {
                 Some(allocation) if selected && target_is_sized(target) => (
@@ -169,10 +169,12 @@ fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Ve
                 let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
                 let profile = if !expanded
                     && wizard.effective_focused_provider(dashboard).is_none()
-                    && NewWizard::provider_for_profile(dashboard, wizard.profile).as_ref()
-                        == Some(&provider)
+                    && wizard.provider_of_choice(dashboard).as_ref() == Some(&provider)
                 {
-                    dashboard.new_wizard_profile_id(wizard.profile)
+                    match &wizard.profile {
+                        ProfileChoice::Profile(id) => Some(id.clone()),
+                        ProfileChoice::AutoPrimary => None,
+                    }
                 } else {
                     dashboard.predicted_provider_profile(&provider)
                 };
@@ -302,8 +304,12 @@ pub(crate) fn render_new_wizard(
         return;
     }
     if wizard.step == WizardStep::Review {
-        let target_id = nth_key(&dashboard.config.targets, wizard.target);
-        let raw_project = is_bare_project_target(&dashboard.config.targets[&target_id]);
+        let target_id = wizard.target.clone();
+        let raw_project = dashboard
+            .config
+            .targets
+            .get(&target_id)
+            .is_some_and(is_bare_project_target);
         let title = format!(
             " New session · {} review ",
             step_counter(4, 4, target_hidden, wizard)
@@ -321,7 +327,7 @@ pub(crate) fn render_new_wizard(
                     (
                         wizard.create_managed_worktree,
                         wizard
-                            .selected_worktree_options(&dashboard.config)
+                            .selected_worktree_options()
                             .is_some_and(|options| options.available),
                     )
                 }),
@@ -354,9 +360,7 @@ pub(crate) fn render_new_wizard(
                 preparing: false,
                 preparation_error: None,
                 submit_enabled: (!raw_project
-                    || wizard
-                        .selected_worktree_options(&dashboard.config)
-                        .is_some()
+                    || wizard.selected_worktree_options().is_some()
                     || wizard.remote_preflight_error.is_some())
                     && wizard.subagents.error().is_none(),
                 active_interruption: false,
@@ -373,7 +377,7 @@ pub(crate) fn render_new_wizard(
                 remote_preflight_in_flight: wizard.remote_preflight_in_flight,
                 remote_preflight_error: wizard.remote_preflight_error.as_deref(),
                 local_changes_excluded: !raw_project,
-                review_notice: (raw_project && wizard.selected_review_turns_off(&dashboard.config))
+                review_notice: (raw_project && wizard.selected_review_turns_off())
                     .then_some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF),
                 conversion: None,
                 sandbox_offer: dashboard.sandbox_offer(wizard),
@@ -385,10 +389,10 @@ pub(crate) fn render_new_wizard(
         return;
     }
     if wizard.step == WizardStep::ProjectDirectory {
-        let target_id = nth_key(&dashboard.config.targets, wizard.target);
+        let target_id = wizard.target.clone();
         let local = matches!(
-            dashboard.config.targets[&target_id],
-            TargetTemplate::LocalBare
+            dashboard.config.targets.get(&target_id),
+            Some(TargetTemplate::LocalBare)
         );
         let popup = wizard_modal(frame, surfaces, area);
         let width = popup.width.saturating_sub(4);
@@ -533,7 +537,7 @@ pub(crate) fn render_new_wizard(
             frame,
             area,
             dashboard,
-            wizard.target,
+            wizard.target(dashboard),
             &wizard.mounts,
             &mut form,
             " Add attached directory ",
@@ -853,8 +857,8 @@ pub(crate) fn render_review_wizard(
         conversion,
         sandbox_offer,
     } = view;
-    let target = &dashboard.config.targets[target_id];
-    let can_attach = offers_attached_directories(target);
+    let target = dashboard.config.targets.get(target_id);
+    let can_attach = target.is_some_and(offers_attached_directories);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Profile: ", theme::muted()),
@@ -878,7 +882,10 @@ pub(crate) fn render_review_wizard(
         Line::from(vec![
             Span::styled("Target: ", theme::muted()),
             Span::styled(target_id, Style::default().fg(theme::palette().accent)),
-            Span::styled(format!(" ({})", target_label(target)), theme::muted()),
+            Span::styled(
+                target.map_or_else(String::new, |target| format!(" ({})", target_label(target))),
+                theme::muted(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Compute: ", theme::muted()),
@@ -1377,7 +1384,7 @@ pub(crate) fn render_review_wizard(
             && (remote_repositories.is_some()
                 || !local_changes_excluded
                 || remote_preflight_error.is_some())
-            && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
+            && (allocation.is_some() || !matches!(target, Some(TargetTemplate::AwsEc2 { .. }))),
     ));
     Dialog::render_actions(frame, DialogShell::layout(inner, 1).actions, &buttons, form);
     // Paint the active popup last so it overlays the remaining review fields.
