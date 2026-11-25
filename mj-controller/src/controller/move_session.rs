@@ -17,6 +17,28 @@ use sha2::{Digest, Sha256};
 
 use super::lifecycle::SourceTargetDisposition;
 
+/// Stop any surviving or sealed retained source worker. A person's cancel,
+/// daemon shutdown and the cleanup bound each end a command.
+fn stop_retained_source_worker(
+    backend: &crate::targets::TargetLocator,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    crate::targets::stop_worker_plan(
+        backend,
+        session_id,
+        "stop retained Move source worker before retry",
+    )
+    .and_then(|plan| {
+        plan.execute(
+            &executor.with_cleanup_timeout(MOVE_SOURCE_CLEANUP_TIMEOUT),
+            &super::ControlWorker,
+        )
+    })
+    .map(|_| ())
+    .context("stop retained worker before retry")
+}
+
 /// The bound each retained-source stop and cleanup command had when these
 /// paths ran on their own 15-second executors (before #1678).
 const MOVE_SOURCE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -1354,18 +1376,7 @@ impl Controller {
                 // Stop any surviving or sealed source worker before resolving
                 // the Move so a failed stop keeps the operation retryable and
                 // Resume cannot reattach to a sealed relay.
-                crate::targets::stop_worker_plan(
-                    &backend,
-                    session_id,
-                    "stop retained Move source worker before retry",
-                )
-                .and_then(|plan| {
-                    plan.execute(
-                        &executor.with_cleanup_timeout(MOVE_SOURCE_CLEANUP_TIMEOUT),
-                        &super::ControlWorker,
-                    )
-                })
-                .context("stop retained worker before retry")?;
+                stop_retained_source_worker(&backend, session_id, executor)?;
                 // Clear any OriginDelta quiescence wire files left by the
                 // abandoned Move so a later Suspend on the resumed source
                 // cannot adopt the Move's old request or receipt.
