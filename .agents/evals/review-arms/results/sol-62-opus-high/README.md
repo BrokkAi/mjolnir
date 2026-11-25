@@ -174,7 +174,12 @@ estimates use hollow markers. These series count different source outcomes:
   index divides that estimated 70-diff yield by **current Terra/high on all
   70 diffs**, rather than taking the raw DSF16/Terra16 ratio. Cost scales the
   observed subset reviewer cost by matched-control workload cost ratios. Its
-  study peak token rates were checked against the [DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing/).
+  study peak token rates were checked against the [DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing/). The
+  subset was the **first 16 diffs in job order**, and the run **stopped for
+  latency**; it was not randomly sampled. Matched controls adjust measured
+  subset yield but cannot establish that DSF's relative performance transfers
+  to the remaining 54 diffs. The projected point has that unmeasured transfer
+  uncertainty; the PNG also states the selection rule and limitation.
 
 The frozen local input table is
 `/mnt/optane/review-arms-20261113/sol-62-repeats/figure/single-model-cost-inputs.json`.
