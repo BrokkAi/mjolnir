@@ -68,7 +68,11 @@ async fn acquire_suspend_blocker_lease(
             drop(admission);
             Ok(None)
         }
-        Some(record) if !parent && !record.state.is_active() => {
+        Some(record)
+            if !parent
+                && (!record.state.is_active()
+                    || matches!(record.state, SessionState::Error | SessionState::Lost)) =>
+        {
             drop(admission);
             Ok(None)
         }
