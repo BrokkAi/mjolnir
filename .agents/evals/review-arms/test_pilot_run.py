@@ -1046,6 +1046,10 @@ if not (attempt / "recover").exists():
         write("a.txt", b"decoy\n")
         write("[ab].txt", b"glob\n")
         write("wide.txt", b"x\n")
+        write("foo", b"a file that becomes a directory\n")
+        (repo / "bar").mkdir()
+        write("bar/x", b"x\n")
+        write("bar/y", b"y\n")
         git("add", "-A")
         git("commit", "-q", "-m", "base")
         base = git("rev-parse", "HEAD").decode().strip()
@@ -1055,16 +1059,32 @@ if not (attempt / "recover").exists():
         write("a.txt", b"decoy changed\n")
         write("[ab].txt", b"glob changed\n")
         write("wide.txt", ("\u00e9" * 40_000 + "\n").encode())  # one 80,000-byte line
+        # A file replaced by a directory and a directory by a file: `:(literal)foo` alone would
+        # also match foo/inner.txt.
+        git("rm", "-q", "foo", "bar/x", "bar/y")
+        (repo / "foo").mkdir()
+        write("foo/inner.txt", b"inner\n")
+        write("bar", b"a directory that becomes a file\n")
         git("add", "-A")
         git("commit", "-q", "-m", "change")
         head = git("rev-parse", "HEAD").decode().strip()
 
-        with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
+        # Planning sees the default configuration whatever the host sets; the session's clone has a
+        # different abbreviation length, context and color. The reads must print the planned bytes.
+        host_config = self.root / "host.gitconfig"
+        host_config.write_text("[diff]\n\tnoprefix = true\n\tcontext = 0\n")
+        with (unittest.mock.patch.object(pilot.driver, "REPO", str(repo)),
+              unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(host_config)})):
             capture = pilot_review.capture({"base_commit": base, "intro_commit": head})
             reads = pilot_review.plan_reads(pilot_review.file_diffs(*capture[:2]))
-        full = git("diff", "--no-ext-diff", "--ignore-submodules=none", *capture[:2])
+        full = git("diff", *pilot_review.PATCH_FLAGS, *capture[:2])
+        self.assertIn(b"diff --git a/big.txt b/big.txt", full)
         self.assertGreater(len(full), 3 * exec_cap)
-        outputs = [subprocess.check_output(["bash", "-c", pilot_review.read_command(*capture[:2], read)], cwd=repo)
+        reader = self.root / "reader"
+        git("clone", "-q", "--no-local", str(repo), str(reader), cwd=self.root)
+        for key, value in (("core.abbrev", "12"), ("diff.context", "1"), ("color.ui", "always")):
+            git("config", key, value, cwd=reader)
+        outputs = [subprocess.check_output(["bash", "-c", pilot_review.read_command(*capture[:2], read)], cwd=reader)
                    for read in reads]
         self.assertGreater(len(reads), 3)
         self.assertEqual(b"".join(outputs), full)
@@ -1073,6 +1093,14 @@ if not (attempt / "recover").exists():
             self.assertLessEqual(len(output), pilot_review.READ_BYTES)
             self.assertLess(pilot_review.READ_BYTES, exec_cap)
             output.decode()
+        self.assertIn(("foo",), [tuple(read[3]) for read in reads])
+        self.assertIn(("bar",), [tuple(read[3]) for read in reads])
+        # A repository whose own config can change the patch is refused, not planned.
+        git("config", "diff.algorithm", "patience")
+        with unittest.mock.patch.object(pilot.driver, "REPO", str(repo)):
+            with self.assertRaisesRegex(ValueError, "diff.algorithm"):
+                pilot_review.file_diffs(*capture[:2])
+        git("config", "--unset", "diff.algorithm")
 
         # The Stage 2a configuration renders its prompt and inputs unchanged; the new one adds
         # the reads and binds its version, independently for writers and reviewers.

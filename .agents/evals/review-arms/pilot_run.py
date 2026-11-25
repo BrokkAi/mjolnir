@@ -422,7 +422,8 @@ class Pilot:
             self.captures[row["key"]] = pilot_review.capture(bug)
         if row["key"] not in self.reads:
             self.reads[row["key"]] = pilot_review.plan_reads(pilot_review.file_diffs(*self.captures[row["key"]][:2]))
-        text = f"{pilot_review.READ_BYTES}\n{pilot_review.DIFF_READING_TEXT}\n{WRITER_DIFF_SENTENCE}"
+        text = "\n".join([str(pilot_review.READ_BYTES), pilot_review.DIFF_READING_TEXT, WRITER_DIFF_SENTENCE,
+                          *pilot_review.PATCH_FLAGS])
         return self.reads[row["key"]], {f"{kind}_diff_reading": self.diff_reading[kind],
                                         f"{kind}_diff_reading_sha256": digest(text.encode())}
 

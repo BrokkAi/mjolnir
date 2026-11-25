@@ -125,11 +125,17 @@ role reads the diff; they are independent, so a reviewer-only rerun keeps the ac
 
 - `single-command` (default) is the Stage 2a prompt, byte for byte, and adds nothing to a job's
   inputs, so the frozen Stage 2a artifacts still verify.
-- `bounded-reads-v1` lists numbered `git diff` reads of at most 32,000 bytes each (small files
+- `bounded-reads-v2` lists numbered `git diff` reads of at most 32,000 bytes each (small files
   batched, large files read in byte windows ending at line boundaries). Together they print the
-  whole diff once. Each job's `inputs.json` records `writer_diff_reading` or
-  `reviewer_diff_reading` and a digest of the instruction text and budget, and `prompt_sha256`
-  covers the rendered list.
+  whole diff once. The patch bytes are pinned with `--full-index` (the session's history is cut
+  short, so abbreviated `index` lines would differ in length from the planning clone's) and the
+  other `audit.py`-accepted flags in `pilot_review.PATCH_FLAGS`; planning runs without system or
+  global git config and refuses a clone whose own config sets `diff.*`, `color.*` or
+  `core.quotePath`, because the rest have no accepted flag and the pinned session image has no git
+  config. A changed path that is a directory of another changed path gets its own read with
+  `:(exclude,literal)path/`. Each job's `inputs.json` records `writer_diff_reading` or
+  `reviewer_diff_reading` and a digest of the instruction text, budget and flags, and
+  `prompt_sha256` covers the rendered list.
 
 `tool_output_token_limit` in the Codex overlay would raise the policy, but it applies to every
 session of the profile and the model still chooses `max_output_tokens` (the reviewers chose 30,000,
