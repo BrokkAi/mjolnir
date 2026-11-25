@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 156;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 157;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3674,6 +3674,48 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 157 is breaking, for two reasons that ship together.
+    // Recorded target runtimes keep secret-sourced environment entries as
+    // `environment_references`: an older daemon rewrites `target_runtime_json`
+    // without the field, silently dropping those variables at the next launch.
+    // And a managed checkout's path derives from its descriptor, so its
+    // `project_directory` is NULL: an older daemon rejects such a record, and
+    // reads NULL as a bundle workspace.
+    // Work is O(rows of `subagent_sessions`) and two triggers; no large blob
+    // table is touched. Existing `sessions.project_directory` values stay: a
+    // legacy sub-agent whose parent is gone has no other record of its path.
+    if version < 157 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        // Reviewer launches recorded the profile's resolved environment, which
+        // the launch now takes from the live profile.
+        transaction.execute_batch(
+            "UPDATE subagent_sessions
+                SET record_json = json_remove(record_json, '$.reviewer_launch.environment')
+              WHERE json_type(record_json, '$.reviewer_launch.environment') IS NOT NULL;
+             DROP TRIGGER IF EXISTS project_discovery_insert;
+             DROP TRIGGER IF EXISTS project_discovery_update;
+             CREATE TRIGGER project_discovery_insert AFTER INSERT ON sessions
+                WHEN NEW.project_directory IS NOT NULL OR NEW.managed_worktree IS NOT NULL BEGIN
+                    INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                    VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                END;
+             CREATE TRIGGER project_discovery_update AFTER UPDATE OF project_directory,managed_worktree,target_template_id ON sessions
+                WHEN (NEW.project_directory IS NOT NULL OR NEW.managed_worktree IS NOT NULL) AND
+                    (NEW.project_directory IS NOT OLD.project_directory
+                    OR NEW.managed_worktree IS NOT OLD.managed_worktree
+                    OR NEW.target_template_id IS NOT OLD.target_template_id) BEGIN
+                    INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                    VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                END;
+             UPDATE schema_compatibility
+                 SET minimum_compatible_version = 157 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (157, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=157;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -6138,6 +6180,172 @@ mod reader_tests {
             )
             .unwrap();
         assert_eq!(preserved, ("sg-old".into(), None, None));
+    }
+
+    #[test]
+    fn revision_157_scrubs_reviewer_environment_catalogs_pathless_checkouts_and_refuses_revision_156()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let (_, child) = super::super::tests::subagent_pair(&path);
+        let discoveries = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM project_discovery_changes",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // A reviewer launch as revision 156 recorded it: with the profile's
+        // resolved environment, which may hold a secret.
+        let connection = Connection::open(&path).unwrap();
+        let json: String = connection
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&child.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut record: mj_core::subagent::SubagentRecord = serde_json::from_str(&json).unwrap();
+        record.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+            role: mj_core::worker_launch::ReviewChildRole::Reviewer,
+            profile_id: "reviewer".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            bridge_command: "review-bridge".into(),
+            bridge_args: vec![],
+            environment: Default::default(),
+            excluded_environment: vec![],
+            execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            model: None,
+            effort: None,
+            fast_mode: None,
+            generation: 0,
+            mcp_servers: vec![],
+        });
+        connection
+            .execute(
+                "UPDATE subagent_sessions
+                    SET record_json=json_insert(?2,'$.reviewer_launch.environment',
+                                                json('{\"API_KEY\":\"sk-secret-value\"}'))
+                  WHERE child_session_id=?1",
+                params![child.id, serde_json::to_string(&record).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        stamp_schema_version(&path, 156);
+        let previous = Connection::open(&path).unwrap();
+        previous
+            .execute_batch(
+                "DROP TRIGGER project_discovery_insert;
+                 DROP TRIGGER project_discovery_update;
+                 CREATE TRIGGER project_discovery_insert AFTER INSERT ON sessions
+                    WHEN NEW.project_directory IS NOT NULL BEGIN
+                        INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                        VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                    END;
+                 CREATE TRIGGER project_discovery_update AFTER UPDATE OF project_directory,managed_worktree,target_template_id ON sessions
+                    WHEN NEW.project_directory IS NOT NULL AND
+                        (NEW.project_directory IS NOT OLD.project_directory
+                        OR NEW.managed_worktree IS NOT OLD.managed_worktree
+                        OR NEW.target_template_id IS NOT OLD.target_template_id) BEGIN
+                        INSERT INTO project_discovery_changes(session_id,directory,managed_worktree,target_template_id)
+                        VALUES(NEW.session_id,NEW.project_directory,NEW.managed_worktree,NEW.target_template_id);
+                    END;",
+            )
+            .unwrap();
+        read_schema_state(&previous)
+            .unwrap()
+            .ensure_supported_by(156)
+            .unwrap();
+        // Revision 156 ignores a managed checkout that records no path.
+        let before = discoveries(&previous);
+        previous
+            .execute(
+                "UPDATE sessions SET managed_worktree='{}' WHERE session_id=?1",
+                [&child.id],
+            )
+            .unwrap();
+        assert_eq!(discoveries(&previous), before);
+        previous
+            .execute(
+                "UPDATE sessions SET managed_worktree=NULL WHERE session_id=?1",
+                [&child.id],
+            )
+            .unwrap();
+        drop(previous);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert!(matches!(
+            state
+                .ensure_supported_by(156)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        ));
+        let (environment, profile): (Option<String>, String) = upgraded
+            .query_row(
+                "SELECT json_type(record_json,'$.reviewer_launch.environment'),
+                        json_extract(record_json,'$.reviewer_launch.profile_id')
+                   FROM subagent_sessions WHERE child_session_id=?1",
+                [&child.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((environment, profile.as_str()), (None, "reviewer"));
+        assert!(
+            load_state_from(&path)
+                .unwrap()
+                .subagents
+                .contains_key(&child.id)
+        );
+
+        // A managed checkout stores no project directory: its path derives
+        // from the descriptor, and the new triggers still queue it.
+        let mut managed = super::super::tests::session("managed", "project");
+        let source = PathBuf::from("/srv/project");
+        managed.project_directory = None;
+        managed.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: source.join("app"),
+            source_repository: source.clone(),
+            worktree_root: source.join(".mj/clones/managed"),
+            branch: "main".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: None,
+        }));
+        let queued = discoveries(&upgraded);
+        save_session_to(&path, &managed).unwrap();
+        assert_eq!(discoveries(&upgraded), queued + 1);
+        let directory: Option<Vec<u8>> = upgraded
+            .query_row(
+                "SELECT directory FROM project_discovery_changes ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(directory, None);
+        let loaded = state_io::load_session_with(&upgraded, "managed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.project_directory, None);
+        assert_eq!(
+            loaded.checkout().project_directory().as_deref(),
+            Some(source.join(".mj/clones/managed/app").as_path())
+        );
+        upgraded
+            .execute(
+                "UPDATE sessions SET managed_worktree='{}' WHERE session_id=?1",
+                [&child.id],
+            )
+            .unwrap();
+        assert_eq!(discoveries(&upgraded), queued + 2);
     }
 
     #[test]

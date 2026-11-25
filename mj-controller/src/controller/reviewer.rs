@@ -27,31 +27,21 @@ impl Controller {
         let execution_policy = session
             .target_runtime_settings(&self.config)?
             .execution_policy;
-        let (backend, _) = self.worker_placement(session_id)?;
         let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
+        // The reviewer's launch is built from its profile like any session's,
+        // so its environment values are not recorded here: the record outlives
+        // a rotated secret and must not hold one. Only the names to remove are
+        // recorded.
         let mut environment = profile.environment.resolved().clone();
-        // The worker sets the harness home from the directory it staged, so
-        // sending one here could only point the reviewer somewhere it must not
-        // read.
         environment.remove(profile.home_env());
-        // A reviewer on a ChatGPT Codex profile must not fall back to an API
-        // key any more than a session may.
         let excluded_environment = profile.exclude_harness_environment(&mut environment);
-        // A Podman session runs as uid 0, where Claude Code rejects
-        // bypassPermissions unless told it is already sandboxed. The session's
-        // own launch sets this only when the session itself runs Claude.
-        if backend.container_engine() == Some("podman")
-            && profile.kind == mj_core::config::HarnessKind::Claude
-        {
-            environment.insert("IS_SANDBOX".into(), "1".into());
-        }
         Ok(ReviewerLaunchConfig {
             role: mj_core::worker_launch::ReviewChildRole::Reviewer,
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             bridge_command: bridge_command.into(),
             bridge_args,
-            environment,
+            environment: Default::default(),
             excluded_environment,
             execution_policy,
             model: None,
@@ -132,33 +122,26 @@ mod tests {
         )
     }
 
+    // The reviewer's profile environment is applied from the live profile at
+    // launch; a recorded copy would persist resolved secrets.
     #[test]
-    fn a_claude_reviewer_in_a_podman_session_is_told_it_is_sandboxed() {
+    fn a_reviewer_launch_record_holds_no_environment_values() {
         let directory = tempfile::tempdir().unwrap();
-        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
         let podman = mj_core::state::TargetLocator::LocalPodman {
             borrowed_from: None,
-            container_id: container_id.clone(),
+            container_id: crate::targets::resource_name(SESSION_ID).unwrap(),
             workspace_storage: Default::default(),
         };
-        let docker = mj_core::state::TargetLocator::LocalDocker {
-            borrowed_from: None,
-            container_id,
-        };
-        for (locator, profile_id, sandboxed) in [
-            (podman.clone(), "claude", true),
-            (podman, "codex", false),
-            (docker, "claude", false),
-        ] {
-            let (controller, session_id) = fixture(directory.path(), locator);
-            let config = controller
-                .reviewer_launch_config(&session_id, profile_id, 0, &[])
-                .unwrap();
-            assert_eq!(
-                config.environment.get("IS_SANDBOX").map(String::as_str),
-                sandboxed.then_some("1"),
-                "{profile_id}"
-            );
-        }
+        let (controller, session_id) = fixture(directory.path(), podman);
+        let config = controller
+            .reviewer_launch_config(&session_id, "claude", 0, &[])
+            .unwrap();
+        assert!(config.environment.is_empty());
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("environment")
+                .is_none()
+        );
     }
 }

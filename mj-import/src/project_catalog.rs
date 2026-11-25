@@ -357,22 +357,23 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 !executor.cancellation_requested(),
                 "project discovery cancelled"
             );
-            let mut discovered_directory = change.directory.clone();
+            let mut discovered_directory = change.directory.clone().unwrap_or_default();
             let result = (|| {
                 let stored_state = database::load_state()?;
                 let known = stored_state.sessions.get(&change.session_id).cloned();
                 let path = stored_state
                     .checkout(&change.session_id)
                     .ok()
-                    .map(|checkout| match checkout {
+                    .and_then(|checkout| match checkout {
                         mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
-                            worktree.source_project_directory.clone()
+                            Some(worktree.source_project_directory.clone())
                         }
-                        mj_core::state::Checkout::Attached { path } => path.to_path_buf(),
+                        mj_core::state::Checkout::Attached { path } => Some(path.to_path_buf()),
                         mj_core::state::Checkout::ManagedWorkspace
                         | mj_core::state::Checkout::Borrowed { .. } => change.directory.clone(),
                     })
-                    .unwrap_or_else(|| change.directory.clone());
+                    .or_else(|| change.directory.clone())
+                    .context("session records no project directory to discover")?;
                 discovered_directory.clone_from(&path);
                 let recorded = known
                     .as_ref()
@@ -455,7 +456,8 @@ fn migrate_memory(
         legacy.push(Project::bundle(primary, members).key()?);
     }
     for session in sessions {
-        legacy.push(Project::for_legacy_session(session, bundle, None)?.key()?);
+        legacy
+            .push(Project::for_legacy_session(session, &session.checkout(), bundle, None)?.key()?);
     }
     for key in legacy {
         for conflict in
@@ -677,11 +679,15 @@ mod tests {
         record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: root.path().join("workers").join(&record.id),
         }));
-        let raw_key =
-            ProjectMemoryIdentity::for_legacy_session(&record, Some(&legacy_bundle), None)
-                .unwrap()
-                .key()
-                .unwrap();
+        let raw_key = ProjectMemoryIdentity::for_legacy_session(
+            &record,
+            &record.checkout(),
+            Some(&legacy_bundle),
+            None,
+        )
+        .unwrap()
+        .key()
+        .unwrap();
         let raw_root = mj_core::config::data_dir()
             .join("projects")
             .join(raw_key)

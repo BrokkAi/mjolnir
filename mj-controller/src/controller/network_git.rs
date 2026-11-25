@@ -46,7 +46,7 @@ impl Controller {
         let directory = session
             .checkout()
             .project_directory()
-            .map(std::path::Path::to_path_buf)
+            .map(std::borrow::Cow::into_owned)
             .unwrap_or(workspace_directory);
         let checked = |arguments: &[&str]| -> Result<String> {
             let mut args = vec![

@@ -2250,10 +2250,7 @@ impl Controller {
             let refreshed_checkout = self.state.checkout_for_record(session_id, &previous)?;
             previous_managed_worktree = refreshed_checkout.effective().managed_worktree().cloned();
         }
-        let mut upgraded_legacy_worktree: Option<(
-            mj_core::state::ManagedWorktree,
-            Option<PathBuf>,
-        )> = None;
+        let mut upgraded_legacy_worktree: Option<mj_core::state::ManagedWorktree> = None;
         if !origin_delta
             && !transferring_workspace
             && plan == ResumePlan::InPlace
@@ -2266,13 +2263,9 @@ impl Controller {
             )
             && !managed_worktree_checkout_exists(executor, worktree)?
         {
-            let (upgraded_clone, upgraded_project_directory) = upgrade_legacy_worktree_to_clone(
-                worktree,
-                session_id,
-                previous.project_directory.as_deref(),
-            );
+            let upgraded_clone = upgrade_legacy_worktree_to_clone(worktree, session_id);
             ensure_managed_worktree_available(executor, &upgraded_clone)?;
-            upgraded_legacy_worktree = Some((upgraded_clone, upgraded_project_directory));
+            upgraded_legacy_worktree = Some(upgraded_clone);
         }
         // A converting resume writes its own archive below, from the accepted
         // repository's selected network source, and provisioning reads that
@@ -2291,7 +2284,7 @@ impl Controller {
             && matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. })
             && let Some(project_directory) = checkout.project_directory()
         {
-            self.validate_project_directory(target_id, project_directory, executor)
+            self.validate_project_directory(target_id, &project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
         let conversion = match plan {
@@ -2487,13 +2480,9 @@ impl Controller {
                 worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
                     && matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local)
             }) {
-                let (upgraded, upgraded_project_directory) = upgrade_legacy_worktree_to_clone(
-                    worktree,
-                    session_id,
-                    previous.project_directory.as_deref(),
-                );
+                let upgraded = upgrade_legacy_worktree_to_clone(worktree, session_id);
                 ensure_managed_worktree_available(executor, &upgraded)?;
-                Some((upgraded, upgraded_project_directory))
+                Some(upgraded)
             } else {
                 None
             }
@@ -2531,12 +2520,13 @@ impl Controller {
                 apply_workspace_to_raw(record, conversion);
             }
             None => {
-                if let Some((upgraded, upgraded_project_directory)) = upgraded_origin_delta_clone
+                if let Some(upgraded) = upgraded_origin_delta_clone
                     .as_ref()
                     .or(upgraded_legacy_worktree.as_ref())
                 {
+                    // The clone's path derives from its descriptor.
                     record.managed_worktree = Some(Box::new(upgraded.clone()));
-                    record.project_directory = upgraded_project_directory.clone();
+                    record.project_directory = None;
                 } else if let (Some(worktree), Some(refreshed)) = (
                     record.managed_worktree.as_mut(),
                     previous_managed_worktree.as_ref(),
@@ -2580,7 +2570,7 @@ impl Controller {
                     // then applies the origin-delta snapshot into the workspace.
                 } else if plan == ResumePlan::WorkspaceToRaw {
                     // Handled in the WorkspaceToRaw conversion block below.
-                } else if let Some((upgraded, _)) = upgraded_origin_delta_clone.as_ref() {
+                } else if let Some(upgraded) = upgraded_origin_delta_clone.as_ref() {
                     match super::worktree::restore_managed_clone_origin_delta(
                         executor, upgraded, &archive_path, archive_manifest,
                     )? {
@@ -2609,7 +2599,7 @@ impl Controller {
                     // ManagedWorkspace resuming in place: provisioning clones from origin;
                     // restore_into_target applies the origin-delta snapshot.
                 }
-            } else if let Some((upgraded_clone, _)) = upgraded_legacy_worktree.as_ref() {
+            } else if let Some(upgraded_clone) = upgraded_legacy_worktree.as_ref() {
                 resume_notices.extend(restore_legacy_worktree_as_managed_clone(
                     executor,
                     upgraded_clone,

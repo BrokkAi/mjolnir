@@ -245,10 +245,13 @@ pub fn worker_launch_config(
     Option<ProjectMemoryLaunchConfig>,
     String,
 )> {
+    // One resolution per launch: the AWS decision and the worker's
+    // environment must see the same secret values.
+    let target_environment = target.launch_environment()?;
     let aws_source = crate::aws_credentials::source_for_staged_profile(
         profile,
         backend,
-        &target.environment,
+        &target_environment,
         session.staged_aws_profile.as_deref(),
     )?;
     worker_launch_config_with_checkout(
@@ -259,6 +262,7 @@ pub fn worker_launch_config(
         backend,
         worker_workspace,
         target,
+        target_environment,
         config,
         aws_source.as_ref(),
     )
@@ -273,6 +277,8 @@ pub fn worker_launch_config_with_checkout(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
+    // `target.launch_environment()`, resolved once by the caller.
+    mut target_environment: std::collections::BTreeMap<String, String>,
     config: &mj_core::config::Config,
     aws_source: Option<&mj_core::aws_credentials::AwsCredentialSource>,
 ) -> Result<(
@@ -304,7 +310,6 @@ pub fn worker_launch_config_with_checkout(
         );
     }
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
-    let mut target_environment = target.environment.clone();
     let podman_container = backend.container_engine() == Some("podman");
     let nitro_build_cache =
         session.build_cache.is_some() && matches!(backend, targets::TargetLocator::SshNitro { .. });
@@ -437,6 +442,7 @@ pub fn worker_launch_config_with_checkout(
     // the memory launch config below depends on the session's choice.
     let mut project_memory = project_memory_launch(
         session,
+        checkout,
         bundle,
         &workspace,
         &target_profile_home,

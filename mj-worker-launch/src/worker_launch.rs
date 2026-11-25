@@ -85,7 +85,7 @@ pub fn aws_session_inputs<'a>(
         .context("session target is missing")?;
     let backend = backend_locator(locator, session, config)?;
     let runtime = session.target_runtime_settings(config)?;
-    Ok((profile, backend, runtime.environment.clone()))
+    Ok((profile, backend, runtime.launch_environment()?))
 }
 
 /// Where this session's worker lives. This is decided from the session
@@ -232,14 +232,17 @@ pub fn stage_worker_files_for(
         .get(&session.last_profile)
         .context("session profile is missing")?;
     profile.ensure_ready(&session.last_profile)?;
-    let target_environment = &session.target_runtime_settings(config)?.environment;
-    let aws_source = crate::aws_credentials::source(profile, backend, target_environment)?;
+    let target_environment = session
+        .target_runtime_settings(config)?
+        .launch_environment()?;
+    let aws_source = crate::aws_credentials::source(profile, backend, &target_environment)?;
     let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
         config,
         state,
         session_id,
         backend,
         history,
+        &target_environment,
         aws_source.as_ref(),
     )?;
 
@@ -297,7 +300,7 @@ pub fn stage_worker_files_for(
         &session.last_profile,
         profile,
         crate::aws_credentials::SessionHost::from(backend),
-        target_environment,
+        &target_environment,
     ) {
         executor.notify_notice(&notice);
     }
@@ -786,11 +789,13 @@ pub fn session_launch_config(
         .profiles
         .get(&session.last_profile)
         .context("session profile is missing")?;
-    let target = session.target_runtime_settings(config)?;
+    let target_environment = session
+        .target_runtime_settings(config)?
+        .launch_environment()?;
     let aws_source = crate::aws_credentials::source_for_staged_profile(
         profile,
         backend,
-        &target.environment,
+        &target_environment,
         session.staged_aws_profile.as_deref(),
     )?;
     session_launch_config_with_source(
@@ -799,6 +804,7 @@ pub fn session_launch_config(
         session_id,
         backend,
         history,
+        &target_environment,
         aws_source.as_ref(),
     )
 }
@@ -809,6 +815,8 @@ fn session_launch_config_with_source(
     session_id: &str,
     backend: &targets::TargetLocator,
     history: LaunchHistory<'_>,
+    // The target environment resolved once for this launch.
+    target_environment: &std::collections::BTreeMap<String, String>,
     aws_source: Option<&AwsCredentialSource>,
 ) -> Result<(
     WorkerLaunchConfig,
@@ -819,13 +827,13 @@ fn session_launch_config_with_source(
         .sessions
         .get(session_id)
         .with_context(|| format!("unknown session {session_id}"))?;
-    session.validate_configuration(config)?;
     let profile = config
         .profiles
         .get(&session.last_profile)
         .context("session profile is missing")?;
     let owner = state.workspace_owner(session_id)?;
     let checkout = owner.checkout();
+    session.validate_configuration_in(&checkout, config)?;
     let bundle = checkout
         .project_directory()
         .is_none()
@@ -869,6 +877,7 @@ fn session_launch_config_with_source(
             working_directories: &working_directories,
         },
         &target,
+        target_environment.clone(),
         config,
         aws_source,
     )?;
@@ -883,7 +892,6 @@ fn session_launch_config_with_source(
         launch.bridge_command = reviewer.bridge_command.clone();
         launch.bridge_args = reviewer.bridge_args.clone();
         launch.execution_policy = reviewer.execution_policy;
-        launch.environment.extend(reviewer.environment.clone());
         if let Some(source) = aws_source {
             apply_aws_launch_environment(&mut launch.environment, &target_profile_home, source);
         }
@@ -1096,7 +1104,6 @@ pub fn project_memory_sync_target(
     if session.no_project_memory {
         return Ok(None);
     }
-    session.validate_configuration(config)?;
     let locator = session
         .target
         .as_ref()
@@ -1108,6 +1115,7 @@ pub fn project_memory_sync_target(
         .context("session profile is missing")?;
     let owner = state.workspace_owner(session_id)?;
     let checkout = owner.checkout();
+    session.validate_configuration_in(&checkout, config)?;
     let bundle = checkout
         .project_directory()
         .is_none()
@@ -1128,6 +1136,7 @@ pub fn project_memory_sync_target(
     let target_home = target_profile_home(&backend, session_id, profile);
     let launch = project_memory_launch(
         session,
+        &checkout,
         bundle,
         &workspace,
         &target_home,

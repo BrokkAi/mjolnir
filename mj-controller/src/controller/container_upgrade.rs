@@ -465,6 +465,12 @@ impl Controller {
             operation_id,
             Path::new(&workspace),
             Path::new(&root),
+            &session
+                .target_runtime_settings(&self.config)?
+                .environment_references
+                .keys()
+                .cloned()
+                .collect(),
             executor,
         )?;
         if let Some(settings) = settings {

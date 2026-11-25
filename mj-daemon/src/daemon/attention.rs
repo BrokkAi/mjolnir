@@ -321,8 +321,22 @@ pub(super) fn supports_question_dismissal(
 
 fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
     runtime.records.get(id).is_some_and(|record| {
+        // A sub-agent is judged by the checkout it borrows, which only its
+        // owner's record names.
+        let checkout = match runtime
+            .environment_owners
+            .get(id)
+            .filter(|owner| owner.as_str() != id)
+            .and_then(|owner| runtime.records.get(owner))
+        {
+            Some(owner) => mj_core::state::Checkout::Borrowed {
+                owner,
+                checkout: Box::new(owner.checkout()),
+            },
+            None => record.checkout(),
+        };
         record
-            .configuration_issue(&runtime.metadata.config)
+            .configuration_issue_in(&checkout, &runtime.metadata.config)
             .is_some()
     }) || runtime.sessions.get(id).is_some_and(|view| {
         matches!(
