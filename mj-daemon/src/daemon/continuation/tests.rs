@@ -2817,7 +2817,8 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
         panic!("an old worker must wait on the source profile");
     };
     assert!(
-        wait.notice.contains("worker predates in-place restarts"),
+        wait.notice
+            .contains("worker predates credential-preserving in-place Move"),
         "{}",
         wait.notice
     );
