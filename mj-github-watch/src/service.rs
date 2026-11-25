@@ -3710,6 +3710,7 @@ mod tests {
         };
         // Include more pending pairs than one poll can classify, with GitHub's
         // clock ahead of the worker, plus a failed pair that is due to retry.
+        database::github_repo_cursor("acme", "repo").unwrap();
         record_items(1..=MAX_CLASSIFICATIONS_PER_POLL as u64 + 2, at(60));
         database::record_github_classification_failure(
             "acme".into(),

@@ -3774,6 +3774,25 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 160 is compatible: an independent GitHub reset table; older
+    // readers ignore it and ordinary session updates preserve its rows.
+    // O(1) DDL only: no retained feed or transcript rows are copied.
+    if version < 160 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS github_session_reset_frontiers (
+                 session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 owner TEXT NOT NULL, repo TEXT NOT NULL,
+                 through_number INTEGER NOT NULL,
+                 PRIMARY KEY(session_id, owner, repo)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (160, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=160;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -6168,6 +6187,46 @@ mod reader_tests {
     }
 
     #[test]
+    fn revision_160_github_reset_frontiers_are_compatible_and_session_owned() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut session = super::super::tests::session("cleared", "project");
+        save_session_to(&path, &session).unwrap();
+        open_writer(&path)
+            .unwrap()
+            .execute_batch("DROP TABLE github_session_reset_frontiers;")
+            .unwrap();
+        stamp_schema_version(&path, 159);
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 160);
+        assert_eq!(state.minimum_compatible, Some(159));
+        state.ensure_supported_by(159).unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_session_reset_frontiers VALUES ('cleared', 'acme', 'repo', 42)",
+                [],
+            )
+            .unwrap();
+        session.title = "new title".into();
+        save_session_to(&path, &session).unwrap();
+        assert_eq!(connection.query_row("SELECT through_number FROM github_session_reset_frontiers WHERE session_id='cleared'", [], |row| row.get::<_, i64>(0)).unwrap(), 42);
+        connection
+            .execute("DELETE FROM sessions WHERE session_id='cleared'", [])
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM github_session_reset_frontiers",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn revision_159_history_only_consent_round_trips_and_refuses_revision_158() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -6175,7 +6234,7 @@ mod reader_tests {
         stamp_schema_version(&path, 158);
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 159);
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(159));
         assert!(state.ensure_supported_by(158).is_err());
         let consent = mj_core::suspend_consent::SuspendConsent {

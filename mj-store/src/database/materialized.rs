@@ -275,7 +275,7 @@ pub(super) fn materialized_user_message(
 }
 
 /// Where the newest `/clear` boundary sits, if the session has one.
-fn last_materialized_context_boundary(
+pub(super) fn last_materialized_context_boundary(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<u64>> {
