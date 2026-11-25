@@ -4041,7 +4041,9 @@ fn review_residue_repositories_for_state(
         if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } = checkout.effective()
             && worktree.kind == ManagedCheckoutKind::Worktree
         {
-            in_use.push(worktree.source_repository.as_path());
+            in_use.push(std::borrow::Cow::Borrowed(
+                worktree.source_repository.as_path(),
+            ));
         }
     }
     let mut repositories = configured
@@ -4051,7 +4053,7 @@ fn review_residue_repositories_for_state(
                 .checkout(session_id)
                 .ok()?
                 .project_directory()
-                .map(Path::to_path_buf)
+                .map(std::borrow::Cow::into_owned)
         }))
         .filter(|repository| {
             !is_inside_managed_checkout(repository)

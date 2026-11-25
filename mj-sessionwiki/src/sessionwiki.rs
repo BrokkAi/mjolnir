@@ -136,7 +136,7 @@ pub fn indexed_project_directory(
         mj_core::state::Checkout::Attached { path } => Ok(Some(path.to_path_buf())),
         mj_core::state::Checkout::ManagedWorktree {
             project_directory, ..
-        } => Ok(project_directory.map(Path::to_path_buf)),
+        } => Ok(project_directory.map(std::borrow::Cow::into_owned)),
         mj_core::state::Checkout::ManagedWorkspace => {
             let Some(config) = config else {
                 return Ok(None);

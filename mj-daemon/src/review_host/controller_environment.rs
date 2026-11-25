@@ -79,9 +79,14 @@ impl ReviewEnvironment for ControllerEnvironment {
                 controller.config.targets.get(&session.target_template_id),
                 Some(mj_core::config::TargetTemplate::LocalBare)
             )
-            && if let Some(directory) = session.project_directory.as_deref() {
+            && if let Some(directory) = controller
+                .state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.project_directory())
+            {
                 mj_core::repository::resolve_local_directory(
-                    directory,
+                    &directory,
                     &mj_controller::targets::BoundedProcessExecutor::new(
                         std::time::Duration::from_secs(5),
                     ),

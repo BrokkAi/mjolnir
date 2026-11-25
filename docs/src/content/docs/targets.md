@@ -437,6 +437,20 @@ environment; see [Secrets](/configuration/#secrets-secretstoml). Use the
 harness login flow for provider credentials and the controller's GitHub token
 flow for GitHub access. See [Profiles and harnesses](/profiles/).
 
+A plain-string target environment entry is passed to the container engine as
+`--env`, so the container records it. An entry that names a secret is not: the
+engine never sees its value, so `podman inspect` and the daemon's session
+records hold only the reference. Mjolnir reads the secret each time a worker
+launches and delivers it to the worker, the harness, and its shells through the
+session's private `launch.json`. A secret you rotate therefore takes effect at
+the session's next Restart, and a reference that no longer resolves stops that
+launch with an error naming it.
+
+The one thing a secret-sourced entry does not reach is Mjolnir's own
+provisioning commands, which run in the container before its worker exists
+(installing Git and cloning the project). Put a value those commands need, such
+as a proxy setting, in the table as a plain string.
+
 ## Full field reference
 
 The examples above intentionally omit optional connection and storage fields.

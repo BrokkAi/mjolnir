@@ -531,7 +531,10 @@ impl DashboardState {
             session_id: id.to_owned(),
             level,
             title: session.listed_title().to_owned(),
-            project: session.project_name(&self.config),
+            project: self
+                .state
+                .project_identity_session(session)
+                .project_name(&self.config),
             recency: published.as_ref().map_or_else(
                 || {
                     self.session_details

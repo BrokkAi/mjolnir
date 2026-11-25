@@ -475,7 +475,7 @@ impl Controller {
                 }
                 checkout @ mj_core::state::Checkout::Borrowed { .. } => {
                     if let Some(path) = checkout.project_directory() {
-                        self.validate_project_directory(target_template_id, path, executor)?;
+                        self.validate_project_directory(target_template_id, &path, executor)?;
                     }
                 }
                 mj_core::state::Checkout::ManagedWorkspace => {}

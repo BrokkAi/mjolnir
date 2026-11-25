@@ -519,6 +519,7 @@ fn environment_workspace_root(
         // it.
         targets::TargetLocator::SshBare { ssh, workspace, .. }
             if placement.project_directory.is_none()
+                && placement.managed_worktree.is_none()
                 && targets::verify_session_workspace(workspace, session_id).is_ok() =>
         {
             Some((CacheHost::Ssh(ssh.clone()), PathBuf::from(workspace)))
@@ -1455,5 +1456,29 @@ mod tests {
             worker_id: None,
         };
         assert!(BuildStateRelease::for_target(&unmanaged, &bare_backend, &config).is_none());
+
+        // A managed checkout records no project directory either, but it is
+        // not a bundle workspace: its root is the checkout, not the bare
+        // target's per-session workspace.
+        let mut managed = crate::database::test_fixtures::checkpoint_test_session(id);
+        managed.project_directory = None;
+        managed.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: "/home/user/project".into(),
+            source_repository: "/home/user/project".into(),
+            worktree_root: format!("/home/user/project/.mj/clones/{id}").into(),
+            branch: "main".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: None,
+        }));
+        let workspace_backend = targets::TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "builder.test".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: format!(".local/share/hel/workspaces/{id}"),
+            worker_id: None,
+        };
+        assert!(BuildStateRelease::for_target(&managed, &workspace_backend, &config).is_none());
     }
 }

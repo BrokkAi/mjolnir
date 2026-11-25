@@ -1509,7 +1509,7 @@ impl Controller {
                 if matches!(checkout, mj_core::state::Checkout::Attached { .. }) =>
             {
                 if let Some(path) = checkout.project_directory() {
-                    self.validate_project_directory(target_id, path, executor)?;
+                    self.validate_project_directory(target_id, &path, executor)?;
                 }
             }
             ResumePlan::InPlace => {}

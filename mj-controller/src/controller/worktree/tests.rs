@@ -383,9 +383,20 @@ fn worktree_choice_survives_reload_and_controls_creation() {
         "side"
     );
     assert_eq!(managed.kind, ManagedCheckoutKind::Clone);
+    // The record stores no path for a managed checkout; it derives from the
+    // descriptor.
     assert_eq!(
         controller.state.sessions[&record.id].project_directory,
-        Some(managed.worktree_root.join("nested"))
+        None
+    );
+    assert_eq!(
+        controller
+            .state
+            .checkout(&record.id)
+            .unwrap()
+            .project_directory()
+            .as_deref(),
+        Some(managed.worktree_root.join("nested").as_path())
     );
     crate::controller::test_support::worker_test_scope(&record.id, || {
         controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
@@ -3893,19 +3904,15 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
         kind: ManagedCheckoutKind::Worktree,
         target: ManagedWorktreeTarget::Local,
     };
-    let (upgraded_clone, upgraded_project_dir) = upgrade_legacy_worktree_to_clone(
-        &legacy_record,
-        "legacy-sess",
-        Some(&legacy_wt.join("subdir")),
-    );
+    let upgraded_clone = upgrade_legacy_worktree_to_clone(&legacy_record, "legacy-sess");
     assert_eq!(upgraded_clone.kind, ManagedCheckoutKind::Clone);
     assert_eq!(
         upgraded_clone.worktree_root,
         source.join(".mj/clones/legacy-sess")
     );
     assert_eq!(
-        upgraded_project_dir,
-        Some(source.join(".mj/clones/legacy-sess/subdir"))
+        upgraded_clone.checkout_directory(),
+        Some(source.join(".mj/clones/legacy-sess"))
     );
 
     let notices = restore_legacy_worktree_as_managed_clone(
@@ -3966,8 +3973,7 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
     mj_checkpoint::archive::write_archive_atomic(&originless_archive, &archive_input).unwrap();
     let verified_originless =
         mj_checkpoint::archive::read_archive_verified(&originless_archive).unwrap();
-    let (upgraded_originless, _) =
-        upgrade_legacy_worktree_to_clone(&legacy_record, "legacy-sess-2", None);
+    let upgraded_originless = upgrade_legacy_worktree_to_clone(&legacy_record, "legacy-sess-2");
     let notices_originless = restore_legacy_worktree_as_managed_clone(
         &ProcessExecutor,
         &upgraded_originless,

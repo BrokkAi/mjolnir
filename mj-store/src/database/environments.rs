@@ -55,7 +55,13 @@ impl EnvironmentPlacement {
             target_template_id: session.target_template_id.clone(),
             runtime: session.target_runtime.as_deref().cloned(),
             managed_worktree: session.managed_worktree.clone().map(|v| *v),
-            project_directory: session.project_directory.clone(),
+            // A managed checkout's path derives from its descriptor; keeping a
+            // second copy here would let the two disagree.
+            project_directory: session
+                .managed_worktree
+                .is_none()
+                .then(|| session.project_directory.clone())
+                .flatten(),
             container_workspace: session.container_workspace.clone(),
             build_cache: session.build_cache.clone(),
             repositories: session.project.as_ref().map(|project| {

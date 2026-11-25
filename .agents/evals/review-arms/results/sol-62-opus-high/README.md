@@ -149,7 +149,7 @@ The **combined point-estimate frontier** minimizes cost and maximizes the
 plotted yield index across non-Greptile points. It is descriptive: historical
 and current outcomes use different corpora, grading and normalization baselines.
 Its models and both Greptile solo references are **labeled directly by name**;
-the other nine points use numbers with a lookup key. The frontier is calculated
+the other eight points use numbers with a lookup key. The frontier is calculated
 from the plotted values, rather than a hardcoded list. These series count
 different source outcomes:
 
@@ -166,8 +166,9 @@ different source outcomes:
   Initial heads come from `revision_index=0` in the metrics. Accepted material
   roots whose source references include those heads give **Terra/high
   28/30/30** and **Haiku/xhigh 22/21/19** over three 47-review passes. Historical
-  yield divides each mean by Terra's **29.333** initial-review material roots;
-  its matching initial-review cost reference is **$0.051**.
+  yield divides each mean by Terra's **29.333** initial-review material roots.
+  This historical Terra baseline is retained only for normalization; its point
+  is omitted from the chart at the user's request.
   Initial-only grades for **Haiku/high, Sonnet/high and Opus/high** were not
   preserved. Their initial-review yields are **estimates**, marked `*` in the
   PNG: each all-revision material-root mean is multiplied by Terra's measured

@@ -4144,7 +4144,7 @@ fn agent_repo_urls(
 ) -> Vec<String> {
     use mj_core::remote_git::{Shorthand, display_url, expand_github_source, parse_github_remote};
     record
-        .filter(|record| record.project_directory.is_none())
+        .filter(|record| record.project_directory.is_none() && record.managed_worktree.is_none())
         .and_then(|record| record.project_bundle(&projection?.metadata.config))
         .into_iter()
         .flat_map(|bundle| &bundle.repositories)
