@@ -1226,7 +1226,7 @@ pub fn reconnect_command(
         .sessions
         .get(session_id)
         .with_context(|| format!("unknown session {session_id}"))?;
-    session.validate_configuration_in(&state.checkout(session_id)?, config)?;
+    state.validate_session_configuration(session, config)?;
     let locator = session.target.as_ref().context("session has no target")?;
     let backend = backend_locator(locator, session, config)?;
     targets::reconnect_plan(&backend, session_id)?

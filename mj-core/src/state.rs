@@ -3169,6 +3169,18 @@ impl State {
         }
     }
 
+    /// [`Self::configuration_issue`] as a refusal.
+    pub fn validate_session_configuration(
+        &self,
+        session: &SessionRecord,
+        config: &Config,
+    ) -> Result<()> {
+        match self.configuration_issue(session, config) {
+            Some(issue) => Err(crate::refusal::Refusal::precondition(issue).into()),
+            None => Ok(()),
+        }
+    }
+
     /// The record holding the physical checkout and workspace history.
     pub fn workspace_owner(&self, session_id: &str) -> Result<&SessionRecord> {
         let owner_id = self
@@ -3522,9 +3534,7 @@ impl State {
         self.validate()?;
         config.validate()?;
         for session in self.sessions.values() {
-            if let Some(issue) = self.configuration_issue(session, config) {
-                return Err(crate::refusal::Refusal::precondition(issue).into());
-            }
+            self.validate_session_configuration(session, config)?;
         }
         Ok(())
     }
