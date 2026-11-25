@@ -1,0 +1,45 @@
+{
+  "pool": {
+    "wholly_empty_diffs": 1,
+    "sessions": 1796,
+    "diffs": 70,
+    "raw_findings": 3550,
+    "judged_diffs": 69,
+    "zero_finding_sessions": 409
+  },
+  "accepted_high_reviews": 70,
+  "high_reviews_by_profile": {
+    "codex3": 35,
+    "codex4": 35
+  },
+  "review_executor_width_per_profile": 16,
+  "review_runtime": {
+    "reviews": 70,
+    "mean_cost_usd": 0.28845417142857144,
+    "median_seconds": 123.83000000000001,
+    "p95_seconds": 260.2881,
+    "max_seconds": 993.475,
+    "raw_findings": 246,
+    "peak_global": 25,
+    "peak_by_profile": {
+      "codex3": 12,
+      "codex4": 13
+    },
+    "cli_versions": [
+      "mj 2.75.0"
+    ],
+    "harnesses": [
+      "brokkai-codex-acp-1.15.1_codex-0.170.0_pkg2"
+    ]
+  },
+  "judges": 35,
+  "judge_profiles": {
+    "claude4": 18,
+    "claude7": 17
+  },
+  "judge_providers": {
+    "claude-opus-5-5": 35
+  },
+  "reviewer_extra_samples": 0,
+  "judge_output_reruns": 0
+}

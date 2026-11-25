@@ -1,0 +1,69 @@
+All impact
+==========
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/low              total  130.33
+  gpt-6.2-sol/medium           total  209.00
+  gpt-6.2-sol/high             total  180.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +78.67 (95% +60.33 to +98.00); diffs better 56, worse 2, tied 12
+  gpt-6.2-sol/high - gpt-6.2-sol/low: +49.67 (95% +29.33 to +69.67); diffs better 44, worse 9, tied 17
+
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  gpt-6.2-sol/medium           total  209.00
+  gpt-6.2-sol/high             total  180.00
+  gpt-6.2-sol/high - gpt-6.2-sol/medium: -29.00 (95% -49.33 to -10.00); diffs better 21, worse 28, tied 21
+
+Medium + high impact
+====================
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/low              total   72.33
+  gpt-6.2-sol/medium           total  115.33
+  gpt-6.2-sol/high             total  112.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +43.00 (95% +29.00 to +59.00); diffs better 36, worse 1, tied 33
+  gpt-6.2-sol/high - gpt-6.2-sol/low: +39.67 (95% +25.00 to +55.33); diffs better 35, worse 4, tied 31
+
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  gpt-6.2-sol/medium           total  115.33
+  gpt-6.2-sol/high             total  112.00
+  gpt-6.2-sol/high - gpt-6.2-sol/medium: -3.33 (95% -14.67 to +6.67); diffs better 20, worse 11, tied 39
+
+High impact
+===========
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/low              total   13.00
+  gpt-6.2-sol/medium           total   18.33
+  gpt-6.2-sol/high             total   19.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +5.33 (95% +1.67 to +9.67); diffs better 7, worse 0, tied 63
+  gpt-6.2-sol/high - gpt-6.2-sol/low: +6.00 (95% +1.67 to +11.00); diffs better 7, worse 1, tied 62
+
+diffs 70; verdicts ['confirmed']; severities ['high']
+  gpt-6.2-sol/medium           total   18.33
+  gpt-6.2-sol/high             total   19.00
+  gpt-6.2-sol/high - gpt-6.2-sol/medium: +0.67 (95% -0.67 to +2.33); diffs better 2, worse 1, tied 67
+
+Medium impact
+=============
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/low              total   59.33
+  gpt-6.2-sol/medium           total   97.00
+  gpt-6.2-sol/high             total   93.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +37.67 (95% +25.33 to +51.67); diffs better 34, worse 1, tied 35
+  gpt-6.2-sol/high - gpt-6.2-sol/low: +33.67 (95% +20.00 to +48.00); diffs better 32, worse 4, tied 34
+
+diffs 70; verdicts ['confirmed']; severities ['medium']
+  gpt-6.2-sol/medium           total   97.00
+  gpt-6.2-sol/high             total   93.00
+  gpt-6.2-sol/high - gpt-6.2-sol/medium: -4.00 (95% -15.00 to +6.00); diffs better 19, worse 11, tied 40
+
+Low impact
+==========
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/low              total   58.00
+  gpt-6.2-sol/medium           total   93.67
+  gpt-6.2-sol/high             total   68.00
+  gpt-6.2-sol/medium - gpt-6.2-sol/low: +35.67 (95% +24.33 to +48.00); diffs better 41, worse 5, tied 24
+  gpt-6.2-sol/high - gpt-6.2-sol/low: +10.00 (95% -5.33 to +25.33); diffs better 29, worse 14, tied 27
+
+diffs 70; verdicts ['confirmed']; severities ['low']
+  gpt-6.2-sol/medium           total   93.67
+  gpt-6.2-sol/high             total   68.00
+  gpt-6.2-sol/high - gpt-6.2-sol/medium: -25.67 (95% -41.33 to -11.00); diffs better 13, worse 26, tied 31

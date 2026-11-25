@@ -1,0 +1,7 @@
+{
+  "common_raw_findings": 3304,
+  "same_verdict": 2928,
+  "both_retained": 2902,
+  "same_retained_severity": 2508,
+  "same_verdict_and_severity": 2553
+}
