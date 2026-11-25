@@ -516,6 +516,32 @@ exec '{}' -e 'require("vm").runInNewContext(process.argv[1], {{process: {{versio
             .unwrap();
         assert!(install < text.find("&& chown -R hel").unwrap());
     }
+
+    // Hard-won: cffa9ef4f: BuildKit rejects Containerfile lines longer than 65,535 bytes; 48 KiB chunks base64-encoded to 65,536 bytes.
+    #[test]
+    fn generated_containerfile_lines_stay_within_buildkit_line_limit() {
+        const BUILDKIT_MAX_LINE_BYTES: usize = 65_535;
+        let base = ImageBase {
+            reference: format!("example.invalid/base@sha256:{}", "a".repeat(64)),
+            ..Default::default()
+        };
+        let mise = pinned_mise("x86_64").unwrap();
+        let files = BTreeMap::from([("mise.toml".into(), format!("# {}\n", "x".repeat(70_000)))]);
+        for platform in ["linux/amd64", "linux/arm64"] {
+            let project = containerfile(&base, platform, &mise, &files, &HarnessKind::ALL).unwrap();
+            let generic = session_base_containerfile(&base, platform).unwrap();
+            for text in [project, generic] {
+                for (index, line) in text.lines().enumerate() {
+                    assert!(
+                        line.len() <= BUILDKIT_MAX_LINE_BYTES,
+                        "{platform} line {} is {} bytes (max {BUILDKIT_MAX_LINE_BYTES})",
+                        index + 1,
+                        line.len()
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub const BAKED_NODE_LABEL: &str = "dev.mj.harnesses.node";
@@ -548,7 +574,11 @@ fn emit_embedded_file(text: &mut String, dest: &str, bytes: &[u8], mode: &str) {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."));
-    let chunks: Vec<_> = bytes.chunks(48 * 1024).collect();
+    // BuildKit's Dockerfile line scanner rejects lines longer than 65,535 bytes
+    // (64 KiB - 1), which is tighter than Linux's MAX_ARG_STRLEN (128 KiB).
+    // 36 KiB raw base64-encodes to 48 KiB (49,152 bytes), leaving >16 KiB of
+    // headroom for the surrounding RUN command and destination paths.
+    let chunks: Vec<_> = bytes.chunks(36 * 1024).collect();
     for (index, chunk) in chunks
         .iter()
         .copied()
