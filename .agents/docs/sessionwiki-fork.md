@@ -57,7 +57,7 @@ What the fork used to add, and where it is now:
   write, with a full pass. Standing aside from an older index too stranded it
   for good, since nothing else would ever bring it forward. Check
   `sessionwiki::index::SCHEMA_VERSION` on every bump. 0.30.1 to 0.33.1 kept
-  version 8; 0.34.0 to 0.34.28 keep version 9. SessionWiki itself refuses to
+  version 8; 0.34.0 to 0.34.29 keep version 9; 0.34.30 advances to version 10 with an in-place v9 -> v10 upgrade that drops touched/edits while preserving files/messages/msgs. SessionWiki itself refuses to
   rebuild a newer index from 0.34.1 on, so only a `sessionwiki` command older
   than that rebuilds Mjolnir's index back down.
 - **Full-pass marker.** `<data_dir>/sessionwiki-built` records the cache
