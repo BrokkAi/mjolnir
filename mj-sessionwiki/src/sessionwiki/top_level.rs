@@ -484,16 +484,7 @@ pub(super) fn prune(
                 [id],
             )
             .context("remove a child session from the full-text index")?;
-        for table in [
-            "messages",
-            "touched",
-            "edits",
-            "archive",
-            "tags",
-            "notes",
-            "summaries",
-            "files",
-        ] {
+        for table in ["messages", "archive", "tags", "notes", "summaries", "files"] {
             transaction
                 .execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])
                 .with_context(|| format!("remove child session {id} from {table}"))?;
@@ -855,10 +846,6 @@ mod tests {
             connection
                 .execute("INSERT INTO summaries VALUES (?1, 'summary', 'now')", [id])
                 .unwrap();
-            connection
-                .execute("INSERT INTO touched VALUES (?1, '/src/file')", [id])
-                .unwrap();
-            connection.execute("INSERT INTO edits(session_id, path, kind, snippet) VALUES (?1, '/src/file', 'write', 'edit')", [id]).unwrap();
         }
         connection
             .execute(
@@ -879,15 +866,7 @@ mod tests {
         };
         assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 4);
         assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 0);
-        for table in [
-            "files",
-            "messages",
-            "tags",
-            "notes",
-            "summaries",
-            "touched",
-            "edits",
-        ] {
+        for table in ["files", "messages", "tags", "notes", "summaries"] {
             let ids: Vec<String> = connection
                 .prepare(&format!("SELECT session_id FROM {table}"))
                 .unwrap()

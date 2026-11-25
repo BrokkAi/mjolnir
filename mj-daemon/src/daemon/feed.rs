@@ -1413,7 +1413,7 @@ mod tests {
                 tool_ended_at_ms: None,
                 generated: false,
                 lines: vec![text.into()],
-                mailbox_events: vec![],
+                disclosures: vec![],
                 glyph: "",
                 tone: "agent",
                 tool_status: None,

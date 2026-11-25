@@ -3712,18 +3712,89 @@ fn podman_cleanup_ignores_an_already_absent_container() {
         SESSION,
     )
     .unwrap();
-    assert!(
-        remote.scripts()[0]
-            .args
-            .last()
-            .unwrap()
-            .contains("podman rm --force --ignore")
-    );
-    assert_eq!(
-        remote.scripts()[2].purpose,
-        "remove Podman session Git cache snapshot"
-    );
-    assert!(remote.scripts()[2].args.last().unwrap().contains(SESSION));
+    // Over SSH the whole removal is one command; its script holds every step.
+    assert_eq!(remote.scripts().len(), 1);
+    let script = remote.scripts()[0].args.last().unwrap();
+    assert!(script.contains("podman rm --force --ignore"));
+    assert!(script.contains(&format!(".cache/mjolnir/git/sessions/{SESSION}")));
+}
+
+/// The SSH removal is one command, and each step still runs only if the one
+/// before it succeeded: a container that is not this session's is refused
+/// before any volume or cache is touched, and the failure names the step.
+#[cfg(unix)]
+#[test]
+fn an_ssh_podman_cleanup_runs_in_one_command_and_stops_at_a_refused_container() {
+    let name = resource_name(SESSION).unwrap();
+    let workspace = format!("{name}-workspace");
+    let temporary = format!("{name}-tmp");
+    let locator = TargetLocator::SshPodman {
+        borrowed_from: None,
+        ssh: ssh(),
+        container_id: name.clone(),
+        workspace_storage: PodmanWorkspaceLocator::Volume {
+            name: workspace.clone(),
+        },
+    };
+    let plan = podman_cleanup_plan(&locator, SESSION, true).unwrap();
+    assert_eq!(plan.commands.len(), 1);
+    assert_eq!(plan.commands[0].program, "ssh");
+    // The remote command line, run from the host's home as SSH runs it.
+    let line = format!("cd \"$HOME\" && {}", plan.commands[0].args.last().unwrap());
+    let remote = CommandSpec::new("sh", ["-c", line.as_str()]);
+
+    for (owner, refused) in [(SESSION, false), ("someone-else", true)] {
+        let environment = fake_ssh_podman_environment();
+        let home = environment.path().join("home");
+        let state = home.join("fake-podman");
+        std::fs::write(state.join("container"), "").unwrap();
+        std::fs::write(state.join("volumes"), format!("{workspace}\n{temporary}\n")).unwrap();
+        let cache = home.join(format!(".cache/mjolnir/git/sessions/{SESSION}"));
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let output = execute_with_fake_docker(
+            &environment,
+            &remote,
+            &[
+                ("FAKE_SESSION", owner),
+                ("FAKE_TMP_VOLUME", temporary.as_str()),
+            ],
+        );
+        let invocations = fake_podman_invocations(&environment);
+        let removed = |prefix: &str| invocations.iter().position(|line| line.starts_with(prefix));
+        if refused {
+            let error = mj_core::targets::checked_command_output(&plan.commands[0], output)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error
+                    .contains("remove exact stopped Podman session container failed with status 2")
+                    && error.contains("refusing to operate on a Podman container"),
+                "{error}"
+            );
+            assert_eq!(removed("volume rm"), None, "{invocations:#?}");
+            assert!(state.join("container").exists());
+            assert!(cache.exists(), "the Git cache survives a refused removal");
+            assert_eq!(
+                std::fs::read_to_string(state.join("volumes")).unwrap(),
+                format!("{workspace}\n{temporary}\n")
+            );
+        } else {
+            mj_core::targets::checked_command_output(&plan.commands[0], output).unwrap();
+            let container = removed("rm --force --ignore").expect("container removed");
+            let volume_removals: Vec<_> = invocations
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.starts_with("volume rm"))
+                .collect();
+            assert_eq!(volume_removals.len(), 2, "{invocations:#?}");
+            assert!(volume_removals.iter().all(|(index, _)| *index > container));
+            assert!(volume_removals[0].1.ends_with(&workspace));
+            assert!(volume_removals[1].1.ends_with(&temporary));
+            assert!(!state.join("container").exists());
+            assert!(!cache.exists());
+        }
+    }
 }
 
 #[test]
@@ -5989,7 +6060,7 @@ fn podman_quiesce_and_remove_succeed_when_dead_exec_conmon_causes_stop_timeout()
     assert_eq!(running.status, 0);
     assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "false");
 
-    let cleanup = podman_cleanup_plan(&locator, &session).unwrap();
+    let cleanup = podman_cleanup_plan(&locator, &session, false).unwrap();
     let remove_output = mj_core::targets::checked_command_output(
         &cleanup.commands[0],
         ProcessExecutor.execute(&cleanup.commands[0]).unwrap(),

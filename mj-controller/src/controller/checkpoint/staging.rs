@@ -258,7 +258,7 @@ const SPEC_STREAM_QUEUE_CHUNKS: usize = 4;
 /// Run `command` with `spec` as its JSON stdin, serializing while the command
 /// reads. The spec carries the whole conversation, and a `Vec<u8>` of it would
 /// sit beside the snapshot it came from.
-fn send_spec_streamed<T: serde::Serialize + Sync>(
+pub(in crate::controller) fn send_spec_streamed<T: serde::Serialize + Sync>(
     executor: &impl CommandExecutor,
     command: &CommandSpec,
     spec: &T,

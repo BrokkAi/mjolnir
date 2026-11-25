@@ -373,12 +373,8 @@ fn local_checkpoint_transfer_and_cleanup_accept_native_paths() {
     assert!(destination.exists());
 
     let spec_path = root.join("checkpoint spec.json");
-    for command in [
-        export_command(&locator, SESSION, spec_path.to_str().unwrap()).unwrap(),
-        restore_command(&locator, SESSION, spec_path.to_str().unwrap()).unwrap(),
-    ] {
-        assert_eq!(command.args.last().unwrap(), spec_path.to_str().unwrap());
-    }
+    let command = export_command(&locator, SESSION, spec_path.to_str().unwrap()).unwrap();
+    assert_eq!(command.args.last().unwrap(), spec_path.to_str().unwrap());
     let invalid = format!("{}/../source.hel.zip", spec.relay_root.display());
     let error = transfer_plan(&locator, SESSION, &invalid, &destination, "staging")
         .unwrap_err()
@@ -842,4 +838,33 @@ fn staging_command_runs_in_a_real_shell_and_reports_the_remote_home() {
         format!("MJ_REMOTE_HOME={}\n", home.display())
     );
     assert_eq!(fs::metadata(home.join(&staging)).unwrap().len(), 131072);
+}
+
+/// The export, pack, and restore specs carry paths and the whole conversation;
+/// they cross SSH gzipped, and the path form of export, which sends no stdin,
+/// does not.
+#[test]
+fn export_and_restore_stream_their_spec_gzipped_over_ssh() {
+    for locator in locators() {
+        for command in [
+            export_stdin_command(&locator, SESSION).unwrap(),
+            restore_stdin_command(&locator, SESSION).unwrap(),
+        ] {
+            assert!(command.ssh_gzip_stdin, "{locator:?}: {:?}", command.args);
+            assert!(!command.ssh_gzip_stdout);
+            assert!(
+                command.args.iter().any(|arg| arg.contains("--spec")),
+                "{:?}",
+                command.args
+            );
+        }
+        let pack = pack_stdin_command(&locator, SESSION).unwrap();
+        assert!(pack.ssh_gzip_stdin, "{locator:?}: {:?}", pack.args);
+        assert!(!pack.ssh_gzip_stdout);
+        assert!(
+            !export_command(&locator, SESSION, "/spec.json")
+                .unwrap()
+                .ssh_gzip_stdin
+        );
+    }
 }
