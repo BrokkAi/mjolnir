@@ -1394,10 +1394,6 @@ impl Controller {
                 let handoff = utility_handoff
                     .clone()
                     .context("a resume into a fresh native session has no handoff")?;
-                let handoff = match &canonical_session.pending_prompt_context {
-                    Some(pending) => format!("{pending}\n\n{handoff}"),
-                    None => handoff,
-                };
                 relay.install_prompt_context(handoff).await?;
                 if replay_queue {
                     for prompt in &canonical_session.queued_prompts {

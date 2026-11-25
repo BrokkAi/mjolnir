@@ -10785,33 +10785,15 @@ fn antigravity_connected_with_hook_publishes_steering_and_enables_automatic_stee
 
 #[tokio::test]
 async fn checkpoint_native_use_protocol_transfers_large_pending_context_at_cut() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "checkpoint-context").unwrap();
-    let context = "escaped \"hidden\" context\n".repeat(4096);
-    assert!(context.len() > 64 * 1024);
-    durable.install_prompt_context(context.clone()).unwrap();
-    let cut = crate::relay::test_support::ready_checkpoint(&mut durable, "context-barrier");
-    let relay = Arc::new(RelayCell::new(durable));
-    let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let serving = mj_core::runtime::spawn(unix::serve_client(
-        server,
-        relay,
-        wake_tx,
-        test_credentials(),
-        None,
-        fatal_reports().0,
-    ));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    for barrier in ["context-barrier", "wrong-barrier"] {
+    async fn exchange(
+        lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        request: RelayRequest,
+    ) -> RelayResponseEnvelope {
         let request = RelayRequestEnvelope {
-            request_id: barrier.into(),
+            request_id: "context-test".into(),
             protocol_version: RELAY_PROTOCOL_VERSION,
-            request: RelayRequest::ReadCheckpointNativeUse {
-                barrier_command_id: barrier.into(),
-                cut: cut.clone(),
-            },
+            request,
         };
         let mut bytes = serde_json::to_vec(&request).unwrap();
         bytes.push(b'\n');
@@ -10821,15 +10803,157 @@ async fn checkpoint_native_use_protocol_transfers_large_pending_context_at_cut()
             .unwrap()
             .unwrap()
             .unwrap();
-        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
-        if barrier == "context-barrier" {
-            assert!(matches!(response.body, RelayResponseBody::Ok {
-                payload: RelayResponsePayload::CheckpointNativeUse { pending_prompt_context: Some(text), .. }
-            } if text == context));
-        } else {
-            assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+        assert!(line.len() < mj_core::relay::MAX_FRAME_BYTES);
+        serde_json::from_str(&line).unwrap()
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let durable = DurableRelay::open(temp.path(), SESSION_ID, "checkpoint-context").unwrap();
+    let relay = Arc::new(RelayCell::new(durable));
+    let (wake_tx, _wake_rx) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let serving = mj_core::runtime::spawn(unix::serve_client(
+        server,
+        relay.clone(),
+        wake_tx,
+        test_credentials(),
+        None,
+        fatal_reports().0,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut context = String::new();
+    for index in 0..24 {
+        // Each installation fits; together the hidden text exceeds a frame.
+        let part = format!("{index}:") + &"漢🌍\"\\\n\u{1}".repeat(35_000);
+        let command = RelayCommand::InstallPromptContext { text: part.clone() };
+        assert!(
+            serde_json::to_vec(&command).unwrap().len() < mj_core::relay::RELAY_COMMAND_BYTE_BUDGET
+        );
+        let installed = exchange(
+            &mut lines,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: format!("context-{index}"),
+                command,
+            },
+        )
+        .await;
+        assert!(matches!(
+            installed.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Accepted { .. }
+            }
+        ));
+        if !context.is_empty() {
+            context.push_str("\n\n");
+        }
+        context.push_str(&part);
+    }
+    assert!(context.len() > mj_core::relay::MAX_FRAME_BYTES);
+    let cut =
+        crate::relay::test_support::ready_checkpoint(&mut relay.lock().unwrap(), "context-barrier");
+    let read = |barrier: &str, offset| RelayRequest::ReadCheckpointNativeUse {
+        barrier_command_id: barrier.into(),
+        cut: cut.clone(),
+        pending_context_offset: offset,
+    };
+    let refused = exchange(&mut lines, &mut writer, read("wrong-barrier", None)).await;
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
+    let refused = exchange(&mut lines, &mut writer, read("context-barrier", Some(3))).await;
+    assert!(
+        matches!(refused.body, RelayResponseBody::Error { error } if error.code == RelayErrorCode::InvalidRequest)
+    );
+
+    let mut received = String::new();
+    let mut offset = None;
+    let mut pages = 0;
+    loop {
+        let response = exchange(&mut lines, &mut writer, read("context-barrier", offset)).await;
+        if pages == 0 {
+            let mut longer = response.clone();
+            let RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::CheckpointNativeUse {
+                        pending_prompt_context: Some(ref mut page),
+                        next_context_offset: ref mut next,
+                        ..
+                    },
+            } = longer.body
+            else {
+                panic!("expected first page")
+            };
+            let boundary = next.expect("context exceeds one frame") as usize;
+            let ch = context[boundary..].chars().next().unwrap();
+            page.push(ch);
+            let following = boundary + ch.len_utf8();
+            *next = (following < context.len()).then_some(following as u64);
+            assert!(
+                serde_json::to_vec(&longer).unwrap().len() + 1 > mj_core::relay::MAX_FRAME_BYTES
+            );
+        }
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::CheckpointNativeUse {
+                    pending_prompt_context: Some(page),
+                    next_context_offset,
+                    ..
+                },
+        } = response.body
+        else {
+            panic!("unexpected checkpoint page: {:?}", response.body)
+        };
+        received.push_str(&page);
+        pages += 1;
+        match next_context_offset {
+            Some(next) => {
+                assert_eq!(next as usize, received.len());
+                assert!(context.is_char_boundary(next as usize));
+                offset = Some(next);
+            }
+            None => break,
         }
     }
+    assert!(pages > 1);
+    assert_eq!(received, context);
+
+    // An eventless installation after the first page spoils the cut even
+    // though the journal frontier can remain unchanged.
+    let first = exchange(&mut lines, &mut writer, read("context-barrier", None)).await;
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::CheckpointNativeUse {
+                next_context_offset: Some(next),
+                ..
+            },
+    } = first.body
+    else {
+        panic!("expected first page")
+    };
+    let installed = exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::InstallPromptContext {
+            text: "late context".into(),
+        },
+    )
+    .await;
+    assert!(matches!(installed.body, RelayResponseBody::Ok { .. }));
+    let refused = exchange(&mut lines, &mut writer, read("context-barrier", Some(next))).await;
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
+    let refused = exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::Submit {
+            command_id: "close-after-context-change".into(),
+            command: RelayCommand::Close {
+                barrier_command_id: "context-barrier".into(),
+                expected: cut,
+            },
+        },
+    )
+    .await;
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
     drop(writer);
     drop(lines);
     serving.await.unwrap().unwrap();

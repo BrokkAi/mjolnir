@@ -254,33 +254,84 @@ impl DurableRelay {
             RelayRequest::ReadCheckpointNativeUse {
                 barrier_command_id,
                 cut,
+                pending_context_offset,
             } => match self.checkpoint_native_use(barrier_command_id, cut) {
                 Ok((native_use_evidence, pending_prompt_context)) => {
-                    let payload = RelayResponsePayload::CheckpointNativeUse {
-                        native_use_evidence,
-                        pending_prompt_context: (envelope.protocol_version
-                            >= RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL)
-                            .then_some(pending_prompt_context)
-                            .flatten(),
-                    };
-                    // The response, including JSON escaping, the request ID and
-                    // newline, must fit the transport's actual frame limit.
-                    let response = RelayResponseEnvelope {
-                        request_id: envelope.request_id.clone(),
-                        protocol_version: envelope.protocol_version,
-                        body: RelayResponseBody::Ok {
-                            payload: payload.clone(),
-                        },
-                    };
-                    if serde_json::to_vec(&response)?.len().saturating_add(1) > MAX_FRAME_BYTES {
+                    let text =
+                        if envelope.protocol_version >= RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL {
+                            pending_prompt_context
+                        } else {
+                            None
+                        };
+                    let offset = usize::try_from(pending_context_offset.unwrap_or(0)).ok();
+                    let Some(offset) = offset.filter(|&offset| match text {
+                        Some(text) => offset <= text.len() && text.is_char_boundary(offset),
+                        None => offset == 0,
+                    }) else {
                         return Ok(relay_error(
-                            RelayErrorCode::InvalidState,
-                            "checkpoint pending prompt context exceeds the relay response frame limit",
+                            RelayErrorCode::InvalidRequest,
+                            "invalid checkpoint prompt context offset",
                             false,
                             None,
                         ));
+                    };
+                    let page = |end: usize, next_context_offset: Option<u64>| {
+                        RelayResponsePayload::CheckpointNativeUse {
+                            native_use_evidence: native_use_evidence.clone(),
+                            pending_prompt_context: text.map(|text| text[offset..end].to_owned()),
+                            next_context_offset,
+                        }
+                    };
+                    let fits = |payload: &RelayResponsePayload| -> Result<bool> {
+                        let response = RelayResponseEnvelope {
+                            request_id: envelope.request_id.clone(),
+                            protocol_version: envelope.protocol_version,
+                            body: RelayResponseBody::Ok {
+                                payload: payload.clone(),
+                            },
+                        };
+                        Ok(serde_json::to_vec(&response)?.len().saturating_add(1)
+                            <= MAX_FRAME_BYTES)
+                    };
+                    let end = text.map_or(0, str::len);
+                    if end - offset <= MAX_FRAME_BYTES && fits(&page(end, None))? {
+                        page(end, None)
+                    } else {
+                        let Some(text) = text else {
+                            return Ok(relay_error(
+                                RelayErrorCode::InvalidState,
+                                "checkpoint native-use evidence cannot fit in a relay response frame",
+                                false,
+                                None,
+                            ));
+                        };
+                        let mut low = offset;
+                        let mut high = offset.saturating_add(MAX_FRAME_BYTES).min(end);
+                        let mut best = offset;
+                        while low < high {
+                            let mid = low + (high - low).div_ceil(2);
+                            let mut boundary = mid;
+                            while !text.is_char_boundary(boundary) {
+                                boundary -= 1;
+                            }
+                            let candidate = page(boundary, Some(boundary as u64));
+                            if fits(&candidate)? {
+                                low = mid;
+                                best = boundary;
+                            } else {
+                                high = mid - 1;
+                            }
+                        }
+                        if best == offset {
+                            return Ok(relay_error(
+                                RelayErrorCode::InvalidState,
+                                "checkpoint prompt context cannot fit in a relay response frame",
+                                false,
+                                None,
+                            ));
+                        }
+                        page(best, Some(best as u64))
                     }
-                    payload
                 }
                 Err(message) => {
                     return Ok(relay_error(

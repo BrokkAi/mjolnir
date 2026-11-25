@@ -1984,8 +1984,12 @@ impl DurableRelay {
         {
             return Ok(());
         }
+        let old_evidence = self.snapshot.native_use_evidence.clone();
         self.snapshot.native_session_used = true;
         self.snapshot.record_native_use(NativeSessionUse::Used);
+        if self.snapshot.native_use_evidence != old_evidence {
+            self.spoil_checkpoint_cut()?;
+        }
         self.persist_snapshot()
     }
 

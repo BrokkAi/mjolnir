@@ -2028,8 +2028,8 @@ const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
 /// restart continuation, and saving the failed session checkpoints that queue
 /// without a harness. The daemon's projection keeps no payload for a wake, so
 /// the latch archives the prompt the worker's queue holds at the cut. A
-/// checkpoint-only worker too old to report pending context cannot safely save
-/// a checkpoint, even if it can report the wake.
+/// checkpoint-only worker too old to report pending context must first be
+/// replaced, and a failed replacement leaves its launch and relay intact.
 // Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
 // Hard-won: pending handoff text was absent from suspend checkpoints.
 #[cfg(unix)]
@@ -2059,7 +2059,7 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         return;
     };
     let protocol: u32 = protocol.to_str().unwrap().parse().unwrap();
-    let pending_context = "hidden checkpoint context ".repeat(4_000);
+    let pending_context = "東京".repeat(mj_core::relay::MAX_FRAME_BYTES / 6 + 1_000);
     let _writer = crate::database::install_isolated_test_writer();
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(120));
@@ -2073,6 +2073,7 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     struct ExportRecorder {
         exported: std::sync::Mutex<Option<CheckpointExportSpec>>,
         notices: std::sync::Mutex<Vec<String>>,
+        purposes: std::sync::Mutex<Vec<String>>,
     }
 
     impl CommandExecutor for ExportRecorder {
@@ -2096,7 +2097,8 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             self.execute_with_stdin(command, input)
         }
 
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
             Ok(CommandOutput {
                 status: 1,
                 stdout: Vec::new(),
@@ -2190,8 +2192,12 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    let worker_root = data_directory.join("workers").join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let launch = br#"{"run_mode":"checkpoint_only","suspend_capture":{"operation":"preserve-me"}}"#;
+    std::fs::write(worker_root.join("launch.json"), launch).unwrap();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
+        worker_root: worker_root.clone(),
     }));
     crate::database::save_session(&session).unwrap();
     let mut config = Config::default();
@@ -2261,10 +2267,41 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     };
     if protocol < mj_core::relay::RELAY_CHECKPOINT_PROMPT_CONTEXT_PROTOCOL {
         assert!(
-            format!("{error:#}").contains("checkpoint-only worker is too old"),
+            format!("{error:#}")
+                .contains("upgrade the checkpoint-only worker without starting its harness"),
             "{error:#}"
         );
         assert!(executor.exported.lock().unwrap().is_none());
+        assert_eq!(
+            std::fs::read(worker_root.join("launch.json")).unwrap(),
+            launch
+        );
+        let retained: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+            &std::fs::read(relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            retained
+                .pending_prompt_context
+                .as_ref()
+                .is_some_and(|context| context.text == pending_context),
+            "failed replacement lost the pending context"
+        );
+        {
+            let purposes = executor.purposes.lock().unwrap();
+            assert!(
+                purposes
+                    .iter()
+                    .any(|purpose| purpose == "stop Mjolnir worker daemon"),
+                "{purposes:?}"
+            );
+            assert!(
+                !purposes
+                    .iter()
+                    .any(|purpose| purpose == "start detached Mjolnir worker"),
+                "{purposes:?}"
+            );
+        }
         channels.shutdown.shutdown().await.unwrap();
         return;
     }
@@ -2279,9 +2316,10 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         .take()
         .expect("the checkpoint never reached its export");
     spec.canonical_session.validate().unwrap();
-    assert_eq!(
-        spec.canonical_session.pending_prompt_context.as_deref(),
-        Some(pending_context.as_str())
+    assert!(
+        spec.canonical_session.pending_prompt_context.as_deref() == Some(pending_context.as_str()),
+        "checkpoint did not preserve the {} byte pending context",
+        pending_context.len()
     );
     let notices = executor.notices.lock().unwrap().clone();
     if protocol < reads_queue {

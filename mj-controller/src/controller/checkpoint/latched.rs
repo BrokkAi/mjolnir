@@ -342,17 +342,40 @@ impl Controller {
         {
             let checkpoint_only = relay.sync_snapshot().await?.operational.checkpoint_only;
             if checkpoint_only {
-                bail!("the checkpoint-only worker is too old to report pending prompt context; source state was retained");
-            }
-            if exclusivity != LatchExclusivity::HoldThroughClose {
+                // Keep the installed launch, including any accepted suspend capture.
+                // It already started this worker in checkpoint-only mode.
+                let launch: serde_json::Value = super::super::lifecycle::origin_delta::read_wire(
+                    &backend, session_id, &worker_root, "launch.json", executor,
+                )?.context("checkpoint-only worker launch is missing")?;
+                ensure!(launch.get("run_mode").and_then(serde_json::Value::as_str) == Some("checkpoint_only"),
+                    "checkpoint-only worker launch no longer specifies checkpoint-only mode");
+                relay.release();
+                let connection = self.restart_worker_with_installed_binary(
+                    session_id,
+                    executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &worker_root,
+                        reconnect: &reconnect,
+                        launch: None,
+                        prepared: false,
+                        discard_queued_prompts: None,
+                        staged_aws_profile: None,
+                        swap_admission: None,
+                        messages: &RESTART_FOR_CHECKPOINT,
+                    },
+                ).await.context("upgrade the checkpoint-only worker without starting its harness")?;
+                relay = adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await?;
+                restarted_worker = true;
+            } else if exclusivity != LatchExclusivity::HoldThroughClose {
                 return Err(CheckpointDeferred::pending_context_worker_upgrade().into());
-            }
-            let manager = manager.context("the older worker cannot be upgraded for checkpoint without a session manager")?;
-            relay.release();
-            self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
-                .await
-                .context("upgrade the worker before capturing pending prompt context")?;
-            (relay, restarted_worker) = self.open_checkpoint_relay(
+            } else {
+                let manager = manager.context("the older worker cannot be upgraded for checkpoint without a session manager")?;
+                relay.release();
+                self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
+                    .await
+                    .context("upgrade the worker before capturing pending prompt context")?;
+                (relay, restarted_worker) = self.open_checkpoint_relay(
                 admission,
                 session_id,
                 executor,
@@ -370,7 +393,8 @@ impl Controller {
                 },
                 true,
                 None,
-            ).await?;
+                ).await?;
+            }
         }
         if let Some(captured) = &prestaged_capture {
             record_checkpoint_report_notice(&mut relay, session_id, captured).await;

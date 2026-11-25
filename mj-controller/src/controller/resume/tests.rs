@@ -2554,6 +2554,8 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
 
 #[cfg(unix)]
 const FRESH_NATIVE_RESUME_CHILD: &str = "MJ_TEST_FRESH_NATIVE_RESUME_CHILD";
+#[cfg(unix)]
+const FRESH_NATIVE_RESTORE_SPEC: &str = "MJ_TEST_FRESH_NATIVE_RESTORE_SPEC";
 
 /// How the stand-in worker of [`fresh_native_resume`] opens its session.
 #[cfg(unix)]
@@ -2591,6 +2593,12 @@ fn fresh_native_resume_for_each_harness(
     stopped_subagents: StoppedSubagents,
 ) {
     if let Some(harness) = std::env::var_os(FRESH_NATIVE_RESUME_CHILD) {
+        if harness == "restore" {
+            let path = std::env::var_os(FRESH_NATIVE_RESTORE_SPEC).unwrap();
+            let spec = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            mj_checkpoint::checkpoint::restore_checkpoint(&spec, &SystemGit).unwrap();
+            return;
+        }
         let harness = match harness.to_str() {
             Some("claude") => mj_core::config::HarnessKind::Claude,
             Some("codex") => mj_core::config::HarnessKind::Codex,
@@ -2660,23 +2668,36 @@ fn fresh_native_resume(
 
     // Never prompted: the archived transcript is empty, and the archive names
     // the native session the harness was given at launch.
-    let checkpoint = write_checkpoint_gate_archive_for_harness(
-        &archives,
-        session_id,
-        2,
-        harness,
-        profile_id,
-        !matches!(
-            opening,
-            FreshNativeOpening::NothingToLoad | FreshNativeOpening::CrossHarness
-        ),
-    );
-    let mut verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
-    let saved_context = "previous hidden context ".repeat(4_000);
-    if opening == FreshNativeOpening::CrossHarness {
-        Arc::make_mut(&mut verified.canonical_session).pending_prompt_context =
-            Some(saved_context.clone());
-    }
+    let saved_context = if opening == FreshNativeOpening::CrossHarness {
+        "x".repeat(mj_core::relay::MAX_FRAME_BYTES - 4_096)
+    } else {
+        String::new()
+    };
+    let new_handoff = "new generated handoff ".repeat(300);
+    let checkpoint = if opening == FreshNativeOpening::CrossHarness {
+        let mut input = crate::controller::test_support::checkpoint_archive_input(
+            session_id,
+            2,
+            Vec::new(),
+            Vec::new(),
+        );
+        input.session.harness_kind = harness;
+        input.session.profile_id = profile_id.to_owned();
+        input.canonical_session.pending_prompt_context = Some(saved_context.clone());
+        crate::controller::test_support::write_checkpoint_archive_input(
+            &archives, session_id, &input,
+        )
+    } else {
+        write_checkpoint_gate_archive_for_harness(
+            &archives,
+            session_id,
+            2,
+            harness,
+            profile_id,
+            opening != FreshNativeOpening::NothingToLoad,
+        )
+    };
+    let verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
     assert_eq!(
         verified.manifest.session.native_session_id,
         "native-session"
@@ -2693,6 +2714,26 @@ fn fresh_native_resume(
         | FreshNativeOpening::Unexplained
         | FreshNativeOpening::CrossHarness => String::new(),
     };
+    let restore_command = if opening == FreshNativeOpening::CrossHarness {
+        let test = format!(
+            "{}::a_cross_harness_resume_preserves_saved_context_and_stopped_subagent_notes",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        format!(
+            "{FRESH_NATIVE_RESUME_CHILD}=restore {FRESH_NATIVE_RESTORE_SPEC}={} {} --exact {} --nocapture || exit $?",
+            quote(&restore_spec),
+            quote(&std::env::current_exe().unwrap()),
+            quote(Path::new(&test))
+        )
+    } else {
+        format!(
+            "cat >{} <<'SEED'\n{{\"event_frontier\":2,\"event_frontier_digest\":\"{}\",\"queued_prompts\":[],\"native_session_unused\":true}}\nSEED",
+            quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
+            verified.canonical_session.event_frontier_digest
+        )
+    };
     let script = format!(
         r#"case "${{2:-}}" in
 proxy)
@@ -2706,9 +2747,7 @@ restore-checkpoint)
     # The spec arrives on standard input (`--spec -`), never as an uploaded file.
     [ "$4" = - ] || exit 64
     cat >{restore_spec}
-    cat >{seed} <<'SEED'
-{{"event_frontier":2,"event_frontier_digest":"{digest}","queued_prompts":[],"native_session_unused":true}}
-SEED
+    {restore_command}
     ;;
 esac
 exit 0
@@ -2716,9 +2755,7 @@ exit 0
         root = quote(&worker_root),
         binary = quote(&std::env::current_exe().unwrap()),
         child = mj_core::test_hooks::latch_relay::CHILD_TEST,
-        seed = quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
         restore_spec = quote(&restore_spec),
-        digest = verified.canonical_session.event_frontier_digest,
     );
     // Only the behaviour goes in: the resume installs `MJ_WORKER_BINARY`, the
     // checked-in dispatcher, as `hel`, and that reads `hel.script` beside it.
@@ -2811,7 +2848,7 @@ exit 0
                 queue_policy_override: QueuePolicy::Import,
                 move_transfer: None,
                 utility_handoff: (opening == FreshNativeOpening::CrossHarness)
-                    .then(|| "new generated handoff".to_owned()),
+                    .then(|| new_handoff.clone()),
                 projection_build: None,
                 resume_notices: Vec::new(),
                 include_in_place_subagents: false,
@@ -2910,7 +2947,7 @@ exit 0
                 let context = snapshot.pending_prompt_context.unwrap().text;
                 assert!(context.contains(&saved_context));
                 assert_eq!(context.matches(&saved_context).count(), 1);
-                assert!(context.contains("new generated handoff"));
+                assert!(context.contains(&new_handoff));
                 assert!(context.contains("<mj-stopped-subagents>"));
             }
 

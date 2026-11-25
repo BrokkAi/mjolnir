@@ -85,9 +85,7 @@ pub fn relay_seed_for_restore(
         native_use_evidence: native_continuity
             .then(|| canonical.native_use_evidence.clone())
             .flatten(),
-        pending_prompt_context: native_continuity
-            .then(|| canonical.pending_prompt_context.clone())
-            .flatten(),
+        pending_prompt_context: canonical.pending_prompt_context.clone(),
     };
     seed.validate()?;
     Ok(seed)

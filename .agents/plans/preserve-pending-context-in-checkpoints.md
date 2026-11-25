@@ -19,6 +19,8 @@ A switch between agent harnesses (the programs running models, such as Antigravi
 - [x] (2026-11-25 22:58Z) Run focused regression tests and affected-crate clippy under mbx: 10 tests passed; ten-package all-target clippy passed.
 - [ ] Review integrated diff, commit, request review, resolve accepted findings, and push to origin/master.
 - [ ] Prepare and review the next workspace release, push its version commit and tag, and follow the normal release workflow through publication.
+- [x] Commit the initial validated fix and prepare version 2.76.0; request review of the combined deliverable.
+- [x] (2026-11-25 23:15Z) Address first review: multi-frame pending-context transfer, old checkpoint-only worker replacement, and avoiding combined context installation frames; seven focused tests and ten-package clippy pass.
 
 ## Surprises & Discoveries
 
@@ -28,6 +30,8 @@ The worker stores pending text outside the visible transcript. Installing it com
 The initial targeted build stopped before tests because `mj-transcript/src/projection/materialize.rs` needed the new optional field. The same constructor update is needed in importer, wiki, daemon-test, and binary-test fixtures. Those are mechanical format-consumer fixes. The workspace format check also reports pre-existing differences in `mj-core/src/suspend_consent.rs`, `mj-daemon/src/daemon.rs`, and `mj-daemon/src/daemon/tests.rs`; keep unrelated formatting out of this change.
 
 Validation also caught an existing checkpoint test launch fixture missing `parked_move: None`, a new archive assertion using a method as a field, and a new controller fixture installing hidden context after mailbox delivery had already started a prompt. Those were corrected narrowly. The controller regression now installs context through the normal request before delivery; its isolated subprocesses check protocols 95, 94, and pre-mail behavior.
+
+The first complete review found three accepted gaps. Multiple valid installations can accumulate text larger than the relay's documented frame limit, so a single-frame read can prevent every subsequent checkpoint. Combining saved text and a generated handoff can similarly exceed a request frame. Finally, rejecting an older checkpoint-only worker leaves recovery stuck even though the worker can be restarted without running its failed harness. All findings will be fixed rather than overridden.
 
 ## Decision Log
 
@@ -44,11 +48,17 @@ Validation also caught an existing checkpoint test launch fixture missing `parke
 - Decision: Commit the validated fix, prepare the release from the clean checkout, and review both commits together before pushing and tagging.
   Rationale: The user requested both outcomes. The release preparation is a separate normal version commit, and one review can assess the final deliverable without repeating unchanged code review or local CI.
   Date/Author: 2026-11-25, parent agent.
+- Decision: Transfer pending context in pages through the existing cut-checked read, and invalidate that cut using its existing owner when eventless context installation changes the text.
+  Rationale: The transport has a real frame limit, but accepted context can legitimately exceed it in aggregate. Optional byte offsets and the existing barrier preserve completeness without a second RPC, snapshot cache, or recovery state machine.
+  Date/Author: 2026-11-25, parent agent, first-review revision.
+- Decision: Restore saved pending text into the seed regardless of native continuity; the existing cross-harness handoff install then appends only the new handoff. Replace older checkpoint-only workers through their existing current-binary launch path while retaining relay state.
+  Rationale: Seeding eliminates the oversized combined request and an unnecessary cross-harness special case. Replacing the worker removes the recovery dead end without starting a failed harness.
+  Date/Author: 2026-11-25, parent agent, first-review revision.
 
 ## Outcomes & Retrospective
 
 
-Implementation slices are integrated and parent-reviewed. Ten focused tests passed: archive round trip (1), schema/version behavior (1), content equality (1), cut reads and real socket transfer (2), restored delivery/interruption (1), controller capture and legacy source behavior (1), archive reuse (1), further cross-harness resume with stopped-subagent notes (1), and legacy idle suspend admission (1). All-target clippy passed across the five behavioral crates and five format consumers on dev profile. No live session was mutated. Commit, external review, push, and release publication remain.
+The initial implementation passed ten focused tests and all-target clippy across ten affected crates. It is committed as 356497937, followed by a conflict-free upstream merge and release preparation 49236a8fa for 2.76.0. First-review findings are now fixed: paged transfers cover more than 8 MiB of escaped Unicode, saved text restores directly from a real archive even across a further harness switch, and old checkpoint-only sources use the existing replacement mechanism. Seven affected tests passed and ten-package dev all-target clippy passed again after three narrow test-code lint corrections. The checkpoint-only regression proves replacement is attempted and injected failure preserves launch/suspend capture/relay state; the unchanged helper's successful restart is not newly simulated. No commit has been pushed and no release tag exists yet. No live session was mutated. Another review, push, and release publication remain.
 
 ## Context and Orientation
 
@@ -62,11 +72,11 @@ The daemon controls session lifecycle; each worker owns the agent and its relay 
 ## Plan of Work
 
 
-The format owner edits mj-core and mj-checkpoint. Add an optional string named `pending_prompt_context` to the canonical snapshot and restored seed, with serde default and omission when absent. Include it in content comparison. Add optional text to the existing native-use response and a documented protocol-95 capability constant. Retain old wire request names and old-request compatibility. Introduce schema 16 only for archives containing this field and update schema checks and existing format fixtures. Restore pending text independently of queue policy and without installing it twice on a cross-harness path.
+The format owner edits mj-core and mj-checkpoint. Add an optional string named `pending_prompt_context` to the canonical snapshot and restored seed, with serde default and omission when absent. Include it in content comparison. Add optional text to the existing native-use response and a documented protocol-95 capability constant. Retain old wire request names and old-request compatibility. Introduce schema 16 only for archives containing this field and update schema checks and existing format fixtures. Restore pending text independently of queue policy and native continuity. Extend the same request with optional `pending_context_offset: Option<u64>` (absent means byte zero) and response with `next_context_offset: Option<u64>` (absent means complete). Offsets name raw UTF-8 bytes; each page must end at a character boundary.
 
-The worker owner edits mj-worker. Read text at the same established cut as native-use evidence, enforce the actual relay frame budget without truncation, seed the existing pending field, and preserve the current live relay over a stale seed during repair. Verify whether the cut can carry an attached in-flight dispatch and uphold the existing completion/interruption invariant. Extend existing relay/protocol tests to prove cut rejection and exact first-prompt delivery after seed restoration and restart.
+The worker owner edits mj-worker. Read text at the same established cut as native-use evidence, fit each page within the actual serialized relay frame budget without truncation, seed the existing pending field, and preserve the current live relay over a stale seed during repair. Validate requested byte offsets and ensure returned next offsets advance. Eventless context installation must spoil the existing cut, so a reader cannot combine pages from different snapshots. Verify whether the cut can carry an attached in-flight dispatch and uphold the existing completion/interruption invariant. Extend existing relay/protocol tests to prove multi-frame complete transfer, escaped Unicode boundaries, cut rejection after context changes, and exact first-prompt delivery after seed restoration and restart.
 
-The controller owner edits mj-controller and mj-session-runtime. Carry both reply fields through the existing client wrappers, capture text into the canonical snapshot at the cut, and ensure old workers cannot be mistaken for a proof that context is absent. Prefer existing idle worker replacement before capture; do not add a parallel upgrade path. Preserve pending notes on a second harness switch in the existing handoff installation before work is admitted. Extend existing controller checkpoint and resume tests and ensure content changes prevent stale archive reuse.
+The controller owner edits mj-controller and mj-session-runtime. The existing client wrapper requests successive pages under the same barrier ID/cursor, assembles the complete optional text, and keeps its existing outward evidence/text result. Capture it into the canonical snapshot and ensure old workers cannot be mistaken for a proof that context is absent. Use existing idle replacement for live workers and current-binary checkpoint-only replacement for failed-harness recovery, retaining the relay files; do not introduce a parallel upgrade state machine or start the failed harness. Seed saved text directly on every restore; the original cross-harness code installs only the new generated handoff before work is admitted. Existing stopped-subagent notes retain their ordering. Extend controller integration tests using actual archives, including old checkpoint-only recovery and further harness switches, and ensure context changes prevent stale reuse.
 
 Writers own disjoint crate trees and fix constructor literals in their owned crates. No writer runs a build while another writer is editing. After integration, one validation worker owns formatting, compilation, focused tests, and clippy. The parent owns design decisions, plan updates, integrated review, commits, and acceptance. No work in go/ is authorized.
 
@@ -105,7 +115,7 @@ The design source was a read-only investigation. Its essential conclusions and f
 ## Interfaces and Dependencies
 
 
-Use only the existing Rust workspace crates and serde format support. The new canonical and seed field is `pub pending_prompt_context: Option<String>`. The existing `RelayResponsePayload::CheckpointNativeUse` gains the same optional field. The runtime wrappers may return the existing evidence and text together without introducing another authority or persistence format. Restore initializes `PendingPromptContext` using the saved text and no historical command attachment after the barrier has settled dispatch. The wire capability and archive schema are version declarations, not new runtime state machines.
+Use only the existing Rust workspace crates and serde format support. The new canonical and seed field is `pub pending_prompt_context: Option<String>`. The existing `RelayResponsePayload::CheckpointNativeUse` gains that optional page field and `next_context_offset: Option<u64>`; `ReadCheckpointNativeUse` gains `pending_context_offset: Option<u64>`. The runtime wrapper assembles pages while preserving its existing evidence/text return value. Restore initializes `PendingPromptContext` using the saved text and no historical command attachment after the barrier has settled dispatch, including on a further harness switch. The wire capability and archive schema are version declarations, not new runtime state machines.
 
 Plan created 2026-11-25 to implement the user's approved state-preservation design.
 
@@ -116,3 +126,7 @@ Plan corrected 2026-11-25 after validator preparation: use actual package names 
 Plan updated 2026-11-25 22:48Z: all implementation owners handed back, and initial compilation identified dependent snapshot constructors. Existing barrier invariants settle or recover attached prompts before restoring text without a dispatch ID. Compatibility uses normal worker replacement for explicit suspend, defers background captures requiring old-worker replacement, and visibly rejects an old checkpoint-only source before exporting incomplete state.
 
 Plan updated 2026-11-25 22:58Z: all 10 targeted regressions and affected-consumer clippy pass after narrow compiler and fixture fixes. Prepare the clean-checkout release commit before requesting one review of the complete deliverable. Detailed execution logs remain in validator and controller-child report directories for the current run; the decisive results are summarized above.
+
+Plan revised after the first complete review on 2026-11-25: all three distinct findings are accepted. Add paging within the same checkpoint read, seed pending text on all restores to simplify cross-harness installation, and replace older checkpoint-only workers without invoking the failed harness. The prepared version remains 2.76.0; tag only the final reviewed commit containing these fixes.
+
+Plan updated 2026-11-25 23:15Z: first-review fixes pass all seven affected tests, changed-file formatting, and ten-package all-target clippy. Earlier unaffected passing schema, reuse, and legacy-idle tests were not repeated. Commit these fixes and request the second review before any push.

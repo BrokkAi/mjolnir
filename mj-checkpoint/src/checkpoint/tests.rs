@@ -4126,6 +4126,8 @@ fn checkpoint_round_trips_the_latched_materialized_session() {
         (true, QueueRestorePolicy::Discard),
         (true, QueueRestorePolicy::Defer),
         (false, QueueRestorePolicy::Restore),
+        (false, QueueRestorePolicy::Discard),
+        (false, QueueRestorePolicy::Defer),
     ] {
         let relay_root = temp
             .path()
@@ -4150,7 +4152,7 @@ fn checkpoint_round_trips_the_latched_materialized_session() {
         let seed = restored_seed(&relay_root);
         assert_eq!(
             seed.pending_prompt_context.as_deref(),
-            native.then_some(pending.as_str())
+            Some(pending.as_str())
         );
         assert_eq!(
             seed.queued_prompts.is_empty(),

@@ -483,7 +483,7 @@ pub struct RestoredRelaySeed {
     /// Seeds from older releases omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_use_evidence: Option<NativeSessionUseEvidence>,
-    /// Context awaiting the first prompt in the continued native session.
+    /// Context awaiting the first prompt, whether or not native history continues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_prompt_context: Option<String>,
 }

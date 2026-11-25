@@ -2457,8 +2457,7 @@ fn restored_prompt_context_waits_for_a_prompt_and_survives_an_interruption() {
         relay
             .checkpoint_native_use("during-prompt-barrier", &cut)
             .unwrap()
-            .1
-            .as_deref(),
+            .1,
         Some(text)
     );
 
@@ -12183,6 +12182,7 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
         RelayRequest::ReadCheckpointNativeUse {
             barrier_command_id: barrier_id.clone(),
             cut: cut.clone(),
+            pending_context_offset: None,
         },
     ));
     match response.body {
@@ -12191,6 +12191,7 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
                 RelayResponsePayload::CheckpointNativeUse {
                     native_use_evidence,
                     pending_prompt_context,
+                    next_context_offset,
                 },
         } => {
             let evidence = native_use_evidence.expect("worker owns native-use evidence");
@@ -12198,6 +12199,7 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
             assert_eq!(evidence.native_session_id, "native-cut-1");
             assert_eq!(evidence.usage, NativeSessionUse::Unused);
             assert_eq!(pending_prompt_context.as_deref(), Some(context.as_str()));
+            assert_eq!(next_context_offset, None);
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -12207,29 +12209,35 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
         "read-native-use-refused",
         RelayRequest::ReadCheckpointNativeUse {
             barrier_command_id: "other-barrier".into(),
-            cut,
+            cut: cut.clone(),
+            pending_context_offset: None,
         },
     ));
     assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
 
-    // JSON escaping can make a context exceed the frame even when its raw
-    // length is below the transport limit. Refuse instead of dropping bytes.
-    let oversized_root = tempfile::tempdir().unwrap();
-    let mut oversized = DurableRelay::open(oversized_root.path(), SESSION, "oversized").unwrap();
-    let escaped = "\u{1}".repeat(MAX_FRAME_BYTES / 6 + 1);
-    assert!(escaped.len() < MAX_FRAME_BYTES);
-    oversized.install_prompt_context(escaped).unwrap();
-    let oversized_cut = ready_checkpoint(&mut oversized, "oversized-barrier");
-    let refused = oversized.handle(envelope(
-        "read-oversized-context",
+    let refused = relay.handle(envelope(
+        "invalid-offset",
         RelayRequest::ReadCheckpointNativeUse {
-            barrier_command_id: "oversized-barrier".into(),
-            cut: oversized_cut,
+            barrier_command_id: barrier_id.clone(),
+            cut: cut.clone(),
+            pending_context_offset: Some(context.len() as u64 + 1),
         },
     ));
     assert!(
-        matches!(refused.body, RelayResponseBody::Error { error } if error.message.contains("frame limit"))
+        matches!(refused.body, RelayResponseBody::Error { error } if error.code == RelayErrorCode::InvalidRequest)
     );
+
+    // Native-use evidence also changes without a journal event.
+    relay.mark_native_session_used().unwrap();
+    let refused = relay.handle(envelope(
+        "evidence-changed",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: barrier_id,
+            cut,
+            pending_context_offset: None,
+        },
+    ));
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
 
     // A checkpoint-only worker first recovers an interrupted in-flight
     // prompt, detaching its context before it can make a fresh cut.
@@ -12270,6 +12278,7 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
         RelayRequest::ReadCheckpointNativeUse {
             barrier_command_id: "recovered-barrier".into(),
             cut: recovered_cut,
+            pending_context_offset: None,
         },
     ));
     assert!(
