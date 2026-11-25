@@ -141,10 +141,41 @@ historical frontier and retain the original per-configuration sample caps.
 
 Yield is normalized to Terra 6.1/high = 100 within each source study. Current
 measurements use filled markers; historical Claude and partial-cohort DSF
-estimates use hollow markers. The historical points are approximate context,
-with different corpora, grading and workload. They are not new Claude results
-on the current 70 diffs. Detailed inputs and numeric exports remain in the
-local campaign analysis bundle.
+estimates use hollow markers. These series count different source outcomes:
+
+- **Current study:** the single-reviewer rows of [pareto.csv](pareto.csv), from
+  the blinded Opus `verify9` round. Yield averages one reviewer's confirmed
+  group count within each diff, then sums across all 70 diffs. Its denominator
+  is the Terra 6.1/high total on those same 70 diffs. Costs are estimated
+  reviewer-turn API costs; Greptile uses its per-review service prices.
+- **Claude historical estimates:** the earlier **mr-boxington PR/revision
+  reviewer study**, preserved as `reviewcharts/data.json`, `native.csv` and
+  `README.txt`. Yield is the mean material-root total, deduplicated within each
+  PR and pass across follow-up revisions. Its denominator is Terra 6.1/high's
+  material-root total from that same historical cohort. Costs use the earlier
+  study's initial-head review estimates with the requested five-minute cache
+  normalization; they exclude follow-up review costs. Haiku/xhigh's horizontal
+  range is a historical pricing bound, with its marker at the midpoint. These are historical
+  proxies, not fresh Claude results on the current 70 diffs.
+- **DSF/low estimate:** `verify9/sessions.csv`, `groups.csv` and
+  `session_groups.csv` supply the DSF and control outcomes on the same 16
+  covered diffs. Each matched-control estimate is DSF's 16-diff total times
+  that control's 70-diff total divided by its total on the same 16 diffs; the
+  chart uses the median of the reference-control estimates. The displayed
+  index divides that estimated 70-diff yield by **current Terra/high on all
+  70 diffs**, rather than taking the raw DSF16/Terra16 ratio. Cost scales the
+  observed subset reviewer cost by matched-control workload cost ratios. Its
+  study peak token rates were checked against the [DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing/).
+
+The frozen local input table is
+`/mnt/optane/review-arms-20261113/sol-62-repeats/figure/single-model-cost-inputs.json`.
+It identifies the original historical bundle and its hash and contains the
+historical rows, matched DSF calibration table and cost assumptions. The
+companion `review-single-model-cost.csv` records each plotted value, raw yield,
+baseline and source. These detailed inputs remain local. The local
+`plot_single_model_cost.py` reproduces the chart from that snapshot and the
+checked-in current CSVs. Corpus, grading and follow-up exposure differ between
+studies; within-study normalization does not make this a controlled comparison.
 
 ### Budget maps
 
