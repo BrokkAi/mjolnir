@@ -161,7 +161,7 @@ jobs:
           provenance: false
           no-cache: ${{ github.event_name == 'schedule' }}
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.ref == 'refs/heads/master' && format('type=registry,ref={0}:buildcache-{1},mode=max', steps.image.outputs.name, matrix.arch) || '' }}
           labels: |
             org.opencontainers.image.title=Mjolnir session base
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -223,6 +223,8 @@ jobs:
           password: ${{ github.token }}
 
       # Join the per-arch untagged manifests into one multi-arch manifest list.
+      # Only master runs advance the floating :latest tag; manual dispatches on
+      # other refs publish only their immutable :sha-<7> tag.
       - name: Create multi-arch manifest
         id: publish
         shell: bash
@@ -231,9 +233,12 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
         run: |
           set -euo pipefail
+          tags=(--tag "$IMAGE:sha-${GITHUB_SHA:0:7}")
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
           docker buildx imagetools create \
-            --tag "$IMAGE:latest" \
-            --tag "$IMAGE:sha-${GITHUB_SHA:0:7}" \
+            "${tags[@]}" \
             $(printf "$IMAGE@sha256:%s " *)
           digest="$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA:0:7}" \
             --format '{{.Manifest.Digest}}')"
