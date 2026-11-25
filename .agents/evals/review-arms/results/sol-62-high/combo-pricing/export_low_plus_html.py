@@ -17,7 +17,10 @@ def export():
     payload['vmax'] = panel['max_f']
     data = json.dumps(payload, separators=(',', ':'), ensure_ascii=True).replace('</', '<\\/')
     layout = '\nmain{max-width:1000px;padding:12px 16px 16px}.panels{display:block}\n.marker-key{width:min(520px,100%);display:block;margin:8px 0}\n'
-    scale = colorbar_svg(payload['vmax']).replace('Expected confirmed findings ', 'Low+ confirmed findings ')
+    scale = colorbar_svg(payload['vmax']).replace('viewBox="0 0 440 66"', 'viewBox="0 0 440 84"').replace(
+        'Expected confirmed findings (best setup within both limits)',
+        'Expected Low+ confirmed findings across 70 diffs</text>'
+        '<text x="220" y="78" text-anchor="middle" class="al">(best setup within both limits)')
     key = '\n'.join([
         '<svg viewBox="0 0 520 44" class="marker-key" role="img" aria-label="Chart marker key">',
         '<circle cx="8" cy="10" r="3.6" fill="#fff" stroke="#0b0b0b"/>',
