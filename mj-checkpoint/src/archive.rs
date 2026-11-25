@@ -152,24 +152,6 @@ pub struct VerifiedArchiveMetadata {
     pub archive_sha256: String,
 }
 
-/// Repository state retained by the resume source preflight. The rest of the
-/// archive is still streamed, hashed, and validated without being held in
-/// memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedRepositoryBundle {
-    pub metadata: RepositoryMetadata,
-    pub committed_bundle: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedRepositoryBundles {
-    pub archive_sha256: String,
-    /// The id, within `repositories`, of the repository the session's work is
-    /// primarily in.
-    pub primary_repository: String,
-    pub repositories: Vec<VerifiedRepositoryBundle>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointRepositoryBundle {
     pub metadata: RepositoryMetadata,
@@ -668,56 +650,6 @@ fn verify_archive_streaming_probed(
         manifest: contents.manifest,
         canonical_session: contents.canonical_session,
         archive_sha256: digest_reader(&mut reader)?,
-    })
-}
-
-/// Verify an archive while retaining only its Git bundle payloads.
-///
-/// Resume uses this before provisioning to prove that the configured sources
-/// still provide every prerequisite of each thin bundle. Native artifacts and
-/// patches can be very large, so they stay on the streaming path.
-pub fn verify_repository_bundles_streaming(path: &Path) -> Result<VerifiedRepositoryBundles> {
-    let contents = read_verified_zip(path, PayloadRetention::CanonicalAndGitBundles)?;
-    let repositories = contents
-        .manifest
-        .repositories
-        .iter()
-        .map(|repository| {
-            let role = PayloadRole::GitBundle {
-                repository_id: repository.metadata.id.clone(),
-            };
-            let descriptor = contents
-                .manifest
-                .payloads
-                .iter()
-                .find(|descriptor| descriptor.role == role)
-                .with_context(|| {
-                    format!(
-                        "repository {:?} has no committed bundle payload",
-                        repository.metadata.id
-                    )
-                })?;
-            let committed_bundle = contents
-                .payloads
-                .get(&descriptor.path)
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "verified committed bundle for repository {:?} was not retained",
-                        repository.metadata.id
-                    )
-                })?;
-            Ok(VerifiedRepositoryBundle {
-                metadata: repository.metadata.clone(),
-                committed_bundle,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    Ok(VerifiedRepositoryBundles {
-        archive_sha256: digest_reader(&mut file)?,
-        primary_repository: contents.manifest.bundle.primary_repository.clone(),
-        repositories,
     })
 }
 
@@ -1762,7 +1694,6 @@ enum PayloadRetention {
     Restore,
     Repositories,
     CanonicalOnly,
-    CanonicalAndGitBundles,
 }
 
 struct VerifiedZipContents {
@@ -1902,8 +1833,6 @@ fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
                 _ => true,
             })
         || *role == PayloadRole::CanonicalSession
-        || (retention == PayloadRetention::CanonicalAndGitBundles
-            && matches!(role, PayloadRole::GitBundle { .. }))
 }
 
 /// Part bodies the reader has to hold until reassembly. Tar safety is a

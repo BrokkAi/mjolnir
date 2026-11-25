@@ -22,10 +22,6 @@ impl TurnReview {
         changed
     }
 
-    pub(super) fn status(&self) -> String {
-        self.failure.as_ref().unwrap_or(&self.view.status).clone()
-    }
-
     pub(super) fn pending_elicitations(
         &self,
     ) -> Vec<(String, mj_core::elicitation::ElicitationRequest)> {
@@ -73,35 +69,30 @@ impl super::ChatState {
         !self.turn_reviews.is_empty()
     }
 
-    /// The one line the footer shows for the reviews: the status of a single
-    /// review, or each review's status after its repositories when there are
-    /// several.
-    pub(super) fn turn_review_status(&self) -> Option<String> {
-        match self.turn_reviews.as_slice() {
-            [] => None,
-            [only] => Some(only.status()),
-            // One row has room for each review's repository and state, not for
-            // each review's full status.
-            several => Some(
-                several
-                    .iter()
-                    .map(|review| {
-                        let state = review
-                            .failure
-                            .clone()
-                            .or_else(|| review.view.activity_label().map(str::to_owned))
-                            .unwrap_or_else(|| "Reviewing".to_owned());
-                        let roots = review.view.roots_label();
-                        if roots.is_empty() {
-                            state
-                        } else {
-                            format!("{roots}: {state}")
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            ),
-        }
+    /// Keep review failures visible without showing routine review progress.
+    pub(super) fn turn_review_failure(&self) -> Option<String> {
+        let failures = self
+            .turn_reviews
+            .iter()
+            .filter_map(|review| {
+                let failure = review.failure.as_ref().or_else(|| {
+                    matches!(
+                        review.view.phase,
+                        TurnReviewPhase::Verdict(
+                            mj_core::review::verdict::ReviewVerdict::Failed { .. }
+                        )
+                    )
+                    .then_some(&review.view.status)
+                })?;
+                let roots = review.view.roots_label();
+                Some(if self.turn_reviews.len() > 1 && !roots.is_empty() {
+                    format!("{roots}: {failure}")
+                } else {
+                    failure.clone()
+                })
+            })
+            .collect::<Vec<_>>();
+        (!failures.is_empty()).then(|| failures.join(" · "))
     }
 
     /// Reports a refusal on the review it is about when exactly one is open;

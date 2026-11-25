@@ -2,6 +2,7 @@ use super::*;
 
 impl DurableRelay {
     /// Validate the authoritative scan and reserve its idle state under one lock.
+    #[cfg(unix)]
     pub(crate) fn reserve_idle_after_antigravity_refresh(
         &mut self,
         envelope: RelayRequestEnvelope,
@@ -202,9 +203,14 @@ impl DurableRelay {
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
             RelayRequest::ReleaseInPlaceMoveDispatch {
+                expected_harness_restarted,
                 operation_id,
                 expected_store_id,
-            } => match self.release_in_place_move_dispatch(operation_id, expected_store_id)? {
+            } => match self.release_in_place_move_dispatch(
+                operation_id,
+                expected_store_id,
+                *expected_harness_restarted,
+            )? {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },

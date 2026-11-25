@@ -779,9 +779,6 @@ pub(super) async fn serve_session(
         resumed,
         native_session_used,
     });
-    if let Some(resolved) = session_open.pending_reload_ack.take() {
-        let _ = resolved.send(Ok(()));
-    }
     // Drop anything the worker queued for the bridge this one replaced. The
     // worker dispatches only while it believes the session is configured; it
     // clears that flag on `HarnessRestarting` and sets it again only after this
@@ -846,6 +843,10 @@ pub(super) async fn serve_session(
         },
     )
     .await?;
+    if let Some(resolved) = session_open.pending_reload_ack.take() {
+        let _ = resolved.send(ReloadResolution::Started);
+    }
+
     emit_runtime_event(
         events,
         RuntimeEvent::SessionModesConfigured {
@@ -1610,7 +1611,7 @@ pub(super) async fn serve_session(
                                 .await;
                             }
                             Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) => {
-                                let _ = resolved.send(Err(
+                                let _ = resolved.send(ReloadResolution::refused(
                                     "cannot reload launch configuration while a turn is active"
                                         .into(),
                                 ));

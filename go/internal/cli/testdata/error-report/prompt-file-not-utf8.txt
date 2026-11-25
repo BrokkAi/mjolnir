@@ -1,0 +1,4 @@
+Error: read prompt file testdata/error-report/invalid-utf8-prompt
+
+Caused by:
+    stream did not contain valid UTF-8

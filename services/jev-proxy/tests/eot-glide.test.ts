@@ -44,7 +44,7 @@ test("Fastino BYOK bypasses the proxy limit and contains its credential", async 
   const denied = { ...env, TURN_RATE_LIMITER: { async limit() { admit++; return { success: false }; } } };
   const outbound = t.mock.method(globalThis, "fetch", async (url, options) => {
     assert.equal(url, "https://api.fastino.ai/v1/systemone");
-    assert.equal(options?.redirect, "error");
+    assert.equal(options?.redirect, "manual");
     assert.equal(new Headers(options?.headers).get("X-API-Key"), key);
     return new Response(key, { status: 429, headers: { "Retry-After": "17", "X-Fastino-Key": key } });
   });
@@ -87,4 +87,28 @@ test("GLiDE forwards a 200 KiB authorization reply without legacy field caps", a
     ...large.authorization, messages: [{ id: "bad", role: "assistant", text: 123 }]
   } }), env)).status, 400);
   assert.equal(mock.mock.callCount(), 1);
+});
+
+// Hard-won: 11eb448d5: Cloudflare Workers rejects fetch redirect: "error" with TypeError on every GLiDE call
+test("GLiDE uses manual redirects and turns 3xx responses into 502 without leaking headers or body", async t => {
+  const key = "personal-fastino-key";
+  for (const status of [301, 302, 307, 308]) {
+    const outbound = t.mock.method(globalThis, "fetch", async (_url, options) => {
+      assert.equal(options?.redirect, "manual");
+      return new Response(key, { status, headers: { Location: "https://elsewhere.example/steal" } });
+    });
+    const shared = await proxy.fetch(request(), env);
+    assert.equal(shared.status, 502);
+    assert.equal(shared.headers.get("Location"), null);
+    assert.deepEqual(await shared.json(), { error: "upstream_failure" });
+
+    const own = request();
+    own.headers.set("X-Fastino-Key", key);
+    const byok = await proxy.fetch(own, env);
+    assert.equal(byok.status, 502);
+    assert.equal(byok.headers.get("Location"), null);
+    assert.deepEqual(await byok.json(), { error: "fastino_request_failed" });
+    assert.equal(outbound.mock.callCount(), 2);
+    outbound.mock.restore();
+  }
 });

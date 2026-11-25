@@ -309,8 +309,10 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
             100,
             &BTreeSet::new(),
             false,
-            &top_level::Snapshot::default(),
-            &crate::import::NativeScanCache::new(),
+            &mut top_level::QueryVisibility::new(
+                &top_level::Snapshot::default(),
+                &crate::import::NativeScanCache::new(),
+            ),
         )
         .unwrap();
         assert_eq!(rows.iter().filter(|row| row.tool == tool).count(), 2);

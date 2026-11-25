@@ -19,6 +19,10 @@ pub struct Ec2MoveGrantRow {
     pub users: BTreeSet<String>,
     pub absent_checks: u32,
     pub attempt_id: u64,
+    /// AWS region of the security group; `None` means the daemon's default.
+    pub region: Option<String>,
+    /// AWS CLI profile owning the security group; `None` means the default.
+    pub aws_profile: Option<String>,
 }
 
 /// Return the stable daemon instance ID recorded in the store, generating and
@@ -60,7 +64,8 @@ where
         let mut records = BTreeMap::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT security_group_id, cidr_ip, port, state, users_json, absent_checks, attempt_id
+                "SELECT security_group_id, cidr_ip, port, state, users_json, absent_checks, attempt_id,
+                        region, aws_profile
                  FROM ec2_move_grants",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -72,10 +77,22 @@ where
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })?;
             for row in rows {
-                let (sg, cidr, port, state, users_json, absent_checks, attempt_id) = row?;
+                let (
+                    sg,
+                    cidr,
+                    port,
+                    state,
+                    users_json,
+                    absent_checks,
+                    attempt_id,
+                    region,
+                    aws_profile,
+                ) = row?;
                 let key = Ec2MoveGrantKeyRow {
                     security_group_id: sg,
                     cidr_ip: cidr,
@@ -93,6 +110,8 @@ where
                             .context("invalid ec2_move_grants absent_checks")?,
                         attempt_id: u64::try_from(attempt_id)
                             .context("invalid ec2_move_grants attempt_id")?,
+                        region,
+                        aws_profile,
                     },
                 );
             }
@@ -113,14 +132,17 @@ where
             let users_json = serde_json::to_string(&row.users)?;
             tx.execute(
                 "INSERT INTO ec2_move_grants(
-                     security_group_id, cidr_ip, port, state, users_json, absent_checks, attempt_id, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     security_group_id, cidr_ip, port, state, users_json, absent_checks, attempt_id, updated_at,
+                     region, aws_profile
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(security_group_id, cidr_ip, port) DO UPDATE SET
                      state = excluded.state,
                      users_json = excluded.users_json,
                      absent_checks = excluded.absent_checks,
                      attempt_id = excluded.attempt_id,
-                     updated_at = excluded.updated_at",
+                     updated_at = excluded.updated_at,
+                     region = excluded.region,
+                     aws_profile = excluded.aws_profile",
                 params![
                     key.security_group_id,
                     key.cidr_ip,
@@ -130,6 +152,8 @@ where
                     i64::from(row.absent_checks),
                     i64::try_from(row.attempt_id).context("ec2_move_grants attempt_id overflow")?,
                     now,
+                    row.region,
+                    row.aws_profile,
                 ],
             )?;
         }

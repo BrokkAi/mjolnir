@@ -356,6 +356,7 @@ fn read_summary_row(conn: &Connection, conversation_id: &str) -> Result<Option<S
     .context("query Antigravity conversation_summaries")
 }
 
+#[cfg(any(unix, test))]
 fn open_readonly(path: &Path) -> Result<Connection> {
     open_readonly_with_timeout(path, ANTIGRAVITY_SQLITE_BUSY_TIMEOUT)
 }

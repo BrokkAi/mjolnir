@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 155;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 156;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3652,6 +3652,28 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 156 is breaking: older daemons ignore `region` and `aws_profile`
+    // on ec2_move_grants and would query or reconcile non-default-region grants
+    // against the wrong AWS region/profile.
+    if version < 156 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        for column in ["region", "aws_profile"] {
+            if !legacy_schema::table_has_column(&transaction, "ec2_move_grants", column)? {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE ec2_move_grants ADD COLUMN {column} TEXT;"
+                ))?;
+            }
+        }
+        transaction.execute_batch(
+            "UPDATE schema_compatibility
+                 SET minimum_compatible_version = 156 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (156, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=156;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -6064,6 +6086,61 @@ mod reader_tests {
     }
 
     #[test]
+    fn revision_156_adds_ec2_move_grants_region_and_profile_and_refuses_revision_155() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("grants", "project")).unwrap();
+        stamp_schema_version(&path, 155);
+        let previous = Connection::open(&path).unwrap();
+        for column in ["region", "aws_profile"] {
+            assert!(
+                !legacy_schema::table_has_column(&previous, "ec2_move_grants", column).unwrap()
+            );
+        }
+        previous
+            .execute(
+                "INSERT INTO ec2_move_grants(
+                     security_group_id, cidr_ip, port, state, users_json, absent_checks,
+                     attempt_id, updated_at
+                 ) VALUES ('sg-old', '203.0.113.7/32', 22, 'active', '[\"move\"]', 0, 1,
+                           '2026-11-24T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        read_schema_state(&previous)
+            .unwrap()
+            .ensure_supported_by(155)
+            .unwrap();
+        drop(previous);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert!(matches!(
+            state
+                .ensure_supported_by(155)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        ));
+        for column in ["region", "aws_profile"] {
+            assert!(legacy_schema::table_has_column(&upgraded, "ec2_move_grants", column).unwrap());
+        }
+        let preserved: (String, Option<String>, Option<String>) = upgraded
+            .query_row(
+                "SELECT security_group_id, region, aws_profile FROM ec2_move_grants",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("sg-old".into(), None, None));
+    }
+
+    #[test]
     fn revision_155_persists_staged_aws_profile_and_refuses_revision_154() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -6305,6 +6382,18 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 156 {
+            for column in ["region", "aws_profile"] {
+                if legacy_schema::table_has_column(&connection, "ec2_move_grants", column).unwrap()
+                {
+                    connection
+                        .execute_batch(&format!(
+                            "ALTER TABLE ec2_move_grants DROP COLUMN {column};"
+                        ))
+                        .unwrap();
+                }
+            }
+        }
         if version < 153 {
             restore_pre153_transcript_layout(&connection);
         }

@@ -135,11 +135,56 @@ impl CacheHost {
 pub struct PreparedCloneCache {
     host: CacheHost,
     session_root: PathBuf,
+    /// The orphan cleanup this preparation owes the cache. Preparation does
+    /// not run it: the launch does not need it, so the caller takes it and
+    /// runs it off the launch path.
+    pub pending_gc: Option<PendingCloneCacheGc>,
 }
 
 impl PreparedCloneCache {
     pub fn cleanup(&self, executor: &impl CommandExecutor) -> Result<()> {
         cleanup_session_root(&self.host, &self.session_root, executor)
+    }
+}
+
+/// The cleanup of old clone-cache snapshots and mirrors on one container host.
+///
+/// It does not affect the session that prepared the cache: the cleanup removes
+/// only snapshots of sessions that have no container and whose preparation is
+/// more than a day old, and it stops when another cleanup holds the cache's
+/// cleanup lock. So it can run any time after preparation, and a launch that
+/// is shutting down can leave it to the next launch.
+#[derive(Debug, Clone)]
+pub struct PendingCloneCacheGc {
+    host: CacheHost,
+    cache_root: PathBuf,
+    engine: String,
+    session_id: String,
+}
+
+impl PendingCloneCacheGc {
+    /// Find the sessions that still have containers, then clean the cache.
+    ///
+    /// Not being able to list the containers is reported and survived: the
+    /// cleanup then keeps only the session that prepared the cache, which is
+    /// what it did when it ran inside the launch.
+    pub fn run(self, executor: &impl CommandExecutor) -> Result<()> {
+        let mut live_sessions = match self.host.managed_sessions(&self.engine, executor) {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = self.session_id,
+                    error = format!("{error:#}"),
+                    "clone-cache orphan cleanup could not list live containers; keeping only the launching session"
+                );
+                vec![self.session_id.clone()]
+            }
+        };
+        if !live_sessions.contains(&self.session_id) {
+            live_sessions.push(self.session_id.clone());
+        }
+        collect_garbage(&self.host, &self.cache_root, &live_sessions, executor)
+            .context("clean the container host Git cache")
     }
 }
 
@@ -311,22 +356,17 @@ pub fn prepare(
         access: crate::targets::MountAccess::Ro,
     });
 
-    let mut live_sessions = match host.managed_sessions(engine, executor) {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            executor.notify_notice(&format!(
-                "Clone-cache orphan cleanup was skipped: {error:#}"
-            ));
-            vec![session_id.to_owned()]
-        }
+    let pending_gc = PendingCloneCacheGc {
+        host: host.clone(),
+        cache_root,
+        engine: engine.to_owned(),
+        session_id: session_id.to_owned(),
     };
-    if !live_sessions.iter().any(|live| live == session_id) {
-        live_sessions.push(session_id.to_owned());
-    }
-    if let Err(error) = collect_garbage(&host, &cache_root, &live_sessions, executor) {
-        executor.notify_notice(&format!("Clone-cache cleanup was skipped: {error:#}"));
-    }
-    Ok(Some(PreparedCloneCache { host, session_root }))
+    Ok(Some(PreparedCloneCache {
+        host,
+        session_root,
+        pending_gc: Some(pending_gc),
+    }))
 }
 
 /// Snapshots share the mirror, but each source and selection owns its files.
@@ -924,6 +964,84 @@ mod tests {
             .unwrap();
         assert!(clone.args.iter().any(|arg| arg == source));
         assert!(!clone.args.iter().any(|arg| arg.starts_with("--reference")));
+    }
+
+    /// The orphan cleanup lists live containers and sweeps the whole host
+    /// cache, which a launch does not wait for: preparation hands the cleanup
+    /// to its caller instead of running it.
+    #[test]
+    fn preparing_the_cache_leaves_the_orphan_cleanup_to_the_caller() {
+        let executor = RecordingExecutor {
+            stdout: b"/home/test".to_vec(),
+            ..Default::default()
+        };
+        let (target, mut bundle) = podman_fixture_bundle("https://github.com/example/app.git");
+        let mut mounts = Vec::new();
+        let mut prepared = prepare(
+            &target,
+            "session-12345678",
+            &mut bundle,
+            &mut mounts,
+            None,
+            None,
+            &executor,
+        )
+        .unwrap()
+        .expect("the host has Git, so the cache is prepared");
+        let purposes = |executor: &RecordingExecutor| {
+            executor
+                .commands
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|command| command.purpose.clone())
+                .collect::<Vec<_>>()
+        };
+        let launch = purposes(&executor);
+        assert!(!launch.is_empty());
+        assert!(
+            !launch.iter().any(|purpose| {
+                purpose == "find live container Git cache snapshots"
+                    || purpose == "prune the container host Git cache"
+            }),
+            "{launch:?}"
+        );
+
+        let cleanup = RecordingExecutor::default();
+        prepared.pending_gc.take().unwrap().run(&cleanup).unwrap();
+        assert_eq!(
+            purposes(&cleanup),
+            [
+                "find live container Git cache snapshots",
+                "prune the container host Git cache"
+            ]
+        );
+    }
+
+    /// A host that cannot list containers still gets its cleanup, restricted
+    /// to the launching session, and the failure is not silent.
+    #[test]
+    fn the_orphan_cleanup_keeps_the_launching_session_when_containers_cannot_be_listed() {
+        let gc = PendingCloneCacheGc {
+            host: CacheHost::Local,
+            cache_root: PathBuf::from("/home/test/.cache/mjolnir/git"),
+            engine: "podman".to_owned(),
+            session_id: "session-12345678".to_owned(),
+        };
+        let executor = RecordingExecutor {
+            status: 1,
+            ..Default::default()
+        };
+        let error = gc.run(&executor).unwrap_err();
+        assert!(format!("{error:#}").contains("prune the container host Git cache"));
+        let commands = executor.commands.lock().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert!(
+            commands[1]
+                .args
+                .iter()
+                .any(|argument| argument == "session-12345678")
+        );
     }
 
     #[test]

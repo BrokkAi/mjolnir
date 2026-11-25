@@ -170,8 +170,8 @@ preview quoted:
       "text": "a literal \"quoted phrase\"; caféine",
       "hits": [
         [
-          10,
-          25
+          11,
+          24
         ]
       ],
       "omitted_before": 0,
@@ -210,91 +210,41 @@ preview short:
   "omitted_after": 0
 }
 === query "qx %_" ===
-[]
+[
+  {
+    "session_id": "short",
+    "kind": "agent"
+  }
+]
+preview short:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "qx qy % _ \\",
+      "hits": [
+        [
+          0,
+          2
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
 === query "\"%\"" ===
-[
-  {
-    "session_id": "short",
-    "kind": "agent"
-  }
-]
-preview short:
-{
-  "blocks": [
-    {
-      "role": "assistant",
-      "text": "qx qy % _ \\",
-      "hits": [
-        [
-          6,
-          7
-        ]
-      ],
-      "omitted_before": 0,
-      "truncated": false
-    }
-  ],
-  "omitted_after": 0
-}
+[]
 === query "\"_\"" ===
-[
-  {
-    "session_id": "short",
-    "kind": "agent"
-  }
-]
-preview short:
-{
-  "blocks": [
-    {
-      "role": "assistant",
-      "text": "qx qy % _ \\",
-      "hits": [
-        [
-          8,
-          9
-        ]
-      ],
-      "omitted_before": 0,
-      "truncated": false
-    }
-  ],
-  "omitted_after": 0
-}
+[]
 === query "\"\\\"" ===
-[
-  {
-    "session_id": "short",
-    "kind": "agent"
-  }
-]
-preview short:
-{
-  "blocks": [
-    {
-      "role": "assistant",
-      "text": "qx qy % _ \\",
-      "hits": [
-        [
-          10,
-          11
-        ]
-      ],
-      "omitted_before": 0,
-      "truncated": false
-    }
-  ],
-  "omitted_after": 0
-}
+[]
 === query "\"cafe\u{301}\"" ===
 [
   {
     "session_id": "billing",
     "kind": "agent"
-  },
-  {
-    "session_id": "quoted",
-    "kind": "user"
   }
 ]
 preview billing:
@@ -307,24 +257,6 @@ preview billing:
         [
           36,
           41
-        ]
-      ],
-      "omitted_before": 0,
-      "truncated": false
-    }
-  ],
-  "omitted_after": 0
-}
-preview quoted:
-{
-  "blocks": [
-    {
-      "role": "user",
-      "text": "a literal \"quoted phrase\"; caféine",
-      "hits": [
-        [
-          27,
-          32
         ]
       ],
       "omitted_before": 0,
@@ -359,52 +291,7 @@ preview billing:
   "omitted_after": 0
 }
 === query "café caf" ===
-[
-  {
-    "session_id": "billing",
-    "kind": "agent"
-  },
-  {
-    "session_id": "quoted",
-    "kind": "user"
-  }
-]
-preview billing:
-{
-  "blocks": [
-    {
-      "role": "assistant",
-      "text": "October 1–31, USD before credits: café 東京",
-      "hits": [
-        [
-          36,
-          41
-        ]
-      ],
-      "omitted_before": 0,
-      "truncated": false
-    }
-  ],
-  "omitted_after": 0
-}
-preview quoted:
-{
-  "blocks": [
-    {
-      "role": "user",
-      "text": "a literal \"quoted phrase\"; caféine",
-      "hits": [
-        [
-          27,
-          32
-        ]
-      ],
-      "omitted_before": 0,
-      "truncated": false
-    }
-  ],
-  "omitted_after": 0
-}
+[]
 === query "\"\"" ===
 []
 === query "\" \"" ===

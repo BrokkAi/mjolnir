@@ -23,6 +23,7 @@ mj-checkpoint.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true
 mj-accounts.workspace = true
+mj-harness-install.workspace = true
 anvil-client.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
@@ -32,7 +33,7 @@ reqwest.workspace = true
 rusqlite.workspace = true
 ruzstd.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, features = ["raw_value"] }
+serde_json.workspace = true
 sessionwiki.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
@@ -44,3 +45,6 @@ url.workspace = true
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Go port acceptance scenarios: eight session flows through a real daemon,
-worker and OpenCode harness.
+worker and OpenCode or Codex harness.
 
 The suite drives `mj` as a user does, in a named test instance, and checks
 what the user sees and what is left on disk: a session starts; a prompt that
@@ -33,15 +33,29 @@ build's revision, commit time, worker inputs and MJ_BUILD_EXECUTABLE_TIME_FROM
 naming its `mj`): a client that orders itself newer replaces the daemon, and
 the suite fails when `--mj` does not report that the daemon runs its build.
 
-The instance's config.toml must define a bare target `localhost` and an
-OpenCode profile `oc` (`kind = "open-code"`, its `home` an OpenCode
+The instance's config.toml must define a bare target `localhost` and the
+profile `--profile` names (default `oc`), of kind `open-code` or `codex`.
+
+An OpenCode profile (`kind = "open-code"`) has as its `home` an OpenCode
 configuration directory selecting a free `opencode/*` model, and a placeholder
-provider key under `[profiles.oc.environment]` so the login preflight passes).
-OpenCode's free models need no login. The permission scenario needs a profile
-whose permission requests reach the user instead of Mjolnir's guardian; when
-the config has no `oc-ask` profile the script adds one, a copy of `oc` with
-`mjolnir_guardian = false`, and says so. Prompts are synthetic: they go to
-OpenCode's hosted service.
+provider key under `[profiles.<name>.environment]` so the login preflight
+passes. OpenCode's free models need no login. The permission scenario needs a
+profile whose permission requests reach the user instead of Mjolnir's
+guardian; when the config has no `<name>-ask` profile the script adds one, a
+copy of the profile with `mjolnir_guardian = false`, and says so.
+
+A Codex profile (`kind = "codex"`) has as its `home` a Codex home whose
+config.toml selects a provider that needs no interactive login, such as a
+custom provider with an `experimental_bearer_token` (paid). On a bare target
+Mjolnir runs Codex in its `agent` mode, where Codex's own auto reviewer
+answers every tool approval, so no tool permission request reaches the user;
+the scenario says so and drives the permission request Codex does send
+through ACP, its plan approval ("Implement this plan?"). Codex offers its
+question tool (`request_user_input`) only in Plan mode, so the question is
+asked there. Codex keeps an interrupted command running as a background task,
+so the interrupt scenario stops it with `mj stop-task`.
+
+Prompts are synthetic: they go to the harness's hosted service.
 
 The script stops the instance's daemon first, so the daemon it starts runs
 with this environment (and pins the worker binary it names), and stops it
@@ -75,7 +89,7 @@ SESSION_START_SECONDS = 330
 # CLI calls that do not wait for a turn answer within seconds.
 CLI_SECONDS = 120
 WORKSPACE = "go-port-scenarios"
-ASK_PROFILE = "oc-ask"
+HARNESS_KINDS = ("open-code", "codex")
 
 
 class ScenarioFailure(AssertionError):
@@ -106,12 +120,19 @@ class Suite:
         self.mj = args.mj.resolve()
         self.daemon_mj = (args.daemon_mj or args.mj).resolve()
         self.instance = args.instance
+        # An OpenCode profile's copy whose permission requests reach the user.
+        self.ask_profile = f"{args.profile}-ask"
         self.config_path = product_directory("config") / "instances" / self.instance / "config.toml"
         self.data = product_directory("data") / "instances" / self.instance
         self.artifacts = Path(tempfile.mkdtemp(prefix="mj-go-port-scenarios-"))
         self.trace = (self.artifacts / "trace.jsonl").open("w", buffering=1)
         self.project = self.artifacts / "project"
         self.sessions: list[str] = []
+        # The profile's harness kind, read from the instance's config.
+        self.kind = ""
+        # Checks a harness cannot take part in, each with its reason; the
+        # summary repeats them so no run passes over one silently.
+        self.not_applicable: list[str] = []
         self.env = {key: value for key, value in os.environ.items()
                     if key not in INHERITED_SESSION_VARIABLES}
         if args.worker_binary:
@@ -186,8 +207,13 @@ class Suite:
             record = self.session(session)
             if record["state"] == "error" or record.get("has_error"):
                 raise ScenarioFailure(f"session {session} failed: {json.dumps(record)[:2000]}")
-            return record if record["state"] == "running" else None
-        return self.wait_for(f"session {session} to run", settled, SESSION_START_SECONDS)
+            # A session may report `running` a moment before its record
+            # carries the relay connection.
+            running = record["state"] == "running" \
+                and (record.get("relay") or {}).get("state") == "connected"
+            return record if running else None
+        return self.wait_for(f"session {session} to run with a connected relay", settled,
+                             SESSION_START_SECONDS)
 
     def transcript(self, session: str, *roles: str, after: int | None = None) -> list[dict]:
         args = ["transcript", "--session", session]
@@ -222,30 +248,43 @@ class Suite:
         self.record(name, "passed", evidence)
         print(f"PASS {number} {name}: {evidence}", flush=True)
 
+    def inapplicable(self, number: int, name: str, reason: str) -> None:
+        """A check this harness cannot take part in: said, recorded and
+        repeated in the summary, never passed over."""
+        self.record(name, "not-applicable", reason)
+        self.not_applicable.append(f"{number} {name}")
+        print(f"N/A  {number} {name} ({self.kind}): {reason}", flush=True)
+
+    def config_value(self, session: str, key: str) -> str | None:
+        options = self.session(session).get("config_options", [])
+        return next((option.get("current") for option in options if option["key"] == key), None)
+
     # --- setup -----------------------------------------------------------
 
     def prepare(self) -> None:
         if not self.config_path.is_file():
             raise ScenarioFailure(f"instance {self.instance} has no {self.config_path}; "
-                                  "create it with the `oc` profile described in --help")
+                                  "create it with the profile described in --help")
         config = tomllib.loads(self.config_path.read_text())
         profiles = config.get("profiles", {})
         base = profiles.get(self.args.profile)
-        if not base or base.get("kind") != "open-code":
-            raise ScenarioFailure(f"{self.config_path} needs an OpenCode profile "
-                                  f"`{self.args.profile}` (see --help)")
+        if not base or base.get("kind") not in HARNESS_KINDS:
+            raise ScenarioFailure(f"{self.config_path} needs a profile `{self.args.profile}` of kind "
+                                  f"{' or '.join(HARNESS_KINDS)} (see --help)")
+        self.kind = base["kind"]
+        self.record("setup", "profile", {"name": self.args.profile, "kind": self.kind})
         if config.get("targets", {}).get(self.args.target, {}).get("kind") != "bare":
             raise ScenarioFailure(f"{self.config_path} needs a bare target `{self.args.target}`")
-        if ASK_PROFILE not in profiles:
-            lines = [f"\n[profiles.{ASK_PROFILE}]", 'kind = "open-code"',
+        if self.kind == "open-code" and self.ask_profile not in profiles:
+            lines = [f"\n[profiles.{self.ask_profile}]", 'kind = "open-code"',
                      f"home = {json.dumps(base['home'])}", "mjolnir_guardian = false"]
             environment = base.get("environment", {})
             if environment:
-                lines.append(f"\n[profiles.{ASK_PROFILE}.environment]")
+                lines.append(f"\n[profiles.{self.ask_profile}.environment]")
                 lines += [f"{json.dumps(key)} = {json.dumps(value)}" for key, value in environment.items()]
             with self.config_path.open("a") as handle:
                 handle.write("\n".join(lines) + "\n")
-            print(f"added profile `{ASK_PROFILE}` to {self.config_path}: `{self.args.profile}` "
+            print(f"added profile `{self.ask_profile}` to {self.config_path}: `{self.args.profile}` "
                   "with mjolnir_guardian = false, so permission requests reach the user", flush=True)
 
         # The daemon inherits the environment of the command that starts it.
@@ -275,9 +314,7 @@ class Suite:
     def create(self) -> str:
         started = time.monotonic()
         session = self.new_session(self.args.profile, "go-port scenarios")
-        record = self.wait_until_running(session)
-        if record["relay"]["state"] != "connected":
-            raise ScenarioFailure(f"running session's relay is {record['relay']}")
+        self.wait_until_running(session)
         if not self.checkout(session).is_dir():
             raise ScenarioFailure(f"no checkout at {self.checkout(session)}")
         self.passed(1, "create", f"session {session} running with a connected relay after "
@@ -320,37 +357,64 @@ class Suite:
 
     def interrupt(self, session: str) -> None:
         marker = f"sleep 117.{self.nonce}"
-        self.cli("message", "--session", session,
-                 f"Use the shell tool to run exactly this command: {marker} && echo slept . "
-                 "After it finishes, reply SLEPT.")
+        turn = self.cli_json("message", "--session", session,
+                             f"Use the shell tool to run exactly this command: {marker} && echo slept . "
+                             "After it finishes, reply SLEPT.")["turn_id"]
         self.wait_for("the tool to start", lambda: self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"),
                       self.args.turn_seconds)
         self.cli("interrupt-turn", "--session", session)
-        outcome = self.turn("wait", "--session", session)
+        # Only this turn: the session as a whole settles once its background
+        # work ends, which for Codex includes the interrupted command.
+        outcome = self.turn("wait", "--session", session, "--turn", str(turn))
         if outcome["outcome"] != "cancelled":
             raise ScenarioFailure(f"interrupted turn ended as {json.dumps(outcome)[:2000]}")
+        stopped = "its tool process stopped with the turn"
+        if self.kind == "codex":
+            # Codex keeps an interrupted command running as a background
+            # task; the session lists it and `mj stop-task` stops it.
+            tasks = self.session(session).get("background_tasks", [])
+            task = next((task for task in tasks if marker in task.get("command", "")), None)
+            if task is None or not task.get("can_stop"):
+                raise ScenarioFailure(f"the interrupted command is not a stoppable background task: {tasks}")
+            self.cli("stop-task", "--session", session, task["id"])
+            stopped = "its tool kept running as background task and stopped with `mj stop-task`"
         self.wait_for("the interrupted tool to stop",
                       lambda: not self.process_running(rf"(^|\s){re.escape(marker)}(\s|$)"), 30)
         outcome = self.turn("prompt", "--session", session,
                             "Reply with the single word READY and do not use any tools.")
         if outcome["outcome"] != "finished" or "READY" not in outcome.get("final_message", ""):
             raise ScenarioFailure(f"prompt after the interrupt: {json.dumps(outcome)[:2000]}")
-        self.passed(4, "interrupt", "turn cancelled, its tool process gone, next prompt answered READY")
+        self.passed(4, "interrupt", f"turn cancelled; {stopped}; next prompt answered READY")
 
-    def question_and_permission(self, session: str) -> str:
-        outcome = self.turn("prompt", "--session", session, "--return-on-input",
-                            "Use your question tool (the tool that asks the user a multiple-choice "
-                            "question) to ask me which color I prefer, with the two options red and "
-                            "blue. After I answer, reply with only the chosen color.")
+    def set_collaboration_mode(self, session: str, mode: str) -> None:
+        self.cli("set-config", "--session", session, "--key", "collaboration_mode", "--value", mode)
+        self.wait_for(f"session {session} to be in {mode} mode",
+                      lambda: self.config_value(session, "collaboration_mode") == mode, CLI_SECONDS)
+
+    def question_and_permission(self, session: str) -> None:
+        if self.kind == "codex":
+            # Codex offers request_user_input only in Plan mode (its
+            # default_mode_request_user_input feature is off by default).
+            self.set_collaboration_mode(session, "plan")
+            prompt = ("Use your request_user_input tool (the tool that asks the user a multiple-choice "
+                      "question) to ask me which color I prefer, with the two options red and blue. "
+                      "After I answer, reply with only the chosen color and do not write a plan.")
+        else:
+            prompt = ("Use your question tool (the tool that asks the user a multiple-choice "
+                      "question) to ask me which color I prefer, with the two options red and "
+                      "blue. After I answer, reply with only the chosen color.")
+        outcome = self.turn("prompt", "--session", session, "--return-on-input", prompt)
         if outcome["outcome"] != "input_required":
             raise ScenarioFailure(f"no question reached the user: {json.dumps(outcome)[:2000]}")
         question, = self.cli_json("elicitations", "--session", session)
-        # The model words the options; it may write "Blue" or "blue".
+        # The model words the options: "Blue", "blue", "Red (Recommended)".
         choices = [(field["id"], option["value"]) for field in question["fields"]
                    for option in field.get("options", [])]
-        if sorted(value.lower() for _, value in choices) != ["blue", "red"]:
+        named = [tuple(color for color in ("red", "blue") if color in re.findall(r"[a-z]+", value.lower()))
+                 for _, value in choices]
+        if sorted(named) != [("blue",), ("red",)]:
             raise ScenarioFailure(f"the question does not offer red and blue: {json.dumps(question)[:2000]}")
-        field, blue = next((field, value) for field, value in choices if value.lower() == "blue")
+        field, blue = choices[named.index(("blue",))]
         self.cli("respond", "--session", session, "--elicitation", question["id"],
                  json.dumps({"action": "accept", "content": {field: blue}}))
         outcome = self.turn("wait", "--session", session)
@@ -358,7 +422,58 @@ class Suite:
             raise ScenarioFailure(f"after answering the question: {json.dumps(outcome)[:2000]}")
         reply = outcome["final_message"].strip()
 
-        asking = self.new_session(ASK_PROFILE, "go-port scenarios permission")
+        if self.kind == "codex":
+            self.inapplicable(5, "tool-permission",
+                              "on a bare target Mjolnir runs Codex in its `agent` mode, whose "
+                              "approvals_reviewer is Codex's own auto reviewer, and the session's policy "
+                              "keeps it in that mode, so no tool permission request reaches the user; "
+                              "the plan approval below is the permission request Codex sends through ACP")
+            answers = self.plan_approval(session)
+        else:
+            answers = self.tool_permissions()
+        self.passed(5, "question-and-permission", f"question answered {blue!r}, agent replied {reply!r}; "
+                    f"permission requests: {', '.join(answers)}")
+
+    def plan_approval(self, session: str) -> list[str]:
+        """Codex's own permission request: after a plan turn it asks through
+        ACP whether to implement the plan, which reaches the user as a plan
+        review. Keeping the plan leaves the session planning with nothing
+        written; implementing leaves Plan mode and writes the file."""
+        plan = self.checkout(session) / "plan.txt"
+        line = f"planned {self.nonce}"
+        answers = []
+        for action, mode in (("keep_planning", "plan"), ("implement", "default")):
+            outcome = self.turn("prompt", "--session", session, "--return-on-input",
+                                "Without exploring the repository, write a one-step plan, inside a "
+                                "<proposed_plan> block, to create a file named plan.txt whose only "
+                                f"line is `{line}` (without the backticks). Do not ask me any questions.")
+            if outcome["outcome"] != "input_required":
+                raise ScenarioFailure(f"no plan approval reached the user: {json.dumps(outcome)[:2000]}")
+            review, = self.cli_json("elicitations", "--session", session)
+            offered = [option["value"] for field in review["fields"] if field["id"] == "action"
+                       for option in field.get("options", [])]
+            if not review["id"].startswith("plan-review-") or "plan.txt" not in review["message"] \
+                    or action not in offered:
+                raise ScenarioFailure(f"unexpected input request: {json.dumps(review)[:2000]}")
+            self.cli("respond", "--session", session, "--elicitation", review["id"],
+                     json.dumps({"action": "accept", "content": {"action": action}}))
+            outcome = self.turn("wait", "--session", session)
+            if outcome["outcome"] != "finished":
+                raise ScenarioFailure(f"after answering {action}: {json.dumps(outcome)[:2000]}")
+            current = self.config_value(session, "collaboration_mode")
+            written = plan.is_file() and plan.read_text().strip() == line
+            # Keeping the plan must leave no plan.txt at all, not merely
+            # none with the planned line.
+            settled = written if action == "implement" else not plan.exists()
+            if current != mode or not settled:
+                raise ScenarioFailure(f"after answering {action} the session is in {current} mode and "
+                                      f"{plan} holds {plan.read_text() if plan.exists() else 'nothing'!r}")
+            answers.append(f"plan {action} -> finished in {mode} mode, plan.txt "
+                           f"{'written' if written else 'absent'}")
+        return answers
+
+    def tool_permissions(self) -> list[str]:
+        asking = self.new_session(self.ask_profile, "go-port scenarios permission")
         self.wait_until_running(asking)
         answers = []
         for command, choice, expected in (("ls -la .", "once", "finished"),
@@ -378,9 +493,7 @@ class Suite:
             if outcome["outcome"] != expected:
                 raise ScenarioFailure(f"after answering {choice}: {json.dumps(outcome)[:2000]}")
             answers.append(f"{choice} -> {expected}")
-        self.passed(5, "question-and-permission", f"question answered 'blue', agent replied {reply!r}; "
-                    f"permission requests: {', '.join(answers)}")
-        return asking
+        return answers
 
     def daemon_restart(self, session: str) -> None:
         before = self.latest_seq(session)
@@ -414,7 +527,17 @@ class Suite:
     def suspend_resume(self, session: str) -> None:
         checkout = self.checkout(session)
         # Suspension keeps tracked work and refuses to drop untracked files.
-        subprocess.run(["git", "-C", str(checkout), "add", "notes.txt"], check=True)
+        # The earlier scenarios leave exactly notes.txt, plus plan.txt on
+        # Codex; anything else in the checkout is unexpected and fails here
+        # instead of being staged and carried through the suspension.
+        expected = {"notes.txt"} | ({"plan.txt"} if self.kind == "codex" else set())
+        untracked = set(subprocess.run(
+            ["git", "-C", str(checkout), "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, check=True).stdout.split())
+        if untracked != expected:
+            raise ScenarioFailure(f"untracked files before suspend are {sorted(untracked)}, "
+                                  f"expected {sorted(expected)}")
+        subprocess.run(["git", "-C", str(checkout), "add", "--", *sorted(expected)], check=True)
         self.cli("suspend", "--session", session)
         self.wait_for("the session to be suspended",
                       lambda: self.session(session)["state"] == "suspended", CLI_SECONDS)
@@ -475,7 +598,8 @@ def main() -> int:
                         help="the mj binary that starts every daemon (default: --mj)")
     parser.add_argument("--worker-binary", type=Path,
                         help="worker the daemon runs instead of its own (sets MJ_WORKER_BINARY)")
-    parser.add_argument("--profile", default="oc", help="OpenCode profile (default oc)")
+    parser.add_argument("--profile", default="oc",
+                        help="OpenCode or Codex profile (default oc)")
     parser.add_argument("--target", default="localhost", help="bare target (default localhost)")
     parser.add_argument("--turn-seconds", type=int, default=300,
                         help="how long one turn may take before the scenario fails (default 300)")
@@ -501,7 +625,11 @@ def main() -> int:
     finally:
         suite.cleanup()
     shutil.rmtree(suite.project, ignore_errors=True)
-    print("all scenarios passed", flush=True)
+    if suite.not_applicable:
+        print(f"all scenarios passed; not applicable to {suite.kind}: "
+              f"{', '.join(suite.not_applicable)}", flush=True)
+    else:
+        print("all scenarios passed", flush=True)
     return 0
 
 

@@ -1159,9 +1159,8 @@ directory is reserved: localhost sessions receive the managed copy and isolated
 sessions omit it, even if the profile contains a user copy. Your own `skills/`
 directory is left alone.
 
-Session recall and file provenance are provided by the `mj-memory` MCP server:
-`search_sessions`, `get_session_brief`, `search_session`, `read_session`,
-`trace_file`, `session_files`, and `blame_file`. They query the controller's
+Session recall is provided by the `mj-memory` MCP server:
+`search_history`, `get_session_brief`, and `read_session`. They query the controller's
 session index on local, container, and SSH targets without installing `sw` or
 copying the index to the target. Claude receives these history tools and keeps
 native project notes. Other harnesses read and write their session's project
@@ -1169,11 +1168,10 @@ memory replica with their own file tools. Applicable history tools are
 registered again when a session resumes.
 
 History reads are bounded and include continuation information. The index can
-lag active sessions, and older transcripts may lack timestamps or file evidence.
-`blame_file` runs Git in the target checkout and reports heuristic attribution;
-uncommitted lines remain unattributed. Queries require a connected controller
-and time out after 60 seconds. Local project-memory files remain usable while a
-history query waits. History tools never resume or restore old sessions.
+lag active sessions, and older transcripts may lack timestamps or tool output.
+Queries require a connected controller and time out after 60 seconds. Local
+project-memory files remain usable while a history query waits. History tools
+never resume or restore old sessions.
 User-supplied `recall` and `provenance` skills are preserved.
 
 The destination tree is replaced atomically. Removing the controller-side

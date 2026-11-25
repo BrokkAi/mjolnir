@@ -39,12 +39,9 @@ pub async fn resolve() -> Result<&'static Environment> {
     ENVIRONMENT
         .get_or_try_init(|| async {
             let cancellation = mj_core::subprocess::scoped_preparation_cancellation();
-            mj_core::runtime::spawn_blocking(move || match cancellation {
-                Some(cancellation) => discover_cancellable(cancellation),
-                None => discover(),
-            })
-            .await
-            .context("target login environment task failed")?
+            mj_core::runtime::spawn_blocking(move || discover_with_cancellation(cancellation))
+                .await
+                .context("target login environment task failed")?
         })
         .await
 }
@@ -213,10 +210,17 @@ pub const LOGIN_ENVIRONMENT_PROBE_TIMEOUT: std::time::Duration =
 
 #[cfg(unix)]
 pub fn discover() -> Result<Environment> {
+    discover_with_cancellation(None)
+}
+
+#[cfg(unix)]
+fn discover_with_cancellation(
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> Result<Environment> {
     let started = std::time::Instant::now();
     let account = Account::current()?;
     let shell = account.shell.clone();
-    let environment = discover_account(account, LOGIN_ENVIRONMENT_PROBE_TIMEOUT)?;
+    let environment = discover_account(account, LOGIN_ENVIRONMENT_PROBE_TIMEOUT, cancellation)?;
     let path_entries = environment
         .get("PATH")
         .map(|path| std::env::split_paths(path).count())
@@ -230,21 +234,11 @@ pub fn discover() -> Result<Environment> {
     Ok(environment)
 }
 
-fn discover_cancellable(cancellation: tokio_util::sync::CancellationToken) -> Result<Environment> {
-    #[cfg(unix)]
-    {
-        let executor = mj_core::targets::CancellableProcessExecutor::with_timeout(
-            LOGIN_ENVIRONMENT_PROBE_TIMEOUT,
-        )
-        .with_cancellation(cancellation)
-        .with_foreground_terminal();
-        discover_account_with_executor(Account::current()?, &executor)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = cancellation;
-        discover()
-    }
+#[cfg(not(unix))]
+fn discover_with_cancellation(
+    _cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> Result<Environment> {
+    discover()
 }
 
 /// The shell the probe starts, for diagnostics that explain where a session's
@@ -371,18 +365,20 @@ impl Account {
 /// version managers install themselves. A terminal starts a single shell that
 /// is both, so the probe starts the account's shell the same way.
 #[cfg(unix)]
-fn discover_account(account: Account, timeout: std::time::Duration) -> Result<Environment> {
-    discover_account_with_executor(
-        account,
-        &mj_core::targets::BoundedProcessExecutor::new(timeout),
-    )
-}
-
-#[cfg(unix)]
-fn discover_account_with_executor(
+fn discover_account(
     account: Account,
-    executor: &dyn mj_core::targets::CommandExecutor,
+    timeout: std::time::Duration,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<Environment> {
+    use mj_core::targets::CommandExecutor;
+
+    // Every caller starts an interactive shell in an owned process group.
+    // Its terminal policy must be the same with or without cancellation.
+    let mut executor = mj_core::targets::CancellableProcessExecutor::with_timeout(timeout)
+        .with_foreground_terminal();
+    if let Some(cancellation) = cancellation {
+        executor = executor.with_cancellation(cancellation);
+    }
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)
         .map_err(|error| anyhow::anyhow!("create login capture marker: {error}"))?;
@@ -569,9 +565,12 @@ mod tests {
             "ARBITRARY_PARENT_EXPORT",
         ];
         if let Some(home) = std::env::var_os(HOME_KEY) {
-            let environment =
-                discover_account(account(std::path::Path::new(&home)), Duration::from_secs(5))
-                    .unwrap();
+            let environment = discover_account(
+                account(std::path::Path::new(&home)),
+                Duration::from_secs(5),
+                None,
+            )
+            .unwrap();
             for key in pollution {
                 assert!(
                     !environment.contains_key(key),
@@ -641,12 +640,146 @@ mod tests {
             "export INTERACTIVE_SETTING='from shellrc'\nexport PATH=\"/interactive/bin:$PATH\"\n",
         )
         .unwrap();
-        let environment = discover_account(account(home.path()), Duration::from_secs(5)).unwrap();
+        let environment =
+            discover_account(account(home.path()), Duration::from_secs(5), None).unwrap();
         assert_eq!(environment["INTERACTIVE_SETTING"], "from shellrc");
         assert!(
             environment["PATH"].starts_with("/interactive/bin:"),
             "{}",
             environment["PATH"]
+        );
+    }
+
+    // Hard-won: #1684: a session-triggered daemon replacement stopped its login shell on SIGTTIN.
+    #[test]
+    fn login_capture_restores_the_callers_terminal_after_success_and_failure() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::CommandExt;
+
+        const CHILD: &str = "MJ_TEST_LOGIN_CAPTURE_TERMINAL";
+        const TEST: &str = "login_environment::tests::login_capture_restores_the_callers_terminal_after_success_and_failure";
+        if std::env::var_os(CHILD).is_some() {
+            let terminal = std::fs::File::open("/dev/tty").unwrap();
+            let foreground = || unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
+            assert_eq!(foreground(), unsafe { libc::getpgrp() });
+            let home = tempfile::tempdir().unwrap();
+            // Bash also accepts the C-shell invocation (login argv[0], script
+            // on stdin). Exercise both executor paths without requiring tcsh.
+            let stdin_shell = home.path().join("tcsh");
+            std::os::unix::fs::symlink("/bin/bash", &stdin_shell).unwrap();
+            for shell in [std::path::Path::new("/bin/bash"), &stdin_shell] {
+                for cancellable in [false, true] {
+                    let account = || Account {
+                        user: "fixture-user".into(),
+                        home: home.path().into(),
+                        shell: shell.into(),
+                    };
+                    let cancellation = cancellable.then(tokio_util::sync::CancellationToken::new);
+                    std::fs::write(
+                        home.path().join(".bash_profile"),
+                        format!("export LARGE='{}'\n", "x".repeat(80_000)),
+                    )
+                    .unwrap();
+                    let environment =
+                        discover_account(account(), Duration::from_secs(5), cancellation.clone())
+                            .unwrap();
+                    assert_eq!(environment["LARGE"].len(), 80_000);
+                    assert_eq!(foreground(), unsafe { libc::getpgrp() });
+
+                    std::fs::write(home.path().join(".bash_profile"), "exit 42\n").unwrap();
+                    let error =
+                        discover_account(account(), Duration::from_secs(5), cancellation.clone())
+                            .unwrap_err();
+                    assert!(error.to_string().contains("42"), "{error:#}");
+                    assert_eq!(foreground(), unsafe { libc::getpgrp() });
+
+                    if let Some(cancellation) = cancellation {
+                        let ready = home.path().join("ready");
+                        std::fs::write(
+                            home.path().join(".bash_profile"),
+                            "echo $$ > \"$HOME/ready\"; sleep 60\n",
+                        )
+                        .unwrap();
+                        let started = Instant::now();
+                        let cancel_token = cancellation.clone();
+                        let readiness = ready.clone();
+                        let cancel = std::thread::spawn(move || {
+                            let pid = loop {
+                                if let Ok(body) = std::fs::read_to_string(&readiness)
+                                    && body.ends_with('\n')
+                                    && let Ok(pid) = body.trim().parse::<i32>()
+                                {
+                                    break pid;
+                                }
+                                assert!(started.elapsed() < Duration::from_secs(5));
+                                std::thread::sleep(Duration::from_millis(5));
+                            };
+                            cancel_token.cancel();
+                            pid
+                        });
+                        let error =
+                            discover_account(account(), Duration::from_secs(5), Some(cancellation))
+                                .unwrap_err();
+                        let pid = cancel.join().unwrap();
+                        assert!(
+                            error.to_string().contains("operation cancelled"),
+                            "{error:#}"
+                        );
+                        assert_eq!(foreground(), unsafe { libc::getpgrp() });
+                        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+                        assert_eq!(
+                            std::io::Error::last_os_error().raw_os_error(),
+                            Some(libc::ESRCH)
+                        );
+                        std::fs::remove_file(ready).unwrap();
+                    }
+                }
+            }
+            return;
+        }
+
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: valid output pointers and default terminal settings.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two new owned descriptors.
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let master_fd = master.as_raw_fd();
+        let slave_fd = slave.as_raw_fd();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1");
+        // SAFETY: only async-signal-safe session/terminal syscalls before exec.
+        // Keep the PTY off stdio: the real probe captures its output in pipes.
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(master_fd);
+                if libc::setsid() < 0 || libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(slave_fd);
+                Ok(())
+            });
+        }
+        let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -707,6 +840,7 @@ mod tests {
                 shell,
             },
             Duration::from_secs(5),
+            None,
         )
         .unwrap();
         assert_eq!(environment["CSH_RC_SETTING"], "from-cshrc");
@@ -719,7 +853,7 @@ mod tests {
         std::fs::write(home.path().join(".profile"), "echo secret >&2\nexit 42\n").unwrap();
         // The deadline was raised to 600 seconds for an intermittent failure
         // that was really ETXTBSY on the written fixture shell, not a timeout.
-        let error = discover_account(account(home.path()), Duration::from_secs(5))
+        let error = discover_account(account(home.path()), Duration::from_secs(5), None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("42"), "{error}");
@@ -735,8 +869,9 @@ mod tests {
         )
         .unwrap();
         let started = Instant::now();
-        let error = discover_account(account(home.path()), Duration::from_millis(250)).unwrap_err();
-        assert!(error.to_string().contains("did not answer"), "{error:#}");
+        let error =
+            discover_account(account(home.path()), Duration::from_millis(250), None).unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 }

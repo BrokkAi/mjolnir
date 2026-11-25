@@ -151,6 +151,7 @@ pub fn prepare_worker_files_for(
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
 ) -> Result<StagedWorkerProfile> {
+    let candidate = matches!(&preparation, WorkerFilePreparation::StageCandidate { .. });
     let (launch, staged_profile) = stage_worker_files_for(
         config,
         state,
@@ -160,8 +161,11 @@ pub fn prepare_worker_files_for(
         executor,
         preparation,
         history,
+        None,
     )?;
-    if let Some(launch) = launch {
+    if let Some(launch) = launch
+        && !candidate
+    {
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
     }
     Ok(staged_profile)
@@ -180,6 +184,7 @@ pub fn stage_worker_files_for(
     executor: &impl CommandExecutor,
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
+    created_container: Option<&targets::CreationObservation>,
 ) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
     let _timing = crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
     let owner = crate::worker_lifecycle::require(session_id)?;
@@ -228,16 +233,7 @@ pub fn stage_worker_files_for(
         .context("session profile is missing")?;
     profile.ensure_ready(&session.last_profile)?;
     let target_environment = &session.target_runtime_settings(config)?.environment;
-    let aws_source = if preparation == WorkerFilePreparation::RestoreProfileOnly {
-        crate::aws_credentials::source_for_staged_profile(
-            profile,
-            backend,
-            target_environment,
-            session.staged_aws_profile.as_deref(),
-        )?
-    } else {
-        crate::aws_credentials::source(profile, backend, target_environment)?
-    };
+    let aws_source = crate::aws_credentials::source(profile, backend, target_environment)?;
     let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
         config,
         state,
@@ -249,6 +245,15 @@ pub fn stage_worker_files_for(
 
     if session.native_session_id.is_some() && profile.kind == mj_core::config::HarnessKind::Codex {
         launch.goal_resume_request = Some(mj_core::state::new_session_id()?);
+    }
+    if let WorkerFilePreparation::StageCandidate {
+        operation_id,
+        candidate_id,
+        ..
+    } = &preparation
+    {
+        mj_core::worker_launch::validate_candidate_id(candidate_id)?;
+        launch.accepted_reload_operation_id = Some(operation_id.clone());
     }
     let staging = tempfile::tempdir().context("create worker staging directory")?;
     let launch_path = staging.path().join("launch.json");
@@ -316,7 +321,12 @@ pub fn stage_worker_files_for(
     // Edits to attachment settings apply on the next container creation;
     // describe this container's creation snapshot while it is retained.
     let attachments = mj_core::state::applied_container_settings(session).additional_mounts;
-    let storage = targets::inspect_container_storage(backend, attachments, executor)?;
+    let storage = targets::inspect_container_storage_observed(
+        backend,
+        attachments,
+        created_container,
+        executor,
+    )?;
     append_container_storage_guidance(
         profile.kind,
         &profile_stage,
@@ -392,6 +402,49 @@ pub fn stage_worker_files_for(
     // deliver too long, so the staged file is checked before it travels.
     profile.ensure_staged_instructions_deliverable(&session.last_profile, &profile_stage)?;
     let shared_login = shared_profile_login(profile, backend);
+    if let WorkerFilePreparation::StageCandidate {
+        operation_id,
+        expected_store_id,
+        candidate_id,
+    } = &preparation
+    {
+        use mj_core::worker_launch::{ReloadCandidateManifest, ReloadSharedLogin};
+        // In-place Move reuses the running environment's mbx binary/config/shims.
+        // Phase B's link_build_cache_configuration links the destination XDG config after commit.
+        let (clear_paths, protected_paths) = profile_clear_spec(profile.kind);
+        let manifest = ReloadCandidateManifest {
+            operation_id: operation_id.clone(),
+            expected_store_id: expected_store_id.clone(),
+            candidate_id: candidate_id.clone(),
+            harness: profile.kind,
+            target_profile_home: target_profile_home.clone(),
+            clear_paths,
+            protected_paths,
+            shared_login: shared_login.as_ref().map(|login| ReloadSharedLogin {
+                relative_marker: login.name.to_owned(),
+                source_path: login.file.to_string_lossy().into_owned(),
+            }),
+            clear_github_token: session.no_github_credentials,
+        };
+        let manifest_path = staging.path().join("manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        install_reload_candidate(
+            executor,
+            backend,
+            session_id,
+            worker_root,
+            candidate_id,
+            &manifest_path,
+            mj_worker_staging::worker_binary::StagedWorkerProfile {
+                launch: &launch_path,
+                ownership: &ownership_path,
+                profile: &profile_stage,
+                shared_login: None,
+                shared_paths: &shared_paths,
+            },
+        )?;
+        return Ok((Some(launch), staged_profile));
+    }
     if preparation != WorkerFilePreparation::Install {
         // A shared symlink stays live across boot. Only a copied login
         // identifies the credentials staged for this specific launch.
@@ -509,6 +562,52 @@ pub fn install_build_cache_shim(
     // The build cache is optional: whatever keeps the host's policy or
     // executable from reaching the container turns the cache off for this
     // session, with a notice, instead of blocking the session from starting.
+    if matches!(
+        backend,
+        targets::TargetLocator::SshPodman { .. } | targets::TargetLocator::SshDocker { .. }
+    ) {
+        // Over SSH, every command is a round trip: read the host's policy and
+        // mbx in one, and stage everything in the container with one more.
+        let staged = (|| -> Result<()> {
+            let (configuration, native) =
+                mj_build_cache::mbx::native_mbx_and_config_for_container(backend, cache, executor)
+                    .context("read the container host's mbx configuration")?;
+            let host_mbx = match &native {
+                mj_build_cache::mbx::NativeMbxLookup::Ready(native) => Some(HostMbx {
+                    program: &native.program,
+                    version: &native.version,
+                }),
+                mj_build_cache::mbx::NativeMbxLookup::Unavailable(_) => None,
+            };
+            match stage_ssh_container_mbx(
+                executor,
+                backend,
+                &worker_root,
+                &configuration,
+                &config_roots,
+                host_mbx,
+            )? {
+                // An older private mbx keeps its executable and now has its policy.
+                SshContainerMbx::Legacy | SshContainerMbx::Installed(_) => Ok(()),
+                SshContainerMbx::HostMbxUnavailable => match native {
+                    mj_build_cache::mbx::NativeMbxLookup::Unavailable(reason) => bail!("{reason}"),
+                    mj_build_cache::mbx::NativeMbxLookup::Ready(_) => {
+                        bail!("staging found no host mbx although one was supplied")
+                    }
+                },
+            }
+        })();
+        if let Err(error) = staged {
+            disable_mbx_cache_shims(
+                &session.id,
+                backend,
+                &worker_root,
+                executor,
+                &format!("{error:#}"),
+            );
+        }
+        return Ok(());
+    }
     let staged = (|| -> Result<Option<PathBuf>> {
         // The policy snapshot goes first: an older private mbx, which keeps its
         // own executable, is linked to it below.
@@ -1135,6 +1234,126 @@ mod tests {
     use mj_core::state::{SessionState, TargetLocator};
     use mj_core::subagent::{CHILD_REPORT_DIR_ENV, SubagentKind, SubagentRecord};
     use mj_targets::test_isolation::{IsolatedTest, test_name};
+
+    #[test]
+    fn stage_candidate_preserves_live_files() {
+        const MARKER: &str = "MJ_TEST_PRIVATE_RELOAD";
+        if std::env::var_os(MARKER).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "stage_candidate_preserves_live_files",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(dir.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("config.toml"), "model = \"candidate\"\n").unwrap();
+        std::fs::write(source.join("auth.json"), r#"{"OPENAI_API_KEY":"test-key"}"#).unwrap();
+        let mut config = Config::default().with_local_targets();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, &source),
+        );
+        let id = "55555555555555555555555555555555";
+        let root = dir.path().join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "localhost".into(),
+            directory: dir.path().join("cache"),
+            max_size: None,
+            target_root: None,
+        });
+        session.last_profile = "codex".into();
+        session.harness_kind = HarnessKind::Codex;
+        session.native_session_id = None;
+        session.project_directory = Some(dir.path().to_owned());
+        session.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: root.clone(),
+        }));
+        session.target_template_id = "localhost".into();
+        crate::database::save_session(&session).unwrap();
+        let home = targets::target_profile_home(&backend, id, &config.profiles["codex"]);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(Path::new(&home).join("config.toml"), "live profile").unwrap();
+        for name in ["launch.json", "ownership.json"] {
+            std::fs::write(root.join(name), "live").unwrap();
+        }
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        for name in ["cargo", "mbx"] {
+            std::fs::write(root.join("bin").join(name), "live shim").unwrap();
+        }
+        let state = crate::database::load_state().unwrap();
+        // Candidate staging must not consult host mbx or alter live cache shims.
+        #[cfg(unix)]
+        {
+            let no_host_mbx = dir.path().join("no-host-mbx");
+            std::fs::create_dir(&no_host_mbx).unwrap();
+            for utility in [
+                "mkdir", "cp", "chmod", "sh", "rm", "ln", "find", "dirname", "cat",
+            ] {
+                let executable = ["/usr/bin", "/bin"]
+                    .into_iter()
+                    .map(|directory| Path::new(directory).join(utility))
+                    .find(|path| path.exists())
+                    .expect("system filesystem utility");
+                std::os::unix::fs::symlink(executable, no_host_mbx.join(utility)).unwrap();
+            }
+            unsafe {
+                std::env::set_var("PATH", &no_host_mbx);
+            }
+        }
+        crate::database::test_fixtures::worker_test_scope(id, || {
+            prepare_worker_files_for(
+                &config,
+                &state,
+                id,
+                &backend,
+                root.to_str().unwrap(),
+                &mj_core::targets::ProcessExecutor,
+                WorkerFilePreparation::StageCandidate {
+                    operation_id: "move".into(),
+                    expected_store_id: "store".into(),
+                    candidate_id: "candidate".into(),
+                },
+                LaunchHistory::Stored,
+            )
+            .unwrap();
+        });
+        for name in ["cargo", "mbx"] {
+            assert_eq!(
+                std::fs::read(root.join("bin").join(name)).unwrap(),
+                b"live shim"
+            );
+        }
+        let candidate = root.join("reload-candidates/candidate");
+        let launch = WorkerLaunchConfig::read(&candidate.join("launch.json")).unwrap();
+        assert_eq!(launch.accepted_reload_operation_id.as_deref(), Some("move"));
+        for name in [
+            "launch.json",
+            "ownership.json",
+            "manifest.json",
+            "profile/config.toml",
+        ] {
+            assert!(candidate.join(name).exists(), "{name}");
+        }
+        for name in ["launch.json", "ownership.json"] {
+            assert_eq!(std::fs::read(root.join(name)).unwrap(), b"live");
+        }
+        assert_eq!(
+            std::fs::read(Path::new(&home).join("config.toml")).unwrap(),
+            b"live profile"
+        );
+    }
 
     #[test]
     fn current_worker_launch_config_preserves_staged_aws_profile() {
