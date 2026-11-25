@@ -149,6 +149,62 @@ fn worker_runs_installed_build(reported: Option<&str>, installed: &str) -> bool 
 }
 
 impl Controller {
+    /// Replace a checkpoint-only worker without losing its installed launch or
+    /// holding daemon handoff while the binary is prepared and the relay boots.
+    pub(super) async fn upgrade_checkpoint_only_worker(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        backend: &targets::TargetLocator,
+        worker_root: &str,
+        reconnect: &CommandSpec,
+    ) -> Result<StandaloneSession> {
+        executor.begin_resumable_work()?;
+        let result = async {
+            // Reuse the installed launch byte-for-byte, including suspend capture.
+            // Check it before stopping the worker so a stale launch cannot start
+            // the harness this checkpoint-only worker was avoiding.
+            let launch: serde_json::Value = super::lifecycle::origin_delta::read_wire(
+                backend,
+                session_id,
+                worker_root,
+                "launch.json",
+                executor,
+            )?
+            .context("checkpoint-only worker launch is missing")?;
+            anyhow::ensure!(
+                launch.get("run_mode").and_then(serde_json::Value::as_str)
+                    == Some("checkpoint_only"),
+                "checkpoint-only worker launch no longer specifies checkpoint-only mode"
+            );
+            let worker = WorkerInstall::for_target(backend, executor)?;
+            let staging = stage_worker_binary_for_upgrade(executor, backend, session_id, &worker)?;
+            let swap = crate::upgrade::activity_unless_draining("checkpoint-only worker swap")?;
+            staging.install(&crate::worker_lifecycle::require(session_id)?)?;
+            self.restart_worker_with_installed_binary(
+                session_id,
+                executor,
+                InstalledWorkerRestart {
+                    backend,
+                    worker_root,
+                    reconnect,
+                    launch: None,
+                    prepared: true,
+                    discard_queued_prompts: None,
+                    staged_aws_profile: None,
+                    swap_admission: Some(swap),
+                    messages: &RESTART_FOR_CHECKPOINT,
+                },
+            )
+            .await
+        }
+        .await;
+        // The restart releases the swap after durable launch; on every earlier
+        // failure its guard drops before this resumes the lifecycle admission.
+        executor.end_resumable_work("record checkpoint-only worker readiness")?;
+        result
+    }
+
     /// A reconstructed pathname cannot repair a process's unlinked cwd.
     /// Reuse the upgrade reservation before replacing only this parent.
     pub(in crate::controller) async fn restart_worker_after_checkout_recovery(

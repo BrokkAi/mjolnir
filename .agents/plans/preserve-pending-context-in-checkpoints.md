@@ -21,6 +21,7 @@ A switch between agent harnesses (the programs running models, such as Antigravi
 - [ ] Prepare and review the next workspace release, push its version commit and tag, and follow the normal release workflow through publication.
 - [x] Commit the initial validated fix and prepare version 2.76.0; request review of the combined deliverable.
 - [x] (2026-11-25 23:15Z) Address first review: multi-frame pending-context transfer, old checkpoint-only worker replacement, and avoiding combined context installation frames; seven focused tests and ten-package clippy pass.
+- [x] (2026-11-25 23:23:42 UTC) Address second review: unsupported-schema fixture selects 17, and checkpoint-only preparation/readiness release daemon admission using the existing resumable-work boundary; three affected tests and ten-package clippy pass.
 
 ## Surprises & Discoveries
 
@@ -58,7 +59,7 @@ The first complete review found three accepted gaps. Multiple valid installation
 ## Outcomes & Retrospective
 
 
-The initial implementation passed ten focused tests and all-target clippy across ten affected crates. It is committed as 356497937, followed by a conflict-free upstream merge and release preparation 49236a8fa for 2.76.0. First-review findings are now fixed: paged transfers cover more than 8 MiB of escaped Unicode, saved text restores directly from a real archive even across a further harness switch, and old checkpoint-only sources use the existing replacement mechanism. Seven affected tests passed and ten-package dev all-target clippy passed again after three narrow test-code lint corrections. The checkpoint-only regression proves replacement is attempted and injected failure preserves launch/suspend capture/relay state; the unchanged helper's successful restart is not newly simulated. No commit has been pushed and no release tag exists yet. No live session was mutated. Another review, push, and release publication remain.
+The initial implementation passed ten focused tests and all-target clippy across ten affected crates. It is committed as 356497937, followed by a conflict-free upstream merge and release preparation 49236a8fa for 2.76.0. First-review fixes are committed as 42335cb49: paged transfers cover more than 8 MiB of escaped Unicode, saved text restores directly from a real archive even across a further harness switch, and old checkpoint-only sources use existing replacement. Seven affected tests and ten-package clippy passed. Second-review corrections now pass the unsupported-schema, queued-capture/admission, and durable-launch/readiness admission tests plus ten-package clippy. In total 13 distinct focused tests have passed across the implementation, with only affected tests repeated after each change. The checkpoint-only regression proves replacement is attempted and injected failure preserves launch/suspend capture/relay state; the unchanged helper's successful restart is not newly simulated. No commit has been pushed and no release tag exists yet. No live session was mutated. Third review, push, and release publication remain.
 
 ## Context and Orientation
 
@@ -130,3 +131,5 @@ Plan updated 2026-11-25 22:58Z: all 10 targeted regressions and affected-consume
 Plan revised after the first complete review on 2026-11-25: all three distinct findings are accepted. Add paging within the same checkpoint read, seed pending text on all restores to simplify cross-harness installation, and replace older checkpoint-only workers without invoking the failed harness. The prepared version remains 2.76.0; tag only the final reviewed commit containing these fixes.
 
 Plan updated 2026-11-25 23:15Z: first-review fixes pass all seven affected tests, changed-file formatting, and ten-package all-target clippy. Earlier unaffected passing schema, reuse, and legacy-idle tests were not repeated. Commit these fixes and request the second review before any push.
+
+Plan updated 2026-11-25 23:23:42 UTC: second review found one existing fixture selecting newly-supported schema 16 as invalid, and preparation/readiness holding daemon admission during checkpoint-only replacement. Select schema 17 and use the existing resumable boundary with a labeled swap guard. The three affected regressions, changed-file formatting, and ten-package clippy pass. Request the third review before push and publication.

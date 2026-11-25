@@ -2053,6 +2053,10 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 .env(QUEUED_WAKE_TEST_CHILD, protocol.to_string())
                 .env(LATCH_RELAY_MAX_PROTOCOL, protocol.to_string())
                 .env(LATCH_CHECKPOINT_ONLY, "1")
+                .env(
+                    "MJ_WORKER_BINARY",
+                    mj_core::test_hooks::fake_worker_dispatcher(),
+                )
                 .env("MJ_DATA_DIR", directory.path())
                 .run();
         }
@@ -2074,6 +2078,7 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         exported: std::sync::Mutex<Option<CheckpointExportSpec>>,
         notices: std::sync::Mutex<Vec<String>>,
         purposes: std::sync::Mutex<Vec<String>>,
+        resumable: std::sync::atomic::AtomicBool,
     }
 
     impl CommandExecutor for ExportRecorder {
@@ -2099,6 +2104,30 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
+            if self.resumable.load(std::sync::atomic::Ordering::SeqCst) {
+                if matches!(
+                    command.purpose.as_str(),
+                    "stop Mjolnir worker daemon" | "install the prepared Mjolnir worker"
+                ) {
+                    assert!(
+                        crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == "checkpoint-only worker swap")
+                    );
+                    if command.purpose == "install the prepared Mjolnir worker" {
+                        return targets::ProcessExecutor.execute(command);
+                    }
+                } else {
+                    assert!(
+                        !crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == "checkpoint-only worker swap"),
+                        "worker preparation must not hold swap admission: {}",
+                        command.purpose
+                    );
+                    return targets::ProcessExecutor.execute(command);
+                }
+            }
             Ok(CommandOutput {
                 status: 1,
                 stdout: Vec::new(),
@@ -2119,6 +2148,18 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
 
         fn notify_notice(&self, notice: &str) {
             self.notices.lock().unwrap().push(notice.to_owned());
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            self.resumable
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, _: &'static str) -> Result<()> {
+            self.resumable
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -2293,6 +2334,18 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 purposes
                     .iter()
                     .any(|purpose| purpose == "stop Mjolnir worker daemon"),
+                "{purposes:?}"
+            );
+            assert!(
+                purposes
+                    .iter()
+                    .any(|purpose| purpose == "detect target platform"),
+                "{purposes:?}"
+            );
+            assert!(
+                purposes
+                    .iter()
+                    .any(|purpose| purpose == "install the prepared Mjolnir worker"),
                 "{purposes:?}"
             );
             assert!(

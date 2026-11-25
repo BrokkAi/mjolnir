@@ -342,28 +342,9 @@ impl Controller {
         {
             let checkpoint_only = relay.sync_snapshot().await?.operational.checkpoint_only;
             if checkpoint_only {
-                // Keep the installed launch, including any accepted suspend capture.
-                // It already started this worker in checkpoint-only mode.
-                let launch: serde_json::Value = super::super::lifecycle::origin_delta::read_wire(
-                    &backend, session_id, &worker_root, "launch.json", executor,
-                )?.context("checkpoint-only worker launch is missing")?;
-                ensure!(launch.get("run_mode").and_then(serde_json::Value::as_str) == Some("checkpoint_only"),
-                    "checkpoint-only worker launch no longer specifies checkpoint-only mode");
                 relay.release();
-                let connection = self.restart_worker_with_installed_binary(
-                    session_id,
-                    executor,
-                    InstalledWorkerRestart {
-                        backend: &backend,
-                        worker_root: &worker_root,
-                        reconnect: &reconnect,
-                        launch: None,
-                        prepared: false,
-                        discard_queued_prompts: None,
-                        staged_aws_profile: None,
-                        swap_admission: None,
-                        messages: &RESTART_FOR_CHECKPOINT,
-                    },
+                let connection = self.upgrade_checkpoint_only_worker(
+                    session_id, executor, &backend, &worker_root, &reconnect,
                 ).await.context("upgrade the checkpoint-only worker without starting its harness")?;
                 relay = adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await?;
                 restarted_worker = true;
