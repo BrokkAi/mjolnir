@@ -3674,6 +3674,26 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 157 is compatible: additive Move credential authority, ignored
+    // by older readers/writers; existing rows and formats remain unchanged.
+    if version < 157 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_retired_logins (
+                 session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL CHECK(length(trim(operation_id)) > 0),
+                 source_profile_id TEXT NOT NULL CHECK(length(trim(source_profile_id)) > 0),
+                 harness_kind TEXT NOT NULL CHECK(length(trim(harness_kind)) > 0),
+                 store_id TEXT NOT NULL CHECK(length(trim(store_id)) > 0),
+                 PRIMARY KEY (session_id, operation_id)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (157, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=157;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -6086,6 +6106,34 @@ mod reader_tests {
     }
 
     #[test]
+    fn revision_157_retired_login_authority_is_compatible_and_cascades() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("source", "project")).unwrap();
+        stamp_schema_version(&path, 156);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, 157);
+        assert_eq!(state.minimum_compatible, Some(156));
+        state.ensure_supported_by(156).unwrap();
+        upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source','move','profile','codex','store')", []).unwrap();
+        // New harness identifiers never require rebuilding this table.
+        upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source','future','profile','future-harness','store')", []).unwrap();
+        assert!(upgraded.execute("INSERT INTO pending_retired_logins VALUES ('missing','move','profile','codex','store')", []).is_err());
+        assert!(upgraded.execute("INSERT INTO pending_retired_logins VALUES ('source',' ','profile','codex','store')", []).is_err());
+        upgraded
+            .execute("DELETE FROM sessions WHERE session_id='source'", [])
+            .unwrap();
+        assert_eq!(
+            upgraded
+                .query_row("SELECT count(*) FROM pending_retired_logins", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn revision_156_adds_ec2_move_grants_region_and_profile_and_refuses_revision_155() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -6382,6 +6430,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 157 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS pending_retired_logins;")
+                .unwrap();
+        }
         if version < 156 {
             for column in ["region", "aws_profile"] {
                 if legacy_schema::table_has_column(&connection, "ec2_move_grants", column).unwrap()

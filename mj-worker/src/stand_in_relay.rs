@@ -454,18 +454,34 @@ pub fn serve_latch_relay() {
                 .unwrap_or_else(|_| PathBuf::from(&root));
             let payload = match &request.request {
                 mj_core::relay::RelayRequest::ReadRetiredLogins { after } => {
-                    let (logins, has_more) =
+                    let deferred = relay.in_place_move_hold_active()
+                        || crate::worker_runtime::reload_commit::retired_logins_deferred(
+                            &worker_root,
+                        )
+                        .unwrap();
+                    let (logins, has_more) = if deferred {
+                        (Vec::new(), false)
+                    } else {
                         crate::worker_runtime::reload_commit::read_retired_logins_page(
                             &worker_root,
                             after.as_deref(),
                             mj_core::credentials::RETIRED_LOGIN_PAGE_RAW_BYTES,
                         )
-                        .unwrap();
-                    mj_core::relay::RelayResponsePayload::RetiredLogins { logins, has_more }
+                        .unwrap()
+                    };
+                    mj_core::relay::RelayResponsePayload::RetiredLogins {
+                        logins,
+                        has_more,
+                        deferred,
+                    }
                 }
-                mj_core::relay::RelayRequest::AckRetiredLogin { id } => {
-                    crate::worker_runtime::reload_commit::ack_retired_login(&worker_root, id)
-                        .unwrap();
+                mj_core::relay::RelayRequest::AckRetiredLogin { id, fingerprint } => {
+                    crate::worker_runtime::reload_commit::ack_retired_login(
+                        &worker_root,
+                        id,
+                        fingerprint,
+                    )
+                    .unwrap();
                     mj_core::relay::RelayResponsePayload::RetiredLoginAcknowledged
                 }
                 _ => unreachable!(),

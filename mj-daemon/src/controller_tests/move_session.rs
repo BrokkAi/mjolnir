@@ -1464,6 +1464,12 @@ fn in_place_move_preserves_source_profile_files_when_worker_refuses_restart() {
                 "clearing the store fence re-admits credential sync after a pre-commit refusal"
             );
 
+            assert!(
+                mj_controller::database::pending_retired_logins(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .is_empty(),
+                "pre-commit refusal must clear retired-login authority"
+            );
             // A typed pre-commit refusal remains unambiguous on retry: no
             // candidate overlay has touched the live source home.
             let live_store_id = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0")
@@ -1625,6 +1631,12 @@ fn in_place_move_preserves_fresher_codex_login_when_destination_is_promoted() {
             channels.shutdown.shutdown().await.unwrap();
         });
     assert_eq!(operation.phase, MovePhase::Completed);
+    assert!(
+        mj_controller::database::pending_retired_logins(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_empty(),
+        "successful adoption and acknowledgement must clear durable authority"
+    );
     let canonical_source: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.source_home.join("auth.json")).unwrap()).unwrap();
     assert_eq!(

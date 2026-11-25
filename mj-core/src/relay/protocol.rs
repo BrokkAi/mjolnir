@@ -447,6 +447,7 @@ pub enum RelayRequest {
     },
     AckRetiredLogin {
         id: String,
+        fingerprint: String,
     },
     /// Install a base64-encoded credential file into this session's harness
     /// home. The destination path is fixed by the worker launch config.
@@ -1203,6 +1204,8 @@ pub enum RelayResponsePayload {
         logins: Vec<crate::credentials::RetiredLoginSnapshot>,
         #[serde(default)]
         has_more: bool,
+        #[serde(default)]
+        deferred: bool,
     },
     RetiredLoginAcknowledged,
     /// Fingerprint of a session's synced skills trees. Not secret.

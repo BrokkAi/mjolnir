@@ -4059,17 +4059,17 @@ pub(super) async fn serve_client_with_shared_credentials(
                 let root = relay_root.clone();
                 let request = envelope.request.clone();
                 let result = mj_core::runtime::spawn_blocking(move || -> Result<RelayResponsePayload> {
-                    if held {
+                    if held || super::reload_commit::retired_logins_deferred(&root)? {
                         anyhow::ensure!(matches!(request, RelayRequest::ReadRetiredLogins { .. }), "reload holds retired login acknowledgements");
-                        return Ok(RelayResponsePayload::RetiredLogins { logins: Vec::new(), has_more: false });
+                        return Ok(RelayResponsePayload::RetiredLogins { logins: Vec::new(), has_more: false, deferred: true });
                     }
                     match request {
                         RelayRequest::ReadRetiredLogins { after } => {
                             let (logins, has_more) = super::reload_commit::read_retired_logins_page(&root, after.as_deref(), mj_core::credentials::RETIRED_LOGIN_PAGE_RAW_BYTES)?;
-                            Ok(RelayResponsePayload::RetiredLogins { logins, has_more })
+                            Ok(RelayResponsePayload::RetiredLogins { logins, has_more, deferred: false })
                         },
-                        RelayRequest::AckRetiredLogin { id } => {
-                            super::reload_commit::ack_retired_login(&root, &id)?;
+                        RelayRequest::AckRetiredLogin { id, fingerprint } => {
+                            super::reload_commit::ack_retired_login(&root, &id, &fingerprint)?;
                             Ok(RelayResponsePayload::RetiredLoginAcknowledged)
                         }
                         _ => unreachable!(),
@@ -5674,6 +5674,22 @@ mod preparation_tests {
         ));
         let (read, mut writer) = client.into_split();
         let mut reader = BufReader::new(read);
+        std::fs::write(
+            root.join(mj_core::worker_launch::PENDING_RELOAD_FILE),
+            "pending",
+        )
+        .unwrap();
+        let deferred = request(
+            &mut reader,
+            &mut writer,
+            "deferred-retired",
+            RelayRequest::ReadRetiredLogins { after: None },
+        )
+        .await;
+        assert!(matches!(deferred.body, RelayResponseBody::Ok {
+            payload: RelayResponsePayload::RetiredLogins { deferred: true, logins, .. }
+        } if logins.is_empty()));
+        std::fs::remove_file(root.join(mj_core::worker_launch::PENDING_RELOAD_FILE)).unwrap();
         let response = request(
             &mut reader,
             &mut writer,
@@ -5682,20 +5698,29 @@ mod preparation_tests {
         )
         .await;
         assert!(
-            matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::RetiredLogins { logins, .. } } if logins == vec![login])
+            matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::RetiredLogins { logins, .. } } if logins == vec![login.clone()])
         );
         let response = request(
             &mut reader,
             &mut writer,
             "ack-retired",
-            RelayRequest::AckRetiredLogin { id: "move".into() },
+            RelayRequest::AckRetiredLogin {
+                id: "move".into(),
+                fingerprint: mj_core::credentials::credential_fingerprint(&login.bytes),
+            },
         )
         .await;
         assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
         assert!(!root.join("retired-logins/move.json").exists());
         assert_eq!(relay.lock().unwrap().operational_state(), before);
         assert!(!(RelayRequest::ReadRetiredLogins { after: None }).supported_at(92));
-        assert!(!RelayRequest::AckRetiredLogin { id: "move".into() }.supported_at(92));
+        assert!(
+            !RelayRequest::AckRetiredLogin {
+                id: "move".into(),
+                fingerprint: mj_core::credentials::credential_fingerprint(&login.bytes)
+            }
+            .supported_at(92)
+        );
         writer.shutdown().await.unwrap();
         handler.await.unwrap().unwrap();
     }
@@ -5746,7 +5771,10 @@ mod preparation_tests {
                 &mut reader1,
                 &mut writer1,
                 "ack",
-                RelayRequest::AckRetiredLogin { id: "move".into() },
+                RelayRequest::AckRetiredLogin {
+                    id: "move".into(),
+                    fingerprint: mj_core::credentials::credential_fingerprint(&login.bytes),
+                },
             );
             tokio::pin!(ack);
             tokio::time::timeout(crate::test_support::IO_TIMEOUT, async {
@@ -5772,7 +5800,7 @@ mod preparation_tests {
         };
         assert!(matches!(acked.body, RelayResponseBody::Ok { .. }));
         assert!(
-            matches!(listed.body, RelayResponseBody::Ok { payload:RelayResponsePayload::RetiredLogins { logins, has_more:false } } if logins.is_empty())
+            matches!(listed.body, RelayResponseBody::Ok { payload:RelayResponsePayload::RetiredLogins { logins, has_more:false, .. } } if logins.is_empty())
         );
         writer1.shutdown().await.unwrap();
         writer2.shutdown().await.unwrap();

@@ -444,6 +444,10 @@ pub fn read_retired_logins(root: &Path) -> Result<Vec<mj_core::credentials::Reti
     Ok(read_retired_logins_page(root, None, usize::MAX)?.0)
 }
 
+pub fn retired_logins_deferred(root: &Path) -> Result<bool> {
+    Ok(root.join(PENDING_RELOAD_FILE).try_exists()?)
+}
+
 pub fn read_retired_logins_page(
     root: &Path,
     after: Option<&str>,
@@ -507,12 +511,24 @@ pub fn read_retired_logins_page(
     Ok((logins, false))
 }
 
-pub fn ack_retired_login(root: &Path, id: &str) -> Result<()> {
+pub fn ack_retired_login(root: &Path, id: &str, expected_fingerprint: &str) -> Result<()> {
     ensure!(
         !root.join(PENDING_RELOAD_FILE).try_exists()?,
         "reload is still committing"
     );
     let path = retired_path(root, id)?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let record: RetiredLoginRecord = serde_json::from_slice(&bytes)?;
+    if let Some(login) = record.login {
+        ensure!(
+            mj_core::credentials::credential_fingerprint(&login.bytes) == expected_fingerprint,
+            "retired login receipt changed before acknowledgement"
+        );
+    }
     match std::fs::remove_file(path) {
         Ok(()) => mj_core::config::sync_directory(&root.join(RETIRED_LOGINS)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -596,6 +612,44 @@ fn reconcile_retired_login(
 mod tests {
     use super::*;
     use mj_core::worker_launch::ReloadSharedLogin;
+
+    #[test]
+    fn acknowledgement_cannot_delete_a_replaced_tentative_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(RETIRED_LOGINS);
+        std::fs::create_dir(&directory).unwrap();
+        let old = br#"{"last_refresh":"2026-11-24T00:00:00Z"}"#;
+        let newer = br#"{"last_refresh":"2026-11-25T00:00:00Z"}"#;
+        let record = RetiredLoginRecord {
+            operation_id: "move".into(),
+            store_id: "store".into(),
+            login: Some(mj_core::credentials::RetiredLoginSnapshot {
+                id: "move".into(),
+                profile_id: "profile".into(),
+                harness: mj_core::config::HarnessKind::Codex,
+                store_id: "store".into(),
+                login_relative_path: "auth.json".into(),
+                bytes: newer.to_vec(),
+            }),
+        };
+        let path = retired_path(root.path(), "move").unwrap();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = ack_retired_login(
+            root.path(),
+            "move",
+            &mj_core::credentials::credential_fingerprint(old),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed before acknowledgement"));
+        assert_eq!(read_retired_logins(root.path()).unwrap()[0].bytes, newer);
+        ack_retired_login(
+            root.path(),
+            "move",
+            &mj_core::credentials::credential_fingerprint(newer),
+        )
+        .unwrap();
+        assert!(!path.exists());
+    }
 
     #[test]
     fn reload_commit_retains_late_source_grants_across_every_replay_cut() {
@@ -685,7 +739,14 @@ mod tests {
                 std::fs::write(&live, bytes(true)).unwrap();
                 commit_pending_reload(root, &pending).unwrap();
                 assert!(read_retired_logins(root).unwrap().is_empty());
-                assert!(ack_retired_login(root, "move").is_err());
+                assert!(
+                    ack_retired_login(
+                        root,
+                        "move",
+                        &mj_core::credentials::credential_fingerprint(&bytes(true))
+                    )
+                    .is_err()
+                );
                 if cut >= 1 {
                     std::fs::write(&live, bytes(false)).unwrap();
                 }
@@ -712,10 +773,20 @@ mod tests {
                         & 0o777,
                     0o600
                 );
-                ack_retired_login(root, "move").unwrap();
-                ack_retired_login(root, "move").unwrap();
+                ack_retired_login(
+                    root,
+                    "move",
+                    &mj_core::credentials::credential_fingerprint(&bytes(true)),
+                )
+                .unwrap();
+                ack_retired_login(
+                    root,
+                    "move",
+                    &mj_core::credentials::credential_fingerprint(&bytes(true)),
+                )
+                .unwrap();
                 assert!(read_retired_logins(root).unwrap().is_empty());
-                assert!(ack_retired_login(root, "../launch").is_err());
+                assert!(ack_retired_login(root, "../launch", "unused").is_err());
             }
         }
     }
@@ -1155,6 +1226,7 @@ mod tests {
                     payload: mj_core::relay::RelayResponsePayload::RetiredLogins {
                         logins,
                         has_more,
+                        deferred: false,
                     },
                 },
             };

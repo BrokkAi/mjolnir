@@ -2829,11 +2829,15 @@ impl Controller {
                         }
                         // Cancellation preserves existing queued work. No new
                         // continuation is admitted and no queued prompt is discarded.
+                        if !started { crate::database::clear_pending_retired_login(&id, &operation.operation_id)?; }
                         conn.client.release_in_place_move_dispatch_checked(&operation.operation_id, &expected_store_id, Some(started)).await?;
                         if reopen_admission { conn.set_subagent_admission(true).await?; }
                         if started && let Err(error) = crate::worker_client::drain_retired_logins(
-                            &mut conn.client, |id| self.config.profiles.get(id).cloned(),
-                        ).await {
+                            &mut conn.client, crate::database::pending_retired_logins(&id)?,
+                            |id| self.config.profiles.get(id).cloned(),
+                            |op| crate::database::clear_pending_retired_login(&id, op),
+                            |op| Ok(op == operation.operation_id || !crate::database::retired_login_move_active(&id, op)?),
+                        ).await.1 {
                             tracing::warn!(session_id = %id, %error, "cancelled Move retired login adoption will retry");
                         }
                         operation.in_place_expected_store_id = None;
@@ -3829,6 +3833,14 @@ impl Controller {
                             // this wait. Yield admission meanwhile; the hold, the
                             // expected store and the worker's reload phase let the
                             // next daemon resume an interrupted wait.
+                            if mj_core::credentials::copied_login_relative_path(source_harness_kind).is_some() {
+                                crate::database::record_pending_retired_login(&id, &mj_core::credentials::PendingRetiredLogin {
+                                    operation_id: operation.operation_id.clone(),
+                                    source_profile_id: operation.source_profile_id.clone(),
+                                    harness_kind: source_harness_kind,
+                                    store_id: expected_store_id.clone(),
+                                })?;
+                            }
                             if let Err(error) = executor.begin_resumable_work() {
                                 self.state.sessions.insert(id.clone(), previous_session);
                                 return Err(error);
@@ -3978,6 +3990,7 @@ impl Controller {
                         || (reload_progress == InPlaceReloadProgress::Started && operation.in_place_harness_restarted)
                     {
                         if reload_progress == InPlaceReloadProgress::BeforeCommit {
+                            crate::database::clear_pending_retired_login(&id, &operation.operation_id)?;
                             self.state.sessions.insert(id.clone(), source_session.clone());
                             if let Some(candidate) = &candidate_id {
                                 let cleanup = (|| -> Result<()> {
@@ -4017,8 +4030,11 @@ impl Controller {
                     return Err(err);
                 }
                 if let Err(error) = crate::worker_client::drain_retired_logins(
-                    &mut conn.client, |id| self.config.profiles.get(id).cloned(),
-                ).await {
+                    &mut conn.client, crate::database::pending_retired_logins(&id)?,
+                    |id| self.config.profiles.get(id).cloned(),
+                    |op| crate::database::clear_pending_retired_login(&id, op),
+                    |op| Ok(op == operation.operation_id || !crate::database::retired_login_move_active(&id, op)?),
+                ).await.1 {
                     tracing::warn!(session_id = %id, %error, "Move retired login adoption will retry during credential sync");
                 }
                 operation.in_place_expected_store_id = None;

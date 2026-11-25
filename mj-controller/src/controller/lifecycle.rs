@@ -3437,17 +3437,24 @@ impl Controller {
                     .clone();
                 // Reachable workers may still hold the last refreshed source grant.
                 let retired = (|| -> Result<()> {
+                    let pending = crate::database::pending_retired_logins(session_id)?;
+                    if pending.is_empty() {
+                        return Ok(());
+                    }
                     let spec = self.reconnect_command(session_id)?;
                     mj_core::runtime::block_on(async {
                         let mut client =
                             crate::worker_client::RelayClient::connect(&spec, session_id).await?;
-                        let result =
-                            crate::worker_client::drain_retired_logins(&mut client, |id| {
-                                self.config.profiles.get(id).cloned()
-                            })
-                            .await;
+                        let result = crate::worker_client::drain_retired_logins(
+                            &mut client,
+                            pending,
+                            |id| self.config.profiles.get(id).cloned(),
+                            |op| crate::database::clear_pending_retired_login(session_id, op),
+                            |op| Ok(!crate::database::retired_login_move_active(session_id, op)?),
+                        )
+                        .await;
                         let detached = client.detach().await;
-                        result.and(detached)
+                        result.1.and(detached)
                     })?
                 })();
                 if let Err(error) = retired {

@@ -452,22 +452,29 @@ impl RelayClient {
     pub async fn read_retired_logins_after(
         &mut self,
         after: Option<&str>,
-    ) -> Result<(Vec<mj_core::credentials::RetiredLoginSnapshot>, bool)> {
+    ) -> Result<(Vec<mj_core::credentials::RetiredLoginSnapshot>, bool, bool)> {
         let request = RelayRequest::ReadRetiredLogins {
             after: after.map(str::to_owned),
         };
         if !request.supported_at(self.protocol_version) {
-            return Ok((Vec::new(), false));
+            return Ok((Vec::new(), false, false));
         }
         match self.call(request).await? {
-            RelayResponsePayload::RetiredLogins { logins, has_more } => Ok((logins, has_more)),
+            RelayResponsePayload::RetiredLogins {
+                logins,
+                has_more,
+                deferred,
+            } => Ok((logins, has_more, deferred)),
             _ => bail!("relay returned an unexpected retired login response"),
         }
     }
 
-    pub async fn ack_retired_login(&mut self, id: &str) -> Result<()> {
+    pub async fn ack_retired_login(&mut self, id: &str, fingerprint: &str) -> Result<()> {
         match self
-            .call(RelayRequest::AckRetiredLogin { id: id.to_owned() })
+            .call(RelayRequest::AckRetiredLogin {
+                id: id.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+            })
             .await?
         {
             RelayResponsePayload::RetiredLoginAcknowledged => Ok(()),

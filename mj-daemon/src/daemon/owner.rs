@@ -731,6 +731,19 @@ impl RuntimeState {
 }
 
 impl mj_controller::worker_client::CredentialSyncRuntime for RuntimeState {
+    fn pending_retired_logins(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<mj_core::credentials::PendingRetiredLogin>> {
+        mj_controller::database::pending_retired_logins(session_id)
+    }
+    fn clear_pending_retired_login(&self, session_id: &str, operation_id: &str) -> Result<()> {
+        mj_controller::database::clear_pending_retired_login(session_id, operation_id)
+    }
+    fn retired_login_move_active(&self, session_id: &str, operation_id: &str) -> Result<bool> {
+        mj_controller::database::retired_login_move_active(session_id, operation_id)
+    }
+
     fn credential_profile(&self, profile_id: &str) -> Option<mj_core::config::HarnessProfile> {
         self.owner()
             .controller

@@ -38,6 +38,12 @@ pub enum HostSlopcopLogin {
 /// and configuration, so sync reads these facts from it when it acts and
 /// keeps no copy. Tests run sync without a daemon.
 pub trait CredentialSyncRuntime: Send + Sync {
+    fn pending_retired_logins(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<mj_core::credentials::PendingRetiredLogin>>;
+    fn clear_pending_retired_login(&self, session_id: &str, operation_id: &str) -> Result<()>;
+    fn retired_login_move_active(&self, session_id: &str, operation_id: &str) -> Result<bool>;
     fn credential_profile(&self, profile_id: &str) -> Option<mj_core::config::HarnessProfile>;
     /// The published list of sessions to keep supplied.
     fn credential_targets(&self) -> Arc<watch::Sender<Vec<CredentialSyncTarget>>>;
@@ -2562,13 +2568,46 @@ async fn run_work(
     work: SyncWork,
     runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
 ) -> Result<SessionSync> {
-    if let Some(runtime) = runtime
-        && let Err(error) = drain_retired_logins(client, |id| runtime.credential_profile(id)).await
-    {
+    let (adopted_profiles, result) = if let Some(runtime) = runtime {
+        match runtime.pending_retired_logins(&target.session_id) {
+            Ok(pending) => {
+                drain_retired_logins(
+                    client,
+                    pending,
+                    |id| runtime.credential_profile(id),
+                    |id| runtime.clear_pending_retired_login(&target.session_id, id),
+                    |id| Ok(!runtime.retired_login_move_active(&target.session_id, id)?),
+                )
+                .await
+            }
+            Err(error) => (Default::default(), Err(error)),
+        }
+    } else {
+        (Default::default(), Ok(()))
+    };
+    if let Err(error) = result {
         tracing::warn!(session_id = %target.session_id, %error, "could not adopt retired logins; retained for retry");
     }
     match work {
-        SyncWork::Full(canonical) => reconcile_on(client, target, &canonical).await,
+        SyncWork::Full(mut canonical) => {
+            if adopted_profiles.contains(&target.profile_id) {
+                if let Some(owner) = &canonical.profile {
+                    owner.refresh(runtime, target, false).await;
+                    canonical.login = owner
+                        .for_target(target)
+                        .map_err(|error| format!("{error:#}"));
+                } else {
+                    canonical.login = mj_core::runtime::spawn_blocking({
+                        let target = target.clone();
+                        move || read_canonical_login(&target, &PassLogin::PerSession)
+                    })
+                    .await
+                    .context("canonical login reader stopped")?
+                    .map_err(|error| format!("{error:#}"));
+                }
+            }
+            reconcile_on(client, target, &canonical).await
+        }
         SyncWork::Aws(aws) => {
             let mut sync = SessionSync {
                 unchanged_login: None,
@@ -2959,39 +2998,78 @@ pub async fn adopt_copied_login(
     Ok(installed.installed)
 }
 
-/// Read immutable source ownership, adopt under the canonical lock, then ack.
-/// Lost replies are safe: installation is freshness-based and acknowledgements
-/// are idempotent. No secret enters an event or a checkpoint.
+/// Match receipts against daemon-owned Move authority, adopt under the canonical
+/// lock, then acknowledge the exact fingerprint before clearing authority.
+/// Installed profile IDs survive partial failures so callers can refresh cached
+/// canonical readings. Only complete, non-deferred scans may prune absent receipts.
+/// No secret enters an event or a checkpoint.
 pub async fn drain_retired_logins(
     client: &mut RelayClient,
+    pending: Vec<mj_core::credentials::PendingRetiredLogin>,
     profile: impl Fn(&str) -> Option<mj_core::config::HarnessProfile>,
-) -> Result<()> {
+    clear: impl Fn(&str) -> Result<()>,
+    may_prune: impl Fn(&str) -> Result<bool>,
+) -> (BTreeSet<String>, Result<()>) {
+    let mut adopted = BTreeSet::new();
+    if pending.is_empty() {
+        return (adopted, Ok(()));
+    }
     let mut failure = None;
+    let mut rpc_failed = false;
+    let mut deferred_scan = false;
+    let mut seen = BTreeSet::new();
     let mut cursor: Option<String> = None;
     loop {
-        let (logins, has_more) = client.read_retired_logins_after(cursor.as_deref()).await?;
-        if has_more {
-            let last = logins
+        let (logins, has_more, deferred) =
+            match client.read_retired_logins_after(cursor.as_deref()).await {
+                Ok(page) => page,
+                Err(error) => return (adopted, Err(error)),
+            };
+        // Pre-93 workers cannot prove absence: they have no receipt RPC.
+        deferred_scan |= deferred
+            || client.protocol_version()
+                < mj_core::relay::RELAY_RETIRED_LOGIN_AND_CONTINUITY_PROTOCOL;
+        if has_more
+            && logins
                 .last()
-                .context("retired login page has_more without a cursor")?;
-            anyhow::ensure!(
-                cursor.as_ref().is_none_or(|cursor| last.id > *cursor),
-                "retired login cursor did not advance"
+                .is_none_or(|last| cursor.as_ref().is_some_and(|cursor| last.id <= *cursor))
+        {
+            return (
+                adopted,
+                Err(anyhow::anyhow!("retired login cursor did not advance")),
             );
         }
         cursor = logins.last().map(|login| login.id.clone());
         for login in logins {
+            seen.insert(login.id.clone());
+            let Some(auth) = pending.iter().find(|auth| {
+                auth.operation_id == login.id
+                    && auth.source_profile_id == login.profile_id
+                    && auth.harness_kind == login.harness
+                    && auth.store_id == login.store_id
+            }) else {
+                tracing::warn!(operation_id = %login.id, "refusing unauthorized retired login");
+                failure = Some(anyhow::anyhow!("unauthorized retired login"));
+                continue;
+            };
             let result = async {
-            if let Some(profile) = profile(&login.profile_id) {
-                anyhow::ensure!(profile.kind == login.harness, "retired login harness differs from source profile");
-                adopt_copied_login(&profile, &login.bytes).await?;
-            } else {
-                tracing::info!(profile_id = %login.profile_id, "retired login source profile no longer exists");
-            }
-            client.ack_retired_login(&login.id).await
-        }.await;
+                if let Some(profile) = profile(&auth.source_profile_id) {
+                    anyhow::ensure!(profile.kind == auth.harness_kind, "retired login harness differs from source profile");
+                    if adopt_copied_login(&profile, &login.bytes).await? {
+                        adopted.insert(auth.source_profile_id.clone());
+                    }
+                } else {
+                    tracing::info!(profile_id = %auth.source_profile_id, "retired login source profile no longer exists");
+                }
+                if let Err(error) = client.ack_retired_login(&login.id,
+                    &mj_core::credentials::credential_fingerprint(&login.bytes)).await {
+                    rpc_failed = true;
+                    return Err(error);
+                }
+                clear(&login.id)
+            }.await;
             if let Err(error) = result {
-                tracing::warn!(profile_id = %login.profile_id, operation_id = %login.id, %error, "retired login retained for retry");
+                tracing::warn!(profile_id = %auth.source_profile_id, operation_id = %login.id, %error, "retired login retained for retry");
                 failure = Some(error);
             }
         }
@@ -2999,10 +3077,22 @@ pub async fn drain_retired_logins(
             break;
         }
     }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
+    if !deferred_scan && !rpc_failed {
+        for auth in &pending {
+            if !seen.contains(&auth.operation_id) {
+                let result = (|| {
+                    if may_prune(&auth.operation_id)? {
+                        clear(&auth.operation_id)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    failure = Some(error);
+                }
+            }
+        }
     }
+    (adopted, failure.map_or(Ok(()), Err))
 }
 
 pub async fn reconcile_credentials(
@@ -3435,6 +3525,17 @@ mod retired_tests {
     use super::*;
     use mj_core::config::{HarnessKind, HarnessProfile};
 
+    fn authorize(
+        login: &mj_core::credentials::RetiredLoginSnapshot,
+    ) -> mj_core::credentials::PendingRetiredLogin {
+        mj_core::credentials::PendingRetiredLogin {
+            operation_id: login.id.clone(),
+            source_profile_id: login.profile_id.clone(),
+            harness_kind: login.harness,
+            store_id: login.store_id.clone(),
+        }
+    }
+
     // Recorded relay peer: exercise the wire client and canonical store/locks.
     const PEER: &str = r#"
 import json, sys, os
@@ -3454,10 +3555,33 @@ for line in sys.stdin:
             if page and charged + size > 2 * 1024 * 1024: break
             page.append(login)
             charged += size
-        payload = {'type':'retired_logins','data':{'logins':page,'has_more':len(page) < len(logins)}}
+        payload = {'type':'retired_logins','data':{'logins':page,'has_more':len(page) < len(logins),'deferred':os.path.exists(path + '.deferred')}}
+    elif method == 'credential_state':
+        worker = path + '.worker'
+        data = open(worker, 'rb').read() if os.path.exists(worker) else None
+        payload = {'type':'credential_state','data':{'present':data is not None,'fingerprint':__import__('hashlib').sha256(data).hexdigest() if data else '', 'freshness_epoch_ms':None}}
+    elif method == 'install_credentials':
+        data = __import__('base64').b64decode(req['request']['params']['data'])
+        with open(path + '.worker', 'wb') as f: f.write(data)
+        payload = {'type':'credential_state','data':{'present':True,'fingerprint':__import__('hashlib').sha256(data).hexdigest(),'freshness_epoch_ms':None}}
     elif method == 'ack_retired_login':
         with open(path) as f: logins = json.load(f)
-        logins = [login for login in logins if login['id'] != req['request']['params']['id']]
+        import hashlib, base64
+        replacement = path + '.replace-on-ack'
+        if os.path.exists(replacement):
+            with open(replacement) as f: logins = json.load(f)
+            with open(path, 'w') as f: json.dump(logins, f)
+            os.remove(replacement)
+        params = req['request']['params']
+        for login in logins:
+            if login['id'] == params['id'] and hashlib.sha256(base64.b64decode(login['bytes'])).hexdigest() != params['fingerprint']:
+                print(json.dumps({'request_id':req['request_id'],'protocol_version':protocol,'result':'error','error':{'code':'invalid_state','message':'retired login receipt changed before acknowledgement'}}), flush=True)
+                break
+        else:
+            logins = [login for login in logins if login['id'] != params['id']]
+            with open(path, 'w') as f: json.dump(logins, f)
+            print(json.dumps({'request_id':req['request_id'],'protocol_version':protocol,'result':'ok','payload':{'type':'retired_login_acknowledged'}}), flush=True)
+        continue
         with open(path, 'w') as f: json.dump(logins, f)
         payload = {'type':'retired_login_acknowledged'}
     else:
@@ -3466,6 +3590,275 @@ for line in sys.stdin:
     assert len(response.encode()) < 8 * 1024 * 1024
     print(response, flush=True)
 "#;
+
+    struct Authority {
+        profile: HarnessProfile,
+        pending: std::sync::Mutex<BTreeMap<String, mj_core::credentials::PendingRetiredLogin>>,
+        active: bool,
+    }
+
+    impl CredentialSyncRuntime for Authority {
+        fn credential_profile(&self, _: &str) -> Option<HarnessProfile> {
+            Some(self.profile.clone())
+        }
+        fn pending_retired_logins(
+            &self,
+            _: &str,
+        ) -> Result<Vec<mj_core::credentials::PendingRetiredLogin>> {
+            Ok(self.pending.lock().unwrap().values().cloned().collect())
+        }
+        fn clear_pending_retired_login(&self, _: &str, id: &str) -> Result<()> {
+            self.pending.lock().unwrap().remove(id);
+            Ok(())
+        }
+        fn retired_login_move_active(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(self.active)
+        }
+        fn credential_targets(&self) -> Arc<watch::Sender<Vec<CredentialSyncTarget>>> {
+            unreachable!()
+        }
+        fn credential_session_ids(
+            &self,
+        ) -> mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord> {
+            unreachable!()
+        }
+        fn credential_session_ended(&self, _: &str) -> bool {
+            unreachable!()
+        }
+        fn credential_profile_source_is_current(&self, _: &CredentialSyncTarget) -> bool {
+            true
+        }
+        fn credential_target_is_current(&self, _: &CredentialSyncTarget) -> Result<bool> {
+            unreachable!()
+        }
+        fn credential_sync_skips(
+            &self,
+            _: &str,
+            _: bool,
+            _: Option<&str>,
+            _: &dyn Fn(&str) -> bool,
+        ) -> Vec<(String, &'static str)> {
+            unreachable!()
+        }
+    }
+
+    async fn drain_authorized(
+        client: &mut RelayClient,
+        authority: &Authority,
+    ) -> (BTreeSet<String>, Result<()>) {
+        drain_retired_logins(
+            client,
+            authority.pending_retired_logins("session").unwrap(),
+            |id| authority.credential_profile(id),
+            |id| authority.clear_pending_retired_login("session", id),
+            |id| Ok(!authority.retired_login_move_active("session", id)?),
+        )
+        .await
+    }
+
+    fn receipt() -> mj_core::credentials::RetiredLoginSnapshot {
+        mj_core::credentials::RetiredLoginSnapshot {
+            id: "move".into(),
+            profile_id: "source".into(),
+            harness: HarnessKind::Codex,
+            store_id: "store".into(),
+            login_relative_path: "auth.json".into(),
+            bytes: br#"{"last_refresh":"2026-11-25T00:00:00Z"}"#.to_vec(),
+        }
+    }
+
+    fn peer(path: &std::path::Path) -> CommandSpec {
+        CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                PEER.to_owned(),
+                path.to_string_lossy().into_owned(),
+                "93".into(),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn credential_sync_authorizes_every_receipt_identity_field_before_adoption() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("canonical");
+        std::fs::create_dir(&home).unwrap();
+        let old = br#"{"last_refresh":"2026-11-24T00:00:00Z"}"#;
+        let path = root.path().join("receipts.json");
+        let login = receipt();
+        let authority = Authority {
+            profile: HarnessProfile::new(HarnessKind::Codex, home.clone()),
+            pending: std::sync::Mutex::new(BTreeMap::from([(login.id.clone(), authorize(&login))])),
+            active: false,
+        };
+        let mut client = RelayClient::connect(&peer(&path), "retired-test")
+            .await
+            .unwrap();
+        for field in ["profile", "operation", "harness", "store"] {
+            std::fs::write(home.join("auth.json"), old).unwrap();
+            let mut forged = login.clone();
+            match field {
+                "profile" => forged.profile_id = "victim-profile".into(),
+                "operation" => forged.id = "unrelated-operation".into(),
+                "harness" => forged.harness = HarnessKind::Kimi,
+                "store" => forged.store_id = "other-store".into(),
+                _ => unreachable!(),
+            }
+            // Keep the legitimate Move active: no absent-record pruning.
+            std::fs::write(&path, serde_json::to_vec(&vec![forged.clone()]).unwrap()).unwrap();
+            let (_, result) = drain_retired_logins(
+                &mut client,
+                vec![authorize(&login)],
+                |_| panic!("forged receipt reached canonical store"),
+                |_| panic!("forged receipt acknowledged or active authority pruned"),
+                |_| Ok(false),
+            )
+            .await;
+            assert!(result.is_err(), "{field}");
+            assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), old);
+            assert_eq!(
+                client.read_retired_logins_after(None).await.unwrap().0,
+                vec![forged]
+            );
+        }
+        std::fs::write(&path, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
+        let (adopted, result) = drain_authorized(&mut client, &authority).await;
+        result.unwrap();
+        assert_eq!(adopted, BTreeSet::from(["source".into()]));
+        assert!(authority.pending.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), login.bytes);
+        // An empty authority skips the RPC even when the worker cannot list.
+        std::fs::remove_file(&path).unwrap();
+        drain_authorized(&mut client, &authority).await.1.unwrap();
+        client.detach().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_sync_deferred_and_active_moves_retain_absent_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("receipts.json");
+        std::fs::write(&path, "[]").unwrap();
+        let login = receipt();
+        let mut authority = Authority {
+            profile: HarnessProfile::new(HarnessKind::Codex, root.path()),
+            pending: std::sync::Mutex::new(BTreeMap::from([(login.id.clone(), authorize(&login))])),
+            active: true,
+        };
+        let mut client = RelayClient::connect(&peer(&path), "retired-test")
+            .await
+            .unwrap();
+        let deferred = path.with_extension("json.deferred");
+        std::fs::write(&deferred, "").unwrap();
+        drain_authorized(&mut client, &authority).await.1.unwrap();
+        assert_eq!(authority.pending.lock().unwrap().len(), 1);
+        authority.active = false;
+        drain_authorized(&mut client, &authority).await.1.unwrap();
+        assert_eq!(
+            authority.pending.lock().unwrap().len(),
+            1,
+            "even settled Moves retain authority during deferred scans"
+        );
+        std::fs::remove_file(&deferred).unwrap();
+        authority.active = true;
+        drain_authorized(&mut client, &authority).await.1.unwrap();
+        assert_eq!(authority.pending.lock().unwrap().len(), 1);
+        authority.active = false;
+        drain_authorized(&mut client, &authority).await.1.unwrap();
+        assert!(authority.pending.lock().unwrap().is_empty());
+        client.detach().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_sync_stale_ack_retains_replaced_receipt_and_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("receipts.json");
+        let original = receipt();
+        let mut login = original.clone();
+        login.bytes = br#"{"last_refresh":"2026-11-26T00:00:00Z"}"#.to_vec();
+        std::fs::write(&path, serde_json::to_vec(&vec![original]).unwrap()).unwrap();
+        std::fs::write(
+            path.with_extension("json.replace-on-ack"),
+            serde_json::to_vec(&vec![login.clone()]).unwrap(),
+        )
+        .unwrap();
+        let authority = Authority {
+            profile: HarnessProfile::new(HarnessKind::Codex, root.path()),
+            pending: std::sync::Mutex::new(BTreeMap::from([(login.id.clone(), authorize(&login))])),
+            active: false,
+        };
+        let mut client = RelayClient::connect(&peer(&path), "retired-test")
+            .await
+            .unwrap();
+        let (adopted, result) = drain_authorized(&mut client, &authority).await;
+        assert!(result.is_err());
+        assert!(
+            adopted.contains("source"),
+            "adoption survives a later ack error"
+        );
+        assert_eq!(
+            client.read_retired_logins_after(None).await.unwrap().0,
+            vec![login]
+        );
+        assert_eq!(authority.pending.lock().unwrap().len(), 1);
+        drain_authorized(&mut client, &authority).await.1.unwrap();
+        assert!(authority.pending.lock().unwrap().is_empty());
+        client.detach().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_sync_full_refreshes_owner_after_retired_adoption_before_push() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("canonical");
+        std::fs::create_dir(&home).unwrap();
+        let old = br#"{"last_refresh":"2026-11-24T00:00:00Z"}"#;
+        std::fs::write(home.join("auth.json"), old).unwrap();
+        let path = root.path().join("receipts.json");
+        let login = receipt();
+        std::fs::write(&path, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
+        let authority: Arc<dyn CredentialSyncRuntime> = Arc::new(Authority {
+            profile: HarnessProfile::new(HarnessKind::Codex, home.clone()),
+            pending: std::sync::Mutex::new(BTreeMap::from([(login.id.clone(), authorize(&login))])),
+            active: false,
+        });
+        let mut target = test_fixtures::skills_sync_target(&home);
+        target.harness = HarnessKind::Codex;
+        target.profile_id = "source".into();
+        let owner = Arc::new(ProfileLogin::new(None, Default::default()));
+        owner.refresh(None, &target, false).await;
+        let canonical = SessionCanonical::read(
+            &target,
+            Arc::new(CanonicalSkills::failed("no skills in this fixture")),
+            GithubSync::Known(None),
+            &PassLogin::Shared(owner.clone()),
+        );
+        assert_eq!(canonical.login.as_ref().unwrap().bytes.as_slice(), old);
+        let mut client = RelayClient::connect(&peer(&path), "retired-test")
+            .await
+            .unwrap();
+        let sync = run_work(
+            &mut client,
+            &target,
+            SyncWork::Full(Box::new(canonical)),
+            Some(&authority),
+        )
+        .await
+        .unwrap();
+        assert!(
+            sync.actions.contains(&CredentialSyncAction::Pushed),
+            "{:?}",
+            sync.failures
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("json.worker")).unwrap(),
+            login.bytes
+        );
+        assert_eq!(
+            owner.for_target(&target).unwrap().bytes.as_slice(),
+            login.bytes
+        );
+        client.detach().await.unwrap();
+    }
 
     #[tokio::test]
     async fn credential_sync_retired_backlog_adopts_later_pages_despite_an_earlier_failure() {
@@ -3499,22 +3892,29 @@ for line in sys.stdin:
             ],
         );
         let mut client = RelayClient::connect(&spec, "retired-test").await.unwrap();
-        let (first, more) = client.read_retired_logins_after(None).await.unwrap();
+        let (first, more, _) = client.read_retired_logins_after(None).await.unwrap();
         assert_eq!(first.len(), 2);
         assert!(more);
-        let (second, more) = client.read_retired_logins_after(Some("b")).await.unwrap();
+        let (second, more, _) = client.read_retired_logins_after(Some("b")).await.unwrap();
         assert_eq!(second.len(), 2);
         assert!(!more);
         assert!(
-            drain_retired_logins(&mut client, |id| Some(HarnessProfile::new(
-                HarnessKind::Codex,
-                if id == "bad" {
-                    bad_home.clone()
-                } else {
-                    good_home.clone()
-                }
-            )))
+            drain_retired_logins(
+                &mut client,
+                logins.iter().map(authorize).collect(),
+                |id| Some(HarnessProfile::new(
+                    HarnessKind::Codex,
+                    if id == "bad" {
+                        bad_home.clone()
+                    } else {
+                        good_home.clone()
+                    }
+                )),
+                |_| Ok(()),
+                |_| Ok(true)
+            )
             .await
+            .1
             .is_err()
         );
         assert_eq!(std::fs::read(good_home.join("auth.json")).unwrap(), bytes);
@@ -3586,18 +3986,32 @@ for line in sys.stdin:
             let mut client = RelayClient::connect(&spec, "retired-test").await.unwrap();
             let profile = HarnessProfile::new(kind, home.clone());
             assert!(
-                drain_retired_logins(&mut client, |_| Some(profile.clone()))
-                    .await
-                    .is_err()
+                drain_retired_logins(
+                    &mut client,
+                    vec![authorize(&login)],
+                    |_| Some(profile.clone()),
+                    |_| Ok(()),
+                    |_| Ok(true)
+                )
+                .await
+                .1
+                .is_err()
             );
             assert_eq!(
                 client.read_retired_logins_after(None).await.unwrap().0,
                 vec![login.clone()]
             );
             std::fs::remove_dir(&marker).unwrap();
-            drain_retired_logins(&mut client, |_| Some(profile.clone()))
-                .await
-                .unwrap();
+            drain_retired_logins(
+                &mut client,
+                vec![authorize(&login)],
+                |_| Some(profile.clone()),
+                |_| Ok(()),
+                |_| Ok(true),
+            )
+            .await
+            .1
+            .unwrap();
             assert_eq!(std::fs::read(&marker).unwrap(), bytes);
             assert!(
                 client
@@ -3609,9 +4023,16 @@ for line in sys.stdin:
             );
             // A lost ack can replay installation without changing canonical bytes.
             std::fs::write(&receipts, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
-            drain_retired_logins(&mut client, |_| Some(profile.clone()))
-                .await
-                .unwrap();
+            drain_retired_logins(
+                &mut client,
+                vec![authorize(&login)],
+                |_| Some(profile.clone()),
+                |_| Ok(()),
+                |_| Ok(true),
+            )
+            .await
+            .1
+            .unwrap();
             assert_eq!(std::fs::read(&marker).unwrap(), bytes);
             // Equal timestamps do not order distinct rotating grants either.
             let mut tied = login.clone();
@@ -3636,9 +4057,16 @@ for line in sys.stdin:
             );
             std::fs::write(&receipts, serde_json::to_vec(&vec![tied.clone()]).unwrap()).unwrap();
             assert!(
-                drain_retired_logins(&mut client, |_| Some(profile.clone()))
-                    .await
-                    .is_err()
+                drain_retired_logins(
+                    &mut client,
+                    vec![authorize(&login)],
+                    |_| Some(profile.clone()),
+                    |_| Ok(()),
+                    |_| Ok(true)
+                )
+                .await
+                .1
+                .is_err()
             );
             assert_eq!(
                 client.read_retired_logins_after(None).await.unwrap().0,
@@ -3664,9 +4092,16 @@ for line in sys.stdin:
             )
             .unwrap();
             assert!(
-                drain_retired_logins(&mut client, |_| Some(profile.clone()))
-                    .await
-                    .is_err()
+                drain_retired_logins(
+                    &mut client,
+                    vec![authorize(&login)],
+                    |_| Some(profile.clone()),
+                    |_| Ok(()),
+                    |_| Ok(true)
+                )
+                .await
+                .1
+                .is_err()
             );
             assert_eq!(
                 client.read_retired_logins_after(None).await.unwrap().0,
@@ -3674,8 +4109,17 @@ for line in sys.stdin:
             );
             assert_eq!(std::fs::read(&marker).unwrap(), unknown_canonical);
             std::fs::write(&marker, &bytes).unwrap();
-            std::fs::write(&receipts, serde_json::to_vec(&vec![login]).unwrap()).unwrap();
-            drain_retired_logins(&mut client, |_| None).await.unwrap();
+            std::fs::write(&receipts, serde_json::to_vec(&vec![login.clone()]).unwrap()).unwrap();
+            drain_retired_logins(
+                &mut client,
+                vec![authorize(&login)],
+                |_| None,
+                |_| Ok(()),
+                |_| Ok(true),
+            )
+            .await
+            .1
+            .unwrap();
             assert!(
                 client
                     .read_retired_logins_after(None)
@@ -3697,9 +4141,16 @@ for line in sys.stdin:
                 ],
             );
             let mut client = RelayClient::connect(&old, "retired-test").await.unwrap();
-            drain_retired_logins(&mut client, |_| panic!("old worker has no snapshots"))
-                .await
-                .unwrap();
+            drain_retired_logins(
+                &mut client,
+                vec![authorize(&login)],
+                |_| panic!("old worker has no snapshots"),
+                |_| panic!("old worker cannot prove absence"),
+                |_| Ok(true),
+            )
+            .await
+            .1
+            .unwrap();
             client.detach().await.unwrap();
         }
     }

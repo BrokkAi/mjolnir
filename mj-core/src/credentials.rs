@@ -1844,6 +1844,15 @@ pub fn read_harvestable_copied_login(kind: HarnessKind, home: &Path) -> Result<O
     Ok(harvestable_login_bytes(kind, &bytes)?.then_some(bytes))
 }
 
+/// Daemon-owned authority for one Move's copied source login.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRetiredLogin {
+    pub operation_id: String,
+    pub source_profile_id: String,
+    pub harness_kind: HarnessKind,
+    pub store_id: String,
+}
+
 /// Secret, connection-only retired login. Never put this in relay observations.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetiredLoginSnapshot {
