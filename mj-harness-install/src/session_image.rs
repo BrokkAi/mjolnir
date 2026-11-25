@@ -580,7 +580,7 @@ fn harness_stage(
                     "0644",
                 );
                 format!(
-                    "cd {dir} && export HOME=/tmp/mj-harness-home && mkdir -p \"$HOME\" && npm ci --omit=dev --no-audit --no-fund --cache /tmp/mj-npm-cache && (if npm install-scripts ls --json > /tmp/mj-scripts.json 2>&1; then node -e \"{INSTALL_SCRIPTS_CHECK}\" /tmp/mj-scripts.json; else grep -q 'Unknown command' /tmp/mj-scripts.json; fi) && ./{} --version && test -x {} && test -x {} && rm -rf /tmp/mj-npm-cache /tmp/mj-scripts.json \"$HOME\"",
+                    "cd {dir} && export HOME=/tmp/mj-harness-home && mkdir -p \"$HOME\" && npm ci --omit=dev --no-audit --no-fund --cache /tmp/mj-npm-cache && (if npm install-scripts ls --json > /tmp/mj-scripts.json 2>/tmp/mj-scripts.err; then node -e \"{INSTALL_SCRIPTS_CHECK}\" /tmp/mj-scripts.json; else grep -q 'Unknown command' /tmp/mj-scripts.json /tmp/mj-scripts.err || {{ cat /tmp/mj-scripts.err >&2; exit 1; }}; fi) && ./{} --version && test -x {} && test -x {} && rm -rf /tmp/mj-npm-cache /tmp/mj-scripts.json /tmp/mj-scripts.err \"$HOME\"",
                     selected.cli_entrypoint, selected.entrypoint, selected.cli_entrypoint
                 )
             }
@@ -632,7 +632,7 @@ fn harness_stage(
                             artifact.sha256, artifact.url
                         ));
                         format!(
-                            "mkdir -p {dir}/bin && if command -v zstd >/dev/null 2>&1; then zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; elif [ -x {node_dir}/bin/node ]; then {node_dir}/bin/node -e \"require('stream/promises').pipeline(require('fs').createReadStream('/tmp/mj-grok.zst'),require('zlib').createZstdDecompress(),require('fs').createWriteStream('{dir}/bin/grok')).catch(e=>{{console.error(e);process.exit(1)}})\"; elif command -v apt-get >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd && zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; else echo 'zstd decompressor unavailable' >&2; exit 1; fi && chmod 0755 {dir}/bin/grok && ln -s grok {dir}/bin/agent && rm /tmp/mj-grok.zst"
+                            "mkdir -p {dir}/bin && if command -v zstd >/dev/null 2>&1; then zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; elif [ -x {node_dir}/bin/node ]; then {node_dir}/bin/node -e \"require('stream/promises').pipeline(require('fs').createReadStream('/tmp/mj-grok.zst'),require('zlib').createZstdDecompress(),require('fs').createWriteStream('{dir}/bin/grok')).catch(e=>{{console.error(e);process.exit(1)}})\"; elif command -v apt-get >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd && zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; elif command -v dnf >/dev/null 2>&1; then dnf install -y zstd && zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; elif command -v apk >/dev/null 2>&1; then apk add --no-cache zstd && zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install zstd && zstd -d -f /tmp/mj-grok.zst -o {dir}/bin/grok; else echo 'zstd decompressor unavailable' >&2; exit 1; fi && chmod 0755 {dir}/bin/grok && ln -s grok {dir}/bin/agent && rm /tmp/mj-grok.zst"
                         )
                     }
                     HarnessKind::Antigravity | HarnessKind::OpenCode => {

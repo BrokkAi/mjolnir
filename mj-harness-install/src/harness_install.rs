@@ -655,7 +655,7 @@ async fn resolve_at_async(
     };
     let selected = pin(harness);
     let install = managed_harness_install_dir(root, harness);
-    if !install.exists()
+    if !complete_install(&install, harness, selected)?
         && let Some(baked_root) = baked_harness_store_root(&environment)
     {
         let baked = mj_core::harness_runtime::baked_harness_install_dir(&baked_root, harness);
@@ -1558,18 +1558,18 @@ async fn ensure_node_runtime_with_minimum(
         environment.get("HOME").map(OsStr::new),
     )?;
 
-    if let Some(baked) = baked
-        && !root
-            .join(baked.file_name().context("baked Node folder")?)
-            .exists()
-        && baked_node_is_usable(&baked, minimum_version, &metadata)?
-    {
-        prepend_path(environment, &baked.join("bin"))?;
-        return Ok(Some(ManagedNodeRuntime {
-            path: baked,
-            lease_path: None,
-            _lease: None,
-        }));
+    if let Some(baked) = baked {
+        let cached = root.join(baked.file_name().context("baked Node folder")?);
+        if managed_node_health(&cached, environment).await? != ManagedNodeHealth::Usable
+            && baked_node_is_usable(&baked, minimum_version, &metadata)?
+        {
+            prepend_path(environment, &baked.join("bin"))?;
+            return Ok(Some(ManagedNodeRuntime {
+                path: baked,
+                lease_path: None,
+                _lease: None,
+            }));
+        }
     }
     install_managed_node(&root, environment, &metadata)
         .await
@@ -2479,6 +2479,20 @@ mod tests {
             );
             assert!(writable.lease_path.is_some());
             drop(writable);
+            let cached = managed_harness_install_dir(&cache, kind);
+            std::fs::remove_file(cached.join(MANIFEST_FILE)).unwrap();
+            let fallback = runtime
+                .block_on(resolve_at_async(
+                    &cache,
+                    kind,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                ))
+                .unwrap();
+            assert_eq!(fallback.entrypoint, dir.join(selected.entrypoint));
+            assert!(fallback.lease_path.is_none());
+            assert!(fallback.cache_root.is_none());
+            assert!(!cached.join(MANIFEST_FILE).exists());
             std::fs::remove_dir_all(&cache).unwrap();
             if kind == HarnessKind::Codex {
                 std::fs::write(
@@ -2625,6 +2639,32 @@ exit "$MJ_NPM_STATUS"
         );
         assert!(!root.path().join("unused-home").exists());
         assert!(!baked.join(LEASE_FILE).exists());
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            root.path().join("writable").display().to_string(),
+        );
+        let cached_root = managed_node_cache_root(
+            environment.get("XDG_CACHE_HOME").map(OsStr::new),
+            environment.get("HOME").map(OsStr::new),
+        )
+        .unwrap();
+        let cached = cached_root.join(baked.file_name().unwrap());
+        std::fs::create_dir_all(&cached).unwrap();
+        environment.insert(
+            "PATH".into(),
+            root.path().join("missing").display().to_string(),
+        );
+        let fallback = runtime
+            .block_on(ensure_node_runtime_with_minimum(
+                &mut environment,
+                NODE_MINIMUM_VERSION,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback.path(), baked);
+        assert!(fallback.lease_path().is_none());
+        assert!(!cached.join("bin").exists());
+        assert!(!cached.join(LEASE_FILE).exists());
         assert!(!baked_node_is_usable(&baked, "99.0.0", &metadata).unwrap());
         let mut missing_interpreter = metadata.clone();
         missing_interpreter["platforms"][current_node_platform()]["interpreter"] = root
