@@ -186,9 +186,13 @@ const COPIES: [RuntimeCopies; 4] = [
         json_column: "placement_json",
         locations: &[
             ("/runtime", Some("/target_template_id")),
+            // A prepared destination names its Move, which names the target.
             ("/prepared_destination/destination/runtime", None),
         ],
-        row_template: "NULL",
+        row_template: "(SELECT COALESCE(json_extract(m.operation_json,'$.selection.target_template_id'),
+                                        json_extract(m.operation_json,'$.source_target_template_id'))
+                           FROM session_moves m
+                          WHERE m.operation_id=json_extract(placement_json,'$.prepared_destination.operation_id'))",
     },
     RuntimeCopies {
         table: "environment_workers",
