@@ -29,7 +29,7 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
                 WizardControl::TargetList,
                 ControlKind::ChoiceList {
                     len: offered.len(),
-                    selected: dashboard.target_row(wizard.target()),
+                    selected: dashboard.target_row(wizard.target(dashboard)),
                 },
                 true,
             );
@@ -60,7 +60,7 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
         WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
         WizardStep::Review => {
             let can_attach = offers_attached_directories(
-                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target())],
+                &dashboard.config.targets[&wizard.target_id(dashboard)],
             );
             let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
             declare_review_controls(&mut form, can_attach, submit_enabled);
@@ -287,7 +287,7 @@ impl DashboardState {
                     .offered_target_indices()
                     .get(row)
                     .copied()
-                    .unwrap_or_else(|| wizard.target());
+                    .unwrap_or_else(|| wizard.target(self));
                 self.select_wizard_target(wizard, selected)
             }
             Interaction::Select(WizardControl::MountHistory, selected) => {
@@ -547,9 +547,7 @@ impl DashboardState {
             Ok(action) => return action,
             Err(wizard) => wizard,
         };
-        let can_attach = offers_attached_directories(
-            &self.config.targets[&nth_key(&self.config.targets, wizard.target())],
-        );
+        let can_attach = offers_attached_directories(&self.config.targets[&wizard.target_id(self)]);
         match id {
             WizardControl::ReviewAttachments => {
                 wizard.note_draft_change(self, DraftChange::AttachmentOpened);
@@ -598,7 +596,7 @@ impl DashboardState {
         id: WizardControl,
         mut wizard: W,
     ) -> DashboardAction {
-        let target_template_id = nth_key(&self.config.targets, wizard.target());
+        let target_template_id = wizard.target_id(self);
         match id {
             WizardControl::MountSource if wizard.mounts().source.is_empty() => {
                 wizard.mounts_mut().error =

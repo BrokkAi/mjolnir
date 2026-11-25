@@ -19,7 +19,7 @@ pub(crate) fn target_resources<'a, W: WizardDraft>(
     if wizard.step() != WizardStep::Target {
         return None;
     }
-    let id = nth_key(&dashboard.config.targets, wizard.target());
+    let id = wizard.target_id(dashboard);
     if wizard.target_rejection(dashboard, &id).is_some() {
         return None;
     }

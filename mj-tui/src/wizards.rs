@@ -151,15 +151,20 @@ pub(crate) struct NewWizard {
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
 
-    pub(crate) profile: usize,
+    /// The chosen profile row, by identity. Row positions come from the
+    /// picker's current contents, so a configuration reload cannot shift the
+    /// choice onto another profile.
+    pub(crate) profile: ProfileChoice,
     pub(crate) expanded_providers: BTreeSet<QuotaProvider>,
     pub(crate) focused_provider: Option<QuotaProvider>,
-    /// Only this background selection may advance the profile page.
-    pub(crate) profile_selection_request: Option<u64>,
+    /// Only this background selection may advance the profile page, and only
+    /// while it still describes the draft and the configuration it was made on.
+    pub(crate) profile_selection_request: Option<ProviderSelection>,
     /// Provider placement still validates and accounts for this named choice at Create.
     pub(crate) resolved_profile: Option<(String, QuotaProvider)>,
     bundle: usize,
-    pub(crate) target: usize,
+    /// The chosen target template, by id.
+    pub(crate) target: String,
     /// Whether the draft passed the target step without showing it, because
     /// that step offered one target and nothing else to decide. Back and the
     /// step numbers in the title then leave that step out.
@@ -195,11 +200,28 @@ pub(crate) struct NewWizard {
     pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
+/// What the profile page has chosen, apart from a provider group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProfileChoice {
+    /// The configured primary list picks the profile.
+    AutoPrimary,
+    Profile(String),
+}
+
+/// A provider selection in flight: the daemon's answer is accepted only for
+/// the configuration generation it was asked under, and only while the
+/// draft still asks the same question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderSelection {
+    pub(crate) generation: u64,
+    pub(crate) request: mj_client::http::ProviderProfileSelectionRequest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProfilePickerItem {
     Auto,
     Provider(QuotaProvider),
-    Profile { profile_index: usize, id: String },
+    Profile { id: String },
 }
 
 pub(crate) fn new_wizard_profile_items(
@@ -211,25 +233,20 @@ pub(crate) fn new_wizard_profile_items(
     if has_auto {
         items.push(ProfilePickerItem::Auto);
     }
-    let mut groups =
-        BTreeMap::<QuotaProvider, Vec<(usize, &str, &mj_core::config::HarnessProfile)>>::new();
-    for (idx, (id, profile)) in dashboard.offered_profiles().enumerate() {
+    let mut groups = BTreeMap::<QuotaProvider, Vec<&str>>::new();
+    for (id, profile) in dashboard.offered_profiles() {
         let provider =
             crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers);
-        groups
-            .entry(provider)
-            .or_default()
-            .push((idx + usize::from(has_auto), id, profile));
+        groups.entry(provider).or_default().push(id);
     }
     for (provider, members) in groups {
         items.push(ProfilePickerItem::Provider(provider.clone()));
         if expanded.contains(&provider) {
-            items.extend(members.into_iter().map(|(profile_index, id, _)| {
-                ProfilePickerItem::Profile {
-                    profile_index,
-                    id: id.to_owned(),
-                }
-            }));
+            items.extend(
+                members
+                    .into_iter()
+                    .map(|id| ProfilePickerItem::Profile { id: id.to_owned() }),
+            );
         }
     }
     items
@@ -242,21 +259,61 @@ impl NewWizard {
         }
     }
 
+    /// The provider group an offered profile belongs to now.
     pub(crate) fn provider_for_profile(
         dashboard: &DashboardState,
-        profile_index: usize,
+        profile_id: &str,
     ) -> Option<QuotaProvider> {
-        let has_auto = dashboard.new_wizard_has_auto_primary();
-        if has_auto && profile_index == 0 {
-            return None;
-        }
-        let offered_idx = profile_index.checked_sub(usize::from(has_auto))?;
-        let (id, profile) = dashboard.offered_profiles().nth(offered_idx)?;
+        let (id, profile) = dashboard
+            .offered_profiles()
+            .find(|(id, _)| *id == profile_id)?;
         Some(crate::render::quota_pools::profile_provider(
             id,
             profile,
             &dashboard.quota_providers,
         ))
+    }
+
+    /// Chooses a profile row; whatever hung from the previous choice goes.
+    pub(crate) fn set_profile_choice(&mut self, choice: ProfileChoice) {
+        self.profile = choice;
+        self.focused_provider = None;
+        self.profile_selection_request = None;
+        self.resolved_profile = None;
+    }
+
+    /// The provider group of the chosen profile, if it names one.
+    pub(crate) fn provider_of_choice(&self, dashboard: &DashboardState) -> Option<QuotaProvider> {
+        match &self.profile {
+            ProfileChoice::AutoPrimary => None,
+            ProfileChoice::Profile(id) => Self::provider_for_profile(dashboard, id),
+        }
+    }
+
+    /// The question the daemon must answer before this page can advance, or
+    /// `None` when the page needs no provider resolution. The one place that
+    /// decides it: a reply is valid only while it equals the current answer.
+    pub(crate) fn provider_selection_request(
+        &self,
+        dashboard: &DashboardState,
+    ) -> Option<mj_client::http::ProviderProfileSelectionRequest> {
+        match self.step {
+            WizardStep::Profile => self.selected_provider(dashboard).map(|provider| {
+                mj_client::http::ProviderProfileSelectionRequest {
+                    provider,
+                    profile_id: None,
+                    target_template_id: None,
+                }
+            }),
+            WizardStep::Target => self.resolved_profile.as_ref().map(|(id, provider)| {
+                mj_client::http::ProviderProfileSelectionRequest {
+                    provider: provider.clone(),
+                    profile_id: Some(id.clone()),
+                    target_template_id: Some(self.target.clone()),
+                }
+            }),
+            _ => None,
+        }
     }
 
     /// The focused provider header if it still exists among offered profiles.
@@ -296,7 +353,10 @@ impl NewWizard {
         } else if let Some((id, _)) = &self.resolved_profile {
             Some(id.clone())
         } else {
-            dashboard.new_wizard_profile_id(self.profile)
+            Some(match &self.profile {
+                ProfileChoice::AutoPrimary => String::new(),
+                ProfileChoice::Profile(id) => id.clone(),
+            })
         }
     }
 
@@ -306,7 +366,10 @@ impl NewWizard {
         } else if let Some((id, _)) = &self.resolved_profile {
             id.clone()
         } else {
-            dashboard.new_wizard_profile_label(self.profile)
+            match &self.profile {
+                ProfileChoice::AutoPrimary => "Auto (Primary)".to_owned(),
+                ProfileChoice::Profile(id) => id.clone(),
+            }
         }
     }
 
@@ -465,30 +528,23 @@ impl MountWizard {
 }
 
 impl NewWizard {
-    fn selected_worktree_options(
-        &self,
-        config: &Config,
-    ) -> Option<mj_core::state::ManagedWorktreeOptions> {
-        self.selected_directory_check(config)
-            .map(|(options, _)| options)
+    fn selected_worktree_options(&self) -> Option<mj_core::state::ManagedWorktreeOptions> {
+        self.selected_directory_check().map(|(options, _)| options)
     }
 
     /// Whether creating this session turns its review off.
-    fn selected_review_turns_off(&self, config: &Config) -> bool {
-        self.selected_directory_check(config)
+    fn selected_review_turns_off(&self) -> bool {
+        self.selected_directory_check()
             .is_some_and(|(_, review_turns_off)| review_turns_off)
     }
 
     /// The directory check, only while it still matches the selection.
-    fn selected_directory_check(
-        &self,
-        config: &Config,
-    ) -> Option<(mj_core::state::ManagedWorktreeOptions, bool)> {
-        let target_id = nth_key(&config.targets, self.target);
+    fn selected_directory_check(&self) -> Option<(mj_core::state::ManagedWorktreeOptions, bool)> {
+        let target_id = &self.target;
         self.worktree_options
             .as_ref()
             .and_then(|(target, directory, options, review_turns_off)| {
-                (target == &target_id && directory == self.project_directory.trim())
+                (target == target_id && directory == self.project_directory.trim())
                     .then_some((*options, *review_turns_off))
             })
     }
