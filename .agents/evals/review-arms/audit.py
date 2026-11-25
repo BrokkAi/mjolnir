@@ -613,7 +613,7 @@ GIT_FLAGS = set("""
     --show-prefix --show-object-format --is-inside-work-tree --path-format --absolute-git-dir
     --git-common-dir --git-dir --literal-pathspecs --relative --no-relative --porcelain
     --untracked-files --branch --detach --others --exclude-standard --full-name --stage --error-unmatch
-    --long --object-only --no-commit-id --root --abbrev
+    --long --object-only --no-commit-id --abbrev
     -p -s -q -r -R -v -V -M -C -a -b -w -i -m -c -t -e -u -z -l -1 -d
 """.split())
 GIT_VALUE_OPTIONS = set("""
@@ -735,6 +735,13 @@ def git_hits(args, own_workspace, commits, single_commit, cwd=""):
         operands = operands[:1]
     for path in paths:
         yield from path_hits(path, own_workspace, cwd)
+    if verb == "diff-tree":
+        # One operand compares that commit with its parent, which is outside the pin.
+        if len(operands) == 1:
+            yield "git-revision-outside-pin", operands[0]
+            return
+        if len(operands) != 2:
+            raise InspectionRequired("diff-tree requires two explicit trees")
     detached = verb == "checkout" and "--detach" in before
     if detached and not operands:
         raise InspectionRequired("detached checkout without an explicit pin")
