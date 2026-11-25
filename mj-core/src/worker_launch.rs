@@ -292,6 +292,14 @@ pub struct WorkerLaunchConfig {
     pub cwd: PathBuf,
     #[serde(default)]
     pub additional_directories: Vec<PathBuf>,
+    /// Ancestor and owner workspace roots that stay writable when a borrowed
+    /// child's `working_directory` moves `cwd` below its owner's checkout. The
+    /// harness sandbox and ACP session grant them, but they are kept apart from
+    /// `additional_directories` so multi-repository review discovery and
+    /// Muse's single-repository check see only the repositories the session
+    /// was launched with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_directories: Vec<PathBuf>,
     #[serde(default)]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

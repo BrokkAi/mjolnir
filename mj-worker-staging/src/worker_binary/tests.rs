@@ -3270,6 +3270,102 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
     }
 }
 
+// A borrowed child that moves into a subdirectory (or elsewhere) keeps the
+// directories it left writable, apart from `additional_directories`: review
+// discovery and Muse's single-repository check read that list.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+fn borrowed_child_working_directory_keeps_left_roots_out_of_additional_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let elsewhere = directory.path().join("elsewhere");
+
+    let launch = |kind: HarnessKind, working_directories: &[&Path]| {
+        let session_id = "00000000000000000000000000000abc";
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: directory
+                .path()
+                .join("workers")
+                .join(session_id)
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let profile = mj_core::config::HarnessProfile::new(
+            kind,
+            directory.path().join(format!("{}-home", kind.id())),
+        );
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: directory.path().join("workers").join(session_id),
+        }));
+        worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &backend,
+            LaunchWorkspace {
+                session_id,
+                container: None,
+                parent_worktree: None,
+                owner: None,
+                working_directories,
+            },
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+            &mj_core::config::Config::default(),
+        )
+        .map(|(launch, _, _)| launch)
+    };
+
+    // Nested relative steps keep the owner root and the intermediate one.
+    let launched = launch(HarnessKind::Codex, &[Path::new("crates"), Path::new("foo")]).unwrap();
+    assert_eq!(launched.cwd, project.join("crates/foo"));
+    assert_eq!(
+        launched.writable_directories,
+        [project.clone(), project.join("crates")]
+    );
+    assert!(launched.additional_directories.is_empty());
+
+    // An absolute step leaves the owner root behind; a repeated step adds no
+    // directory twice.
+    let launched = launch(
+        HarnessKind::Claude,
+        &[elsewhere.as_path(), Path::new("."), Path::new("sub")],
+    )
+    .unwrap();
+    assert_eq!(launched.cwd, elsewhere.join("sub"));
+    assert_eq!(
+        launched.writable_directories,
+        [project.clone(), elsewhere.clone()]
+    );
+    assert!(launched.additional_directories.is_empty());
+
+    // Muse takes one workspace root, and the preserved ones are not counted
+    // among the roots it refuses.
+    let launched = launch(HarnessKind::Muse, &[Path::new("crates")]).unwrap();
+    assert_eq!(
+        launched.writable_directories,
+        std::slice::from_ref(&project)
+    );
+
+    // A session that did not move owes nothing extra.
+    assert!(
+        launch(HarnessKind::Codex, &[])
+            .unwrap()
+            .writable_directories
+            .is_empty()
+    );
+}
+
 /// A catalog cache of the test's own, so the fallback path never touches the
 /// daemon's shared one.
 #[derive(Default)]
@@ -5557,6 +5653,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -5732,6 +5829,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         excluded_environment: Vec::new(),
         cwd: "/workspace/project".into(),
         additional_directories: Vec::new(),
+        writable_directories: Vec::new(),
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,

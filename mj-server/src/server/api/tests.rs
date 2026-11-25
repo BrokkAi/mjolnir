@@ -240,6 +240,17 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
             }],
             cost_usd_ticks: Ok(10_000_000_000),
         }],
+        profile_usage: vec![mj_core::usage::ProfileUsageEstimate {
+            profile: Some("codex".into()),
+            cost_usd_ticks: Ok(10_000_000_000),
+            ..Default::default()
+        }],
+        quota_usage: vec![mj_core::usage::ProfileQuotaUsage {
+            profile: "codex".into(),
+            consumed_basis_points: Some(125),
+            partial: true,
+            monthly_price_usd: Some(200),
+        }],
         cost_usd_ticks: Ok(10_000_000_000),
         ..Default::default()
     };
@@ -278,8 +289,12 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
         // Responses from older daemons lack the additive role summary.
         let mut legacy = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         legacy.as_object_mut().unwrap().remove("agent_usage");
+        legacy.as_object_mut().unwrap().remove("profile_usage");
+        legacy.as_object_mut().unwrap().remove("quota_usage");
         let legacy: mj_core::usage::SessionUsageReport = serde_json::from_value(legacy).unwrap();
         assert!(legacy.agent_usage.is_empty());
+        assert!(legacy.profile_usage.is_empty());
+        assert!(legacy.quota_usage.is_empty());
         assert_eq!(legacy.cost_usd_ticks, report.cost_usd_ticks);
     }
     assert_eq!(
