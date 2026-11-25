@@ -613,12 +613,12 @@ GIT_FLAGS = set("""
     --show-prefix --show-object-format --is-inside-work-tree --path-format --absolute-git-dir
     --git-common-dir --git-dir --literal-pathspecs --relative --no-relative --porcelain
     --untracked-files --branch --detach --others --exclude-standard --full-name --stage --error-unmatch
-    --long --object-only --no-commit-id --root
+    --long --object-only --no-commit-id --root --abbrev
     -p -s -q -r -R -v -V -M -C -a -b -w -i -m -c -t -e -u -z -l -1 -d
 """.split())
 GIT_VALUE_OPTIONS = set("""
     -n -L -S -G -U --format --pretty --max-count --skip --output --unified --diff-filter
-    --stat-width --stat-name-width --stat-count --abbrev --grep --author --committer --since --until
+    --stat-width --stat-name-width --stat-count --grep --author --committer --since --until
 """.split())
 
 

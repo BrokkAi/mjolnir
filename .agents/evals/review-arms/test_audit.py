@@ -158,6 +158,8 @@ def test_protected_command_access_voids(tmp_path, command, hit):
 
 
 @pytest.mark.parametrize("command", [
+    f"git ls-tree --abbrev {PIN}",
+    f"git ls-tree --abbrev=8 {PIN}",
     f"git ls-tree -r --name-only {PIN}",
     f"git ls-tree -r --name-only {PIN} src/lib.rs",
     f"git ls-tree -r --name-only {PIN} -- src/lib.rs",
@@ -169,6 +171,7 @@ def test_pinned_tree_reads_pass(tmp_path, command):
 
 
 @pytest.mark.parametrize(("command", "hit"), [
+    (f"git diff-tree --abbrev {OTHER} {PIN}", "git-revision-outside-pin"),
     (f"git ls-tree {OTHER}", "git-revision-outside-pin"),
     (f"git ls-tree {PIN} /home/jonathan/secret", "outside-workspace"),
     (f"git diff-tree --no-commit-id --name-only -r {PIN} {OTHER}", "git-revision-outside-pin"),
