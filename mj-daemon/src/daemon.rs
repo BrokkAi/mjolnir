@@ -774,17 +774,12 @@ impl ActiveLifecycle {
         if self.cancel_with(LifecycleControl::cancel_for_shutdown) {
             return true;
         }
-        // A person's cancel already won, so the operation is rolling back.
-        // Shutdown still stops that cleanup's commands; the commit decision
-        // stays lost. A create's rollback runs to completion regardless.
-        if self.kind != LifecycleKind::Create
-            && self.control.cancel_accepted()
-            && matches!(
-                self.phase,
-                LifecyclePhase::Cancelling
-                    | LifecyclePhase::CancellingRestart
-                    | LifecyclePhase::CancellingMoveDestination
-            )
+        // A person's cancel already won, so the operation is rolling back,
+        // whichever phase the canceller left it in (a phone action cancels
+        // the control without changing the phase). Shutdown still stops that
+        // cleanup's commands; the commit decision stays lost. A create's
+        // rollback runs to completion regardless.
+        if self.kind != LifecycleKind::Create && self.control.cancel_accepted() && self.is_running()
         {
             self.control.interrupt_cancelled_cleanup();
             return true;

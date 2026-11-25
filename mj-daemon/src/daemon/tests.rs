@@ -3422,11 +3422,21 @@ async fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
             LifecyclePhase::CancellingRestart,
         ),
         (LifecycleKind::Resume, LifecyclePhase::Cancelling),
+        (LifecycleKind::Suspend, LifecyclePhase::Executing),
+        (LifecycleKind::Move, LifecyclePhase::MovingDestination),
     ] {
         let restart = matches!(phase, LifecyclePhase::CancellingRestart);
         let control = LifecycleControl::default();
         let mut cancelled = operation(kind, control.clone());
-        assert!(cancelled.request_cancel("test-session", "person cancel from dashboard"));
+        if matches!(
+            phase,
+            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+        ) {
+            // A phone action cancels the control and leaves the phase alone.
+            assert!(control.request_cancel("phone action cancel"));
+        } else {
+            assert!(cancelled.request_cancel("test-session", "person cancel from dashboard"));
+        }
         cancelled.phase = phase;
         assert!(!control.stopped_for_shutdown());
         assert_eq!(cancelled.cancelled_restart_releases_intent(), restart);

@@ -1895,6 +1895,26 @@ impl Controller {
         self.persist_session_state(session_id)
     }
 
+    /// Remove the stop's records from the target. The session's state is
+    /// already persisted, and the remote removal can stall, so admission is
+    /// yielded around it. A handoff that closed admission meanwhile leaves the
+    /// next daemon to clear them; that is not a failure of this rollback.
+    fn clear_suspend_records(
+        attempt: &OriginDeltaSuspend,
+        executor: &(impl CommandExecutor + Sync),
+        cleanup: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        executor.begin_resumable_work()?;
+        let cleared = mj_core::runtime::off_async_worker(|| attempt.clear_after_restart(cleanup));
+        if executor
+            .end_resumable_work("clear suspend records")
+            .is_err()
+        {
+            return Ok(());
+        }
+        cleared
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn restart_after_refused_origin_delta(
         &mut self,
@@ -1917,7 +1937,7 @@ impl Controller {
                 cleanup.with_cleanup_timeout(super::FAILED_STARTUP_CLEANUP_TIMEOUT);
             let parked = self
                 .park_quiescent_session(session_id, executor, &parked_cleanup, &error)
-                .and_then(|()| attempt.clear_after_restart(&parked_cleanup));
+                .and_then(|()| Self::clear_suspend_records(attempt, executor, &parked_cleanup));
             return match parked {
                 Ok(()) => error,
                 Err(_) if executor.shutdown_interrupted() => error,
@@ -1972,9 +1992,9 @@ impl Controller {
             record.updated_at = now();
             self.persist_session_state(session_id)?;
             let cleared = if cancelled {
-                attempt.clear_after_restart(&cleanup)
+                Self::clear_suspend_records(attempt, executor, &cleanup)
             } else {
-                attempt.clear_after_restart(executor)
+                Self::clear_suspend_records(attempt, executor, executor)
             };
             if let Err(failure) = cleared {
                 // A shutdown that stopped this cleanup leaves the records for
