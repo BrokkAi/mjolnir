@@ -15,7 +15,7 @@ Review override notices currently fill the conversation with declined findings, 
 - [x] Committed the implementation and received the first review.
 - [x] Validated all four review fixes with the focused goldens, producer-to-reader test and affected-crate Clippy.
 - [x] Committed the first review fixes; second review completed.
-- [ ] Commit and review the long-paragraph fix, then push to origin/master.
+- [x] Committed and reviewed all fixes, merged current master without conflicts, and pushed the implementation to origin/master.
 
 ## Surprises & Discoveries
 
@@ -28,7 +28,11 @@ Mailbox disclosure boundaries are already interpreted in `mj-client/src/transcri
 
 ## Outcomes & Retrospective
 
-The TUI shows only declined findings until its arrow or any finding row is clicked. The web uses the same disclosure description with native touch and keyboard expansion. All 34 selected Rust goldens and the browser conversation golden pass without regeneration. Rust formatting and the initial Clippy checks also passed. First review found two daemon test literals missed by the field rename, clipped expanded mailbox titles, ambiguous raw multiline reason boundaries, and a hidden whole-list truncation marker. All four fixes are implemented and their focused checks pass. The notice producer-to-reader test checks quoted field and section labels, and the browser golden checks touch expansion of a long header-only mailbox event.
+The TUI and web initially show only declined findings. Opening the shared disclosure exposes the complete original notice, including long paragraphs and more than 24 lines, with one click or touch. Mailbox events use that same single disclosure pattern. New notices indent multiline fields, and a truncated list says that findings were omitted.
+
+Validation passed: 34 initial client/chat goldens, the extended notice producer-to-reader integration test, focused reruns of the changed goldens, and the final browser conversation golden. The observed history-loading race was fixed at its missing fixture response and verified with three consecutive browser runs. Formatting and affected-crate Clippy, including daemon test targets, passed.
+
+The final review was accepted with two explicit decisions: reconstructing ambiguous quoted field labels in historical unindented notice text is outside this change because those records do not retain the original boundaries; mailbox reports intentionally share the single outer disclosure instead of inheriting a second automatic tool-output fold. Original text remains available. The implementation, including the merge of current master, was pushed as `f7d118eea`.
 
 ## Context and Orientation
 
@@ -75,3 +79,5 @@ Updated 2026-11-25 00:40Z: second review found clipping of long expanded browser
 Updated 2026-11-25 00:42Z: the long-notice client golden and client Clippy pass. Fixed an observed browser-golden race: scrolling a mailbox title to the top invoked an unmocked history endpoint, so captures alternated between loading and 404 text. The fixture now supplies and awaits the empty history page before scrolling. The final browser golden passed three consecutive runs without regeneration.
 
 Updated 2026-11-25 00:45Z: removed the tool-output renderer from disclosure bodies after review showed its 24-line automatic folding required a second tap. Shared system disclosure bodies now render as literal preformatted text inside the single outer disclosure. Extended the long-paragraph case past 24 lines; the browser checks that no nested details element exists and the complete body is visible after one tap. The client and browser goldens pass without regeneration.
+
+Completed 2026-11-25 00:47Z: final review accepted and implementation pushed to origin/master. Recorded the final behavior, validation and declined historical reconstruction/inner-fold findings above.
