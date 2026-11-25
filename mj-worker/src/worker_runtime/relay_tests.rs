@@ -7296,8 +7296,30 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
         unix::select_resume_session(&config, &relay).as_deref(),
         Some("native-relay")
     );
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "old-harness-model".into(),
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "effort".into(),
+            value: "old-harness-effort".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        unix::accepted_config_for_boot(&config, &relay, Some("native-relay"))
+            .model
+            .as_deref(),
+        Some("old-harness-model")
+    );
     config.discard_native_session_id = Some("native-relay".into());
     assert_eq!(unix::select_resume_session(&config, &relay), None);
+    assert_eq!(
+        unix::accepted_config_for_boot(&config, &relay, None),
+        mj_core::acp::AcceptedSessionConfig::default()
+    );
     relay
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "new-harness".into(),
@@ -7306,9 +7328,21 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
             replaced_unused_native_session_id: None,
         })
         .unwrap();
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "new-harness-model".into(),
+        })
+        .unwrap();
     assert_eq!(
         unix::select_resume_session(&config, &relay).as_deref(),
         Some("new-harness")
+    );
+    assert_eq!(
+        unix::accepted_config_for_boot(&config, &relay, Some("new-harness"))
+            .model
+            .as_deref(),
+        Some("new-harness-model")
     );
 }
 

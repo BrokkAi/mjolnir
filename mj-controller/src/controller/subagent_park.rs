@@ -806,6 +806,13 @@ mod tests {
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
+            if matches!(
+                command.purpose.as_str(),
+                "install local worker launch configuration"
+                    | "replace stale Mjolnir worker launch config"
+            ) {
+                return crate::targets::ProcessExecutor.execute(command);
+            }
             if command.purpose == "start detached Mjolnir worker" {
                 assert!(!self.gate.try_close(), "launch must hold admission");
                 assert_eq!(
@@ -1075,18 +1082,131 @@ mod tests {
         if !isolated("parked_move_starts_destination_in_the_existing_environment") {
             return;
         }
+        parked_move_case(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subagent_move_parked_cross_harness_and_boot_recovery() {
+        if !isolated("subagent_move_parked_cross_harness_and_boot_recovery") {
+            return;
+        }
+        parked_move_case(true).await;
+    }
+
+    async fn parked_move_case(cross_harness: bool) {
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
         let mut controller = waking_controller(root.path(), 0);
+        let script_path = root.path().join(LATCH_RELAY_SESSION).join("hel");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        std::fs::write(
+            &script_path,
+            script
+                .lines()
+                .filter(|line| {
+                    !line.contains(mj_core::test_hooks::latch_relay::LATCH_RELAY_RUNNING)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut seed =
+            mj_worker::relay::DurableRelay::open(root.path(), LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "old-codex-thread".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+        seed.record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+        seed.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "previous-assignment".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: "previous-assignment".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from(
+                        "Keep the previous implementation and continue its tests.",
+                    )],
+                },
+            },
+        });
+        assert_eq!(seed.claim_pending_commands(true).unwrap().len(), 1);
+        seed.record_command_completed(
+            "previous-assignment",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+        let mut history = mj_core::state::MaterializedSession::empty(LATCH_RELAY_SESSION);
+        for event in seed
+            .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+        {
+            let projected =
+                mj_transcript::projection::project_relay_event(&history, &event).unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut history,
+                &event,
+                projected.mutation,
+            )
+            .unwrap();
+        }
+        crate::database::save_materialized_session(&history).unwrap();
+        drop(seed);
+
+        controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap()
+            .native_session_id = Some("old-codex-thread".into());
+        crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
         let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
         controller.config.profiles.insert(
             "destination".into(),
             controller.config.profiles["codex"].clone(),
         );
+        if cross_harness {
+            controller
+                .config
+                .profiles
+                .get_mut("destination")
+                .unwrap()
+                .kind = mj_core::config::HarnessKind::Claude;
+        }
         let mut operation =
             super::super::move_session::test_fixtures::source_recovery_operation(&previous);
         operation.in_place = true;
         let channels = crate::session_manager::spawn_session_manager().unwrap();
+        let targets = channels.targets.clone();
+        let target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
+        // This stand-in opens a journal per connection. Attach its actor only
+        // after the wake observer has closed its connection, as a fresh daemon does.
+        let attach = mj_core::runtime::spawn(async move {
+            loop {
+                if crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap()
+                    == Some(SessionState::Running)
+                    && crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .is_none()
+                {
+                    targets.send(vec![target]).unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
         controller
             .execute_move(
                 &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
@@ -1098,8 +1218,42 @@ mod tests {
             )
             .await
             .unwrap();
+        attach.await.unwrap();
+        let launch = mj_core::worker_launch::WorkerLaunchConfig::read(
+            &root.path().join(LATCH_RELAY_SESSION).join("launch.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            launch.discard_native_session_id.as_deref(),
+            cross_harness.then_some("old-codex-thread")
+        );
+        assert_eq!(
+            launch.native_session_id.as_deref(),
+            (!cross_harness).then_some("old-codex-thread")
+        );
+        if cross_harness {
+            operation.phase = mj_core::state::MovePhase::DestinationStarting;
+            operation.in_place_harness_restarted = false;
+            crate::database::save_move_operation(&operation).unwrap();
+            let outcome = controller
+                .recover_move_managed_controlled(
+                    &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                    operation.clone(),
+                    &WakeTarget::new(),
+                    &channels.control,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+        }
         channels.shutdown.shutdown().await.unwrap();
-        assert_eq!(operation.phase, mj_core::state::MovePhase::Completed);
+        assert_eq!(
+            crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                .unwrap()
+                .unwrap()
+                .phase,
+            mj_core::state::MovePhase::Completed
+        );
         let active = crate::database::load_session_record(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();

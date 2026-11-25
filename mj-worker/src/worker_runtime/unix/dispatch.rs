@@ -2129,6 +2129,18 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
 /// the journal recorded last, if there is one: the launch configuration can
 /// still name a thread this session already replaced. ACP decides how to open
 /// that identity using `DurableRelay::native_session_history` as evidence.
+pub(crate) fn accepted_config_for_boot(
+    config: &WorkerLaunchConfig,
+    relay: &DurableRelay,
+    resume_session: Option<&str>,
+) -> acp::AcceptedSessionConfig {
+    if config.discard_native_session_id.is_some() && resume_session.is_none() {
+        return Default::default();
+    }
+    let state = relay.operational_state();
+    acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+}
+
 pub(crate) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,

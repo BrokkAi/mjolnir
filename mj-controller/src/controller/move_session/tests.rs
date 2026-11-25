@@ -497,7 +497,9 @@ fn preparing_cross_harness_move_without_utility_profiles_succeeds() {
         .insert(session.id.clone(), session.id.clone());
 
     let catalog =
-        crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new());
+        crate::profile_catalog::ProfileCatalog::with_probe(crate::profile_catalog::counting_probe(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -569,6 +571,130 @@ fn preparing_cross_harness_move_without_utility_profiles_succeeds() {
                 "{error:#}"
             );
         }
+
+        controller.config.targets.insert(
+            "other-target".into(),
+            serde_json::from_value(serde_json::json!({"kind":"local-podman"})).unwrap(),
+        );
+        for (change, obstacle) in [
+            "target changed",
+            "attached mounts changed",
+            "resource allocation changed",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut selection = preparation.selection.clone();
+            match change {
+                0 => selection.target_template_id = Some("other-target".into()),
+                1 => {
+                    selection.additional_mounts = Some(vec![mj_core::targets::AdditionalMount {
+                        source: dir.path().to_owned(),
+                        destination: "/attached".into(),
+                        access: mj_core::targets::MountAccess::Ro,
+                    }])
+                }
+                _ => {
+                    selection.resource_allocation =
+                        Some(mj_core::state::SessionResourceAllocation::Container {
+                            cpus: 2,
+                            memory_bytes: 1024 * 1024 * 1024,
+                        })
+                }
+            }
+            let error = controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    selection,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(obstacle), "{error:#}");
+        }
+
+        let mut reviewer = relation.clone();
+        reviewer.reviewer_launch = Some(
+            controller
+                .reviewer_launch_config(&session.id, "source", 0, &[])
+                .unwrap(),
+        );
+        rusqlite::Connection::open(crate::database::database_path())
+            .unwrap()
+            .execute(
+                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+                rusqlite::params![session.id, serde_json::to_string(&reviewer).unwrap()],
+            )
+            .unwrap();
+        let error = controller
+            .prepare_move_session_controlled(
+                &catalog,
+                preparation.selection.clone(),
+                &crate::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer sessions cannot move to a different harness"),
+            "{error:#}"
+        );
+        let mut same_harness = preparation.selection.clone();
+        same_harness.profile_id = Some("source".into());
+        assert!(
+            controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    same_harness,
+                    &crate::targets::ProcessExecutor
+                )
+                .await
+                .unwrap()
+                .in_place
+        );
+
+        let mut orchestrator = relation;
+        orchestrator.orchestrator = true;
+        rusqlite::Connection::open(crate::database::database_path())
+            .unwrap()
+            .execute(
+                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+                rusqlite::params![session.id, serde_json::to_string(&orchestrator).unwrap()],
+            )
+            .unwrap();
+        controller
+            .state
+            .subagents
+            .insert(session.id.clone(), (&orchestrator).into());
+        controller
+            .state
+            .environment_owners
+            .insert(session.id.clone(), session.id.clone());
+        controller
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: true,
+            straightforward: Some(Box::new(mj_core::config::SubagentChoice {
+                model: "destination-model".into(),
+                effort: None,
+            })),
+            subtle: None,
+        });
+        assert!(
+            controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    preparation.selection.clone(),
+                    &crate::targets::ProcessExecutor
+                )
+                .await
+                .unwrap()
+                .in_place
+        );
     });
 }
 
@@ -1282,6 +1408,20 @@ mod staged_in_place_tests {
     }
 
     #[test]
+    fn subagent_move_live_same_harness_keeps_current_model() {
+        if isolated("subagent_move_live_same_harness_keeps_current_model") {
+            run_case("subagent-same");
+        }
+    }
+
+    #[test]
+    fn subagent_move_live_cross_harness_discards_spawn_model() {
+        if isolated("subagent_move_live_cross_harness_discards_spawn_model") {
+            run_case("subagent-cross");
+        }
+    }
+
+    #[test]
     fn in_place_move_lost_reply_retry_skips_staging_and_restart() {
         if isolated("in_place_move_lost_reply_retry_skips_staging_and_restart") {
             run_case("lost-reply");
@@ -1684,9 +1824,62 @@ mod staged_in_place_tests {
 
     fn run_case(mode: &str) {
         let _writer = crate::database::install_isolated_test_writer();
-        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let destination_kind = if mode == "subagent-cross" {
+            HarnessKind::Codex
+        } else {
+            HarnessKind::Claude
+        };
+        let mut fixture = in_place_fixture(destination_kind, HarnessKind::Claude);
         let source_session = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
         let relay_root = seed_source_relay(&fixture.worker_root);
+        if mode.starts_with("subagent-") {
+            let mut parent = source_session.clone();
+            parent.id = "parent-move".into();
+            parent.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: fixture.worker_root.parent().unwrap().join(&parent.id),
+            }));
+            crate::database::save_session(&parent).unwrap();
+            let relation: mj_core::subagent::SubagentRecord =
+                serde_json::from_value(serde_json::json!({
+                    "child_session_id": source_session.id, "parent_session_id": parent.id,
+                    "task_name": "move child", "profile_id": IN_PLACE_SOURCE_PROFILE,
+                    "working_directory": "", "initial_prompt": "work", "request_key": "live-child",
+                    "model": "stale-spawn-model", "created_at": source_session.created_at
+                }))
+                .unwrap();
+            crate::database::save_subagent_session(&source_session, &relation).unwrap();
+            fixture.controller.state = crate::database::load_state().unwrap();
+            let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                &relation.kind.startup_request_key(&relation.request_key),
+            );
+            let prompt = crate::database::startup_step_id(&group, "prompt");
+            let mut seed =
+                mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                    .unwrap();
+            seed.handle(mj_core::relay::RelayRequestEnvelope {
+                request_id: "seed-assignment".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: mj_core::relay::RelayRequest::Submit {
+                    command_id: prompt.clone(),
+                    command: mj_core::relay::RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                            "original assignment",
+                        )],
+                    },
+                },
+            });
+            assert_eq!(seed.claim_pending_commands(true).unwrap().len(), 1);
+            seed.record_command_completed(
+                &prompt,
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    work_facts: None,
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        }
         let before = live_files(&fixture.worker_root);
         let marker = match mode {
             "refused" => Some("reject-in-place-restart"),
@@ -1739,7 +1932,7 @@ mod staged_in_place_tests {
                         .unwrap();
                         assert!(relay.operational_state().in_place_move_hold.is_none());
                     }
-                    "success" => {
+                    "success" | "subagent-same" | "subagent-cross" => {
                         result.unwrap();
                         let session = crate::database::load_session_record(LATCH_RELAY_SESSION)
                             .unwrap()
@@ -1755,11 +1948,19 @@ mod staged_in_place_tests {
                             launch.accepted_reload_operation_id.as_deref(),
                             Some(operation.operation_id.as_str())
                         );
-                        assert!(
-                            fs::read_to_string(fixture.worker_root.join("profile/settings.json"))
+                        if mode.starts_with("subagent-") {
+                            assert_eq!(launch.initial_model, None);
+                            assert_eq!(executor.move_stop_calls(), 0);
+                        }
+                        if destination_kind == HarnessKind::Claude {
+                            assert!(
+                                fs::read_to_string(
+                                    fixture.worker_root.join("profile/settings.json")
+                                )
                                 .unwrap()
                                 .contains("destination")
-                        );
+                            );
+                        }
                     }
                     "lost-reply" => {
                         assert!(result.is_err());

@@ -352,13 +352,9 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         session_environment.clone(),
         events_tx.clone(),
     );
-    let accepted_config = if config.discard_native_session_id.is_some() && resume_session.is_none()
-    {
-        Default::default()
-    } else {
+    let accepted_config = {
         let relay = relay.lock().expect("relay lock poisoned");
-        let state = relay.operational_state();
-        acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+        accepted_config_for_boot(&config, &relay, resume_session.as_deref())
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;

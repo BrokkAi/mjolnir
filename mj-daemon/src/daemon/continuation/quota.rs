@@ -944,11 +944,24 @@ mod tests {
 
     #[tokio::test]
     async fn quota_for_an_owned_child_selects_the_in_place_move() {
-        const NAME: &str = "quota_for_an_owned_child_selects_the_in_place_move";
+        quota_child_move(true).await;
+    }
+
+    #[tokio::test]
+    async fn quota_for_a_borrowed_child_selects_the_in_place_move() {
+        quota_child_move(false).await;
+    }
+
+    async fn quota_child_move(owned: bool) {
+        let name = if owned {
+            "quota_for_an_owned_child_selects_the_in_place_move"
+        } else {
+            "quota_for_a_borrowed_child_selects_the_in_place_move"
+        };
         const MARKER: &str = "MJ_QUOTA_OWNED_CHILD_TEST";
         if std::env::var_os(MARKER).is_none() {
             let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(module_path!(), NAME))
+            IsolatedTest::new(test_name(module_path!(), name))
                 .env(MARKER, "1")
                 .isolated_store(root.path())
                 .run();
@@ -968,7 +981,10 @@ mod tests {
                 .insert(id.into(), HarnessProfile::new(HarnessKind::Claude, home));
         }
         let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
-        let parent = runtime_test_session("parent-session", workspace, SessionState::Running);
+        let mut parent = runtime_test_session("parent-session", workspace, SessionState::Running);
+        parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: mj_core::config::data_dir().join("parent-session"),
+        }));
         let mut owner = runtime_test_session("owner-session", workspace, SessionState::Parked);
         owner.harness_kind = HarnessKind::Claude;
         owner.last_profile = "source".into();
@@ -977,6 +993,7 @@ mod tests {
             .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
         let checkout = mj_core::config::data_dir().join("checkout");
         std::fs::create_dir_all(&checkout).unwrap();
+        parent.project_directory = Some(checkout.clone());
         owner.project_directory = Some(checkout);
         owner.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: mj_core::config::data_dir().join("owner-session"),
@@ -988,7 +1005,7 @@ mod tests {
             vec![],
             None,
             None,
-            true,
+            owned,
         )
         .unwrap();
         config.save().unwrap();
