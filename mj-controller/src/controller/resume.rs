@@ -2175,9 +2175,13 @@ impl Controller {
         let is_history_cutoff_origin_delta =
             super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
                 && super::backend::session_history_cutoff(&previous)?.is_some();
-        let history_only_archive = !archive_manifest.repositories.is_empty()
-            && archive_manifest.repositories.iter().all(|repository|
-                repository.metadata.review_refs_metadata_only || repository.metadata.plain_directory);
+        let history_only_archive = archive_manifest
+            .repositories
+            .iter()
+            .any(|repository| repository.metadata.review_refs_metadata_only)
+            && archive_manifest.repositories.iter().all(|repository| {
+                repository.metadata.review_refs_metadata_only || repository.metadata.plain_directory
+            });
         let origin_delta = manifest_uses_origin_delta(archive_manifest);
         if origin_delta && plan != ResumePlan::InPlace {
             let originless = archive_manifest.repositories.iter().any(|repository| {

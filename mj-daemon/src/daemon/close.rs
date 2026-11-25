@@ -121,9 +121,15 @@ impl RuntimeState {
                 }
             };
             let probe_session_id = session_id.clone();
-            let response = super::terminal_operations::process_probe(None, move |executor| {
-                Controller::load()?.resolve_suspend_blockers(&probe_session_id, executor)
-            })
+            // Bound the remediation probe to 60s (matching ForceDestroy's
+            // daemon-handoff admission bound in AGENTS.md) so a stalled target
+            // cannot hold daemon replacement or the worker barrier open.
+            let response = super::terminal_operations::process_probe(
+                Some(Duration::from_secs(60)),
+                move |executor| {
+                    Controller::load()?.resolve_suspend_blockers(&probe_session_id, executor)
+                },
+            )
             .await;
             if let Some(lease) = workspace_lease {
                 lease.release().await.context(
