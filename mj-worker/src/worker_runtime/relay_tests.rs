@@ -6400,13 +6400,28 @@ async fn daemon_restart_serves_a_closed_relay_without_starting_acp() {
     };
     let mut encoded = serde_json::to_vec(&request).unwrap();
     encoded.push(b'\n');
+    // Pipeline a second observation before reading either reply. The real
+    // Unix server must drain buffered frames in order without another send.
+    let mut second = serde_json::to_vec(&RelayRequestEnvelope {
+        request_id: "pipelined-history".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::HistoryRequests,
+    })
+    .unwrap();
+    second.push(b'\n');
+    encoded.extend(second);
     writer.write_all(&encoded).await.unwrap();
-    let response = BufReader::new(reader)
-        .lines()
-        .next_line()
-        .await
-        .unwrap()
-        .unwrap();
+    let mut lines = BufReader::new(reader).lines();
+    let response = lines.next_line().await.unwrap().unwrap();
+    let second: RelayResponseEnvelope =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(second.request_id, "pipelined-history");
+    assert!(matches!(
+        second.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::HistoryRequests { .. }
+        }
+    ));
     let response: RelayResponseEnvelope = serde_json::from_str(&response).unwrap();
     let state = match response.body {
         RelayResponseBody::Ok {

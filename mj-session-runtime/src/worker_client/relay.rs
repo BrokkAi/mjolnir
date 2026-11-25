@@ -226,22 +226,39 @@ impl RelayClient {
         after_ordinal: u64,
         after_digest: impl Into<String>,
     ) -> Result<RelayAttachment> {
-        let after_digest = after_digest.into();
+        let request = self.attach_request(after_ordinal, after_digest.into());
+        let response = self
+            .call_with_timeout(request.clone(), RELAY_HISTORY_TIMEOUT)
+            .await?;
+        self.decode_attachment(request, response)
+    }
+
+    pub(crate) fn attach_request(&self, after_ordinal: u64, after_digest: String) -> RelayRequest {
         let known_state_digest = (self.protocol_version
             >= mj_core::relay::RELAY_STATE_DIGEST_PROTOCOL)
             .then(|| self.known_state.as_ref().map(|(digest, _)| digest.clone()))
             .flatten();
-        let (state, events, through_ordinal, through_digest) = match self
-            .call_with_timeout(
-                RelayRequest::Attach {
-                    after_ordinal,
-                    after_digest: after_digest.clone(),
-                    known_state_digest: known_state_digest.clone(),
-                },
-                RELAY_HISTORY_TIMEOUT,
-            )
-            .await?
-        {
+        RelayRequest::Attach {
+            after_ordinal,
+            after_digest,
+            known_state_digest,
+        }
+    }
+
+    pub(crate) fn decode_attachment(
+        &mut self,
+        request: RelayRequest,
+        response: RelayResponsePayload,
+    ) -> Result<RelayAttachment> {
+        let RelayRequest::Attach {
+            after_ordinal,
+            after_digest,
+            known_state_digest,
+        } = request
+        else {
+            bail!("expected attach request");
+        };
+        let (state, events, through_ordinal, through_digest) = match response {
             RelayResponsePayload::Attached {
                 mut state,
                 events,
@@ -302,6 +319,14 @@ impl RelayClient {
     ) -> Result<RelayCatchUp> {
         let after_digest = after_digest.into();
         let first = self.attach(after_ordinal, after_digest.clone()).await?;
+        Self::catch_up_from_attachment(after_ordinal, after_digest, first)
+    }
+
+    pub(crate) fn catch_up_from_attachment(
+        after_ordinal: u64,
+        after_digest: String,
+        first: RelayAttachment,
+    ) -> Result<RelayCatchUp> {
         let frontier = RelayCursor {
             ordinal: first.state.latest_ordinal,
             digest: first.state.latest_digest.clone(),
@@ -1164,6 +1189,41 @@ impl RelayClient {
         Ok(())
     }
 
+    /// Query presence in reference order before any upload mutates the worker.
+    pub async fn attachment_presence(
+        &mut self,
+        images: &[mj_core::attachment::AttachmentRef],
+        files: &[mj_core::attachment::FileAttachmentRef],
+    ) -> Result<(Vec<bool>, Vec<bool>)> {
+        if !files.is_empty() {
+            self.require_file_attachment_protocol()?;
+        }
+        let requests = images
+            .iter()
+            .map(|reference| RelayRequest::AttachmentPresent {
+                reference: reference.clone(),
+            })
+            .chain(
+                files
+                    .iter()
+                    .map(|reference| RelayRequest::FileAttachmentPresent {
+                        reference: reference.clone(),
+                    }),
+            )
+            .collect();
+        let mut present = self
+            .call_many(requests)
+            .await?
+            .into_iter()
+            .map(|reply| match reply? {
+                RelayResponsePayload::AttachmentPresent { present } => Ok(present),
+                _ => bail!("unexpected attachment presence response"),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let files = present.split_off(images.len());
+        Ok((present, files))
+    }
+
     pub async fn submit(
         &mut self,
         command_id: impl Into<String>,
@@ -1179,17 +1239,22 @@ impl RelayClient {
             let mut seen_files = BTreeSet::new();
             let mut missing_images = Vec::new();
             let mut missing_files = Vec::new();
-            for reference in mj_core::attachment::references(prompt)? {
-                if seen_images.insert(reference.sha256.clone())
-                    && !self.attachment_present(&reference).await?
-                {
+            let images: Vec<_> = mj_core::attachment::references(prompt)?
+                .into_iter()
+                .filter(|reference| seen_images.insert(reference.sha256.clone()))
+                .collect();
+            let files: Vec<_> = files
+                .into_iter()
+                .filter(|reference| seen_files.insert(reference.sha256.clone()))
+                .collect();
+            let (image_presence, file_presence) = self.attachment_presence(&images, &files).await?;
+            for (reference, present) in images.into_iter().zip(image_presence) {
+                if !present {
                     missing_images.push(reference);
                 }
             }
-            for reference in files {
-                if seen_files.insert(reference.sha256.clone())
-                    && !self.file_attachment_present(&reference).await?
-                {
+            for (reference, present) in files.into_iter().zip(file_presence) {
+                if !present {
                     missing_files.push(reference);
                 }
             }

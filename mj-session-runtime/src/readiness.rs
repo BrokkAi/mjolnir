@@ -68,6 +68,20 @@ pub trait NativeSessionProbe {
     }
 
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness>;
+
+    async fn readiness_observation(
+        &mut self,
+    ) -> Result<(NativeSessionReadiness, Option<(u64, String)>)> {
+        Ok((self.native_session_readiness().await?, None))
+    }
+
+    async fn wait_readiness_change(
+        &mut self,
+        _observed: (u64, String),
+        _interrupted: impl std::future::Future<Output = ()>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl NativeSessionProbe for StandaloneSession {
@@ -78,6 +92,27 @@ impl NativeSessionProbe for StandaloneSession {
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
         Ok(native_session_readiness(&self.sync().await?.operational))
     }
+    async fn readiness_observation(
+        &mut self,
+    ) -> Result<(NativeSessionReadiness, Option<(u64, String)>)> {
+        let snapshot = self.sync().await?;
+        let observed = self
+            .client
+            .known_state_digest()
+            .filter(|_| self.protocol_version() >= mj_core::relay::RELAY_CHANGE_WAIT_PROTOCOL)
+            .map(|digest| (snapshot.operational.latest_ordinal, digest.to_owned()));
+        Ok((native_session_readiness(&snapshot.operational), observed))
+    }
+
+    async fn wait_readiness_change(
+        &mut self,
+        observed: (u64, String),
+        interrupted: impl std::future::Future<Output = ()>,
+    ) -> Result<()> {
+        self.client
+            .wait_readiness_change(observed, interrupted)
+            .await
+    }
 }
 
 impl NativeSessionProbe for RelayClient {
@@ -87,6 +122,41 @@ impl NativeSessionProbe for RelayClient {
 
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
         Ok(native_session_readiness(&self.status().await?))
+    }
+    async fn readiness_observation(
+        &mut self,
+    ) -> Result<(NativeSessionReadiness, Option<(u64, String)>)> {
+        let state = match self.call(mj_core::relay::RelayRequest::Status).await? {
+            mj_core::relay::RelayResponsePayload::Status(state) => state,
+            _ => bail!("unexpected readiness status response"),
+        };
+        let observed = mj_core::relay::RelayRequest::WaitForChange {
+            after_ordinal: 0,
+            state_digest: None,
+        }
+        .supported_at(self.protocol_version())
+        .then(|| {
+            mj_core::relay::relay_state_digest(&state).map(|digest| (state.latest_ordinal, digest))
+        })
+        .transpose()?;
+        Ok((native_session_readiness(&state), observed))
+    }
+
+    async fn wait_readiness_change(
+        &mut self,
+        (after_ordinal, digest): (u64, String),
+        interrupted: impl std::future::Future<Output = ()>,
+    ) -> Result<()> {
+        self.call_until(interrupted, async |client| {
+            client
+                .call(mj_core::relay::RelayRequest::WaitForChange {
+                    after_ordinal,
+                    state_digest: Some(digest),
+                })
+                .await
+        })
+        .await?;
+        Ok(())
     }
 }
 
@@ -263,12 +333,13 @@ async fn wait_for_startup(
         < mj_core::relay::RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL)
         .then_some(LegacyStartupDeadline::Unobserved);
     let mut stage = NativeReadinessStage::new(executor, harness, fallback_stage);
+    let mut poll_delay = Duration::from_millis(100);
     loop {
         if executor.cancellation_requested() {
             bail!("operation cancelled while waiting for ACP runtime startup");
         }
-        let readiness = {
-            let readiness = relay.native_session_readiness();
+        let (readiness, observed) = {
+            let readiness = relay.readiness_observation();
             tokio::pin!(readiness);
             loop {
                 let now = tokio::time::Instant::now();
@@ -339,12 +410,33 @@ async fn wait_for_startup(
                 NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
             );
         }
+        if let Some(observed) = observed {
+            let end = deadline.as_ref().and_then(LegacyStartupDeadline::deadline);
+            relay
+                .wait_readiness_change(observed, async {
+                    loop {
+                        if executor.cancellation_requested()
+                            || end.is_some_and(|end| tokio::time::Instant::now() >= end)
+                        {
+                            break;
+                        }
+                        let now = tokio::time::Instant::now();
+                        tokio::time::sleep_until(
+                            end.map_or(now + CANCELLATION_POLL_INTERVAL, |end| {
+                                std::cmp::min(end, now + CANCELLATION_POLL_INTERVAL)
+                            }),
+                        )
+                        .await;
+                    }
+                })
+                .await?;
+            continue;
+        }
         let next_poll = deadline
             .as_ref()
             .and_then(LegacyStartupDeadline::deadline)
-            .map_or(now + std::time::Duration::from_millis(100), |end| {
-                std::cmp::min(end, now + std::time::Duration::from_millis(100))
-            });
+            .map_or(now + poll_delay, |end| std::cmp::min(end, now + poll_delay));
+        poll_delay = (poll_delay * 2).min(Duration::from_millis(500));
         loop {
             let now = tokio::time::Instant::now();
             if now >= next_poll {
@@ -1029,7 +1121,7 @@ mod tests {
         assert!(!wait.is_finished(), "preparation must suspend the timeout");
 
         state.store(1, Ordering::Release);
-        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::time::advance(Duration::from_millis(500)).await;
         for _ in 0..10 {
             tokio::task::yield_now().await;
             if saw_started.load(Ordering::Acquire) {
@@ -2165,5 +2257,128 @@ mod tests {
             reported.contains("it recorded no startup step"),
             "{reported}"
         );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn legacy_readiness_polling_backs_off_with_a_bounded_cancellation_poll() {
+        struct Legacy {
+            polls: Vec<tokio::time::Instant>,
+        }
+        impl NativeSessionProbe for Legacy {
+            fn protocol_version(&self) -> u32 {
+                57
+            }
+            async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
+                self.polls.push(tokio::time::Instant::now());
+                Ok(if self.polls.len() == 5 {
+                    NativeSessionReadiness::Ready("ready".into())
+                } else {
+                    NativeSessionReadiness::Waiting
+                })
+            }
+        }
+        let mut probe = Legacy { polls: Vec::new() };
+        let executor = CancellableProcessExecutor::new(Arc::default());
+        wait_for_native_session(&mut probe, &executor, HarnessKind::Codex)
+            .await
+            .unwrap();
+        let delays: Vec<_> = probe
+            .polls
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]).as_millis())
+            .collect();
+        assert_eq!(delays, vec![100, 200, 400, 500]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_change_wait_uses_exact_probe_digest_and_abandons_on_cancel() {
+        use mj_core::relay::{
+            RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
+            RelayResponsePayload,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for cancel in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = mj_worker::relay::DurableRelay::open(
+                root.path(),
+                crate::worker_client::test_fixtures::SESSION_ID,
+                "test",
+            )
+            .unwrap()
+            .operational_state();
+            state.harness_preparation = Some(mj_core::relay::HarnessPreparation::Preparing {
+                step: "prepare".into(),
+                since_ms: 0,
+            });
+            let expected_digest = mj_core::relay::relay_state_digest(&state).unwrap();
+            let (controller, worker) = tokio::io::duplex(65536);
+            let mut client = crate::worker_client::test_fixtures::duplex_relay_client(
+                controller,
+                crate::worker_client::test_fixtures::SESSION_ID,
+            );
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let signal = cancelled.clone();
+            let peer = mj_core::runtime::spawn(async move {
+                let (reader, mut writer) = tokio::io::split(worker);
+                let mut lines = BufReader::new(reader).lines();
+                for i in 0..3 {
+                    let request: RelayRequestEnvelope =
+                        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                    let payload = if i == 1 {
+                        match request.request {
+                            RelayRequest::WaitForChange {
+                                after_ordinal,
+                                state_digest,
+                            } => {
+                                assert_eq!(after_ordinal, state.latest_ordinal);
+                                assert_eq!(state_digest.as_deref(), Some(expected_digest.as_str()));
+                            }
+                            request => panic!("expected wait, got {request:?}"),
+                        }
+                        if cancel {
+                            signal.store(true, std::sync::atomic::Ordering::Release);
+                            std::future::pending::<()>().await;
+                        }
+                        RelayResponsePayload::ChangeObserved {
+                            latest_ordinal: state.latest_ordinal,
+                            state_digest: expected_digest.clone(),
+                            subagent_queue_changed: false,
+                            guardian_queue_changed: false,
+                        }
+                    } else {
+                        assert!(matches!(request.request, RelayRequest::Status));
+                        let mut state = state.clone();
+                        if i == 0 {
+                            state.harness_preparation =
+                                Some(mj_core::relay::HarnessPreparation::Preparing {
+                                    step: "prepare".into(),
+                                    since_ms: 0,
+                                });
+                        } else {
+                            state.execution = RelayExecutionState::Closed;
+                        }
+                        // Digest must describe exactly the state sent in the first status.
+                        RelayResponsePayload::Status(state)
+                    };
+                    let mut frame = serde_json::to_vec(&RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok { payload },
+                    })
+                    .unwrap();
+                    frame.push(b'\n');
+                    writer.write_all(&frame).await.unwrap();
+                }
+            });
+            let executor = CancellableProcessExecutor::new(cancelled);
+            let result = wait_for_native_session(&mut client, &executor, HarnessKind::Codex).await;
+            assert!(result.is_err());
+            if cancel {
+                assert!(client.status().await.is_err());
+                peer.abort();
+                let _ = peer.await;
+            } else {
+                peer.await.unwrap();
+            }
+        }
     }
 }
