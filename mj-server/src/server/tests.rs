@@ -1295,6 +1295,22 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
     assert!(row("reviewer").active);
     assert!(!row("worker").active);
 
+    assert!(!row("worker").subagent_orchestrator);
+    assert!(
+        serde_json::to_value(row("worker"))
+            .unwrap()
+            .get("subagent_orchestrator")
+            .is_none()
+    );
+    state.subagents.get_mut("worker").unwrap().orchestrator = true;
+    let orchestrator_snapshot = ViewerSnapshot::from_config_state(&config, &state, 2);
+    let orchestrator = orchestrator_snapshot.sessions.0.get("worker").unwrap();
+    assert!(orchestrator.subagent_orchestrator);
+    assert_eq!(
+        serde_json::to_value(orchestrator).unwrap()["subagent_orchestrator"],
+        true
+    );
+
     // The summary rows a compact client sees carry both lists, so Reviewers
     // and Subagents never wait for a child's own record.
     let mut stopped = state.clone();
@@ -5977,7 +5993,7 @@ fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_sto
         "{}\n{}",
         viewer_source("function isAutoPrimaryProfile(", "function targetIsBare("),
         viewer_source(
-            "function moveSubagentChange(",
+            "function moveDelegationApplies(",
             "function moveQueueItemText("
         ),
     );
@@ -5991,6 +6007,7 @@ const sessions = {
   gone: { id: "gone", lifecycle: "suspended" },
 };
 function sessionById(id) { return sessions[id]; }
+function isSubagentSession(session) { return Boolean(session?.subagent_parent_id); }
 "#;
     let checks = r#"
 const assert = (condition, message) => { if (!condition) throw Error(message); };
@@ -6006,6 +6023,12 @@ assert(moveSubagentChange(draft) === null, "a native destination keeps an alread
 draft.storedSubagents = { mode: "mjolnir", straightforward: { model: "gpt-6-sol", effort: "high" }, subtle: { model: "gpt-6-luna" } };
 draft.subagents = structuredClone(draft.storedSubagents);
 assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
+sessions.worker = { id: 'worker', subagent_parent_id: 'parent' };
+draft.sessionId = 'worker';
+draft.subagents = { mode: 'mjolnir' };
+assert(moveSubagentChange(draft) === null, "worker subagents cannot change delegation");
+sessions.worker.subagent_orchestrator = true;
+assert(moveSubagentChange(draft)?.mode === 'mjolnir', "orchestrators retain delegation controls");
 assert(moveStoppedChildren(sessions.parent, { stops_subagents: true }) === 1, "only a child still at its task is counted; a parked one has handed back");
 assert(moveStoppedChildren(sessions.parent, { in_place: true, stops_subagents: false }) === 0, "an in-place Move that keeps its children stops none");
 // DSH has no sub-agents of its own: a stored Native reads as None and stays.
@@ -6031,7 +6054,7 @@ fn viewer_move_controls_use_global_availability_for_delegation() {
         "{}\n{}",
         viewer_source("function isAutoPrimaryProfile(", "function targetIsBare("),
         viewer_source(
-            "function moveSubagentChange(",
+            "function moveDelegationApplies(",
             "function moveStoppedChildren("
         )
     );
@@ -6042,6 +6065,8 @@ fn viewer_move_controls_use_global_availability_for_delegation() {
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
+function sessionById() {{ return null; }}
+function isSubagentSession(session) {{ return Boolean(session?.subagent_parent_id); }}
 const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 {source}
@@ -6967,4 +6992,58 @@ async fn migrated_terminal_routes_reject_browser_and_external_bearer_before_json
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
         }
     }
+}
+
+#[test]
+fn viewer_subagent_move_locks_current_target_and_keeps_resources() {
+    let source = format!(
+        "{}\n{}\n{}",
+        viewer_source("function freshMoveDraft(", "/// The delegation policy"),
+        viewer_source(
+            "function moveAvailabilityError(",
+            "async function prepareMove("
+        ),
+        viewer_source(
+            "function moveDelegationApplies(",
+            "function moveSubagentChange("
+        )
+    );
+    run_web_check(
+        "viewer-subagent-move-target",
+        &format!(
+            r#"
+import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
+installDocument();
+const snapshot = {{ profiles: [{{id:'profile'}}], targets: [] }};
+const session = {{id:'child', profile_id:'profile', target_id:'borrowed', subagent_parent_id:'parent', compatible_resume_targets:['other']}};
+function sessionById() {{ return session; }}
+function isSubagentSession(value) {{ return Boolean(value?.subagent_parent_id); }}
+function selectedWorkspaceId() {{ return 'workspace'; }}
+function targetLaunchable() {{ return false; }}
+function availabilityMissing() {{ return false; }}
+function delegationPolicy(value) {{ return value || {{mode:'none'}}; }}
+function soleProfileId() {{ return 'profile'; }}
+function offeredProfiles() {{ return snapshot.profiles; }}
+function pickerField() {{ return document.createElement('div'); }}
+function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
+function subagentSelectionError() {{ throw Error('worker delegation must not be validated'); }}
+function renderSubagentFields() {{ throw Error('worker delegation must not be rendered'); }}
+function moveStorageProblems() {{ return []; }}
+const route = {{name:'move', sessionId:'child'}};
+const moveStep = el('div'), moveProgress = el('p'), moveNextButton = el('button'), moveBackButton = el('button');
+moveStep.replaceChildren = function () {{ this.childNodes = []; }};
+moveStep.querySelectorAll = () => ['input', 'select', 'button'].flatMap(tag => elements(moveStep, tag));
+let moveDraft = null;
+{source}
+const draft = freshMoveDraft(session);
+checkEqual(draft.targetId, 'borrowed', 'current unavailable target retained');
+checkEqual(draft.clearResourceAllocation, false, 'resource sizing retained');
+checkEqual(moveAvailabilityError(draft), '', 'borrowed target need not be launchable');
+renderMoveForm();
+checkEqual(elements(moveStep, 'input').length, 0, 'no resource clearing checkbox');
+check(elements(moveStep, 'p').some(node => node.textContent.includes('sub-agents move in place')), 'read-only target explanation');
+check(!moveNextButton.disabled, 'in-place move can prepare');
+"#
+        ),
+    );
 }
