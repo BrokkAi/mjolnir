@@ -34,6 +34,31 @@ fn entities(s: &str) -> String {
     out.push_str(rest);
     out
 }
+fn find_closing_tag(rest: &str, hidden: &str) -> Option<usize> {
+    let mut pos = 0;
+    while let Some(relative) = rest[pos..].find("</") {
+        let name = pos + relative + 2;
+        if rest[name..]
+            .get(..hidden.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(hidden))
+        {
+            let mut end = name + hidden.len();
+            while rest
+                .as_bytes()
+                .get(end)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                end += 1;
+            }
+            if rest.as_bytes().get(end) == Some(&b'>') {
+                return Some(end + 1);
+            }
+        }
+        pos = name;
+    }
+    None
+}
+
 fn convert(html: &str, markdown: bool) -> String {
     let mut out = String::new();
     let mut rest = html;
@@ -42,16 +67,7 @@ fn convert(html: &str, markdown: bool) -> String {
     let mut pre = false;
     while !rest.is_empty() {
         if let Some(hidden) = &skip {
-            let lower = rest.to_ascii_lowercase();
-            let closing = format!("</{hidden}");
-            let end = lower.match_indices(&closing).find_map(|(i, _)| {
-                let after = &lower[i + closing.len()..];
-                let trimmed = after.trim_start_matches(|c: char| c.is_ascii_whitespace());
-                trimmed
-                    .starts_with('>')
-                    .then_some(i + closing.len() + after.len() - trimmed.len() + 1)
-            });
-            rest = end.map_or("", |end| &rest[end..]);
+            rest = find_closing_tag(rest, hidden).map_or("", |end| &rest[end..]);
             skip = None;
             continue;
         }

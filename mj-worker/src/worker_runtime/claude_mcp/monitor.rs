@@ -2,7 +2,6 @@ use super::*;
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 pub(super) struct Monitor {
-    pub pgid: i32,
     pub cancel: CancellationToken,
     pub view: Value,
     pub events: Arc<AtomicU64>,
@@ -16,6 +15,40 @@ pub(super) fn kill(pgid: i32, signal: i32) {
         }
     }
 }
+fn take_utf8_chunk(batch: &mut Vec<u8>, flush_all: bool) -> Option<String> {
+    if batch.is_empty() {
+        return None;
+    }
+    if flush_all {
+        let out = String::from_utf8_lossy(batch).into_owned();
+        batch.clear();
+        return Some(out);
+    }
+    // Walk invalid spans as well as valid prefixes, retaining only an incomplete tail.
+    let mut end = 0;
+    while end < batch.len() {
+        match std::str::from_utf8(&batch[end..]) {
+            Ok(_) => {
+                end = batch.len();
+                break;
+            }
+            Err(error) => {
+                end += error.valid_up_to();
+                match error.error_len() {
+                    Some(len) => end += len,
+                    None => break,
+                }
+            }
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    let out = String::from_utf8_lossy(&batch[..end]).into_owned();
+    batch.drain(..end);
+    Some(out)
+}
+
 pub(super) fn list(s: &Service) -> Value {
     json!({"monitors":s.monitors.lock().unwrap().values().map(|m|{let mut v=m.view.clone();v["events_emitted"]=json!(m.events.load(Ordering::Relaxed));v}).collect::<Vec<_>>()})
 }
@@ -49,7 +82,6 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
     registry.insert(
         task_id.clone(),
         Monitor {
-            pgid,
             cancel: cancel.clone(),
             view: view.clone(),
             events: events.clone(),
@@ -74,16 +106,14 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
                 if out_cancel.is_cancelled() {
                     break;
                 }
-                if !batch.is_empty() && (end || batch.len() >= 16384 || flush) {
+                if (end || batch.len() >= 16384 || flush)
+                    && let Some(chunk) = take_utf8_chunk(&mut batch, end)
+                {
                     out_s.deliver_wake(
                         &out_id,
-                        format!(
-                            "[mj-claude monitor {out_id}: {description}]\n{}",
-                            String::from_utf8_lossy(&batch)
-                        ),
+                        format!("[mj-claude monitor {out_id}: {description}]\n{chunk}"),
                     );
                     events.fetch_add(1, Ordering::Relaxed);
-                    batch.clear();
                 }
                 if end {
                     break;
@@ -119,9 +149,23 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
                 tokio::time::sleep(Duration::from_millis(timeout)).await
             }
         };
-        let (status, stopped, timed_out) = tokio::select! {_=cancel.cancelled()=>{kill(pgid,libc::SIGTERM);kill(pgid,libc::SIGKILL);(child.wait().await,true,false)},_=deadline=>{kill(pgid,libc::SIGTERM);kill(pgid,libc::SIGKILL);(child.wait().await,false,true)},r=child.wait()=>(r,false,false)};
-        // The shell may exit before descendants close inherited pipes.
-        kill(pgid, libc::SIGKILL);
+        // Only this supervisor signals the group, and only before reaping.
+        let (status, stopped, timed_out) = tokio::select! {
+            _ = cancel.cancelled() => {
+                s.monitors.lock().unwrap().remove(&task_id);
+                kill(pgid, libc::SIGTERM); kill(pgid, libc::SIGKILL);
+                (child.wait().await, true, false)
+            },
+            _ = deadline => {
+                s.monitors.lock().unwrap().remove(&task_id);
+                kill(pgid, libc::SIGTERM); kill(pgid, libc::SIGKILL);
+                (child.wait().await, false, true)
+            },
+            result = child.wait() => {
+                s.monitors.lock().unwrap().remove(&task_id);
+                (result, false, false)
+            }
+        };
         // Escaped descendants can retain pipes after the owned group exits.
         // Bound only this final drain; cancellation always remains responsive.
         let drained = tokio::select! {
@@ -145,7 +189,6 @@ pub(super) fn start(s: &Arc<Service>, a: Value) -> Result<Value> {
             errors.abort();
             Vec::new()
         };
-        s.monitors.lock().unwrap().remove(&task_id);
         if !stopped && !cancel.is_cancelled() {
             s.deliver_wake(
                 &task_id,
@@ -173,8 +216,6 @@ pub(super) async fn stop(s: &Service, id: &str) -> Result<Value> {
         let mut map = s.monitors.lock().unwrap();
         let m = map.remove(id).context("unknown monitor")?;
         m.cancel.cancel();
-        kill(m.pgid, libc::SIGTERM);
-        kill(m.pgid, libc::SIGKILL);
         m.done
     };
     if !*done.borrow() {
@@ -186,6 +227,24 @@ pub(super) async fn stop(s: &Service, id: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_mcp_monitor_utf8_chunks_preserve_incomplete_tail() {
+        let mut batch = b"prefix ".to_vec();
+        batch.extend_from_slice(&"😀".as_bytes()[..2]);
+        let first = take_utf8_chunk(&mut batch, false).unwrap();
+        assert_eq!(first, "prefix ");
+        assert!(take_utf8_chunk(&mut batch, false).is_none());
+        batch.extend_from_slice(&"😀".as_bytes()[2..]);
+        assert_eq!(
+            first + &take_utf8_chunk(&mut batch, false).unwrap(),
+            "prefix 😀"
+        );
+        batch.extend_from_slice(&[0xff, 0xf0, 0x9f]);
+        assert_eq!(take_utf8_chunk(&mut batch, false).unwrap(), "�");
+        batch.extend_from_slice(&[0x98, 0x80]);
+        assert_eq!(take_utf8_chunk(&mut batch, true).unwrap(), "😀");
+    }
+
     #[tokio::test]
     async fn claude_mcp_monitor_stop_drains_escaped_descendant_pipes() {
         let root = tempfile::tempdir().unwrap();

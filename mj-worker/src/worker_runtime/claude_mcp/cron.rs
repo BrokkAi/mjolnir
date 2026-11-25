@@ -105,10 +105,22 @@ impl Job {
     }
 }
 async fn persist(s: &Service, jobs: &BTreeMap<String, Job>) -> Result<()> {
+    let io = s.cron_io.clone().lock_owned().await;
+    if s.cancel.is_cancelled() {
+        return Ok(());
+    }
     let bytes = serde_json::to_vec(&jobs.values().filter(|j| j.durable).collect::<Vec<_>>())?;
     let path = s.root.join("claude-cron.json");
-    mj_core::runtime::spawn_blocking(move || mj_core::config::atomic_write(&path, &bytes))
-        .await??;
+    let cancel = s.cancel.clone();
+    // The blocking writer retains the lock even if its async caller is aborted.
+    mj_core::runtime::spawn_blocking(move || {
+        let _io = io;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        mj_core::config::atomic_write(&path, &bytes)
+    })
+    .await??;
     Ok(())
 }
 fn arm(s: &Arc<Service>, job: Job) {
@@ -127,11 +139,19 @@ fn arm(s: &Arc<Service>, job: Job) {
             }
             let now = chrono::Utc::now().timestamp_millis();
             let expired = job.expires_at_ms.is_some_and(|e| now >= e);
-            if !expired {
-                s.deliver_wake_with_key(
+            if !expired
+                && !s.deliver_wake_with_key(
                     &format!("claude-cron-{}-{}", job.id, job.next_fire_at_ms),
                     format!("[mj-claude cron {} ({})]\n{}", job.id, job.cron, job.prompt),
-                );
+                )
+            {
+                drop(jobs);
+                tokio::select! {
+                    _ = s.cancel.cancelled() => break,
+                    _ = job.cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+                continue;
             }
             let next = Schedule::parse(&job.cron)
                 .ok()
@@ -199,22 +219,17 @@ pub(super) async fn delete(s: &Arc<Service>, id: &str) -> Result<Value> {
     Ok(json!({"id":id,"deleted":true}))
 }
 pub(super) async fn reload(s: &Arc<Service>) -> Result<()> {
+    let mut jobs = s.jobs.lock().await;
+    let _io = s.cron_io.lock().await;
     let bytes = match tokio::fs::read(s.root.join("claude-cron.json")).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
     let loaded: Vec<Job> = serde_json::from_slice(&bytes)?;
-    let mut jobs = s.jobs.lock().await;
     for mut job in loaded {
         Schedule::parse(&job.cron)?;
         job.cancel = CancellationToken::new();
-        if job.recurring && job.next_fire_at_ms < chrono::Utc::now().timestamp_millis() {
-            job.next_fire_at_ms = Schedule::parse(&job.cron)?
-                .next_fire_after(Local::now())
-                .context("cron has no matching date")?
-                .timestamp_millis();
-        }
         jobs.insert(job.id.clone(), job.clone());
         arm(s, job);
     }

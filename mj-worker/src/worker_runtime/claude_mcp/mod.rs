@@ -48,6 +48,7 @@ struct Service {
     cancel: CancellationToken,
     monitors: Mutex<BTreeMap<String, monitor::Monitor>>,
     jobs: tokio::sync::Mutex<BTreeMap<String, cron::Job>>,
+    cron_io: Arc<tokio::sync::Mutex<()>>,
     wakeup: Mutex<Option<JoinHandle<()>>>,
     cron_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
 }
@@ -55,7 +56,7 @@ impl Service {
     fn deliver_wake(&self, key: &str, text: String) {
         self.deliver_wake_with_key(&format!("{key}-{}", id()), text);
     }
-    fn deliver_wake_with_key(&self, key: &str, text: String) {
+    fn deliver_wake_with_key(&self, key: &str, text: String) -> bool {
         if let Err(error) = self
             .relay
             .lock()
@@ -63,8 +64,10 @@ impl Service {
             .deliver_agent_wake(CLAUDE_MCP_SERVER, key, text)
         {
             tracing::error!(%error,"utility wake delivery failed");
+            return false;
         }
         let _ = self.dispatch.try_send(());
+        true
     }
     async fn call(self: &Arc<Self>, req: ClaudeMcpRpcRequest) -> Result<Value> {
         let a = req.arguments;
@@ -128,6 +131,7 @@ struct ControllerState {
     dispatch: mpsc::Sender<()>,
     runtime: tokio::runtime::Handle,
     service: Mutex<Option<ClaudeMcpShutdownGuard>>,
+    cron_io: Arc<tokio::sync::Mutex<()>>,
 }
 pub struct ClaudeMcpControllerGuard(pub ClaudeMcpController);
 impl Drop for ClaudeMcpControllerGuard {
@@ -150,6 +154,7 @@ impl ClaudeMcpController {
             dispatch,
             runtime,
             service: Mutex::new(None),
+            cron_io: Arc::new(tokio::sync::Mutex::new(())),
         }))
     }
     pub fn reconcile(
@@ -165,7 +170,7 @@ impl ClaudeMcpController {
         if let Some(guard) = slot.as_ref() {
             guard.update_runtime(harness, environment);
         } else {
-            *slot = Some(start_claude_mcp_service(
+            *slot = Some(start_with_cron_io(
                 &self.0.root,
                 self.0.cwd.clone(),
                 environment,
@@ -173,6 +178,7 @@ impl ClaudeMcpController {
                 self.0.relay.clone(),
                 self.0.dispatch.clone(),
                 &self.0.runtime,
+                self.0.cron_io.clone(),
             )?);
         }
         Ok(true)
@@ -191,11 +197,6 @@ impl ClaudeMcpShutdownGuard {
     }
     pub fn shutdown(&self) {
         self.service.cancel.cancel();
-        for monitor in self.service.monitors.lock().unwrap().values() {
-            monitor.cancel.cancel();
-            monitor::kill(monitor.pgid, libc::SIGTERM);
-            monitor::kill(monitor.pgid, libc::SIGKILL);
-        }
         if let Some(task) = self.service.wakeup.lock().unwrap().take() {
             task.abort();
         }
@@ -215,6 +216,7 @@ impl Drop for ClaudeMcpShutdownGuard {
         self.shutdown();
     }
 }
+#[cfg(test)]
 pub fn start_claude_mcp_service(
     worker_root: &Path,
     cwd: PathBuf,
@@ -223,6 +225,28 @@ pub fn start_claude_mcp_service(
     relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     runtime: &tokio::runtime::Handle,
+) -> Result<ClaudeMcpShutdownGuard> {
+    start_with_cron_io(
+        worker_root,
+        cwd,
+        environment,
+        harness,
+        relay,
+        dispatch_wake,
+        runtime,
+        Arc::new(tokio::sync::Mutex::new(())),
+    )
+}
+#[allow(clippy::too_many_arguments)] // Service state plus the worker-owned cross-generation I/O lock.
+fn start_with_cron_io(
+    worker_root: &Path,
+    cwd: PathBuf,
+    environment: BTreeMap<String, String>,
+    harness: HarnessKind,
+    relay: Arc<RelayCell>,
+    dispatch_wake: mpsc::Sender<()>,
+    runtime: &tokio::runtime::Handle,
+    cron_io: Arc<tokio::sync::Mutex<()>>,
 ) -> Result<ClaudeMcpShutdownGuard> {
     use std::os::unix::fs::PermissionsExt;
     let path = worker_root.join(CLAUDE_MCP_SOCKET);
@@ -246,6 +270,7 @@ pub fn start_claude_mcp_service(
         cancel: CancellationToken::new(),
         monitors: Mutex::new(BTreeMap::new()),
         jobs: tokio::sync::Mutex::new(BTreeMap::new()),
+        cron_io,
         wakeup: Mutex::new(None),
         cron_tasks: Mutex::new(Vec::new()),
     });
