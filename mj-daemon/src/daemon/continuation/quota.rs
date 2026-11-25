@@ -10,11 +10,6 @@ pub(super) enum Plan {
     Obsolete,
     Pending(QuotaWait),
     Wait(QuotaRecovery),
-    ChildSwitch {
-        destination: String,
-        reservation: Option<mj_controller::quota_telemetry::PlacementReservation>,
-        fallback: QuotaRecovery,
-    },
     Move {
         request: Box<MoveSessionRequest>,
         destination: String,
@@ -239,7 +234,7 @@ pub(super) async fn prepare(
                 .is_some_and(|handback| handback.answers(turn.key)),
         )
     };
-    if !child {
+    {
         let session_id = id.to_owned();
         let command = turn.key.to_owned();
         let provenance = mj_core::runtime::spawn_blocking(move || {
@@ -382,7 +377,6 @@ pub(super) async fn prepare(
         };
     }
     if !handed_back
-        && (!child || harness != mj_core::config::HarnessKind::OpenCode)
         && mj_controller::quota::long_window_stop(
             &windows,
             model.as_deref().unwrap_or(""),
@@ -391,13 +385,15 @@ pub(super) async fn prepare(
             now_ms / 1000,
         )
     {
-        if !child
-            && let Err(error) =
-                mj_controller::controller::move_session::in_place::ensure_worker_supports_in_place_move(
-                    id,
-                    snapshot.operational.relay_protocol_version.unwrap_or_default(),
-                    true,
-                )
+        if let Err(error) =
+            mj_controller::controller::move_session::in_place::ensure_worker_supports_in_place_move(
+                id,
+                snapshot
+                    .operational
+                    .relay_protocol_version
+                    .unwrap_or_default(),
+                true,
+            )
         {
             append_bounded(&mut fallback.notice, &format!(" {error}"));
             return Ok(Plan::Wait(fallback));
@@ -491,13 +487,6 @@ pub(super) async fn prepare(
                     break;
                 };
                 let candidate = remaining.remove(0).candidate;
-                if child {
-                    return Ok(Plan::ChildSwitch {
-                        destination: candidate.profile_id,
-                        reservation: Some(reservation),
-                        fallback,
-                    });
-                }
                 match state
                     .prepare_quota_move(id, &candidate.profile_id, &fallback)
                     .await
@@ -780,48 +769,6 @@ pub(super) async fn schedule(
 ) -> Result<Option<Box<ManagedSessionView>>> {
     let (fallback, _work) = match plan {
         Plan::Wait(recovery) => (recovery, work),
-        Plan::ChildSwitch {
-            destination,
-            reservation,
-            mut fallback,
-        } => {
-            let turn = view
-                .snapshot
-                .as_ref()
-                .and_then(ended_turn)
-                .context("missing quota completion")?;
-            let runtime = env
-                .child_switch_runtime
-                .as_ref()
-                .context("missing child quota runtime")?;
-            match runtime
-                .switch_child_quota_profile(
-                    id.to_owned(),
-                    fallback.profile_id.clone(),
-                    destination,
-                    turn.completed_ordinal,
-                )
-                .await
-            {
-                Ok(()) => {
-                    if let Some(reservation) = reservation {
-                        reservation.commit(Some(id.to_owned()));
-                    }
-                    return Ok(env
-                        .control
-                        .find_session(id)
-                        .await?
-                        .map(|handle| Box::new(handle.view())));
-                }
-                Err(error) => tracing::warn!(session=id, %error, "child quota switch failed"),
-            }
-            drop(reservation);
-            append_bounded(
-                &mut fallback.notice,
-                " The sub-agent could not switch profiles. Start a new sub-agent or send again after quota resets.",
-            );
-            (fallback, Some(gate.enter_unless_draining("quota Wait")?))
-        }
         Plan::Move {
             request,
             destination,
@@ -996,8 +943,8 @@ mod tests {
     use mj_core::config::{HarnessKind, HarnessProfile};
 
     #[tokio::test]
-    async fn quota_for_an_owned_child_selects_the_in_place_child_switch() {
-        const NAME: &str = "quota_for_an_owned_child_selects_the_in_place_child_switch";
+    async fn quota_for_an_owned_child_selects_the_in_place_move() {
+        const NAME: &str = "quota_for_an_owned_child_selects_the_in_place_move";
         const MARKER: &str = "MJ_QUOTA_OWNED_CHILD_TEST";
         if std::env::var_os(MARKER).is_none() {
             let root = tempfile::tempdir().unwrap();
@@ -1021,20 +968,30 @@ mod tests {
                 .insert(id.into(), HarnessProfile::new(HarnessKind::Claude, home));
         }
         let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
-        let parent = runtime_test_session("parent", workspace, SessionState::Running);
-        let mut owner = runtime_test_session("owner", workspace, SessionState::Running);
+        let parent = runtime_test_session("parent-session", workspace, SessionState::Running);
+        let mut owner = runtime_test_session("owner-session", workspace, SessionState::Parked);
         owner.harness_kind = HarnessKind::Claude;
         owner.last_profile = "source".into();
+        config
+            .targets
+            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+        let checkout = mj_core::config::data_dir().join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        owner.project_directory = Some(checkout);
+        owner.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: mj_core::config::data_dir().join("owner-session"),
+        }));
         mj_controller::database::save_session(&parent).unwrap();
         mj_controller::database::register_subagent_with_startup(
             &owner,
-            &runtime_test_subagent("owner", "parent"),
+            &runtime_test_subagent("owner-session", "parent-session"),
             vec![],
             None,
             None,
             true,
         )
         .unwrap();
+        config.save().unwrap();
         let state = test_runtime_state_with(Controller {
             config: config.clone(),
             state: mj_controller::database::load_state().unwrap(),
@@ -1045,6 +1002,7 @@ mod tests {
             )),
         );
         catalog.sync_now(&config).await;
+        assert!(state.profile_catalog.set(catalog.clone()).is_ok());
         let backend = Arc::new(
             crate::server_runtime::api::ApiBackend::new(
                 state.session_manager.client(),
@@ -1055,7 +1013,18 @@ mod tests {
         );
         state.install_report_backend(&backend);
 
-        let mut view = super::super::tests::view("owner", true);
+        let mut view = super::super::tests::view("owner-session", true);
+        super::super::tests::quota_assessed(&mut view);
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .native_session_id = Some("native-owner".into());
         let snapshot = view.snapshot.as_mut().unwrap();
         snapshot
             .operational
@@ -1071,9 +1040,15 @@ mod tests {
             reset_at: Some((now / 1000 + 10 * 3600).to_string()),
             login_fingerprint: None,
         });
-        let plan = prepare(&state, "owner", &view).await.unwrap();
+        let plan = prepare(&state, "owner-session", &view).await.unwrap();
+        if let Plan::Wait(ref fallback) = plan {
+            let result = state
+                .prepare_quota_move("owner-session", "destination", fallback)
+                .await;
+            panic!("quota Move unexpectedly refused: {result:#?}");
+        }
         assert!(
-            matches!(&plan, Plan::ChildSwitch { destination, .. } if destination == "destination"),
+            matches!(&plan, Plan::Move { destination, .. } if destination == "destination"),
             "{plan:?}"
         );
     }

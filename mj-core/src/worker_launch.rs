@@ -166,6 +166,8 @@ pub enum WorkerRunMode {
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard_native_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_reload_operation_id: Option<String>,
     /// Chosen from the target locator, never from ambient container detection.
     #[serde(

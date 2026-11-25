@@ -375,6 +375,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         accepted_reload_operation_id: None,
+        discard_native_session_id: None,
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
@@ -7294,6 +7295,20 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
     assert_eq!(
         unix::select_resume_session(&config, &relay).as_deref(),
         Some("native-relay")
+    );
+    config.discard_native_session_id = Some("native-relay".into());
+    assert_eq!(unix::select_resume_session(&config, &relay), None);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "new-harness".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    assert_eq!(
+        unix::select_resume_session(&config, &relay).as_deref(),
+        Some("new-harness")
     );
 }
 

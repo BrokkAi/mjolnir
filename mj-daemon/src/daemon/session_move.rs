@@ -54,7 +54,6 @@ impl RuntimeState {
                 source,
                 selection,
                 &controller.config.targets,
-                controller.state.subagents.contains_key(&source.id),
                 previous,
             )
             .map_err(|error| anyhow::Error::new(Refusal::precondition(error.to_string())))?;

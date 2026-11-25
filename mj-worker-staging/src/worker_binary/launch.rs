@@ -540,6 +540,7 @@ pub fn worker_launch_config_with_checkout(
     let approval_choices = config.profile_approval_choices(profile);
     Ok((
         WorkerLaunchConfig {
+            discard_native_session_id: None,
             accepted_reload_operation_id: None,
             cpu_accounting: backend.cpu_accounting(),
             no_github_credentials: session.no_github_credentials,

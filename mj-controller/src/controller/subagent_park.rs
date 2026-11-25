@@ -418,11 +418,12 @@ impl Controller {
     /// accepted, a proved dead worker settles with its failure; uncertain
     /// liveness leaves the active record and boot intent for recovery.
     /// It never stops a worker that may have resumed accepted work.
+    // A Move stages a destination while preserving the parked source for rollback.
     pub async fn unpark_subagent_worker(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
-        profile_change: Option<(&str, &str)>,
+        move_destination: Option<(&mj_core::state::SessionRecord, Option<String>)>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
@@ -468,23 +469,10 @@ impl Controller {
             }
             // Prepare using a local view of the chosen profile. The record
             // still names the source if staging fails or is interrupted.
-            if let Some((source, destination)) = profile_change {
-                ensure!(
-                    session.last_profile == source
-                        && session.harness_kind != mj_core::config::HarnessKind::OpenCode
-                        && self.config.enabled_profile(destination).is_some()
-                        && self.config.native_continuity(
-                            session.harness_kind,
-                            source,
-                            destination,
-                        )?,
-                    "the sub-agent's quota switch profiles changed before staging"
-                );
-            }
-            let destination_profile = profile_change.map(|(_, destination)| destination);
+            let previous_session = session.clone();
             let mut staging = Controller { config: self.config.clone(), state: self.state.clone() };
-            if let Some(profile) = destination_profile {
-                staging.state.sessions.get_mut(session_id).unwrap().last_profile = profile.to_owned();
+            if let Some((destination, _)) = move_destination.as_ref() {
+                staging.state.sessions.insert(session_id.to_owned(), (*destination).clone());
             }
             // Stage the current login even when the parked child kept its profile.
             let staged = staging.prepare_worker_files_for(
@@ -497,7 +485,8 @@ impl Controller {
             )
             .context("stage the current profile login for the parked sub-agent")?;
             staging.state.sessions.get_mut(session_id).unwrap().staged_aws_profile.clone_from(&staged.aws_profile);
-            let launch = staging.current_worker_launch_config(session_id, &backend)?;
+            let mut launch = staging.current_worker_launch_config(session_id, &backend)?;
+            launch.discard_native_session_id = move_destination.as_ref().and_then(|(_, discard)| discard.clone());
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
             staging.install_launch_config(session_id, &backend, &launch, executor)?;
@@ -534,7 +523,7 @@ impl Controller {
                     target: *target.clone(),
                     desired_build: String::new(),
                 },
-                profile_change,
+                move_destination.as_ref().map(|(destination, _)| *destination),
                 Some(staged.aws_profile.as_deref()),
             )?;
             let observed = async {
@@ -599,16 +588,13 @@ impl Controller {
                     let evidence = staged.login
                         .filter(|_| mj_core::credentials::text_reports_auth_failure(&detail))
                         .map(|staged_login| mj_core::subagent::WakeFailure::Authentication {
-                            profile_id: destination_profile.unwrap_or(&session.last_profile).to_owned(),
+                            profile_id: staging.state.sessions[session_id].last_profile.clone(),
                             staged_login,
                         });
-                    crate::database::fail_subagent_unpark(
-                        session_id,
-                        owner.operation_id(),
-                        SubagentUnparkFailure::Retryable {
-                            detail: &detail,
-                            evidence: evidence.as_ref(),
-                        },
+                    crate::database::fail_subagent_unpark_with_rollback(
+                        session_id, owner.operation_id(),
+                        SubagentUnparkFailure::Retryable { detail: &detail, evidence: evidence.as_ref() },
+                        move_destination.as_ref().map(|_| &previous_session),
                     )?;
                     anyhow::bail!("{detail}");
                 }
@@ -961,8 +947,18 @@ mod tests {
                     target: *target,
                     desired_build: String::new(),
                 };
-                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None, None)
-                    .unwrap();
+                let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+                let mut destination = previous.clone();
+                destination.last_profile = "moved-profile".into();
+                destination.harness_kind = mj_core::config::HarnessKind::Claude;
+                destination.native_session_id = None;
+                crate::database::begin_subagent_unpark(
+                    LATCH_RELAY_SESSION,
+                    &intent,
+                    Some(&destination),
+                    None,
+                )
+                .unwrap();
                 let detail = "workspace routing discovery unauthorized (401)";
                 let evidence = mj_core::subagent::WakeFailure::Authentication {
                     profile_id: "codex".into(),
@@ -984,19 +980,23 @@ mod tests {
                     crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
                     Some(SessionState::Running)
                 );
-                crate::database::fail_subagent_unpark(
+                crate::database::fail_subagent_unpark_with_rollback(
                     LATCH_RELAY_SESSION,
                     owner.operation_id(),
                     SubagentUnparkFailure::Retryable {
                         detail,
                         evidence: Some(&evidence),
                     },
+                    Some(&previous),
                 )
                 .unwrap();
                 let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
                     .unwrap()
                     .unwrap();
                 assert_eq!(record.state, SessionState::Parked);
+                assert_eq!(record.last_profile, previous.last_profile);
+                assert_eq!(record.harness_kind, previous.harness_kind);
+                assert_eq!(record.native_session_id, previous.native_session_id);
                 let saved = record.last_error.as_deref().unwrap();
                 assert!(saved.starts_with(detail), "{saved}");
                 assert_eq!(
@@ -1068,6 +1068,44 @@ mod tests {
                 .iter()
                 .any(|p| p == "stop Mjolnir worker daemon")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_move_starts_destination_in_the_existing_environment() {
+        if !isolated("parked_move_starts_destination_in_the_existing_environment") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = waking_controller(root.path(), 0);
+        let previous = controller.state.sessions[LATCH_RELAY_SESSION].clone();
+        controller.config.profiles.insert(
+            "destination".into(),
+            controller.config.profiles["codex"].clone(),
+        );
+        let mut operation =
+            super::super::move_session::test_fixtures::source_recovery_operation(&previous);
+        operation.in_place = true;
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        controller
+            .execute_move(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                &mut operation,
+                None,
+                &WakeTarget::new(),
+                &channels.control,
+                super::super::move_session::MoveSourceRelay::default(),
+            )
+            .await
+            .unwrap();
+        channels.shutdown.shutdown().await.unwrap();
+        assert_eq!(operation.phase, mj_core::state::MovePhase::Completed);
+        let active = crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.last_profile, "destination");
+        assert_eq!(active.target, previous.target);
+        assert_eq!(active.state, SessionState::Running);
     }
 
     // Hard-won: #1547: a woken child started with the login it parked with, which a renewal had revoked.

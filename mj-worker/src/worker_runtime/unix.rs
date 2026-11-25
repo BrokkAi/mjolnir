@@ -352,7 +352,10 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         session_environment.clone(),
         events_tx.clone(),
     );
-    let accepted_config = {
+    let accepted_config = if config.discard_native_session_id.is_some() && resume_session.is_none()
+    {
+        Default::default()
+    } else {
         let relay = relay.lock().expect("relay lock poisoned");
         let state = relay.operational_state();
         acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)

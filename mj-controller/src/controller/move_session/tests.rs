@@ -522,6 +522,53 @@ fn preparing_cross_harness_move_without_utility_profiles_succeeds() {
             .unwrap();
         assert!(preparation.cross_harness);
         assert!(preparation.in_place);
+        let relation: mj_core::subagent::SubagentRecord = serde_json::from_value(serde_json::json!({
+            "child_session_id": session.id, "parent_session_id": "parent",
+            "task_name": "move child", "profile_id": "source", "working_directory": "",
+            "initial_prompt": "work", "request_key": "move-child", "created_at": session.created_at
+        })).unwrap();
+        let parent = crate::controller::test_support::checkpoint_test_session("parent");
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(&session, &relation).unwrap();
+        controller
+            .state
+            .subagents
+            .insert(session.id.clone(), (&relation).into());
+        for state in [SessionState::Running, SessionState::Parked] {
+            controller
+                .state
+                .sessions
+                .get_mut(&session.id)
+                .unwrap()
+                .state = state;
+            let mut selection = preparation.selection.clone();
+            assert!(
+                controller
+                    .prepare_move_session_controlled(
+                        &catalog,
+                        selection.clone(),
+                        &crate::targets::ProcessExecutor
+                    )
+                    .await
+                    .unwrap()
+                    .in_place
+            );
+            selection.oracle = Some(!session.oracle);
+            let error = controller
+                .prepare_move_session_controlled(
+                    &catalog,
+                    selection,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot change delegation or oracle"),
+                "{error:#}"
+            );
+        }
     });
 }
 

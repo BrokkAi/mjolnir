@@ -2133,10 +2133,11 @@ pub(crate) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
 ) -> Option<String> {
-    relay
-        .operational_state()
-        .native_session_id
-        .or_else(|| config.native_session_id.clone())
+    let native_session_id = relay.operational_state().native_session_id;
+    if native_session_id.is_some() && native_session_id == config.discard_native_session_id {
+        return None;
+    }
+    native_session_id.or_else(|| config.native_session_id.clone())
 }
 
 /// A native identity that arrived with the launch configuration was created

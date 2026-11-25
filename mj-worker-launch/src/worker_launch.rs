@@ -976,7 +976,7 @@ fn session_launch_config_with_source(
 
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).
-    launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
+    launch.initial_model = None;
     if let Some(child) = subagent.as_ref() {
         let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
             &child.kind.startup_request_key(&child.request_key),
@@ -988,9 +988,25 @@ fn session_launch_config_with_source(
         // already holds it and the settings it was sent with.
         let prompt_id = crate::database::startup_step_id(&group, "prompt");
         let assignment_started = prompt_started(session_id, &history, &prompt_id)?;
+        let same_spawn_harness = session.last_profile == child.profile_id
+            || config
+                .profiles
+                .get(&child.profile_id)
+                .is_some_and(|spawn| spawn.kind == profile.kind);
+        if !assignment_started && same_spawn_harness {
+            launch.initial_model = child.model.clone();
+        }
         if !assignment_started {
             launch.initial_commands = steps
                 .into_iter()
+                .filter(|step| {
+                    same_spawn_harness
+                        || !matches!(
+                            serde_json::from_str::<crate::database::StartupStep>(&step.step_json),
+                            Ok(crate::database::StartupStep::Configure { key, .. })
+                                if matches!(key.as_str(), "model" | "effort" | "thought_level")
+                        )
+                })
                 .map(|step| {
                     let (command, optional) = match serde_json::from_str::<
                         crate::database::StartupStep,
@@ -1509,7 +1525,7 @@ mod tests {
             created_at: child.created_at.clone(),
             kind: SubagentKind::Worker,
             reviewer_launch: None,
-            model: None,
+            model: Some("codex-spawn-model".into()),
             effort: None,
             initial_prompt: "inspect".into(),
             noticed_turn: None,
@@ -1552,5 +1568,24 @@ mod tests {
         let launch: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
         assert!(launch.oracle && launch.review_gate());
         assert_eq!(launch.subagent_kind, Some(SubagentKind::Worker));
+        let state = crate::database::load_state().unwrap();
+        let (launch, _, _) =
+            session_launch_config(&config, &state, child_id, &backend, LaunchHistory::Stored)
+                .unwrap();
+        assert_eq!(launch.initial_model.as_deref(), Some("codex-spawn-model"));
+        config.profiles.insert(
+            "claude".into(),
+            HarnessProfile::new(
+                HarnessKind::Claude,
+                mj_core::config::data_dir().join("claude"),
+            ),
+        );
+        let mut moved = state.clone();
+        moved.sessions.get_mut(child_id).unwrap().last_profile = "claude".into();
+        moved.sessions.get_mut(child_id).unwrap().harness_kind = HarnessKind::Claude;
+        let (launch, _, _) =
+            session_launch_config(&config, &moved, child_id, &backend, LaunchHistory::Stored)
+                .unwrap();
+        assert_eq!(launch.initial_model, None);
     }
 }
