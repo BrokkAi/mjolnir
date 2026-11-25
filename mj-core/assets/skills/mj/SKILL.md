@@ -213,8 +213,10 @@ Project environments:
   tools preinstalled. Run it from inside the repository; `--target`, `--bundle`
   and `--name` override the defaults, `--print` shows the generated
   Containerfile only. An unchanged recipe reuses the published image.
+- `mj image base --base <ref@sha256:...> --platform linux/amd64` — print a
+  generic base Containerfile containing every pinned harness (also supports linux/arm64).
 - `mj image status` — whether each recorded project image still matches the
-  current recipe (`current`, `recipe changed`, or `unknown` without a target).
+  current recipe and enabled harness pins (`current`, `out of date`, or `unknown` without a target).
 
 Diagnosis:
 
